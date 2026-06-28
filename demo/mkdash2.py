@@ -142,8 +142,8 @@ dash = {
     "annotations": {"list": [
         {"builtIn": 1, "type": "dashboard", "name": "Annotations & Alerts", "enable": True,
          "iconColor": "rgba(0,211,255,1)", "datasource": {"type": "grafana", "uid": "-- Grafana --"}},
-        {"name": "NetBox changes", "enable": True, "iconColor": "purple", "datasource": nb,
-         "target": {"queryType": "annotations", "limit": 100}},
+        {"name": "NetBox device changes", "enable": True, "iconColor": "purple", "datasource": nb,
+         "target": {"queryType": "annotations", "objectTypes": ["dcim.device"], "limit": 100}},
     ]},
     "panels": panels,
 }

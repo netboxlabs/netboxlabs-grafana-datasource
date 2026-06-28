@@ -9,7 +9,7 @@ data source brings that context into Grafana so you can **join** it onto metrics
 from Prometheus, Loki, Mimir, InfluxDB or anything else — turning `device="leaf1"` into
 "leaf1, an Arista switch in DM-Akron, rack R-12, owned by the NetEng team."
 
-![Enrichment dashboard](./screenshots/v2-final-full.png)
+![Enrichment dashboard](./screenshots/hero.png)
 
 ## Features
 

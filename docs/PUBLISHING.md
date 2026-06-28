@@ -79,7 +79,7 @@ README, **CHANGELOG (required)**, LICENSE (must be an OSI license — Apache-2.0
 | `secureJsonData` for the API token (no secrets in jsonData) | ✅ |
 | SDK HTTP client (PDC-compatible) | ✅ (uses `backend/httpclient`) |
 | Multi-arch binaries (amd64+arm64 + full matrix) | ✅ via `mage`/CI |
-| Real SVG logo (not the scaffold placeholder) | ✅ original NetBox-themed mark — **swap for the official NetBox brand asset before submission** |
+| Real SVG logo (not the scaffold placeholder) | ✅ official NetBox icon, vector-extracted from `netboxlabs_brand_guidelines_v3.pdf` (Visuals page) |
 | Screenshots in `plugin.json` | ✅ |
 | README + CHANGELOG + Apache-2.0 LICENSE | ✅ |
 | `grafanaDependency` realistic minimum | ✅ `>=12.3.0` |
@@ -91,7 +91,6 @@ README, **CHANGELOG (required)**, LICENSE (must be an OSI license — Apache-2.0
 
 1. Decide Community vs Commercial level (coordinate a Commercial Plugin Subscription with
    Grafana if commercial).
-2. Replace the logo with the official NetBox brand asset.
-3. Public source repo + matching release tag for `-sourceCodeUri`.
-4. Generate the access-policy token, sign, and submit at grafana.com (Org Settings → My
+2. Public source repo + matching release tag for `-sourceCodeUri`.
+3. Generate the access-policy token, sign, and submit at grafana.com (Org Settings → My
    Plugins → Submit New Plugin).

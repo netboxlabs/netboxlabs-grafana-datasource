@@ -68,7 +68,7 @@ func mockNetBox(t *testing.T) *httptest.Server {
 
 func newTestProvider(t *testing.T) *Provider {
 	srv := mockNetBox(t)
-	return New(srv.URL, "test-token", false, 5*time.Second)
+	return New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
 }
 
 func TestHealthCheck(t *testing.T) {

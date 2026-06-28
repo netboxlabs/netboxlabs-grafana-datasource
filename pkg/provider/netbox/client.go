@@ -2,43 +2,34 @@ package netbox
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
-// Client is a thin authenticated HTTP client for the NetBox REST API.
+// Client is a thin authenticated HTTP client for the NetBox REST API. The
+// underlying *http.Client is supplied by the caller — in production it is built
+// from the Grafana SDK (backend/httpclient) using the datasource instance
+// settings, so Grafana's proxy/TLS/timeout config and Private Data Source
+// Connect (PDC) are honored automatically.
 type Client struct {
 	base  string // base URL without trailing slash, e.g. https://netbox.example.com
 	token string
 	http  *http.Client
 }
 
-// NewClient builds a NetBox API client. base may include or omit a trailing
-// "/api"; it is normalized to the instance root.
-func NewClient(base, token string, tlsSkipVerify bool, timeout time.Duration) *Client {
+// NewClient builds a NetBox API client over the given HTTP client. base may
+// include or omit a trailing "/api"; it is normalized to the instance root.
+func NewClient(base, token string, httpClient *http.Client) *Client {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	base = strings.TrimSuffix(base, "/api")
-
-	transport := &http.Transport{
-		MaxIdleConns:        20,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: tlsSkipVerify}, // #nosec G402 — operator opt-in for self-signed certs
+	if httpClient == nil {
+		httpClient = http.DefaultClient
 	}
-	return &Client{
-		base:  base,
-		token: token,
-		http: &http.Client{
-			Timeout:   timeout,
-			Transport: transport,
-		},
-	}
+	return &Client{base: base, token: token, http: httpClient}
 }
 
 // BaseURL returns the instance root URL.

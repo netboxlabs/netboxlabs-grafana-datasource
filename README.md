@@ -132,6 +132,21 @@ implementation is the **NetBox REST API**. A second mode — the **Network Conte
 planned fast-follow and slots in behind the same interface. See
 [ARCHITECTURE.md](./ARCHITECTURE.md).
 
+## Grafana Cloud
+
+This is a **backend** datasource, so it runs on Grafana Cloud once published to the Grafana
+plugin catalog and signed by Grafana (Cloud cannot load private/unsigned plugins).
+
+- **Public NetBox** (internet-reachable URL): the Cloud-hosted backend calls it directly.
+- **Private NetBox** (VPC / on-prem): use **[Private Data Source Connect (PDC)](https://grafana.com/docs/grafana-cloud/connect-externally-hosted/private-data-source-connect/)**.
+  PDC supports backend datasource plugins, and this plugin builds its HTTP client from the
+  Grafana SDK (`backend/httpclient`) so PDC's secure tunnel, proxy and TLS settings are
+  honored automatically — no plugin changes needed by the customer.
+
+The backend ships binaries for `linux/amd64` and `linux/arm64` (Cloud) plus the full
+catalog target matrix (darwin/windows/arm). See [docs/PUBLISHING.md](./docs/PUBLISHING.md)
+for the catalog/signing checklist.
+
 ## Development
 
 ```bash

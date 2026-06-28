@@ -17,7 +17,7 @@ package ncs
 import (
 	"context"
 	"errors"
-	"time"
+	"net/http"
 
 	"github.com/netboxlabs/netbox/pkg/provider"
 )
@@ -31,7 +31,7 @@ type Provider struct {
 }
 
 // New constructs an NCS provider bound to an endpoint.
-func New(baseURL, _ string, _ bool, _ time.Duration) *Provider {
+func New(baseURL, _ string, _ *http.Client) *Provider {
 	return &Provider{baseURL: baseURL}
 }
 

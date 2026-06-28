@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -46,10 +47,10 @@ type fieldsCacheEntry struct {
 	expiry time.Time
 }
 
-// New constructs a NetBox provider.
-func New(base, token string, tlsSkipVerify bool, timeout time.Duration) *Provider {
+// New constructs a NetBox provider over the given HTTP client.
+func New(base, token string, httpClient *http.Client) *Provider {
 	return &Provider{
-		client: NewClient(base, token, tlsSkipVerify, timeout),
+		client: NewClient(base, token, httpClient),
 		fields: map[string]fieldsCacheEntry{},
 	}
 }

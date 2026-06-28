@@ -17,5 +17,8 @@ Initial release of the NetBox data source for Grafana.
 - IP enrichment query type (longest-prefix match via NetBox `prefixes?contains=`).
 - Topology query type (devices + cables) for the Node Graph panel, with a connected-only option.
 - Config, query, variable and annotation editors.
+- Grafana Cloud readiness: upstream HTTP client built from the Grafana SDK
+  (`backend/httpclient`) so Private Data Source Connect (PDC), proxy and TLS settings are
+  honored; real (non-placeholder) logo; publishing/Cloud checklist in `docs/PUBLISHING.md`.
 - Go + Jest unit tests and Playwright e2e smoke tests.
 - `demo/`: synthetic Prometheus exporter labeled to match NetBox + a rich demo dashboard.

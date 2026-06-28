@@ -3,9 +3,11 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/httpclient"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/resource/httpadapter"
@@ -33,12 +35,16 @@ type Datasource struct {
 }
 
 // NewDatasource creates a new datasource instance for a given configuration.
-func NewDatasource(_ context.Context, settings backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
+func NewDatasource(ctx context.Context, settings backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
 	cfg, err := models.LoadPluginSettings(settings)
 	if err != nil {
 		return nil, err
 	}
-	p, err := newProvider(cfg)
+	httpClient, err := newHTTPClient(ctx, cfg, settings)
+	if err != nil {
+		return nil, err
+	}
+	p, err := newProvider(cfg, httpClient)
 	if err != nil {
 		return nil, err
 	}
@@ -47,14 +53,37 @@ func NewDatasource(_ context.Context, settings backend.DataSourceInstanceSetting
 	return ds, nil
 }
 
+// newHTTPClient builds the upstream HTTP client from the Grafana SDK so that
+// Grafana's proxy/TLS/timeout config and Private Data Source Connect (PDC) — the
+// path to a customer's private NetBox from Grafana Cloud — are applied
+// automatically. PDC requires a backend datasource using this client.
+func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings backend.DataSourceInstanceSettings) (*http.Client, error) {
+	opts, err := settings.HTTPClientOptions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("http client options: %w", err)
+	}
+	// Apply our explicit timeout / TLS-skip config on top of Grafana's defaults.
+	timeouts := httpclient.DefaultTimeoutOptions
+	if cfg.TimeoutSeconds > 0 {
+		timeouts.Timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
+	}
+	opts.Timeouts = &timeouts
+	if cfg.TLSSkipVerify {
+		if opts.TLS == nil {
+			opts.TLS = &httpclient.TLSOptions{}
+		}
+		opts.TLS.InsecureSkipVerify = true
+	}
+	return httpclient.New(opts)
+}
+
 // newProvider selects the enrichment backend based on the configured mode.
-func newProvider(cfg *models.PluginSettings) (provider.Provider, error) {
-	timeout := time.Duration(cfg.TimeoutSeconds) * time.Second
+func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.Provider, error) {
 	switch cfg.Mode {
 	case models.ModeNCS:
-		return ncs.New(cfg.URL, cfg.Secrets.APIToken, cfg.TLSSkipVerify, timeout), nil
+		return ncs.New(cfg.URL, cfg.Secrets.APIToken, httpClient), nil
 	case models.ModeNetBox, "":
-		return netbox.New(cfg.URL, cfg.Secrets.APIToken, cfg.TLSSkipVerify, timeout), nil
+		return netbox.New(cfg.URL, cfg.Secrets.APIToken, httpClient), nil
 	default:
 		return nil, fmt.Errorf("unknown provider mode %q", cfg.Mode)
 	}

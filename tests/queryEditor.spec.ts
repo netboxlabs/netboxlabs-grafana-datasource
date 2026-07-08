@@ -4,5 +4,5 @@ test('smoke: should render query editor', async ({ panelEditPage, readProvisione
   const ds = await readProvisionedDataSource({ fileName: 'datasources.yml' });
   await panelEditPage.datasource.set(ds.name);
   // The object-type selector is the entry point of the NetBox query editor.
-  await expect(panelEditPage.getQueryEditorRow('A').getByText('Object type')).toBeVisible();
+  await expect(panelEditPage.getQueryEditorRow('A').getByText('Object type', { exact: true })).toBeVisible();
 });

@@ -1,0 +1,20 @@
+apiVersion: 1
+
+datasources:
+  - name: NetBox
+    type: netboxlabs-netbox-datasource
+    access: proxy
+    isDefault: false
+    orgId: 1
+    version: 1
+    editable: true
+    jsonData:
+      # Base URL of the NetBox instance (no trailing /api). Interpolated from
+      # the NETBOX_URL environment variable.
+      url: ${NETBOX_URL}
+      mode: netbox
+      tlsSkipVerify: false
+      timeoutSeconds: 30
+    secureJsonData:
+      # NetBox API token (v1 40-char, or v2 "nbt_…"). From NETBOX_API_TOKEN.
+      apiToken: ${NETBOX_API_TOKEN}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "datasource",
+  "name": "NetBox",
+  "id": "netboxlabs-netbox-datasource",
+  "metrics": true,
+  "annotations": true,
+  "backend": true,
+  "executable": "gpx_netbox",
+  "info": {
+    "description": "Enrich your observability data with infrastructure context from NetBox — devices, interfaces, IPs, sites, tenants and topology — as joinable tables, template variables, annotations and deep links.",
+    "author": {
+      "name": "NetBox Labs",
+      "url": "https://netboxlabs.com"
+    },
+    "keywords": ["netbox", "network", "enrichment", "topology", "dcim", "ipam", "infrastructure", "ndi"],
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "links": [
+      { "name": "NetBox Labs", "url": "https://netboxlabs.com" },
+      { "name": "NetBox", "url": "https://netboxlabs.com/oss/netbox/" }
+    ],
+    "screenshots": [{ "name": "Enrichment dashboard", "path": "img/screenshot-dashboard.png" }],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=12.3.0",
+    "plugins": []
+  }
+}

@@ -20,42 +20,42 @@ func mockNetBox(t *testing.T) *httptest.Server {
 	var base string
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"dcim":"%s/api/dcim/","ipam":"%s/api/ipam/","plugins":"%s/api/plugins/","status":"%s/api/status/"}`, base, base, base, base)
+		_, _ = fmt.Fprintf(w, `{"dcim":"%s/api/dcim/","ipam":"%s/api/ipam/","plugins":"%s/api/plugins/","status":"%s/api/status/"}`, base, base, base, base)
 	})
 	mux.HandleFunc("/api/dcim/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"devices":"%s/api/dcim/devices/","interfaces":"%s/api/dcim/interfaces/"}`, base, base)
+		_, _ = fmt.Fprintf(w, `{"devices":"%s/api/dcim/devices/","interfaces":"%s/api/dcim/interfaces/"}`, base, base)
 	})
 	mux.HandleFunc("/api/ipam/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"ip-addresses":"%s/api/ipam/ip-addresses/"}`, base)
+		_, _ = fmt.Fprintf(w, `{"ip-addresses":"%s/api/ipam/ip-addresses/"}`, base)
 	})
 	mux.HandleFunc("/api/plugins/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"bgp":"%s/api/plugins/bgp/","installed-plugins":"%s/api/plugins/installed-plugins/"}`, base, base)
+		_, _ = fmt.Fprintf(w, `{"bgp":"%s/api/plugins/bgp/","installed-plugins":"%s/api/plugins/installed-plugins/"}`, base, base)
 	})
 	mux.HandleFunc("/api/plugins/bgp/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"bgp-sessions":"%s/api/plugins/bgp/bgp-sessions/"}`, base)
+		_, _ = fmt.Fprintf(w, `{"bgp-sessions":"%s/api/plugins/bgp/bgp-sessions/"}`, base)
 	})
 	// installed-plugins is a paginated collection, NOT a URL index.
 	mux.HandleFunc("/api/plugins/installed-plugins/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"count":1,"next":null,"results":[{"name":"bgp"}]}`)
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"name":"bgp"}]}`)
 	})
 	mux.HandleFunc("/api/status/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		fmt.Fprint(w, `{"netbox-version":"4.5.8"}`)
+		_, _ = fmt.Fprint(w, `{"netbox-version":"4.5.8"}`)
 	})
 	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
 		// Echo a filter back so tests can assert filter translation.
 		role := r.URL.Query().Get("role")
 		_ = role
-		fmt.Fprint(w, `{"count":2,"next":null,"results":[
+		_, _ = fmt.Fprint(w, `{"count":2,"next":null,"results":[
 			{"id":1,"name":"leaf1","display_url":"`+base+`/dcim/devices/1/","site":{"id":2,"name":"dc1","slug":"dc1"},"status":{"value":"active","label":"Active"},"interface_count":48},
 			{"id":2,"name":"leaf2","display_url":"`+base+`/dcim/devices/2/","site":{"id":2,"name":"dc1","slug":"dc1"},"status":{"value":"active","label":"Active"},"interface_count":48}
 		]}`)
 	})
 	mux.HandleFunc("/api/core/object-changes/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"count":1,"next":null,"results":[
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[
 			{"time":"2026-06-27T00:42:48Z","user_name":"admin","action":{"value":"update","label":"Updated"},"changed_object_type":"dcim.device","object_repr":"leaf1","display_url":"`+base+`/core/changelog/1/","changed_object":{"display_url":"`+base+`/dcim/devices/1/"}}
 		]}`)
 	})

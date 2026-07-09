@@ -155,7 +155,8 @@ def api(method, path, body=None):
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", AUTH)
     try:
-        return json.load(urllib.request.urlopen(req, timeout=30))
+        # Local demo tooling; G is a hardcoded localhost Grafana URL.
+        return json.load(urllib.request.urlopen(req, timeout=30))  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
     except urllib.error.HTTPError as e:
         return {"_err": e.code, "body": e.read().decode()[:400]}
 

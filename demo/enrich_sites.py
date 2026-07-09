@@ -9,6 +9,8 @@ import os
 import urllib.request
 
 NB = os.environ["NETBOX_URL"].rstrip("/")
+if not NB.startswith(("http://", "https://")):
+    raise SystemExit("NETBOX_URL must be an http(s) URL")
 TOKEN = os.environ["NETBOX_TOKEN"]
 
 CITY = {
@@ -30,7 +32,8 @@ def req(method, path, body=None):
     scheme = "Bearer " if TOKEN.startswith("nbt_") else "Token "
     r.add_header("Authorization", scheme + TOKEN)
     r.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(r, timeout=60) as resp:
+    # Local demo tooling; NETBOX_URL is operator-supplied and scheme-checked at startup.
+    with urllib.request.urlopen(r, timeout=60) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         return json.load(resp)
 
 

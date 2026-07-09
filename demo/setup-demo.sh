@@ -3,8 +3,8 @@
 # Run on the host from /opt/netbox-grafana-ds/demo.
 set -euo pipefail
 
-NETBOX_URL="${NETBOX_URL:-http://netbox.example.com}"
-NETBOX_TOKEN="${NETBOX_TOKEN:-REDACTED_TOKEN}"
+NETBOX_URL="${NETBOX_URL:-http://localhost:8000}"
+NETBOX_TOKEN="${NETBOX_TOKEN:?set NETBOX_TOKEN to an API token for $NETBOX_URL}"
 GRAFANA="http://localhost:3001"
 DEMO_DIR="$(cd "$(dirname "$0")" && pwd)"
 

@@ -19,6 +19,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 NB = os.environ["NETBOX_URL"].rstrip("/")
+if not NB.startswith(("http://", "https://")):
+    raise SystemExit("NETBOX_URL must be an http(s) URL")
 TOKEN = os.environ.get("NETBOX_TOKEN", "")
 PORT = int(os.environ.get("PORT", "9100"))
 MAX_IFACES = int(os.environ.get("MAX_IFACES", "6"))
@@ -36,7 +38,8 @@ def _auth(req):
 def api(path):
     req = urllib.request.Request(NB + path)
     _auth(req)
-    with urllib.request.urlopen(req, timeout=60) as r:
+    # Local demo tooling; NETBOX_URL is operator-supplied and scheme-checked at startup.
+    with urllib.request.urlopen(req, timeout=60) as r:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         return json.load(r)
 
 

@@ -1,0 +1,65 @@
+name: 🐛 Bug Report
+description: Report a reproducible bug in the current release of the NetBox data source for Grafana
+labels: ["bug", "status: needs triage"]
+body:
+  - type: input
+    attributes:
+      label: Plugin version
+      description: What version of the NetBox data source plugin are you currently running?
+      placeholder: v1.0.0
+  - type: dropdown
+    attributes:
+      label: Grafana deployment
+      description: How are you running Grafana?
+      options:
+        - Grafana OSS (self-hosted)
+        - Grafana Enterprise (self-hosted)
+        - Grafana Cloud
+  - type: input
+    attributes:
+      label: Grafana version
+      description: What version of Grafana are you currently running?
+      placeholder: v12.3.0
+  - type: dropdown
+    attributes:
+      label: NetBox deployment
+      description: What flavor of NetBox is the data source connected to?
+      options:
+        - NetBox Community (self-hosted)
+        - NetBox Cloud
+        - NetBox Enterprise
+  - type: input
+    attributes:
+      label: NetBox version
+      description: What version of NetBox are you currently running?
+      placeholder: v4.4.0
+  - type: dropdown
+    attributes:
+      label: Query type
+      description: Which query type does the bug affect?
+      options:
+        - Objects
+        - IP enrichment
+        - Topology
+        - Annotations
+        - Template variables
+        - Data source configuration / health check
+        - Other / not sure
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      description: >
+        Describe in detail the exact steps that someone else can take to reproduce this bug using the given
+        plugin, Grafana, and NetBox versions.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+  - type: textarea
+    attributes:
+      label: Observed behavior
+      description: >
+        What happened instead? Include any error messages shown in the panel or query editor, and relevant
+        Grafana server log lines (the plugin logs under the `netboxlabs-netbox-datasource` plugin id) if available.

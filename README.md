@@ -210,6 +210,15 @@ docker run --rm -v "$PWD":/src -w /src -e GOOS=linux -e GOARCH=amd64 \
 - **Frontend** (`npm run test:ci`): variable mapping, template interpolation, query gating.
 - **E2E** (`npm run e2e`): `@grafana/plugin-e2e` (Playwright) config & query editor smoke.
 
+## Support & contributing
+
+- **Found a bug or want a feature?** [Open an issue](https://github.com/netboxlabs/netboxlabs-grafana-datasource/issues/new/choose)
+  using the matching template. [SUPPORT.md](./SUPPORT.md) explains how to file a good
+  issue and where to get help.
+- **Want to contribute?** See [CONTRIBUTING.md](./CONTRIBUTING.md).
+- **Security issue?** Report privately per [SECURITY.md](./SECURITY.md) — not via a public
+  issue.
+
 ## License
 
 Apache-2.0. See [LICENSE](./LICENSE).

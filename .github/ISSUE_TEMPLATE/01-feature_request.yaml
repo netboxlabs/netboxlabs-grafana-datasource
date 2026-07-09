@@ -1,0 +1,29 @@
+name: ✨ Feature Request
+description: Propose a new feature or enhancement for the NetBox data source for Grafana
+labels: ["enhancement", "status: needs triage"]
+body:
+  - type: input
+    attributes:
+      label: Plugin version
+      description: What version of the NetBox data source plugin are you currently running?
+      placeholder: v1.0.0
+  - type: dropdown
+    attributes:
+      label: Feature type
+      options:
+        - New query type or coverage of a new NetBox object type
+        - New functionality
+        - Change to existing functionality
+  - type: textarea
+    attributes:
+      label: Proposed feature or enhancement
+      description: >
+        Describe in detail the new feature or enhancement you are proposing. The more detail you provide here,
+        the greater chance your proposal has of being discussed.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Use case
+      description: >
+        Explain how adding this feature or enhancement would benefit users of the plugin. What need does it address?

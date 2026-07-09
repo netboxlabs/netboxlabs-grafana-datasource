@@ -1,0 +1,30 @@
+name: 📖 Documentation Change
+description: Suggest an addition or modification to the plugin documentation
+labels: ["documentation", "status: needs triage"]
+body:
+  - type: dropdown
+    attributes:
+      label: Change type
+      description: What type of change are you proposing?
+      options:
+        - Addition
+        - Correction
+        - Removal
+        - Cleanup (formatting, typos, etc.)
+  - type: dropdown
+    attributes:
+      label: Area
+      description: To what section of the documentation does this change primarily pertain?
+      options:
+        - README / getting started
+        - Configuration
+        - Enrichment recipes / join keys
+        - Use cases and coverage
+        - Architecture / development
+        - Other
+  - type: textarea
+    attributes:
+      label: Proposed changes
+      description: Describe the proposed changes and why they are necessary.
+    validations:
+      required: true

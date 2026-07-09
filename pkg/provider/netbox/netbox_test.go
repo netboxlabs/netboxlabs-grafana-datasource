@@ -190,6 +190,29 @@ func TestChanges_TypeFilter(t *testing.T) {
 	}
 }
 
+func TestQuery_ReportsEnvelopeTotal(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Envelope reports 500 matches but this page returns only 2 rows.
+		_, _ = fmt.Fprint(w, `{"count":500,"next":null,"results":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "token", srv.Client())
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Limit: 2})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if res.Total != 500 {
+		t.Errorf("Total = %d, want 500 (envelope count)", res.Total)
+	}
+	if len(res.Rows) != 2 {
+		t.Errorf("len(Rows) = %d, want 2", len(res.Rows))
+	}
+}
+
 func keys(m map[string]bool) []string {
 	var out []string
 	for k := range m {

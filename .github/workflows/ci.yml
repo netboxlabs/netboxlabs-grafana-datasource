@@ -182,10 +182,10 @@ jobs:
       - name: Install dev dependencies
         run: npm ci
 
-      - name: Start Grafana
+      - name: Start Grafana + stub NetBox
         run: |
-          docker compose pull
-          ANONYMOUS_AUTH_ENABLED=false DEVELOPMENT=false GRAFANA_VERSION=${{ matrix.GRAFANA_IMAGE.VERSION }} GRAFANA_IMAGE=${{ matrix.GRAFANA_IMAGE.NAME }} docker compose up -d
+          docker compose -f docker-compose.yaml -f docker-compose.e2e.yaml pull
+          ANONYMOUS_AUTH_ENABLED=false DEVELOPMENT=false GRAFANA_VERSION=${{ matrix.GRAFANA_IMAGE.VERSION }} GRAFANA_IMAGE=${{ matrix.GRAFANA_IMAGE.NAME }} docker compose -f docker-compose.yaml -f docker-compose.e2e.yaml up -d
 
       - name: Wait for grafana server
         uses: grafana/plugin-actions/wait-for-grafana@686ff644d420875e6eeb7b4c10d52d634feeacee # wait-for-grafana/v1.0.4
@@ -205,7 +205,7 @@ jobs:
           docker logs netboxlabs-netbox-datasource >& grafana-server.log
 
       - name: Stop grafana docker
-        run: docker compose down
+        run: docker compose -f docker-compose.yaml -f docker-compose.e2e.yaml down
 
       # Uncomment this step to upload the server log to Github artifacts. Remember Github artifacts are public on the Internet if the repository is public.
       # - name: Upload server log

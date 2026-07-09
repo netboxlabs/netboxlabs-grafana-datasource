@@ -70,6 +70,10 @@ type QuerySpec struct {
 type Result struct {
 	Columns []string                 `json:"columns"`
 	Rows    []map[string]interface{} `json:"rows"`
+	// Total is the number of objects matching the query as reported by the
+	// source (e.g. NetBox's list-envelope "count"), independent of Rows/limit.
+	// Used for count-only queries (alerting). 0 when the source cannot report it.
+	Total int `json:"total"`
 }
 
 // Change is a single change-log/audit event, used to render annotations.

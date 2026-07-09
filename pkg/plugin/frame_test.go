@@ -85,3 +85,45 @@ func TestToString(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildFrame_ReducibleForAlerting documents that object frames built from rows
+// carrying a numeric column expose it as a numeric field. (Alerting on a plain table
+// frame is not supported regardless — see the count option — so this is a
+// characterization test of buildFrame's typing, not a guarantee of alert-reducibility.)
+func TestBuildFrame_ReducibleForAlerting(t *testing.T) {
+	res := &provider.Result{
+		Columns: []string{"id", "name", "status"},
+		Rows: []map[string]interface{}{
+			{"id": float64(1), "name": "leaf1", "status": "active"},
+			{"id": float64(2), "name": "leaf2", "status": "offline"},
+		},
+	}
+	frame := buildFrame("dcim/devices", res, "http://nb")
+
+	hasNumeric := false
+	for _, f := range frame.Fields {
+		if f.Type() == data.FieldTypeNullableFloat64 {
+			hasNumeric = true
+			break
+		}
+	}
+	if !hasNumeric {
+		t.Fatal("object frame has no numeric field; a Grafana alert Reduce/Threshold expression cannot evaluate it")
+	}
+}
+
+func TestBuildCountFrame(t *testing.T) {
+	frame := buildCountFrame("dcim/devices", 3)
+	if len(frame.Fields) != 1 {
+		t.Fatalf("count frame has %d fields, want 1", len(frame.Fields))
+	}
+	if frame.Fields[0].Name != "count" {
+		t.Errorf("field name = %q, want %q", frame.Fields[0].Name, "count")
+	}
+	if frame.Fields[0].Type() != data.FieldTypeFloat64 {
+		t.Errorf("count type = %v, want %v", frame.Fields[0].Type(), data.FieldTypeFloat64)
+	}
+	if v, ok := frame.Fields[0].At(0).(float64); !ok || v != 3 {
+		t.Errorf("count value = %v, want 3", frame.Fields[0].At(0))
+	}
+}

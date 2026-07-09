@@ -29,6 +29,10 @@ export interface NetBoxQuery extends DataQuery {
   filters?: FilterRow[];
   /** Optional subset (and order) of columns to return. */
   fields?: string[];
+  /** For objects queries: return a single numeric count of matching objects
+   * instead of a table. Required to alert on object counts — Grafana alert
+   * expressions evaluate a number, not a table. */
+  count?: boolean;
   limit?: number;
   /** Derived key columns so the result lines up with metric labels. */
   joinKeys?: JoinKeyMapping[];

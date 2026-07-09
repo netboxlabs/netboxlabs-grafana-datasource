@@ -207,6 +207,23 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
         </InlineField>
       )}
 
+      {queryType === 'objects' && (
+        <InlineField
+          label="Return count only"
+          labelWidth={20}
+          tooltip="Return a single numeric count of matching objects instead of a table. Enable this to alert on object counts — Grafana alert rules evaluate a number, not a table."
+        >
+          <InlineSwitch
+            label="Return count only"
+            value={query.count ?? false}
+            onChange={(e) => {
+              update({ count: e.currentTarget.checked });
+              onRunQuery();
+            }}
+          />
+        </InlineField>
+      )}
+
       {/* Join keys — for objects and ip-enrichment */}
       {(queryType === 'objects' || queryType === 'ip-enrichment') && (
         <JoinKeysEditor

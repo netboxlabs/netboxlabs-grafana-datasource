@@ -199,7 +199,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 
 	q := buildFilterValues(spec.Filters)
 
-	rows, err := p.fetchRows(ctx, spec.ObjectType, q, limit)
+	rows, total, err := p.fetchRows(ctx, spec.ObjectType, q, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -226,11 +226,12 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		columns = projectColumns(columns, spec.Fields)
 	}
 
-	return &provider.Result{Columns: columns, Rows: flatRows}, nil
+	return &provider.Result{Columns: columns, Rows: flatRows, Total: total}, nil
 }
 
-// fetchRows pages through a NetBox list endpoint, returning raw object JSON.
-func (p *Provider) fetchRows(ctx context.Context, objectType string, q url.Values, limit int) ([]json.RawMessage, error) {
+// fetchRows pages through a NetBox list endpoint, returning raw object JSON and
+// the total match count reported by the list envelope (from the first page).
+func (p *Provider) fetchRows(ctx context.Context, objectType string, q url.Values, limit int) ([]json.RawMessage, int, error) {
 	pq := url.Values{}
 	for k, vs := range q {
 		pq[k] = vs
@@ -239,10 +240,16 @@ func (p *Provider) fetchRows(ctx context.Context, objectType string, q url.Value
 	next := p.client.apiURL(objectType, pq)
 
 	var rows []json.RawMessage
+	total := 0
+	firstPage := true
 	for next != "" && len(rows) < limit {
 		var page listPage
 		if err := p.client.getJSON(ctx, next, &page); err != nil {
-			return nil, err
+			return nil, 0, err
+		}
+		if firstPage {
+			total = page.Count
+			firstPage = false
 		}
 		rows = append(rows, page.Results...)
 		if page.Next == nil {
@@ -253,7 +260,7 @@ func (p *Provider) fetchRows(ctx context.Context, objectType string, q url.Value
 	if len(rows) > limit {
 		rows = rows[:limit]
 	}
-	return rows, nil
+	return rows, total, nil
 }
 
 // Fields returns the columns of an object type, inferred from a sample object.
@@ -267,7 +274,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 
 	q := url.Values{}
 	q.Set("limit", "1")
-	rows, err := p.fetchRows(ctx, objectType, q, 1)
+	rows, _, err := p.fetchRows(ctx, objectType, q, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +302,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	if limit <= 0 || limit > pageSize {
 		limit = pageSize
 	}
-	rows, err := p.fetchRows(ctx, objectType, url.Values{}, pageSize)
+	rows, _, err := p.fetchRows(ctx, objectType, url.Values{}, pageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +349,7 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	if !spec.To.IsZero() {
 		q.Set("time_before", spec.To.UTC().Format(time.RFC3339))
 	}
-	rows, err := p.fetchRows(ctx, "core/object-changes", q, limit)
+	rows, _, err := p.fetchRows(ctx, "core/object-changes", q, limit)
 	if err != nil {
 		return nil, err
 	}

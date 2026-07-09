@@ -1,0 +1,50 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: netbox-alerting-smoke
+    folder: NetBox
+    interval: 1m
+    rules:
+      - uid: netbox-object-count
+        title: NetBox device count
+        # Query A returns a single-value numeric "count" frame (queryType=objects
+        # with count:true). Grafana's server-side expressions cannot reduce the
+        # plain table frame ("input data must be a wide series but got type long"),
+        # so the datasource returns the row count as a number that Threshold can
+        # evaluate directly — no Reduce node needed.
+        condition: C
+        for: 0s
+        noDataState: NoData
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: netboxlabs-netbox-alerting
+            model:
+              refId: A
+              datasource:
+                type: netboxlabs-netbox-datasource
+                uid: netboxlabs-netbox-alerting
+              queryType: objects
+              objectType: dcim/devices
+              count: true
+              filters: []
+              fields: []
+              limit: 100
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]

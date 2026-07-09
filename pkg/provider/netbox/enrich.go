@@ -130,7 +130,7 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 		limit = 1000
 	}
 
-	devRows, err := p.fetchRows(ctx, "dcim/devices", buildFilterValues(spec.Filters), limit)
+	devRows, _, err := p.fetchRows(ctx, "dcim/devices", buildFilterValues(spec.Filters), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 		})
 	}
 
-	cabRows, err := p.fetchRows(ctx, "dcim/cables", url.Values{}, maxLimit)
+	cabRows, _, err := p.fetchRows(ctx, "dcim/cables", url.Values{}, maxLimit)
 	if err != nil {
 		return nil, err
 	}

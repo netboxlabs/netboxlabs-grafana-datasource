@@ -5,6 +5,7 @@
   "id": "netboxlabs-netbox-datasource",
   "metrics": true,
   "annotations": true,
+  "alerting": true,
   "backend": true,
   "executable": "gpx_netbox",
   "info": {

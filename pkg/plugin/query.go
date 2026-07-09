@@ -32,6 +32,9 @@ type queryModel struct {
 	Limit      int               `json:"limit"`
 	// JoinKeys derive extra key columns so the result lines up with metric labels.
 	JoinKeys []joinKey `json:"joinKeys"`
+	// Count, when true on an objects query, returns a single-value numeric
+	// "count" frame (row count) instead of the table — used by alert rules.
+	Count bool `json:"count"`
 	// ObjectTypes optionally restricts annotation queries to specific NetBox
 	// content types (e.g. "dcim.device").
 	ObjectTypes []string `json:"objectTypes"`
@@ -95,6 +98,23 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 	if qm.ObjectType == "" {
 		// Nothing selected yet; return an empty response.
 		return backend.DataResponse{}
+	}
+
+	if qm.Count {
+		// Count returns the total number of matching objects (from the source's
+		// list envelope), independent of the row limit. Fetch minimally — we need
+		// the total, not a page of rows.
+		res, err := d.provider.Query(ctx, provider.QuerySpec{
+			ObjectType: qm.ObjectType,
+			Filters:    qm.Filters,
+			Limit:      1,
+		})
+		if err != nil {
+			return backend.ErrDataResponse(backend.StatusInternal, err.Error())
+		}
+		frame := buildCountFrame(qm.ObjectType, res.Total)
+		frame.RefID = q.RefID
+		return backend.DataResponse{Frames: data.Frames{frame}}
 	}
 
 	res, err := d.provider.Query(ctx, provider.QuerySpec{

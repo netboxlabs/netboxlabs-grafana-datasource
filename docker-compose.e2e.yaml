@@ -1,0 +1,28 @@
+# End-to-end test environment: the base Grafana stack plus a stub NetBox so the
+# alerting e2e (and any query-driven spec) runs without a real NetBox.
+#
+# Usage (local + CI):
+#   docker compose -f docker-compose.yaml -f docker-compose.e2e.yaml up -d --build
+#   npm run e2e
+#   docker compose -f docker-compose.yaml -f docker-compose.e2e.yaml down
+#
+# The provisioned NetBox data source interpolates ${NETBOX_URL}/${NETBOX_API_TOKEN}
+# at startup; here we point it at the stub service on the compose network.
+services:
+  grafana:
+    environment:
+      NETBOX_URL: http://netbox-stub:8080
+      NETBOX_API_TOKEN: e2e-stub-token
+    depends_on:
+      - netbox-stub
+
+  netbox-stub:
+    image: python:3.12-alpine
+    working_dir: /stub
+    command: ['python', 'main.py']
+    environment:
+      PORT: '8080'
+    volumes:
+      - ./e2e/netbox-stub:/stub:ro
+    expose:
+      - '8080'

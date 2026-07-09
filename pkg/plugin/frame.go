@@ -283,3 +283,12 @@ func firstPresent(cols []string, candidates ...string) string {
 	}
 	return ""
 }
+
+// buildCountFrame returns a single-value numeric frame (no time column) holding
+// the row count. Grafana-managed alert rules can threshold this directly, without
+// a Reduce step — the fallback for when a plain table frame is not reducible.
+func buildCountFrame(objectType string, n int) *data.Frame {
+	return data.NewFrame(frameName(objectType),
+		data.NewField("count", nil, []float64{float64(n)}),
+	)
+}

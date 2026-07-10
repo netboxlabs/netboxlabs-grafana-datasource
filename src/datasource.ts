@@ -62,7 +62,11 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
       // backend expands into repeated NetBox query params.
       value: srv.replace(f.value ?? '', scopedVars, 'csv'),
     }));
-    return { ...query, filters };
+    return {
+      ...query,
+      filters,
+      ips: query.ips === undefined ? undefined : srv.replace(query.ips, scopedVars, 'csv'),
+    };
   }
 
   // --- Resource helpers (backed by the Go CallResource router) ---

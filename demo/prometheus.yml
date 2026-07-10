@@ -4,5 +4,6 @@ global:
 
 scrape_configs:
   - job_name: netbox-synthetic
+    honor_labels: true
     static_configs:
       - targets: ['nbexporter:9100']

@@ -5,7 +5,8 @@ set -euo pipefail
 
 NETBOX_URL="${NETBOX_URL:-http://localhost:8000}"
 NETBOX_TOKEN="${NETBOX_TOKEN:?set NETBOX_TOKEN to an API token for $NETBOX_URL}"
-GRAFANA="http://localhost:3001"
+GRAFANA="${GRAFANA:-http://localhost:3001}"
+GRAFANA_CONTAINER="${GRAFANA_CONTAINER:-grafana-netbox}"
 DEMO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "== enrich site coordinates =="
@@ -19,7 +20,8 @@ echo "incident device: $INCIDENT_DEVICE (id $INCIDENT_ID)"
 
 echo "== network =="
 docker network create nbdemo 2>/dev/null || true
-docker network connect nbdemo grafana-netbox 2>/dev/null || true
+docker network connect nbdemo "$GRAFANA_CONTAINER" 2>/dev/null \
+  || echo "note: $GRAFANA_CONTAINER not attached to nbdemo (already attached, or set GRAFANA_CONTAINER to your Grafana container name)"
 
 echo "== exporter =="
 docker rm -f nbexporter 2>/dev/null || true
@@ -55,6 +57,28 @@ if [ -z "$PROM_UID" ]; then
 fi
 echo "PROM_UID=$PROM_UID"
 
+echo "== loki =="
+docker rm -f loki 2>/dev/null || true
+docker run -d --name loki --network nbdemo -p 3102:3100 grafana/loki:3.4.1
+
+echo "== log shipper =="
+docker rm -f nblogship 2>/dev/null || true
+docker run -d --name nblogship --network nbdemo \
+  -e NETBOX_URL="$NETBOX_URL" -e NETBOX_TOKEN="$NETBOX_TOKEN" -e LOKI_URL="http://loki:3100" \
+  -v "$DEMO_DIR/logship.py:/logship.py:ro" \
+  python:3.12-slim python /logship.py
+
+echo "== provision Loki datasource in Grafana =="
+LOKI_UID=$(curl -s -u admin:admin -H 'Content-Type: application/json' -X POST "$GRAFANA/api/datasources" \
+  -d '{"name":"Loki","type":"loki","access":"proxy","url":"http://loki:3100","isDefault":false}' \
+  | python3 -c 'import sys,json
+d=json.load(sys.stdin)
+print(d.get("datasource",{}).get("uid") or "")' 2>/dev/null || true)
+if [ -z "$LOKI_UID" ]; then
+  LOKI_UID=$(curl -s -u admin:admin "$GRAFANA/api/datasources" | python3 -c 'import sys,json; print([d["uid"] for d in json.load(sys.stdin) if d["type"]=="loki"][0])')
+fi
+echo "LOKI_UID=$LOKI_UID"
+
 echo "== schedule incident NetBox change at +300s (device offline) =="
 nohup bash -c "sleep 300; curl -s -X PATCH \
   -H 'Authorization: Bearer $NETBOX_TOKEN' -H 'Content-Type: application/json' \
@@ -63,4 +87,5 @@ nohup bash -c "sleep 300; curl -s -X PATCH \
 
 echo "INCIDENT_DEVICE=$INCIDENT_DEVICE"
 echo "PROM_UID=$PROM_UID"
+echo "LOKI_UID=$LOKI_UID"
 echo "done"

@@ -4,7 +4,15 @@ import { NetBoxQuery } from './types';
 jest.mock('@grafana/runtime', () => ({
   ...jest.requireActual('@grafana/runtime'),
   getTemplateSrv: () => ({
-    replace: (s: string) => (s === '$site' ? 'dc1,dc2' : s),
+    replace: (s: string) => {
+      if (s === '$site') {
+        return 'dc1,dc2';
+      }
+      if (s === '$flow_ips') {
+        return '10.112.128.1,203.0.113.7';
+      }
+      return s;
+    },
   }),
 }));
 
@@ -44,6 +52,13 @@ describe('applyTemplateVariables', () => {
     };
     const out = ds.applyTemplateVariables(q, {});
     expect(out.filters![0].value).toBe('dc1,dc2');
+  });
+
+  it('interpolates variables in the ip-enrichment ips field (csv)', () => {
+    const ds = makeDS();
+    const q: NetBoxQuery = { refId: 'A', queryType: 'ip-enrichment', ips: '$flow_ips' };
+    const out = ds.applyTemplateVariables(q, {});
+    expect(out.ips).toBe('10.112.128.1,203.0.113.7');
   });
 });
 

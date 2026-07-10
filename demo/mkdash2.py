@@ -5,14 +5,20 @@ import json
 import os
 import urllib.request
 
-G = "http://localhost:3001"
-NB = "P8334760067B51B4B"
+G = os.environ.get("GRAFANA_URL", "http://localhost:3001")
+if not G.startswith(("http://", "https://")):
+    raise SystemExit("GRAFANA_URL must be an http(s) URL")
+NB = os.environ.get("NB_UID", "P8334760067B51B4B")
 PROM = os.environ.get("PROM_UID", "bfqenuth8fapsc")
+LOKI = os.environ.get("LOKI_UID", "")
+if not LOKI:
+    raise SystemExit("set LOKI_UID (printed by setup-demo.sh)")
 AUTH = "Basic " + base64.b64encode(b"admin:admin").decode()
 INCIDENT = os.environ.get("INCIDENT_DEVICE", "dmi01-akron-rtr01")
 
 nb = {"type": "netboxlabs-netbox-datasource", "uid": NB}
 prom = {"type": "prometheus", "uid": PROM}
+loki = {"type": "loki", "uid": LOKI}
 mixed = {"type": "datasource", "uid": "-- Mixed --"}
 
 
@@ -115,6 +121,61 @@ panels = [
                               {"field": "role", "operator": "", "value": "$role"}],
                   "fields": ["name", "site", "role", "status", "platform", "serial", "display_url"], "limit": 500}],
      "fieldConfig": {"defaults": {}, "overrides": [hide_url()]}},
+
+    {"id": 9, "type": "table", "title": "Recipe 2 — Log volume by host (Loki) enriched with NetBox",
+     "gridPos": {"x": 0, "y": 35, "w": 12, "h": 8}, "datasource": mixed,
+     "targets": [
+         {"refId": "L", "datasource": loki, "queryType": "instant",
+          "expr": 'sum by (host) (count_over_time({job="syslog"}[15m]))'},
+         {"refId": "NB", "datasource": nb, "objectType": "dcim/devices",
+          "fields": ["name", "site", "role", "tenant", "display_url"],
+          "joinKeys": [{"source": "name", "output": "host", "transform": "host"}], "limit": 1000}],
+     # Loki's instant query returns one frame per host, so after labelsToFields+merge
+     # Grafana disambiguates the value column to "Value #L" (the L refId) — filter and
+     # rename must reference that exact name, not "Value".
+     "transformations": [{"id": "labelsToFields"},
+                         {"id": "merge", "options": {}},
+                         {"id": "filterByValue", "options": {"filters": [
+                             {"fieldName": "Value #L", "config": {"id": "isNotNull", "options": {}}}], "type": "include", "match": "all"}},
+                         organize(["Time", "name"], {"Value #L": "Log lines (15m)"})],
+     "fieldConfig": {"defaults": {}, "overrides": [hide_url()]}},
+
+    {"id": 10, "type": "table", "title": "Recipe 3a — Top flows enriched by exact IP join",
+     "gridPos": {"x": 12, "y": 35, "w": 12, "h": 8}, "datasource": mixed,
+     "targets": [
+         {"refId": "F", "datasource": prom, "format": "table", "instant": True,
+          "expr": "topk(15, rate(flow_bytes_total[5m]) * 8)"},
+         {"refId": "NB", "datasource": nb, "objectType": "ipam/ip-addresses",
+          "fields": ["address", "tenant", "description", "display_url"],
+          "joinKeys": [{"source": "address", "output": "src_ip", "transform": "iphost"}], "limit": 1000}],
+     "transformations": [{"id": "joinByField", "options": {"byField": "src_ip", "mode": "outer"}},
+                         {"id": "filterByValue", "options": {"filters": [
+                             {"fieldName": "Value", "config": {"id": "isNotNull", "options": {}}}], "type": "include", "match": "all"}},
+                         organize(["Time", "address", "ip", "job", "instance"],
+                                  {"Value": "bps"})],
+     "fieldConfig": {"defaults": {}, "overrides": [hide_url(),
+        {"matcher": {"id": "byName", "options": "bps"},
+         "properties": [{"id": "unit", "value": "bps"}]}]}},
+
+    {"id": 11, "type": "table", "title": "Recipe 3b — Flow IPs, longest-prefix NetBox context",
+     "gridPos": {"x": 0, "y": 43, "w": 12, "h": 8}, "datasource": nb,
+     "targets": [{"refId": "A", "datasource": nb, "queryType": "ip-enrichment",
+                  "ips": "${flow_ips:csv}",
+                  "contextFields": ["prefix", "site", "tenant", "role", "vlan"]}]},
+
+    {"id": 12, "type": "table", "title": "Recipe 1 — Device CPU (Prometheus) enriched, join on instance",
+     "gridPos": {"x": 12, "y": 43, "w": 12, "h": 8}, "datasource": mixed,
+     "targets": [
+         {"refId": "A", "datasource": prom, "format": "table", "instant": True,
+          "expr": "device_cpu_percent"},
+         {"refId": "NB", "datasource": nb, "objectType": "dcim/devices",
+          "fields": ["name", "site", "role", "tenant"],
+          "joinKeys": [{"source": "name", "output": "instance", "transform": "host"}], "limit": 1000}],
+     "transformations": [{"id": "joinByField", "options": {"byField": "instance", "mode": "outer"}},
+                         {"id": "filterByValue", "options": {"filters": [
+                             {"fieldName": "Value", "config": {"id": "isNotNull", "options": {}}}], "type": "include", "match": "all"}},
+                         organize(["Time", "name", "device", "__name__", "job"], {})],
+     "fieldConfig": {"defaults": {}, "overrides": []}},
 ]
 
 
@@ -138,6 +199,10 @@ dash = {
         var("tenant", "Tenant", "tenancy/tenants", "slug", "name"),
         var("device", "Device", "dcim/devices", "name", "name",
             extra={"filters": [{"field": "site", "operator": "", "value": "$site"}]}),
+        {"name": "flow_ips", "label": "Flow IPs", "type": "query", "datasource": prom,
+         "refresh": 2, "includeAll": True, "multi": True,
+         "current": {"selected": True, "text": ["All"], "value": ["$__all"]},
+         "query": {"query": "label_values(flow_bytes_total, dst_ip)", "refId": "flowips"}},
     ]},
     "annotations": {"list": [
         {"builtIn": 1, "type": "dashboard", "name": "Annotations & Alerts", "enable": True,
@@ -155,7 +220,7 @@ def api(method, path, body=None):
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", AUTH)
     try:
-        # Local demo tooling; G is a hardcoded localhost Grafana URL.
+        # Local demo tooling; G is operator-controlled and scheme-checked at startup.
         return json.load(urllib.request.urlopen(req, timeout=30))  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
     except urllib.error.HTTPError as e:
         return {"_err": e.code, "body": e.read().decode()[:400]}

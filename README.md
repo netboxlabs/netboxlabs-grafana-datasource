@@ -3,13 +3,13 @@
 Enrich your observability data with infrastructure context from [NetBox](https://netboxlabs.com/oss/netbox/).
 
 Most network and infrastructure telemetry arrives as bare identifiers — a device name, an
-interface, an IP. NetBox knows what those identifiers *mean*: which site and rack a device
+interface, an IP. NetBox knows what those identifiers _mean_: which site and rack a device
 lives in, its role, platform, tenant, serial, lifecycle, the cable on the other end. This
 data source brings that context into Grafana so you can **join** it onto metrics and logs
 from Prometheus, Loki, Mimir, InfluxDB or anything else — turning `device="leaf1"` into
 "leaf1, an Arista switch in DM-Akron, rack R-12, owned by the NetEng team."
 
-![Enrichment dashboard](./screenshots/hero.png)
+![Enrichment dashboard](https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/screenshots/hero.png)
 
 ## Features
 
@@ -26,7 +26,7 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else — turning `device="lea
   status.
 - **Geomap.** Plot sites from their NetBox latitude/longitude.
 - **Dynamic object-type discovery.** Object types are discovered from the live NetBox API —
-  core models *and* plugin-provided models (e.g. BGP, custom objects) — with no code changes.
+  core models _and_ plugin-provided models (e.g. BGP, custom objects) — with no code changes.
 - **Template variables.** Drive `site` / `device` / `role` / `tenant` dropdowns from NetBox
   and filter every panel on the dashboard. Multi-value variables become OR filters.
 - **Annotations.** Overlay NetBox change-log events (who changed what, when) on any
@@ -38,16 +38,16 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else — turning `device="lea
 
 ## Query types
 
-| Type | Returns | Use with |
-|------|---------|----------|
-| **Objects** | A joinable table for any object type (with optional join keys) | Table, or Outer-join onto metrics |
-| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip` | Join onto flow/log data by IP |
-| **Topology** | Devices (nodes) + cables (edges) | Node Graph panel |
-| **Annotations** | Change-log events (`time/title/text/tags`) | Dashboard annotations |
+| Type              | Returns                                                        | Use with                          |
+| ----------------- | -------------------------------------------------------------- | --------------------------------- |
+| **Objects**       | A joinable table for any object type (with optional join keys) | Table, or Outer-join onto metrics |
+| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`                   | Join onto flow/log data by IP     |
+| **Topology**      | Devices (nodes) + cables (edges)                               | Node Graph panel                  |
+| **Annotations**   | Change-log events (`time/title/text/tags`)                     | Dashboard annotations             |
 
 See [docs/USE-CASES-AND-COVERAGE.md](./docs/USE-CASES-AND-COVERAGE.md) for the full map of
 operator use cases and how well each is covered, and [demo/](./demo) for a runnable demo
-(synthetic Prometheus labeled to match NetBox + a rich dashboard).
+(synthetic Prometheus + Loki labeled to match NetBox + a rich dashboard).
 
 ## Requirements
 
@@ -58,13 +58,13 @@ operator use cases and how well each is covered, and [demo/](./demo) for a runna
 
 Add the data source (**Connections → Data sources → NetBox**) and set:
 
-| Field | Description |
-|-------|-------------|
-| **Mode** | `NetBox REST API` (default). `Network Context Service` is reserved for a future release — see [Modes](#modes). |
-| **NetBox URL** | Base URL of your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`). |
-| **API Token** | A NetBox API token. Both classic 40-character (v1) tokens and `nbt_…` (v2) tokens are auto-detected. Stored encrypted. |
-| **Skip TLS verify** | Accept self-signed certificates. |
-| **Timeout (s)** | Per-request upstream timeout (default 30). |
+| Field               | Description                                                                                                            |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **Mode**            | `NetBox REST API` (default). `Network Context Service` is reserved for a future release — see [Modes](#modes).         |
+| **NetBox URL**      | Base URL of your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`).                              |
+| **API Token**       | A NetBox API token. Both classic 40-character (v1) tokens and `nbt_…` (v2) tokens are auto-detected. Stored encrypted. |
+| **Skip TLS verify** | Accept self-signed certificates.                                                                                       |
+| **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                             |
 
 Click **Save & test** — a healthy data source reports the connected NetBox version.
 
@@ -85,35 +85,166 @@ datasources:
 
 ## Enrichment recipes
 
-### 1. Join NetBox context onto Prometheus metrics
+**How enrichment works (30 seconds).** A NetBox query returns a flat table (one row per
+device/IP/prefix). A **join key** renames one NetBox field into a column that exactly
+matches a label on your metrics or logs — same name, same value — optionally transforming
+it on the way (lowercase, strip domain, drop CIDR mask, regex). A Grafana transformation —
+usually **Join by field** — then lines the two tables up, and every series row carries its
+NetBox context. Full transform reference:
+[docs/JOIN-KEYS.md](./docs/JOIN-KEYS.md).
 
-1. Add your metric query (panel A), e.g. `rate(interface_bytes_in_total[5m])` with a
-   `device` label.
-2. Add a second query against the **NetBox** data source: object type **Devices**, and in
-   **Return fields** pick the join key plus the context you want — e.g. `name`, `site`,
-   `role`, `tenant`.
-3. In **Transformations**, add **Outer join** (a.k.a. *Join by field*) and set the field to
-   the shared key. Name the NetBox key field to match your metric label (`device`).
-4. Every metric row now carries its NetBox site/role/tenant — group, filter and color by them.
+> Want a sandbox with everything pre-wired? Run the
+> [demo stack](./demo) —
+> it stands up Prometheus, Loki and synthetic telemetry labeled to match a NetBox instance.
 
-> Tip: NetBox device names are the most reliable join key. The data source also returns
-> `address` (IPAM) so you can join flow/Prometheus series by IP when names aren't available.
+### Recipe 1 — Enrich Prometheus/SNMP metrics with site, role and tenant
 
-### 2. NetBox-driven dashboard variables
+![Prometheus join result](https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/screenshots/recipes/prometheus-join.png)
 
-Create a variable of type **Query** against the NetBox data source: pick an object type
-(e.g. **Sites**), a **Value field** (`slug`) and a **Text field** (`name`). Reference it in
-any panel filter as `$site`. Chained variables work too — filter `devices` by `site=$site`.
+**You need:** a Prometheus (or any SQL/TSDB) datasource whose series carry a device
+identifier label (here: `instance`), and this plugin connected to your NetBox.
 
-### 3. Change-log annotations
+**Steps:**
 
-Add a dashboard annotation against the NetBox data source. Optionally restrict to content
-types (`dcim.device`, `ipam.prefix`, …). NetBox changes appear as markers on your panels.
+1. Create a table panel. Query **A** (Prometheus): your metric, e.g.
+   `device_cpu_percent`, with **Format = Table** and **Instant** enabled.
+2. Add query **B** with the **NetBox** datasource: query type **Objects**, object type
+   **Devices** (`dcim/devices`). In **Return fields** pick `name`, `site`, `role`,
+   `tenant`, and set **Limit** to cover your fleet (e.g. 1000).
+3. Still in query B, add a **Join key**: source `name` → output `instance`, transform
+   **strip domain** (`leaf1.dc1.corp` → `leaf1`). The output name must equal your metric
+   label exactly.
+4. In **Transformations**, add **Join by field**: mode **Outer**, field `instance`.
+5. Add **Filter data by values** → keep rows where `Value` **is not null** (drops NetBox
+   devices with no metrics), then **Organize fields** and hide `Time`, `name`, and any
+   leftover label columns (`__name__`, `job`, …) so only `instance`, `Value`, `site`,
+   `role`, `tenant` remain.
 
-### 4. Deep links
+**Expected result:**
 
-Include the `display_url` column (it can be hidden in the table) and the primary label
-column (`name`/`address`) renders as a link to the NetBox object page.
+| instance          | Value | site      | role          | tenant         |
+| ----------------- | ----- | --------- | ------------- | -------------- |
+| dmi01-akron-rtr01 | 38.2  | DM-Akron  | Router        | Dunder-Mifflin |
+| dmi01-albany-sw01 | 21.7  | DM-Albany | Access Switch | Dunder-Mifflin |
+
+**If it doesn't match:** your series may use a different label (`device`, `node`) — set
+the join key _output_ to that name instead. Case mismatches (`LEAF1` vs `leaf1`) →
+transform **lowercase**. All transforms:
+[docs/JOIN-KEYS.md](./docs/JOIN-KEYS.md).
+
+### Recipe 2 — Enrich Loki logs with device context
+
+![Loki join result](https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/screenshots/recipes/loki-join.png)
+
+**You need:** a Loki datasource whose streams carry a hostname label (here: `host`).
+
+**Steps:**
+
+1. Create a table panel. Query **A** (Loki): a metric query over your logs, e.g.
+   `sum by (host) (count_over_time({job="syslog"}[15m]))`, query type **Instant**.
+2. Add query **B** (NetBox): **Objects** → **Devices** (`dcim/devices`); Return fields
+   `name`, `site`, `role`, `tenant`; **Limit** e.g. 1000; **Join key** `name` → `host`,
+   transform **strip domain**.
+3. **Transformations:** add **Labels to fields**, then **Merge series/tables** (Loki
+   returns one frame per host; _merge_ correlates them with the NetBox rows on the
+   shared `host` column — don't use _Join by field_ here), then
+   **Filter data by values** → keep where the log-count column **is not null**, then
+   **Organize fields**: hide `Time` and `name`, and rename the log-count column to
+   `Log lines (15m)`. Grafana names that column `Value #A` (after the Loki query's
+   refId) — pick whatever it shows in the field dropdown; it will not be plain `Value`
+   the way a single Prometheus query is.
+
+**Expected result:**
+
+| Log lines (15m) | host              | site     | role   | tenant         |
+| --------------- | ----------------- | -------- | ------ | -------------- |
+| 42              | dmi01-akron-rtr01 | DM-Akron | Router | Dunder-Mifflin |
+
+(Column order follows the merge; drag fields in **Organize fields** to taste.)
+
+Now group noisy hosts by site or filter the log volume table to one tenant.
+
+**If it doesn't match:** label named `hostname`/`instance` → change the join key output;
+logs carry FQDNs but NetBox has short names → keep **strip domain**; the reverse →
+apply a regex transform instead
+([docs/JOIN-KEYS.md](./docs/JOIN-KEYS.md)).
+
+### Recipe 3 — Enrich flows or logs by IP
+
+Two variants: **exact** (the observed IP exists in NetBox IPAM) and **longest-prefix**
+(any IP — resolved to its containing prefix's context). Start with exact; switch when
+you see empty joins.
+
+**You need:** any datasource whose rows carry bare IP labels/fields (flow collector,
+firewall or DNS logs, …) and this plugin connected to your NetBox.
+
+**3a — exact IP join**
+
+![Exact IP join result](https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/screenshots/recipes/flow-ip-exact.png)
+
+1. Query **A** (your flow datasource): a table of flows keyed by IP, e.g. Prometheus
+   `topk(15, rate(flow_bytes_total[5m]) * 8)` with labels `src_ip`, `dst_ip`, with
+   **Format = Table** and **Instant** enabled.
+2. Query **B** (NetBox): **Objects** → **Ip Addresses** (`ipam/ip-addresses`); Return
+   fields `address`, `tenant`, `description`; **Limit** e.g. 1000; **Join key**
+   `address` → `src_ip`, transform **IP host** (drops the `/24` mask so
+   `10.112.128.1/24` matches the label `10.112.128.1`).
+3. **Transformations:** **Join by field** (Outer) on `src_ip`, then
+   **Filter data by values** → `Value` **is not null**, then **Organize fields**: hide
+   `Time`, `address`, `ip`, `job`, `instance`, rename `Value` → `bps`.
+
+**Expected result:**
+
+| src_ip        | dst_ip      | bps        | tenant         | description  |
+| ------------- | ----------- | ---------- | -------------- | ------------ |
+| 10.112.128.1  | 10.113.1.7  | 48,200,113 | Dunder-Mifflin | rtr01 uplink |
+| 10.112.129.10 | 203.0.113.7 | 9,881,220  | Dunder-Mifflin |              |
+
+**3b — longest-prefix match (works for any IP)**
+
+![Longest-prefix result](https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/screenshots/recipes/flow-ip-lpm.png)
+
+Exact joins fail for IPs that aren't individually registered in IPAM. The
+**IP enrichment** query type instead finds each IP's longest containing prefix:
+
+1. Create a dashboard variable `flow_ips` (type **Query**, your flow datasource), e.g.
+   Prometheus `label_values(flow_bytes_total, dst_ip)`. Enable **Multi-value** +
+   **Include All**.
+2. Add a NetBox query: query type **IP enrichment**; in **IPs** enter
+   `${flow_ips:csv}`; pick context fields (`prefix`, `site`, `tenant`, `role`, `vlan`).
+   On **NetBox 4.2+** a prefix's site moved to a generic scope — pick `scope` instead of
+   `site` (it carries the site name).
+3. The result is a table keyed by `ip` — use it standalone, or **Join by field** on `ip`
+   against your flow table (rename the flow label to `ip` with an _organize fields_
+   transform, or set a join key output accordingly).
+
+**Expected result:**
+
+| ip           | prefix          | site     | tenant         | role | vlan |
+| ------------ | --------------- | -------- | -------------- | ---- | ---- |
+| 10.112.128.9 | 10.112.128.0/24 | DM-Akron | Dunder-Mifflin | LAN  | 128  |
+| 203.0.113.7  |                 |          |                |      |      |
+
+An empty row means NetBox has no containing prefix — that's signal too (unknown/external
+traffic).
+
+**If it doesn't match:** exact join (3a) returning mostly empty context → your observed
+IPs aren't individually registered in IPAM; switch to 3b. Longest-prefix rows all empty →
+the containing prefixes aren't in NetBox, or the variable is empty (check its
+`label_values(...)` query returns IPs). Mask/format mismatches → see the transform
+reference in
+[docs/JOIN-KEYS.md](./docs/JOIN-KEYS.md).
+
+### Beyond joins
+
+- **Dashboard variables:** variable type **Query** → NetBox datasource → object type
+  (e.g. _Sites_), value field `slug`, text field `name`. Chain them
+  (`devices` filtered by `site=$site`) and reference as `$site` in any panel.
+- **Change annotations:** add a dashboard annotation backed by NetBox; optionally
+  restrict to content types (`dcim.device`, `ipam.prefix`). Change-log events overlay
+  your panels with who-changed-what.
+- **Deep links:** include the `display_url` column (hideable) and the primary label
+  column links each row back to its NetBox object page — links survive joins.
 
 ## Alerting
 

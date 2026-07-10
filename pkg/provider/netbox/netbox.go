@@ -208,6 +208,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	var columns []string
 	seen := map[string]bool{}
 	flatRows := make([]map[string]interface{}, 0, len(rows))
+	flatRaws := make([]json.RawMessage, 0, len(rows)) // index-aligned with flatRows
 	for _, raw := range rows {
 		cols, vals, err := flattenObject(raw)
 		if err != nil {
@@ -220,6 +221,17 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 			}
 		}
 		flatRows = append(flatRows, vals)
+		flatRaws = append(flatRaws, raw)
+	}
+
+	if isUtilizationType(spec.ObjectType) && wantsUtilization(spec.Fields) {
+		p.enrichUtilization(ctx, spec.ObjectType, flatRaws, flatRows)
+		for _, name := range utilizationFieldNames() {
+			if !seen[name] {
+				seen[name] = true
+				columns = append(columns, name)
+			}
+		}
 	}
 
 	if len(spec.Fields) > 0 {
@@ -285,6 +297,12 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 			for _, c := range cols {
 				fields = append(fields, provider.Field{Name: c, Type: inferType(c, vals[c])})
 			}
+		}
+	}
+
+	if isUtilizationType(objectType) {
+		for _, name := range utilizationFieldNames() {
+			fields = append(fields, provider.Field{Name: name, Type: provider.FieldTypeNumber})
 		}
 	}
 

@@ -17,7 +17,7 @@ scrape time. Labels become permanent and historically queryable, and work in ale
 Downsides: Prometheus-only, static (stale when NetBox changes until re-scrape), adds metric
 cardinality, requires pipeline changes.
 
-**2. Query-time join (this plugin).** NetBox context is fetched live and joined onto *any*
+**2. Query-time join (this plugin).** NetBox context is fetched live and joined onto _any_
 datasource's results in the panel. Always current, zero metric-cardinality cost, works
 across Prometheus **and** Loki/Influx/Tempo/SQL, no pipeline changes. Downsides: join-key
 friction and client-side join cost at high scale (the latter is what the future NCS mode
@@ -29,22 +29,22 @@ mitigates).
 
 ## Use-case scorecard
 
-| # | What the operator wants | Persona | Coverage |
-|---|---|---|---|
-| 1 | Enrich Prometheus/SNMP series with site/role/tenant/rack/platform/serial | NOC, NetEng | **Strong** — Outer-join on `device` |
-| 2 | Enrich flow/syslog by IP → device & interface context | SecOps, NOC | **Partial** — exact-IP join; no CIDR/longest-prefix |
-| 3 | Enrich by interface → description, peer, LAG, speed | NetEng | **Partial** — queryable; ifIndex↔ifName needs normalization |
-| 4 | Site/region/role/tenant variables (chained, repeated panels) | everyone | **Strong** |
-| 5 | Inventory tables (devices/circuits/IPs) with click-through to NetBox | NOC, mgmt | **Strong** |
-| 6 | Change correlation — overlay NetBox changes on metric anomalies | NOC, SRE | **Strong** — changelog annotations |
-| 7 | Topology — node graph of devices + cables/links | NetEng | **Gap** — cables returned as a table, not a node graph |
-| 8 | Geomap of sites colored by health | NOC, mgmt | **Partial** — lat/long emitted, no first-class geo frame |
-| 9 | Cable trace / "what's connected to X" / path A→B | NetEng | **Partial** — queryable, not a specialized view |
-| 10 | Capacity & lifecycle — rack/power, EoL, prefix/IP utilization | Capacity | **Partial→Strong** — lifecycle via `cf_*` strong; utilization partial |
-| 11 | Multi-tenant / per-customer dashboards, cost-center grouping | MSP, platform | **Strong** |
-| 12 | Alert enrichment & routing — owner/contact/site on alerts | on-call | **Partial→Gap** — contacts queryable; alerting not enabled |
-| 13 | "Who do I page?" ownership/contact resolution | on-call | **Partial** — contacts/assignments discoverable, no resolver |
-| 14 | Scrape-target service discovery | platform | **Out of scope** — that's the SD plugin's job |
+| #   | What the operator wants                                                  | Persona       | Coverage                                                                                                                      |
+| --- | ------------------------------------------------------------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Enrich Prometheus/SNMP series with site/role/tenant/rack/platform/serial | NOC, NetEng   | **Strong** — Outer-join on `device`                                                                                           |
+| 2   | Enrich flow/syslog by IP → device & interface context                    | SecOps, NOC   | **Partial** — exact-IP join; no CIDR/longest-prefix                                                                           |
+| 3   | Enrich by interface → description, peer, LAG, speed                      | NetEng        | **Partial** — queryable; ifIndex↔ifName needs normalization                                                                   |
+| 4   | Site/region/role/tenant variables (chained, repeated panels)             | everyone      | **Strong**                                                                                                                    |
+| 5   | Inventory tables (devices/circuits/IPs) with click-through to NetBox     | NOC, mgmt     | **Strong**                                                                                                                    |
+| 6   | Change correlation — overlay NetBox changes on metric anomalies          | NOC, SRE      | **Strong** — changelog annotations                                                                                            |
+| 7   | Topology — node graph of devices + cables/links                          | NetEng        | **Gap** — cables returned as a table, not a node graph                                                                        |
+| 8   | Geomap of sites colored by health                                        | NOC, mgmt     | **Partial** — lat/long emitted, no first-class geo frame                                                                      |
+| 9   | Cable trace / "what's connected to X" / path A→B                         | NetEng        | **Partial** — queryable, not a specialized view                                                                               |
+| 10  | Capacity & lifecycle — rack/power, EoL, prefix/IP utilization            | Capacity      | **Strong** — lifecycle via `cf_*`; prefix/IP-range `utilization`/`used`/`available` are first-class columns (NetBox-matching) |
+| 11  | Multi-tenant / per-customer dashboards, cost-center grouping             | MSP, platform | **Strong**                                                                                                                    |
+| 12  | Alert enrichment & routing — owner/contact/site on alerts                | on-call       | **Partial→Gap** — contacts queryable; alerting not enabled                                                                    |
+| 13  | "Who do I page?" ownership/contact resolution                            | on-call       | **Partial** — contacts/assignments discoverable, no resolver                                                                  |
+| 14  | Scrape-target service discovery                                          | platform      | **Out of scope** — that's the SD plugin's job                                                                                 |
 
 ## The cross-cutting issue: join keys
 
@@ -61,14 +61,14 @@ value**, with the **same field name**. Common mismatches:
 
 ### Options (layered, combinable)
 
-| Option | What | Effort | Notes |
-|---|---|---|---|
-| A. Docs + Grafana transforms | "Rename by regex" + "Outer join" recipes per source | docs only | Pushes friction to the user |
-| B. Configurable join key (server-side) | On the query: pick source field, set **output column name** (e.g. `instance`), apply **normalization** (lowercase / strip-domain / regex), so the emitted key already matches the metric label | medium | Solves device-name + field-name cases ergonomically, no extra transforms |
-| C. Auto host-only `ip` column | Emit `ip` (address without mask) alongside `address` so bare-IP joins work | small | Covers managed IPs present in NetBox |
-| D. Interface name normalization | Optional `Eth↔Ethernet` style normalization; surface ifIndex if stored in a custom field | medium | ifIndex is partly a NetBox data-modeling problem |
-| E. IP longest-prefix enrichment | Map arbitrary IPs → containing prefix/site/tenant | large | Cannot be a join transform; needs a lookup mode or precompute. Strong argument for NCS/relabeling for flow |
-| F. Correlations | Ship Grafana Correlation defs for drill-down (navigation, not value-join) | small–medium | Complements row-level data links |
+| Option                                 | What                                                                                                                                                                                           | Effort       | Notes                                                                                                      |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------- |
+| A. Docs + Grafana transforms           | "Rename by regex" + "Outer join" recipes per source                                                                                                                                            | docs only    | Pushes friction to the user                                                                                |
+| B. Configurable join key (server-side) | On the query: pick source field, set **output column name** (e.g. `instance`), apply **normalization** (lowercase / strip-domain / regex), so the emitted key already matches the metric label | medium       | Solves device-name + field-name cases ergonomically, no extra transforms                                   |
+| C. Auto host-only `ip` column          | Emit `ip` (address without mask) alongside `address` so bare-IP joins work                                                                                                                     | small        | Covers managed IPs present in NetBox                                                                       |
+| D. Interface name normalization        | Optional `Eth↔Ethernet` style normalization; surface ifIndex if stored in a custom field                                                                                                       | medium       | ifIndex is partly a NetBox data-modeling problem                                                           |
+| E. IP longest-prefix enrichment        | Map arbitrary IPs → containing prefix/site/tenant                                                                                                                                              | large        | Cannot be a join transform; needs a lookup mode or precompute. Strong argument for NCS/relabeling for flow |
+| F. Correlations                        | Ship Grafana Correlation defs for drill-down (navigation, not value-join)                                                                                                                      | small–medium | Complements row-level data links                                                                           |
 
 **Recommended baseline:** B + C (+ recipes from A). This makes the common device-name and
 exact-IP cases "just work" server-side. D is a good follow-on; E is documented as a known

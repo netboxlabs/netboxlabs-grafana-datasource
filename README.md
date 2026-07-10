@@ -22,6 +22,9 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else — turning `device="lea
   [docs/JOIN-KEYS.md](./docs/JOIN-KEYS.md).
 - **IP enrichment (longest-prefix match).** Resolve arbitrary observed IPs to their
   containing NetBox prefix's site/tenant/role — the one enrichment a value-join can't do.
+- **Prefix/IP utilization.** Opt-in `utilization` (%), `used` and `available` columns for
+  prefixes and IP ranges, computed to match NetBox's own utilization — gauge or threshold on
+  capacity right in Grafana. See [Prefix & IP utilization](#prefix--ip-utilization).
 - **Topology node graph.** Devices + cables as a Grafana node graph, colored by device
   status.
 - **Geomap.** Plot sites from their NetBox latitude/longitude.
@@ -245,6 +248,42 @@ reference in
   your panels with who-changed-what.
 - **Deep links:** include the `display_url` column (hideable) and the primary label
   column links each row back to its NetBox object page — links survive joins.
+
+## Prefix & IP utilization
+
+Prefixes and IP ranges expose three extra columns — **`utilization`** (percent used, 0–100),
+**`used`**, and **`available`** — computed by the backend to match the figure NetBox's own UI
+shows (network/broadcast excluded for IPv4 non-pool prefixes, container prefixes measured by
+child-prefix coverage, `mark_utilized` ⇒ 100%).
+
+They are **opt-in**: they appear only when you add them to **Return fields**, so ordinary
+IPAM queries pay no extra cost.
+
+![Prefix utilization](./screenshots/recipes/prefix-utilization.png)
+
+**Steps:**
+
+1. Add a panel with query type **Objects**, object type **Prefixes** (`ipam/prefixes`) or
+   **Ip Addresses → IP ranges** (`ipam/ip-ranges`). Add filters as usual (e.g. `site`,
+   `tenant`, `role`).
+2. In **Return fields**, pick `prefix` (or `start_address`) plus `utilization`, `used`,
+   `available`.
+3. Visualize: a **Gauge** or **Bar gauge** on `utilization` with thresholds (e.g. green < 75,
+   red ≥ 90) turns it into an at-a-glance capacity view; a **Table** with all three columns
+   gives the raw numbers. Sort by `utilization` to surface the fullest subnets.
+
+**Expected result** (Table):
+
+| prefix        | utilization | used | available |
+| ------------- | ----------- | ---- | --------- |
+| 10.10.10.0/24 | 1           | 3    | 251       |
+| 10.20.20.0/24 | 0           | 2    | 252       |
+
+**Notes:** utilization is scoped to the object's VRF and mirrors NetBox's own figure — a leaf
+prefix's `used` is the de-duplicated set of its child IP addresses plus any marked-utilized
+child ranges, a container prefix is measured by child-prefix coverage, and an IP range by its
+child-IP count. It's computed only when a utilization field is requested (a few extra NetBox
+calls per row), so ordinary IPAM queries are unaffected.
 
 ## Alerting
 

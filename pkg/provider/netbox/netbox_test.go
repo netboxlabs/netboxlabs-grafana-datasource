@@ -26,7 +26,7 @@ func mockNetBox(t *testing.T) *httptest.Server {
 		_, _ = fmt.Fprintf(w, `{"devices":"%s/api/dcim/devices/","interfaces":"%s/api/dcim/interfaces/"}`, base, base)
 	})
 	mux.HandleFunc("/api/ipam/", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprintf(w, `{"ip-addresses":"%s/api/ipam/ip-addresses/"}`, base)
+		_, _ = fmt.Fprintf(w, `{"ip-addresses":"%s/api/ipam/ip-addresses/","prefixes":"%s/api/ipam/prefixes/","ip-ranges":"%s/api/ipam/ip-ranges/"}`, base, base, base)
 	})
 	mux.HandleFunc("/api/plugins/", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, `{"bgp":"%s/api/plugins/bgp/","installed-plugins":"%s/api/plugins/installed-plugins/"}`, base, base)
@@ -53,6 +53,42 @@ func mockNetBox(t *testing.T) *httptest.Server {
 			{"id":1,"name":"leaf1","display_url":"`+base+`/dcim/devices/1/","site":{"id":2,"name":"dc1","slug":"dc1"},"status":{"value":"active","label":"Active"},"interface_count":48},
 			{"id":2,"name":"leaf2","display_url":"`+base+`/dcim/devices/2/","site":{"id":2,"name":"dc1","slug":"dc1"},"status":{"value":"active","label":"Active"},"interface_count":48}
 		]}`)
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("within") == "10.0.0.0/23" {
+			_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"prefix":"10.0.0.0/24"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
+			{"id":1,"prefix":"10.0.0.0/24","status":{"value":"active","label":"Active"},
+			 "is_pool":false,"mark_utilized":false,"family":{"value":4,"label":"IPv4"},"vrf":null}
+		]}`))
+	})
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// 10.5.0.0/24 models a prefix with no individual IPs (only a utilized range).
+		if r.URL.Query().Get("parent") == "10.5.0.0/24" {
+			_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+			return
+		}
+		// Default: 3 distinct host addresses. `count` (=3) feeds IP-range utilization
+		// (raw count per CIDR block); `results` feed leaf-prefix IPSet computation.
+		_, _ = w.Write([]byte(`{"count":3,"next":null,"results":[
+			{"address":"10.0.0.11/24"},{"address":"10.0.0.12/24"},{"address":"10.0.0.21/24"}
+		]}`))
+	})
+	mux.HandleFunc("/api/ipam/ip-ranges/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// 10.5.0.0/24 contains one marked-utilized range of 10 addresses.
+		if r.URL.Query().Get("parent") == "10.5.0.0/24" {
+			_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
+				{"start_address":"10.5.0.10/24","end_address":"10.5.0.19/24"}
+			]}`))
+			return
+		}
+		// Default: no utilized child ranges (leaf-prefix util depends on this being empty).
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
 	})
 	mux.HandleFunc("/api/core/object-changes/", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[
@@ -96,8 +132,8 @@ func TestObjectTypes_Discovery(t *testing.T) {
 		"dcim/devices",
 		"dcim/interfaces",
 		"ipam/ip-addresses",
-		"plugins/bgp/bgp-sessions",     // plugin sub-app model
-		"plugins/installed-plugins",    // direct plugin collection
+		"plugins/bgp/bgp-sessions",  // plugin sub-app model
+		"plugins/installed-plugins", // direct plugin collection
 	} {
 		if !got[want] {
 			t.Errorf("missing discovered type %q; got %v", want, keys(got))

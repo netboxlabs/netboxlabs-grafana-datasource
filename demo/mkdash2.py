@@ -176,6 +176,19 @@ panels = [
                              {"fieldName": "Value", "config": {"id": "isNotNull", "options": {}}}], "type": "include", "match": "all"}},
                          organize(["Time", "name", "device", "__name__", "job"], {})],
      "fieldConfig": {"defaults": {}, "overrides": []}},
+
+    {"id": 13, "type": "table", "title": "Prefix utilization (used vs available, %)",
+     "gridPos": {"x": 0, "y": 51, "w": 24, "h": 9}, "datasource": nb,
+     "targets": [{"refId": "A", "datasource": nb, "objectType": "ipam/prefixes",
+                  "filters": [{"field": "tenant", "operator": "", "value": "grafana-demo"}],
+                  "fields": ["prefix", "utilization", "used", "available"], "limit": 1000}],
+     "transformations": [{"id": "sortBy", "options": {"fields": [], "sort": [{"field": "utilization", "desc": True}]}}],
+     "fieldConfig": {"defaults": {}, "overrides": [
+        {"matcher": {"id": "byName", "options": "utilization"},
+         "properties": [{"id": "unit", "value": "percent"}, {"id": "max", "value": 100},
+                        {"id": "custom.cellOptions", "value": {"type": "gauge"}},
+                        {"id": "thresholds", "value": {"mode": "absolute", "steps": [
+                            {"color": "green", "value": None}, {"color": "orange", "value": 75}, {"color": "red", "value": 90}]}}]}]}},
 ]
 
 

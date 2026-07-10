@@ -2,7 +2,10 @@ module github.com/netboxlabs/netbox
 
 go 1.26.5
 
-require github.com/grafana/grafana-plugin-sdk-go v0.292.2
+require (
+	github.com/grafana/grafana-plugin-sdk-go v0.292.2
+	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
+)
 
 require (
 	github.com/BurntSushi/toml v1.6.0 // indirect

@@ -9,7 +9,7 @@ data source brings that context into Grafana so you can **join** it onto metrics
 from Prometheus, Loki, Mimir, InfluxDB or anything else — turning `device="leaf1"` into
 "leaf1, an Arista switch in DM-Akron, rack R-12, owned by the NetEng team."
 
-![Enrichment dashboard](https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/screenshots/hero.png)
+![Enrichment dashboard](./screenshots/hero.png)
 
 ## Features
 
@@ -99,7 +99,7 @@ NetBox context. Full transform reference:
 
 ### Recipe 1 — Enrich Prometheus/SNMP metrics with site, role and tenant
 
-![Prometheus join result](https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/screenshots/recipes/prometheus-join.png)
+![Prometheus join result](./screenshots/recipes/prometheus-join.png)
 
 **You need:** a Prometheus (or any SQL/TSDB) datasource whose series carry a device
 identifier label (here: `instance`), and this plugin connected to your NetBox.
@@ -134,7 +134,7 @@ transform **lowercase**. All transforms:
 
 ### Recipe 2 — Enrich Loki logs with device context
 
-![Loki join result](https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/screenshots/recipes/loki-join.png)
+![Loki join result](./screenshots/recipes/loki-join.png)
 
 **You need:** a Loki datasource whose streams carry a hostname label (here: `host`).
 
@@ -180,7 +180,7 @@ firewall or DNS logs, …) and this plugin connected to your NetBox.
 
 **3a — exact IP join**
 
-![Exact IP join result](https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/screenshots/recipes/flow-ip-exact.png)
+![Exact IP join result](./screenshots/recipes/flow-ip-exact.png)
 
 1. Query **A** (your flow datasource): a table of flows keyed by IP, e.g. Prometheus
    `topk(15, rate(flow_bytes_total[5m]) * 8)` with labels `src_ip`, `dst_ip`, with
@@ -202,7 +202,7 @@ firewall or DNS logs, …) and this plugin connected to your NetBox.
 
 **3b — longest-prefix match (works for any IP)**
 
-![Longest-prefix result](https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/screenshots/recipes/flow-ip-lpm.png)
+![Longest-prefix result](./screenshots/recipes/flow-ip-lpm.png)
 
 Exact joins fail for IPs that aren't individually registered in IPAM. The
 **IP enrichment** query type instead finds each IP's longest containing prefix:

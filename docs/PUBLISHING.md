@@ -7,7 +7,7 @@ it must pass. Sources are linked inline.
 
 **Grafana Cloud only runs plugins that are published to the Grafana plugin catalog and signed
 by Grafana.** There is no sideload/upload path, and private/unsigned plugins cannot run on
-Cloud. (Self-hosted OSS/Enterprise Grafana *can* run a privately-signed or
+Cloud. (Self-hosted OSS/Enterprise Grafana _can_ run a privately-signed or
 `allow_loading_unsigned_plugins` build — that's how the demo runs today.)
 See [Find and use plugins](https://grafana.com/docs/grafana-cloud/introduction/find-and-use-plugins/).
 
@@ -22,7 +22,7 @@ See [plugin policy](https://grafana.com/legal/plugins/) and
 - **Public NetBox URL** → the Cloud backend calls it directly.
 - **Private NetBox (VPC/on-prem)** → the customer enables
   **[Private Data Source Connect (PDC)](https://grafana.com/docs/grafana-cloud/connect-externally-hosted/private-data-source-connect/)**.
-  PDC only supports *backend* datasource plugins (this one qualifies). The plugin builds its
+  PDC only supports _backend_ datasource plugins (this one qualifies). The plugin builds its
   HTTP client from the Grafana SDK (`backend/httpclient`) using the datasource instance
   settings, so the PDC tunnel, proxy and TLS options are applied automatically.
 
@@ -72,20 +72,21 @@ README, **CHANGELOG (required)**, LICENSE (must be an OSI license — Apache-2.0
 
 ## Checklist status for this plugin
 
-| Requirement | Status |
-|---|---|
-| Plugin id matches `<org>-<name>-datasource` | ✅ `netboxlabs-netbox-datasource` |
-| `backend: true` + `executable: gpx_netbox` | ✅ |
-| `secureJsonData` for the API token (no secrets in jsonData) | ✅ |
-| SDK HTTP client (PDC-compatible) | ✅ (uses `backend/httpclient`) |
-| Multi-arch binaries (amd64+arm64 + full matrix) | ✅ via `mage`/CI |
-| Real SVG logo (not the scaffold placeholder) | ✅ official NetBox icon, vector-extracted from `netboxlabs_brand_guidelines_v3.pdf` (Visuals page) |
-| Screenshots in `plugin.json` | ✅ |
-| README + CHANGELOG + Apache-2.0 LICENSE | ✅ |
-| `grafanaDependency` realistic minimum | ✅ `>=12.3.0` |
-| No telemetry / tracking scripts | ✅ |
-| Signed by Grafana | ⏳ at submission (needs access-policy token) |
-| Catalog submission (Community/Commercial) | ⏳ business decision (Commercial likely) |
+| Requirement                                                 | Status                                                                                             |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Plugin id matches `<org>-<name>-datasource`                 | ✅ `netboxlabs-netbox-datasource`                                                                  |
+| `backend: true` + `executable: gpx_netbox`                  | ✅                                                                                                 |
+| `secureJsonData` for the API token (no secrets in jsonData) | ✅                                                                                                 |
+| SDK HTTP client (PDC-compatible)                            | ✅ (uses `backend/httpclient`)                                                                     |
+| Multi-arch binaries (amd64+arm64 + full matrix)             | ✅ via `mage`/CI                                                                                   |
+| Real SVG logo (not the scaffold placeholder)                | ✅ official NetBox icon, vector-extracted from `netboxlabs_brand_guidelines_v3.pdf` (Visuals page) |
+| Screenshots in `plugin.json`                                | ✅                                                                                                 |
+| README + CHANGELOG + Apache-2.0 LICENSE                     | ✅                                                                                                 |
+| `grafanaDependency` realistic minimum                       | ✅ `>=12.3.0`                                                                                      |
+| No telemetry / tracking scripts                             | ✅                                                                                                 |
+| Signed by Grafana                                           | ⏳ at submission (needs access-policy token)                                                       |
+| Catalog submission (Community/Commercial)                   | ⏳ business decision (Commercial likely)                                                           |
+| README images/links absolute for the catalog                | ⏳ at submission — currently repo-relative (see step 4)                                            |
 
 ## Remaining business/process steps (not code)
 
@@ -94,3 +95,11 @@ README, **CHANGELOG (required)**, LICENSE (must be an OSI license — Apache-2.0
 2. Public source repo + matching release tag for `-sourceCodeUri`.
 3. Generate the access-policy token, sign, and submit at grafana.com (Org Settings → My
    Plugins → Submit New Plugin).
+4. **Convert README images and links from repo-relative to absolute.** The catalog page
+   renders the packaged README on grafana.com, where relative paths don't resolve, and the
+   validator's `brokenlinks` analyzer treats relative links as **errors**. While the repo
+   is private we keep them relative so they render on github.com (absolute
+   `raw.githubusercontent.com` URLs 404 for a private repo). Once the repo is public (see
+   BIZ-108), rewrite image refs to
+   `https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/<path>`
+   and doc links to `https://github.com/.../blob/main/<path>`, then re-run the validator.

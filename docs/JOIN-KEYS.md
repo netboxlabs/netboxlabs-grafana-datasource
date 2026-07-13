@@ -1,7 +1,7 @@
 # Join keys — a toolbox for lining NetBox up with your telemetry
 
 Query-time enrichment works by **joining** NetBox context onto another data
-source's results in a Grafana panel (the *Outer join* / *Join by field*
+source's results in a Grafana panel (the _Outer join_ / _Join by field_
 transformation). A join matches rows when a field has the **same name** and the
 **same value** in both frames. Real telemetry rarely matches NetBox out of the
 box, so this plugin gives you a set of composable tools to make them line up.
@@ -14,13 +14,13 @@ None of these are required — reach for the one that fits your setup.
 On any **Objects** or **IP enrichment** query, add one or more **Join keys**.
 Each maps a `source` field to a new `output` column, with an optional transform:
 
-| Transform | Effect | Example |
-|---|---|---|
-| `none` | copy as-is | `name` → `device` |
-| `lowercase` / `UPPERCASE` | case-fold | `LEAF1` → `leaf1` |
-| `strip domain` | hostname before first dot (IPs left intact) | `leaf1.dc1.example.com` → `leaf1` |
-| `IP host` | drop CIDR mask | `10.0.0.1/24` → `10.0.0.1` |
-| `regex` | extract a capture group, or replace with a template | `GigabitEthernet0/1` → `Gi0/1` |
+| Transform                 | Effect                                              | Example                           |
+| ------------------------- | --------------------------------------------------- | --------------------------------- |
+| `none`                    | copy as-is                                          | `name` → `device`                 |
+| `lowercase` / `UPPERCASE` | case-fold                                           | `LEAF1` → `leaf1`                 |
+| `strip domain`            | hostname before first dot (IPs left intact)         | `leaf1.dc1.example.com` → `leaf1` |
+| `IP host`                 | drop CIDR mask                                      | `10.0.0.1/24` → `10.0.0.1`        |
+| `regex`                   | extract a capture group, or replace with a template | `GigabitEthernet0/1` → `Gi0/1`    |
 
 The point is to **name the output column exactly like the label on your metric**
 (e.g. `instance`) and shape the value to match — server-side, so you don't need
@@ -57,7 +57,7 @@ needs NetBox at query time — no relabeling pipeline required.
 
 Metric label is `instance` (often an FQDN or IP); NetBox has `name`.
 
-1. NetBox **Objects** query → object type *Devices*; **Join key**:
+1. NetBox **Objects** query → object type _Devices_; **Join key**:
    `name` → `instance`, transform **strip domain**; return `site, role, tenant`.
 2. Your Prometheus query (any).
 3. Panel **Transformations** → **Outer join**, field `instance`.
@@ -81,14 +81,17 @@ abbreviated `ifName`.
 ### Loki / logs (by host)
 
 Logs usually carry a `host` or `hostname` label. Use a join key
-`name` → `host` (strip domain) on a Devices query, then join your log-derived
-table (e.g. a metric query over logs) on `host`.
+`name` → `host` (strip domain) on a Devices query. Note: a Loki **instant**
+metric query returns one frame _per stream_, so use **Labels to fields**
+followed by **Merge series/tables** (not _Join by field_) to correlate them
+with the NetBox rows on the shared `host` column — the README's Loki recipe
+shows the full transform chain.
 
 ### Flow / NetFlow (by IP)
 
 Use the **IP enrichment** query type. Surface the observed source/destination
 IPs as a Grafana **query variable** (from your flow data source), reference it as
-`$flow_ips` in the query's *IPs* box, and join your flow metrics on `ip`.
+`$flow_ips` in the query's _IPs_ box, and join your flow metrics on `ip`.
 
 ## Caveats
 

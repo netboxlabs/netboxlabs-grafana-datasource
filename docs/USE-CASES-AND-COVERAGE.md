@@ -29,22 +29,22 @@ mitigates).
 
 ## Use-case scorecard
 
-| #   | What the operator wants                                                  | Persona       | Coverage                                                                                                                      |
-| --- | ------------------------------------------------------------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Enrich Prometheus/SNMP series with site/role/tenant/rack/platform/serial | NOC, NetEng   | **Strong** — Outer-join on `device`                                                                                           |
-| 2   | Enrich flow/syslog by IP → device & interface context                    | SecOps, NOC   | **Partial** — exact-IP join; no CIDR/longest-prefix                                                                           |
-| 3   | Enrich by interface → description, peer, LAG, speed                      | NetEng        | **Partial** — queryable; ifIndex↔ifName needs normalization                                                                   |
-| 4   | Site/region/role/tenant variables (chained, repeated panels)             | everyone      | **Strong**                                                                                                                    |
-| 5   | Inventory tables (devices/circuits/IPs) with click-through to NetBox     | NOC, mgmt     | **Strong**                                                                                                                    |
-| 6   | Change correlation — overlay NetBox changes on metric anomalies          | NOC, SRE      | **Strong** — changelog annotations                                                                                            |
-| 7   | Topology — node graph of devices + cables/links                          | NetEng        | **Gap** — cables returned as a table, not a node graph                                                                        |
-| 8   | Geomap of sites colored by health                                        | NOC, mgmt     | **Partial** — lat/long emitted, no first-class geo frame                                                                      |
-| 9   | Cable trace / "what's connected to X" / path A→B                         | NetEng        | **Partial** — queryable, not a specialized view                                                                               |
-| 10  | Capacity & lifecycle — rack/power, EoL, prefix/IP utilization            | Capacity      | **Strong** — lifecycle via `cf_*`; prefix/IP-range `utilization`/`used`/`available` are first-class columns (NetBox-matching) |
-| 11  | Multi-tenant / per-customer dashboards, cost-center grouping             | MSP, platform | **Strong**                                                                                                                    |
-| 12  | Alert enrichment & routing — owner/contact/site on alerts                | on-call       | **Partial→Gap** — contacts queryable; alerting not enabled                                                                    |
-| 13  | "Who do I page?" ownership/contact resolution                            | on-call       | **Partial** — contacts/assignments discoverable, no resolver                                                                  |
-| 14  | Scrape-target service discovery                                          | platform      | **Out of scope** — that's the SD plugin's job                                                                                 |
+| #   | What the operator wants                                                  | Persona       | Coverage                                                                                                                                                                                                                                                               |
+| --- | ------------------------------------------------------------------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Enrich Prometheus/SNMP series with site/role/tenant/rack/platform/serial | NOC, NetEng   | **Strong** — Outer-join on `device`                                                                                                                                                                                                                                    |
+| 2   | Enrich flow/syslog by IP → device & interface context                    | SecOps, NOC   | **Strong** — exact-IP join (auto `ip` column) + **IP enrichment** query type (longest-prefix match)                                                                                                                                                                    |
+| 3   | Enrich by interface → description, peer, LAG, speed                      | NetEng        | **Partial** — queryable; ifIndex↔ifName needs normalization                                                                                                                                                                                                            |
+| 4   | Site/region/role/tenant variables (chained, repeated panels)             | everyone      | **Strong**                                                                                                                                                                                                                                                             |
+| 5   | Inventory tables (devices/circuits/IPs) with click-through to NetBox     | NOC, mgmt     | **Strong**                                                                                                                                                                                                                                                             |
+| 6   | Change correlation — overlay NetBox changes on metric anomalies          | NOC, SRE      | **Strong** — changelog annotations                                                                                                                                                                                                                                     |
+| 7   | Topology — node graph of devices + cables/links                          | NetEng        | **Strong (direct cabling)** — **Topology** query renders devices + interface-to-interface cables as a Node Graph, nodes colored by NetBox status. Cables via patch panels (front/rear ports), circuits and wireless links don't produce edges; no live-metric coloring |
+| 8   | Geomap of sites colored by health                                        | NOC, mgmt     | **Strong** — sites plot on the Geomap panel from `latitude`/`longitude` fields (see the demo dashboard)                                                                                                                                                                |
+| 9   | Cable trace / "what's connected to X" / path A→B                         | NetEng        | **Partial** — queryable, not a specialized view                                                                                                                                                                                                                        |
+| 10  | Capacity & lifecycle — rack/power, EoL, prefix/IP utilization            | Capacity      | **Strong** — lifecycle via `cf_*`; prefix/IP-range `utilization`/`used`/`available` are first-class columns (NetBox-matching)                                                                                                                                          |
+| 11  | Multi-tenant / per-customer dashboards, cost-center grouping             | MSP, platform | **Strong**                                                                                                                                                                                                                                                             |
+| 12  | Alert enrichment & routing — owner/contact/site on alerts                | on-call       | **Partial** — alerting enabled (count-only queries back Grafana-managed rules; see README _Alerting_); enriching alert _notifications_ with contacts still open                                                                                                        |
+| 13  | "Who do I page?" ownership/contact resolution                            | on-call       | **Partial** — contacts/assignments discoverable, no resolver                                                                                                                                                                                                           |
+| 14  | Scrape-target service discovery                                          | platform      | **Out of scope** — that's the SD plugin's job                                                                                                                                                                                                                          |
 
 ## The cross-cutting issue: join keys
 
@@ -59,37 +59,37 @@ value**, with the **same field name**. Common mismatches:
   (`10.1.2.3/24`); or you want to map an IP to its **containing prefix** (longest-prefix
   match), which a Grafana join cannot do at all.
 
-### Options (layered, combinable)
+### Options (layered, combinable) — status
 
-| Option                                 | What                                                                                                                                                                                           | Effort       | Notes                                                                                                      |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------- |
-| A. Docs + Grafana transforms           | "Rename by regex" + "Outer join" recipes per source                                                                                                                                            | docs only    | Pushes friction to the user                                                                                |
-| B. Configurable join key (server-side) | On the query: pick source field, set **output column name** (e.g. `instance`), apply **normalization** (lowercase / strip-domain / regex), so the emitted key already matches the metric label | medium       | Solves device-name + field-name cases ergonomically, no extra transforms                                   |
-| C. Auto host-only `ip` column          | Emit `ip` (address without mask) alongside `address` so bare-IP joins work                                                                                                                     | small        | Covers managed IPs present in NetBox                                                                       |
-| D. Interface name normalization        | Optional `Eth↔Ethernet` style normalization; surface ifIndex if stored in a custom field                                                                                                       | medium       | ifIndex is partly a NetBox data-modeling problem                                                           |
-| E. IP longest-prefix enrichment        | Map arbitrary IPs → containing prefix/site/tenant                                                                                                                                              | large        | Cannot be a join transform; needs a lookup mode or precompute. Strong argument for NCS/relabeling for flow |
-| F. Correlations                        | Ship Grafana Correlation defs for drill-down (navigation, not value-join)                                                                                                                      | small–medium | Complements row-level data links                                                                           |
+| Option                                 | What                                                                                                                                                                                           | Status                                                                                                      |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| A. Docs + Grafana transforms           | Copy-paste recipes per source (Prometheus, Loki, flow-by-IP)                                                                                                                                   | ✅ Shipped — README _Enrichment recipes_ with screenshots                                                   |
+| B. Configurable join key (server-side) | On the query: pick source field, set **output column name** (e.g. `instance`), apply **normalization** (lowercase / strip-domain / regex), so the emitted key already matches the metric label | ✅ Shipped — multiple per query ([JOIN-KEYS.md](./JOIN-KEYS.md))                                            |
+| C. Auto host-only `ip` column          | Emit `ip` (address without mask) alongside `address` so bare-IP joins work                                                                                                                     | ✅ Shipped                                                                                                  |
+| D. Interface name normalization        | Optional `Eth↔Ethernet` style normalization; surface ifIndex if stored in a custom field                                                                                                       | Partial — the join-key **regex** transform covers it manually; no canned normalizer. ifIndex needs a `cf_*` |
+| E. IP longest-prefix enrichment        | Map arbitrary IPs → containing prefix/site/tenant                                                                                                                                              | ✅ Shipped — the **IP enrichment** query type                                                               |
+| F. Correlations                        | Ship Grafana Correlation defs for drill-down (navigation, not value-join)                                                                                                                      | Open — complements row-level data links                                                                     |
 
-**Recommended baseline:** B + C (+ recipes from A). This makes the common device-name and
-exact-IP cases "just work" server-side. D is a good follow-on; E is documented as a known
-limitation pointing to relabeling/NCS for arbitrary-IP flow enrichment.
+## Remaining gaps, ranked by value
 
-## Gaps, ranked by value
-
-1. **Node-graph topology** (#7) — highest visible value; cables → nodes+edges, colorable by a
-   live metric.
-2. **Join-key ergonomics** (#1–3) — highest reliability value; options B/C/D above.
-3. **Alerting support** (#12) — enable the datasource for Grafana alerting + enrich alert
-   notifications with contacts.
-4. **Geomap** (#8) — first-class lat/long frame.
-5. **Scale path (NCS + response cache)** — query-time joins on thousands of objects get heavy
-   client-side; concrete justification for NCS mode.
-6. **Correlations** (#9, #5) — datasource-shipped drill-downs from any series into NetBox.
+1. **Scale path (NCS + response cache)** — query-time joins on thousands of objects get heavy
+   client-side; high-frequency alerting multiplies NetBox load. The concrete justification for
+   the NCS mode (stubbed behind the provider seam).
+2. **Alert-notification enrichment** (#12) — rules work today via count queries; enriching the
+   _notification_ with owner/contact from NetBox is open (pairs with #13's contact resolver).
+3. **Interface/ifIndex ergonomics** (#3, option D) — regex transforms work but are manual; a
+   canned normalizer and first-class ifIndex guidance would harden SNMP joins.
+4. **Correlations** (#9, #5, option F) — datasource-shipped drill-downs from any series into
+   NetBox.
+5. **Topology depth** (#7, #9) — trace cables through patch panels (front/rear-port
+   pass-through) so panel-cabled fabrics don't show missing links; include circuits/wireless;
+   color nodes/edges by a live metric instead of NetBox status.
 
 None require rearchitecting — the provider seam and frame model already accommodate them.
 
 ## Bottom line
 
-Bread-and-butter enrichment is covered well (1, 4, 5, 6, 10-lifecycle, 11). The
-demo-worthy gaps are topology/node-graph and geomap; the reliability gap is join-key
-normalization; the enterprise gaps are alerting and the NCS scale path.
+Enrichment is covered end to end: joins with server-side key shaping (1–4), inventory +
+deep links (5), change annotations (6), topology node graph (7), geomap (8), utilization
+(10), multi-tenant (11), and count-backed alert rules (12). The remaining work is scale
+(NCS), notification enrichment, and ergonomics (ifIndex, correlations).

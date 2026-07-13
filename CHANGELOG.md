@@ -17,8 +17,20 @@ Initial release of the NetBox data source for Grafana.
 - IP enrichment query type (longest-prefix match via NetBox `prefixes?contains=`).
 - Topology query type (devices + cables) for the Node Graph panel, with a connected-only option.
 - Config, query, variable and annotation editors.
+- Grafana-managed **alerting** support: count-only object queries (**Return count only**)
+  emit a single number suitable for alert rules; a sample provisioned alert rule ships in
+  `provisioning/alerting/`.
+- **Prefix/IP utilization**: opt-in `utilization` (%), `used` and `available` columns for
+  `ipam/prefixes` and `ipam/ip-ranges`, computed to match NetBox's own `get_utilization()`
+  (containers, pools, `mark_utilized`, utilized child ranges, VRF-scoped).
+- Dashboard variables interpolate in the IP-enrichment **IPs** field (e.g. `${flow_ips:csv}`).
+- Catalog-ready **enrichment recipes** in the README (Prometheus/SNMP, Loki, flow-by-IP
+  exact + longest-prefix) with real screenshots.
 - Grafana Cloud readiness: upstream HTTP client built from the Grafana SDK
   (`backend/httpclient`) so Private Data Source Connect (PDC), proxy and TLS settings are
   honored; real (non-placeholder) logo; publishing/Cloud checklist in `docs/PUBLISHING.md`.
 - Go + Jest unit tests and Playwright e2e smoke tests.
-- `demo/`: synthetic Prometheus exporter labeled to match NetBox + a rich demo dashboard.
+- `demo/`: one-command demo stack (`demo/run.sh`) — bundled, seeded real NetBox +
+  Prometheus + Loki + synthetic telemetry + Grafana with provisioned datasources, dashboard
+  and alert rule; bring-your-own-NetBox fast mode; importable dashboard JSON
+  (`demo/netbox-demo-dashboard.json`).

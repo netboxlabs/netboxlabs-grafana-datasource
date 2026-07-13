@@ -12,7 +12,7 @@ Initial release of the NetBox data source for Grafana.
 - Change-log annotations (`time/title/text/tags`).
 - Deep links from rows to NetBox object pages (survive joins).
 - v1 and v2 NetBox API token support (auto-detected).
-- Configurable join keys (rename + transform: lower/upper/strip-domain/IP-host/regex),
+- Configurable join keys (rename + transform: lower/upper/strip-domain/IP-host/interface-short-name/regex),
   multiple per query, plus an automatic host-only `ip` column.
 - IP enrichment query type (longest-prefix match via NetBox `prefixes?contains=`).
 - Topology query type (devices + cables) for the Node Graph panel, with a connected-only option.

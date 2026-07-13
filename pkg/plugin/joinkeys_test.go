@@ -85,3 +85,78 @@ func containsCol(cols []string, c string) bool {
 	}
 	return false
 }
+
+func TestIfShortName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"GigabitEthernet0/1", "Gi0/1"},
+		{"Ethernet1/1", "Et1/1"},
+		{"FastEthernet0/0", "Fa0/0"},
+		{"TenGigabitEthernet1/0/1", "Te1/0/1"},
+		{"TwentyFiveGigE1/0/1", "Twe1/0/1"}, // vs TwoGigabitEthernet: exact-chunk lookup, no prefix collision
+		{"TwoGigabitEthernet1/0/1", "Tw1/0/1"},
+		{"FortyGigabitEthernet1/1/1", "Fo1/1/1"},
+		{"FourHundredGigabitEthernet1", "FH1"},
+		{"HundredGigabitEthernet1/0/1", "Hu1/0/1"},
+		{"Port-channel10", "Po10"},
+		{"Wlan-GigabitEthernet1", "Wl-Gi1"},
+		{"Loopback0", "Lo0"},
+		{"VLAN100", "Vl100"},
+		{"gigabitethernet0/1", "Gi0/1"}, // case-insensitive lookup
+		{"Management1", "Ma1"},
+		{"mgmt0", "Ma0"},     // netutils ships the lowercase "mgmt" alias verbatim
+		{"Vxlan1", "Vxlan1"}, // known type without a standard short form -> unchanged
+		{"", ""},             // empty -> unchanged
+		{"0/1", "0/1"},       // no alpha prefix -> unchanged
+		// netutils BASE_INTERFACES aliases/abbreviations (canonicalize-then-abbreviate).
+		{"TwentyFiveGigabitEthernet1/0/1", "Twe1/0/1"}, // alias long form
+		{"PortChannel10", "Po10"},                      // alias without the hyphen
+		{"Eth1/1", "Et1/1"},                            // abbreviation alias
+		{"Mgmt0", "Ma0"},                               // abbreviation alias (exact case)
+		{"Po10", "Po10"},                               // exact-case alias: Port-channel identity
+		{"PO3/0", "PO3/0"},                             // exact-case alias: POS identity (Po vs PO stay distinct)
+		// Whitespace between type and number is dropped on a match (netutils split_interface lstrips the tail).
+		{"GigabitEthernet 0/1", "Gi0/1"},
+		{"Port-channel 10", "Po10"},
+		{"loopback 0", "Lo0"},    // canonical fallback path also trims
+		{"Foobar 1", "Foobar 1"}, // unknown prefix: original (incl. space) unchanged
+		// Only a number/separator tail counts as the interface number (netutils
+		// split_interface rstrips "/\0123456789.: " from the right) — a known
+		// prefix followed by ordinary text is not an interface name.
+		{"Ethernet uplink", "Ethernet uplink"},
+		{"Management VLAN", "Management VLAN"},
+		{"Vlan100abc", "Vlan100abc"}, // digits mid-string, non-numeric end: unchanged
+	}
+	for _, c := range cases {
+		if got := ifShortName(c.in); got != c.want {
+			t.Errorf("ifShortName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestApplyJoinKeys_IfShortAndIfIndex(t *testing.T) {
+	res := &provider.Result{
+		Columns: []string{"name", "cf_ifindex"},
+		Rows: []map[string]interface{}{
+			{"name": "GigabitEthernet0/1", "cf_ifindex": float64(10101)},
+			{"name": "Ethernet1/1", "cf_ifindex": float64(10102)},
+		},
+	}
+	applyJoinKeys(res, []joinKey{
+		{Source: "name", Output: "ifName", Transform: "ifshort"},
+		{Source: "cf_ifindex", Output: "ifIndex", Transform: "none"},
+	})
+	if res.Rows[0]["ifName"] != "Gi0/1" {
+		t.Errorf("ifshort transform = %v, want Gi0/1", res.Rows[0]["ifName"])
+	}
+	if res.Rows[1]["ifName"] != "Et1/1" {
+		t.Errorf("ifshort transform = %v, want Et1/1", res.Rows[1]["ifName"])
+	}
+	if res.Rows[0]["ifIndex"] != "10101" {
+		t.Errorf("cf_ifindex join key = %v (%T), want \"10101\"", res.Rows[0]["ifIndex"], res.Rows[0]["ifIndex"])
+	}
+	for _, c := range []string{"ifName", "ifIndex"} {
+		if !containsCol(res.Columns, c) {
+			t.Errorf("missing derived column %q in %v", c, res.Columns)
+		}
+	}
+}

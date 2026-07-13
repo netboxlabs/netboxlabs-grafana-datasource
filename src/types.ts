@@ -16,7 +16,7 @@ export type QueryType = 'objects' | 'ip-enrichment' | 'topology' | 'annotations'
 export interface JoinKeyMapping {
   source: string;
   output: string;
-  transform: string; // none|lower|upper|host|iphost|regex
+  transform: string; // none|lower|upper|host|iphost|ifshort|regex
   regex?: string;
   replace?: string;
 }
@@ -91,6 +91,7 @@ export const JOIN_KEY_TRANSFORMS: Array<{ label: string; value: string; descript
   { label: 'UPPERCASE', value: 'upper' },
   { label: 'strip domain', value: 'host', description: 'leaf1.dc.com → leaf1' },
   { label: 'IP host', value: 'iphost', description: 'strip CIDR mask: 10.0.0.1/24 → 10.0.0.1' },
+  { label: 'interface short name', value: 'ifshort', description: 'GigabitEthernet0/1 → Gi0/1 (netutils standard)' },
   { label: 'regex', value: 'regex', description: 'extract/replace with a regular expression' },
 ];
 

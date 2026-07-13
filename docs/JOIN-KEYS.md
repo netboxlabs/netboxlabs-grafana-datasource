@@ -20,7 +20,8 @@ Each maps a `source` field to a new `output` column, with an optional transform:
 | `lowercase` / `UPPERCASE` | case-fold                                           | `LEAF1` → `leaf1`                 |
 | `strip domain`            | hostname before first dot (IPs left intact)         | `leaf1.dc1.example.com` → `leaf1` |
 | `IP host`                 | drop CIDR mask                                      | `10.0.0.1/24` → `10.0.0.1`        |
-| `regex`                   | extract a capture group, or replace with a template | `GigabitEthernet0/1` → `Gi0/1`    |
+| `interface short name`    | canonical → SNMP-style abbreviation (netutils)      | `GigabitEthernet0/1` → `Gi0/1`    |
+| `regex`                   | extract a capture group, or replace with a template | `Ethernet1/1` → `Eth1/1`          |
 
 The point is to **name the output column exactly like the label on your metric**
 (e.g. `instance`) and shape the value to match — server-side, so you don't need
@@ -69,14 +70,22 @@ Metric label is `instance` (often an FQDN or IP); NetBox has `name`.
 
 ### SNMP by ifIndex / interface
 
-NetBox interface `name` is `Ethernet1/1`; SNMP series key on `ifIndex` or an
-abbreviated `ifName`.
+SNMP series key interfaces by an abbreviated `ifName` (`Gi0/1`, `Et1/1`) or by
+`ifIndex` (`10101`); NetBox stores canonical names (`GigabitEthernet0/1`).
 
-- If you record **ifIndex** in NetBox (a custom field, e.g. `cf_ifindex`), add a
-  join key `cf_ifindex` → `ifIndex`.
-- For abbreviation differences, use a **regex** transform to normalize
-  (`^(\w\w)\w+(\d.*)$` → `$1$2` turns `GigabitEthernet0/1` into `Gi0/1`), applied
-  on whichever side you control.
+- **Abbreviated names**: add a join key `name` → `ifName`, transform
+  **interface short name** — netutils' canonicalize-then-abbreviate pipeline:
+  every spelling netutils recognizes (canonical `GigabitEthernet0/1`, aliases
+  like `PortChannel10` or `TwentyFiveGigabitEthernet…`, abbreviations like
+  `Eth1/1`) normalizes to the standard short form (`Gi0/1`, `Po10`, `Twe…`,
+  `Et1/1`). Aliases match case-sensitively (netutils keeps `Po` Port-channel
+  and `PO` POS distinct); canonical long names also match case-insensitively.
+  Unknown prefixes pass through unchanged. To emit a _non-standard_ short form
+  your exporter uses, fall back to a **regex** transform, or add both
+  mappings — multiple join keys can emit several variants from one query.
+- **ifIndex**: record it on the NetBox interface as a custom field (e.g.
+  `ifindex`); it surfaces as a `cf_ifindex` column — add a join key
+  `cf_ifindex` → `ifIndex` (transform **none**) and join on `ifIndex`.
 
 ### Loki / logs (by host)
 

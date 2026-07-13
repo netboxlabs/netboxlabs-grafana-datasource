@@ -33,7 +33,7 @@ mitigates).
 | --- | ------------------------------------------------------------------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | Enrich Prometheus/SNMP series with site/role/tenant/rack/platform/serial | NOC, NetEng   | **Strong** — Outer-join on `device`                                                                                                                                                                                                                                    |
 | 2   | Enrich flow/syslog by IP → device & interface context                    | SecOps, NOC   | **Strong** — exact-IP join (auto `ip` column) + **IP enrichment** query type (longest-prefix match)                                                                                                                                                                    |
-| 3   | Enrich by interface → description, peer, LAG, speed                      | NetEng        | **Partial** — queryable; ifIndex↔ifName needs normalization                                                                                                                                                                                                            |
+| 3   | Enrich by interface → description, peer, LAG, speed                      | NetEng        | **Strong** — canned `interface short name` transform (netutils table) + `cf_ifindex → ifIndex` recipe; non-standard exporter spellings via the regex transform                                                                                                         |
 | 4   | Site/region/role/tenant variables (chained, repeated panels)             | everyone      | **Strong**                                                                                                                                                                                                                                                             |
 | 5   | Inventory tables (devices/circuits/IPs) with click-through to NetBox     | NOC, mgmt     | **Strong**                                                                                                                                                                                                                                                             |
 | 6   | Change correlation — overlay NetBox changes on metric anomalies          | NOC, SRE      | **Strong** — changelog annotations                                                                                                                                                                                                                                     |
@@ -61,14 +61,14 @@ value**, with the **same field name**. Common mismatches:
 
 ### Options (layered, combinable) — status
 
-| Option                                 | What                                                                                                                                                                                           | Status                                                                                                      |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| A. Docs + Grafana transforms           | Copy-paste recipes per source (Prometheus, Loki, flow-by-IP)                                                                                                                                   | ✅ Shipped — README _Enrichment recipes_ with screenshots                                                   |
-| B. Configurable join key (server-side) | On the query: pick source field, set **output column name** (e.g. `instance`), apply **normalization** (lowercase / strip-domain / regex), so the emitted key already matches the metric label | ✅ Shipped — multiple per query ([JOIN-KEYS.md](./JOIN-KEYS.md))                                            |
-| C. Auto host-only `ip` column          | Emit `ip` (address without mask) alongside `address` so bare-IP joins work                                                                                                                     | ✅ Shipped                                                                                                  |
-| D. Interface name normalization        | Optional `Eth↔Ethernet` style normalization; surface ifIndex if stored in a custom field                                                                                                       | Partial — the join-key **regex** transform covers it manually; no canned normalizer. ifIndex needs a `cf_*` |
-| E. IP longest-prefix enrichment        | Map arbitrary IPs → containing prefix/site/tenant                                                                                                                                              | ✅ Shipped — the **IP enrichment** query type                                                               |
-| F. Correlations                        | Ship Grafana Correlation defs for drill-down (navigation, not value-join)                                                                                                                      | Open — complements row-level data links                                                                     |
+| Option                                 | What                                                                                                                                                                                           | Status                                                                          |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| A. Docs + Grafana transforms           | Copy-paste recipes per source (Prometheus, Loki, flow-by-IP)                                                                                                                                   | ✅ Shipped — README _Enrichment recipes_ with screenshots                       |
+| B. Configurable join key (server-side) | On the query: pick source field, set **output column name** (e.g. `instance`), apply **normalization** (lowercase / strip-domain / regex), so the emitted key already matches the metric label | ✅ Shipped — multiple per query ([JOIN-KEYS.md](./JOIN-KEYS.md))                |
+| C. Auto host-only `ip` column          | Emit `ip` (address without mask) alongside `address` so bare-IP joins work                                                                                                                     | ✅ Shipped                                                                      |
+| D. Interface name normalization        | Optional `Eth↔Ethernet` style normalization; surface ifIndex if stored in a custom field                                                                                                       | ✅ Shipped — canned `interface short name` transform; ifIndex via `cf_*` recipe |
+| E. IP longest-prefix enrichment        | Map arbitrary IPs → containing prefix/site/tenant                                                                                                                                              | ✅ Shipped — the **IP enrichment** query type                                   |
+| F. Correlations                        | Ship Grafana Correlation defs for drill-down (navigation, not value-join)                                                                                                                      | Open — complements row-level data links                                         |
 
 ## Remaining gaps, ranked by value
 
@@ -77,11 +77,9 @@ value**, with the **same field name**. Common mismatches:
    the NCS mode (stubbed behind the provider seam).
 2. **Alert-notification enrichment** (#12) — rules work today via count queries; enriching the
    _notification_ with owner/contact from NetBox is open (pairs with #13's contact resolver).
-3. **Interface/ifIndex ergonomics** (#3, option D) — regex transforms work but are manual; a
-   canned normalizer and first-class ifIndex guidance would harden SNMP joins.
-4. **Correlations** (#9, #5, option F) — datasource-shipped drill-downs from any series into
+3. **Correlations** (#9, #5, option F) — datasource-shipped drill-downs from any series into
    NetBox.
-5. **Topology depth** (#7, #9) — trace cables through patch panels (front/rear-port
+4. **Topology depth** (#7, #9) — trace cables through patch panels (front/rear-port
    pass-through) so panel-cabled fabrics don't show missing links; include circuits/wireless;
    color nodes/edges by a live metric instead of NetBox status.
 
@@ -92,4 +90,4 @@ None require rearchitecting — the provider seam and frame model already accomm
 Enrichment is covered end to end: joins with server-side key shaping (1–4), inventory +
 deep links (5), change annotations (6), topology node graph (7), geomap (8), utilization
 (10), multi-tenant (11), and count-backed alert rules (12). The remaining work is scale
-(NCS), notification enrichment, and ergonomics (ifIndex, correlations).
+(NCS), notification enrichment, and ergonomics (correlations).

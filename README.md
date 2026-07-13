@@ -17,7 +17,7 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else — turning `device="lea
   result keyed on `name` / `address` / `device` so Grafana's **Outer join** transformation
   lines NetBox columns up against your metric series.
 - **Configurable join keys.** Per query, derive extra key columns (rename + transform:
-  lowercase, strip-domain, IP-host, regex) so a NetBox field matches your metric label with
+  lowercase, strip-domain, IP-host, interface-short-name, regex) so a NetBox field matches your metric label with
   no extra Grafana transforms. Add several to reuse one query different ways. See
   [docs/JOIN-KEYS.md](./docs/JOIN-KEYS.md).
 - **IP enrichment (longest-prefix match).** Resolve arbitrary observed IPs to their

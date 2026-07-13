@@ -19,3 +19,20 @@ datasources:
     secureJsonData:
       # NetBox API token (v1 40-char, or v2 "nbt_…"). From NETBOX_API_TOKEN.
       apiToken: ${NETBOX_API_TOKEN}
+
+  # Prometheus + Loki back the demo stack's telemetry panels (service names on
+  # the demo compose network). In the plain dev stack these services don't run,
+  # so the datasources are present but dormant — harmless unless queried.
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    isDefault: false
+    url: http://prometheus:9090
+
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    isDefault: false
+    url: http://loki:3100

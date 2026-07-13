@@ -1,0 +1,54 @@
+# NetBox → Grafana enrichment demo — BASE (fast / bring-your-own NetBox).
+#   NETBOX_URL=https://your-netbox NETBOX_TOKEN=... docker compose -f demo/docker-compose.yaml up
+# For the self-contained "real NetBox" demo use ./demo/run.sh (recommended), or run the
+# override directly WITH the bundled coordinates set — compose interpolates the required
+# ${NETBOX_URL:?}/${NETBOX_TOKEN:?} below per-file, BEFORE the override merge:
+#   NETBOX_URL=http://netbox:8080 NETBOX_TOKEN=0123456789abcdef0123456789abcdef01234567 \
+#     docker compose -f demo/docker-compose.yaml -f demo/docker-compose.full.yaml up
+name: netbox-grafana-demo
+
+x-netbox-env: &netbox-env
+  NETBOX_URL: ${NETBOX_URL:?set NETBOX_URL (or use the full override for a bundled NetBox)}
+  NETBOX_TOKEN: ${NETBOX_TOKEN:?set NETBOX_TOKEN}
+
+services:
+  nbexporter:
+    image: python:3.12-slim
+    environment: *netbox-env
+    volumes: ['./exporter.py:/exporter.py:ro']
+    command: ['python', '/exporter.py']
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    depends_on: {nbexporter: {condition: service_started}}
+    volumes: ['./prometheus.yml:/etc/prometheus/prometheus.yml:ro']
+    ports: ['9091:9090']
+
+  loki:
+    image: grafana/loki:3.4.1
+    ports: ['3102:3100']
+
+  nblogship:
+    image: python:3.12-slim
+    depends_on: {loki: {condition: service_started}}
+    environment:
+      <<: *netbox-env
+      LOKI_URL: http://loki:3100
+    volumes: ['./logship.py:/logship.py:ro']
+    command: ['python', '/logship.py']
+
+  grafana:
+    image: grafana/grafana:13.0.2
+    environment:
+      <<: *netbox-env
+      # The shared root provisioning (../provisioning) interpolates
+      # ${NETBOX_API_TOKEN} in datasources.yml — alias it to the demo token.
+      NETBOX_API_TOKEN: ${NETBOX_TOKEN:?set NETBOX_TOKEN}
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: 'true'
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: netboxlabs-netbox-datasource
+    volumes:
+      - ../dist:/var/lib/grafana/plugins/netboxlabs-netbox-datasource
+      - ../provisioning:/etc/grafana/provisioning
+    ports: ['3001:3000']

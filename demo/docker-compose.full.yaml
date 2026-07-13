@@ -1,0 +1,91 @@
+# Full override: bundle real NetBox + seed, and repoint the shared services at it.
+# Use ./demo/run.sh (recommended), or set the bundled coordinates when invoking
+# directly — the BASE file's ${NETBOX_URL:?}/${NETBOX_TOKEN:?} interpolate per-file,
+# before this override merges:
+#   NETBOX_URL=http://netbox:8080 NETBOX_TOKEN=0123456789abcdef0123456789abcdef01234567 \
+#     docker compose -f demo/docker-compose.yaml -f demo/docker-compose.full.yaml up
+name: netbox-grafana-demo
+
+x-bundled-netbox: &bundled-netbox
+  NETBOX_URL: http://netbox:8080
+  NETBOX_TOKEN: '0123456789abcdef0123456789abcdef01234567'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: {POSTGRES_DB: netbox, POSTGRES_USER: netbox, POSTGRES_PASSWORD: netbox}
+    healthcheck: {test: ['CMD-SHELL', 'pg_isready -U netbox'], interval: 5s, timeout: 5s, retries: 20}
+    volumes: ['netbox-postgres:/var/lib/postgresql/data']
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass redis
+    healthcheck: {test: ['CMD', 'redis-cli', '-a', 'redis', 'ping'], interval: 5s, timeout: 5s, retries: 20}
+
+  redis-cache:
+    image: redis:7-alpine
+    command: redis-server --requirepass redis
+    healthcheck: {test: ['CMD', 'redis-cli', '-a', 'redis', 'ping'], interval: 5s, timeout: 5s, retries: 20}
+
+  netbox:
+    image: netboxcommunity/netbox:v4.4-3.4.2
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      redis-cache: {condition: service_healthy}
+    env_file: netbox.env
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:8080/login/']
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 180s
+    ports: ['8000:8080']
+
+  netbox-seed:
+    image: python:3.12-slim
+    depends_on: {netbox: {condition: service_healthy}}
+    environment: *bundled-netbox
+    volumes: ['./seed.py:/seed.py:ro']
+    command: ['python', '/seed.py']
+    restart: 'no'
+
+  # One-shot incident: resets the device to active, waits INCIDENT_DELAY_SEC,
+  # then marks it offline in NetBox — producing the change-log event that the
+  # dashboard's annotation overlays right where the exporter dips the metrics.
+  incident:
+    image: python:3.12-slim
+    depends_on: {netbox-seed: {condition: service_completed_successfully}}
+    environment:
+      <<: *bundled-netbox
+      INCIDENT_DEVICE: AMS1-leaf-01
+      INCIDENT_DELAY_SEC: '300'
+    volumes: ['./incident.py:/incident.py:ro']
+    command: ['python', '/incident.py']
+    restart: 'no'
+
+  # Shared services: wait for NetBox+seed and use the bundled coordinates.
+  nbexporter:
+    environment:
+      <<: *bundled-netbox
+      INCIDENT_DEVICE: AMS1-leaf-01   # a seeded device; drives panel-4 incident + changelog
+      INCIDENT_DELAY_SEC: '300'
+    depends_on: {netbox-seed: {condition: service_completed_successfully}}
+  nblogship:
+    environment:
+      <<: *bundled-netbox
+      LOKI_URL: http://loki:3100
+    depends_on:
+      loki: {condition: service_started}
+      netbox-seed: {condition: service_completed_successfully}
+  grafana:
+    environment:
+      <<: *bundled-netbox
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: 'true'
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: netboxlabs-netbox-datasource
+    depends_on: {netbox-seed: {condition: service_completed_successfully}}
+
+volumes:
+  netbox-postgres:

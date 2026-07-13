@@ -49,8 +49,8 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else — turning `device="lea
 | **Annotations**   | Change-log events (`time/title/text/tags`)                     | Dashboard annotations             |
 
 See [docs/USE-CASES-AND-COVERAGE.md](./docs/USE-CASES-AND-COVERAGE.md) for the full map of
-operator use cases and how well each is covered, and [demo/](./demo) for a runnable demo
-(synthetic Prometheus + Loki labeled to match NetBox + a rich dashboard).
+operator use cases and how well each is covered, and [Demo](#demo) below for a one-command
+runnable stack (synthetic Prometheus + Loki labeled to match NetBox + a rich dashboard).
 
 ## Requirements
 
@@ -96,9 +96,9 @@ usually **Join by field** — then lines the two tables up, and every series row
 NetBox context. Full transform reference:
 [docs/JOIN-KEYS.md](./docs/JOIN-KEYS.md).
 
-> Want a sandbox with everything pre-wired? Run the
-> [demo stack](./demo) —
-> it stands up Prometheus, Loki and synthetic telemetry labeled to match a NetBox instance.
+> Want a sandbox with everything pre-wired? See [Demo](#demo) below —
+> `./demo/run.sh` brings up a real NetBox plus Prometheus, Loki and synthetic telemetry, all
+> labeled to match.
 
 ### Recipe 1 — Enrich Prometheus/SNMP metrics with site, role and tenant
 
@@ -284,6 +284,26 @@ prefix's `used` is the de-duplicated set of its child IP addresses plus any mark
 child ranges, a container prefix is measured by child-prefix coverage, and an IP range by its
 child-IP count. It's computed only when a utilization field is requested (a few extra NetBox
 calls per row), so ordinary IPAM queries are unaffected.
+
+## Demo
+
+A one-command stack that exercises the enrichment recipes and prefix/IP utilization above
+end to end.
+
+- **Full mode** (self-contained): `./demo/run.sh` — builds the plugin, then brings up a real,
+  seeded NetBox (a multi-site fabric), Prometheus, Loki, synthetic telemetry, and Grafana at
+  [http://localhost:3001](http://localhost:3001) (anonymous admin) with the dashboard above
+  pre-provisioned. First boot seeds NetBox, ~2-3 min.
+- **Fast / bring-your-own-NetBox mode** — point the stack at your own NetBox instead of the
+  bundled one (same script, so the plugin gets built too):
+  ```bash
+  NETBOX_URL=https://your-netbox NETBOX_TOKEN=... ./demo/run.sh
+  ```
+  (Equivalent, if the plugin is already built: the same env vars with
+  `docker compose -f demo/docker-compose.yaml up`.)
+- **Just want the dashboard?** Import
+  [demo/netbox-demo-dashboard.json](./demo/netbox-demo-dashboard.json) into any Grafana
+  (**Dashboards → Import**) — it prompts for your NetBox, Prometheus and Loki datasources.
 
 ## Alerting
 

@@ -1,9 +1,0 @@
-# Demo overlay: point the dev Grafana's provisioned NetBox datasource at a real
-# NetBox. Usage:
-#   NETBOX_URL=… NETBOX_API_TOKEN=… \
-#     docker compose -f docker-compose.yaml -f demo/docker-compose.demo.yaml up -d
-services:
-  grafana:
-    environment:
-      NETBOX_URL: ${NETBOX_URL}
-      NETBOX_API_TOKEN: ${NETBOX_API_TOKEN}

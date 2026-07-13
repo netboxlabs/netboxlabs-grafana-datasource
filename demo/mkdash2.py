@@ -1,24 +1,40 @@
 #!/usr/bin/env python3
-"""Build the rich NetBox enrichment demo dashboard (mixed Prometheus + NetBox)."""
+"""Build the rich NetBox enrichment demo dashboard (mixed Prometheus + NetBox).
+
+Three ways to run this:
+  --emit-provisioned PATH   write dashboard JSON with fixed datasource uids
+                            (netbox-demo/prometheus/loki) and no `__inputs`;
+                            drop this under Grafana's dashboard provisioning.
+  --emit-importable PATH    write dashboard JSON with `${DS_NETBOX}` /
+                            `${DS_PROMETHEUS}` / `${DS_LOKI}` datasource refs
+                            plus top-level `__inputs`/`__requires`, and no
+                            dashboard-level `uid`; use with Grafana's "Import
+                            dashboard" wizard, which prompts for the three
+                            datasources.
+  (no flags)                POST the dashboard straight to a running Grafana
+                            via its HTTP API, using the real datasource uids
+                            from NB_UID/PROM_UID/LOKI_UID. Requires
+                            GRAFANA_URL to be reachable and LOKI_UID to be set.
+
+The two emit modes need no Grafana instance and no env vars: they build the
+dashboard once and rewrite datasource refs by type, so the placeholder
+NB/PROM/LOKI values below are irrelevant to their output.
+"""
+import copy
 import base64
 import json
 import os
+import sys
 import urllib.request
 
-G = os.environ.get("GRAFANA_URL", "http://localhost:3001")
-if not G.startswith(("http://", "https://")):
-    raise SystemExit("GRAFANA_URL must be an http(s) URL")
 NB = os.environ.get("NB_UID", "P8334760067B51B4B")
 PROM = os.environ.get("PROM_UID", "bfqenuth8fapsc")
 LOKI = os.environ.get("LOKI_UID", "")
-if not LOKI:
-    raise SystemExit("set LOKI_UID (printed by setup-demo.sh)")
-AUTH = "Basic " + base64.b64encode(b"admin:admin").decode()
-INCIDENT = os.environ.get("INCIDENT_DEVICE", "dmi01-akron-rtr01")
+INCIDENT = os.environ.get("INCIDENT_DEVICE", "AMS1-leaf-01")
 
 nb = {"type": "netboxlabs-netbox-datasource", "uid": NB}
 prom = {"type": "prometheus", "uid": PROM}
-loki = {"type": "loki", "uid": LOKI}
+loki = {"type": "loki", "uid": LOKI or "loki"}
 mixed = {"type": "datasource", "uid": "-- Mixed --"}
 
 
@@ -100,7 +116,7 @@ panels = [
      "datasource": nb,
      "targets": [{"refId": "A", "datasource": nb, "objectType": "dcim/sites",
                   "fields": ["name", "latitude", "longitude", "display_url"], "limit": 500}],
-     "options": {"view": {"id": "coords", "lat": 39, "lon": -95, "zoom": 4},
+     "options": {"view": {"id": "coords", "lat": 30, "lon": 30, "zoom": 2},
                  "basemap": {"type": "default"},
                  "layers": [{"type": "markers", "name": "Sites",
                              "location": {"mode": "coords", "latitude": "latitude", "longitude": "longitude"},
@@ -111,8 +127,11 @@ panels = [
     {"id": 7, "type": "table", "title": "Flow IP enrichment — longest-prefix match (no relabeling)",
      "gridPos": {"x": 0, "y": 27, "w": 12, "h": 8}, "datasource": nb,
      "targets": [{"refId": "A", "datasource": nb, "queryType": "ip-enrichment",
-                  "ips": "10.112.128.1, 10.112.129.10, 10.112.130.5, 10.112.144.20, 10.113.1.7",
-                  "contextFields": ["prefix", "site", "tenant", "role", "vlan", "description"]}]},
+                  "ips": "10.10.10.11, 10.10.10.12, 10.20.20.11, 10.30.30.5, 203.0.113.7",
+                  "contextFields": ["prefix", "scope", "tenant", "role", "vlan", "description"]}],
+     "fieldConfig": {"defaults": {}, "overrides": [
+        {"matcher": {"id": "byName", "options": "scope"},
+         "properties": [{"id": "displayName", "value": "Site"}]}]}},
 
     {"id": 8, "type": "table", "title": "Devices in $site — enriched inventory",
      "gridPos": {"x": 12, "y": 27, "w": 12, "h": 8}, "datasource": nb,
@@ -161,7 +180,10 @@ panels = [
      "gridPos": {"x": 0, "y": 43, "w": 12, "h": 8}, "datasource": nb,
      "targets": [{"refId": "A", "datasource": nb, "queryType": "ip-enrichment",
                   "ips": "${flow_ips:csv}",
-                  "contextFields": ["prefix", "site", "tenant", "role", "vlan"]}]},
+                  "contextFields": ["prefix", "scope", "tenant", "role", "vlan"]}],
+     "fieldConfig": {"defaults": {}, "overrides": [
+        {"matcher": {"id": "byName", "options": "scope"},
+         "properties": [{"id": "displayName", "value": "Site"}]}]}},
 
     {"id": 12, "type": "table", "title": "Recipe 1 — Device CPU (Prometheus) enriched, join on instance",
      "gridPos": {"x": 12, "y": 43, "w": 12, "h": 8}, "datasource": mixed,
@@ -227,6 +249,83 @@ dash = {
 }
 
 
+# --- Datasource-ref rewriting + emit modes -------------------------------
+#
+# nb/prom/loki are shared BY REFERENCE across panels, targets,
+# templating.list, and annotations.list, so rewriting must (a) deep-copy the
+# whole dashboard first, so the two emits and the POST-mode `dash` never
+# contaminate each other, and (b) recurse over the entire dict/list tree, not
+# just `panels`.
+
+FIXED_UIDS = {
+    "netboxlabs-netbox-datasource": "netboxlabs-netbox-alerting",
+    "prometheus": "prometheus",
+    "loki": "loki",
+}
+
+DS_VARS = {
+    "netboxlabs-netbox-datasource": "${DS_NETBOX}",
+    "prometheus": "${DS_PROMETHEUS}",
+    "loki": "${DS_LOKI}",
+}
+
+INPUTS = [
+    {"name": "DS_NETBOX", "label": "NetBox", "description": "", "type": "datasource",
+     "pluginId": "netboxlabs-netbox-datasource", "pluginName": "NetBox"},
+    {"name": "DS_PROMETHEUS", "label": "Prometheus", "description": "", "type": "datasource",
+     "pluginId": "prometheus", "pluginName": "Prometheus"},
+    {"name": "DS_LOKI", "label": "Loki", "description": "", "type": "datasource",
+     "pluginId": "loki", "pluginName": "Loki"},
+]
+
+
+def rewrite_datasources(obj, uid_map):
+    """Recursively rewrite {"type": T, "uid": ...} datasource refs in place,
+    for any T present in uid_map. Refs whose type isn't in uid_map — notably
+    the built-in "-- Mixed --" (type "datasource") and "-- Grafana --"
+    (type "grafana") refs — are left untouched, since rewriting them would
+    break mixed panels and the built-in annotation."""
+    if isinstance(obj, dict):
+        if "uid" in obj and obj.get("type") in uid_map:
+            obj["uid"] = uid_map[obj["type"]]
+        for value in obj.values():
+            rewrite_datasources(value, uid_map)
+    elif isinstance(obj, list):
+        for item in obj:
+            rewrite_datasources(item, uid_map)
+
+
+def _dump(d, path):
+    with open(path, "w") as f:
+        json.dump(d, f, indent=2)
+        f.write("\n")
+
+
+def write_provisioned(path):
+    d = copy.deepcopy(dash)
+    rewrite_datasources(d, FIXED_UIDS)
+    d.pop("__inputs", None)
+    _dump(d, path)
+
+
+def write_importable(path):
+    d = copy.deepcopy(dash)
+    rewrite_datasources(d, DS_VARS)
+    d.pop("uid", None)
+    d["__inputs"] = INPUTS
+    d["__requires"] = []
+    _dump(d, path)
+
+
+def _flag_value(flag):
+    if flag not in sys.argv:
+        return None
+    i = sys.argv.index(flag)
+    if i + 1 >= len(sys.argv):
+        raise SystemExit(f"{flag} requires a path argument")
+    return sys.argv[i + 1]
+
+
 def api(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(G + path, data=data, method=method)
@@ -239,4 +338,20 @@ def api(method, path, body=None):
         return {"_err": e.code, "body": e.read().decode()[:400]}
 
 
-print(json.dumps(api("POST", "/api/dashboards/db", {"dashboard": dash, "overwrite": True}))[:400])
+emit_provisioned = _flag_value("--emit-provisioned")
+emit_importable = _flag_value("--emit-importable")
+
+if emit_provisioned:
+    write_provisioned(emit_provisioned)
+if emit_importable:
+    write_importable(emit_importable)
+
+if not emit_provisioned and not emit_importable:
+    # No emit flags: fall back to POSTing straight to a running Grafana.
+    G = os.environ.get("GRAFANA_URL", "http://localhost:3001")
+    if not G.startswith(("http://", "https://")):
+        raise SystemExit("GRAFANA_URL must be an http(s) URL")
+    if not LOKI:
+        raise SystemExit("set LOKI_UID to the Loki datasource uid (Grafana -> Connections -> Data sources -> Loki)")
+    AUTH = "Basic " + base64.b64encode(b"admin:admin").decode()
+    print(json.dumps(api("POST", "/api/dashboards/db", {"dashboard": dash, "overwrite": True}))[:400])

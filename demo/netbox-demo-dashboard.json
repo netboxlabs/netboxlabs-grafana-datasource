@@ -1,0 +1,1266 @@
+{
+  "title": "NetBox Enrichment Demo",
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "site",
+        "label": "Site",
+        "type": "query",
+        "datasource": {
+          "type": "netboxlabs-netbox-datasource",
+          "uid": "${DS_NETBOX}"
+        },
+        "query": {
+          "refId": "var",
+          "objectType": "dcim/sites",
+          "valueField": "slug",
+          "textField": "name"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "role",
+        "label": "Role",
+        "type": "query",
+        "datasource": {
+          "type": "netboxlabs-netbox-datasource",
+          "uid": "${DS_NETBOX}"
+        },
+        "query": {
+          "refId": "var",
+          "objectType": "dcim/device-roles",
+          "valueField": "slug",
+          "textField": "name"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "tenant",
+        "label": "Tenant",
+        "type": "query",
+        "datasource": {
+          "type": "netboxlabs-netbox-datasource",
+          "uid": "${DS_NETBOX}"
+        },
+        "query": {
+          "refId": "var",
+          "objectType": "tenancy/tenants",
+          "valueField": "slug",
+          "textField": "name"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "device",
+        "label": "Device",
+        "type": "query",
+        "datasource": {
+          "type": "netboxlabs-netbox-datasource",
+          "uid": "${DS_NETBOX}"
+        },
+        "query": {
+          "refId": "var",
+          "objectType": "dcim/devices",
+          "valueField": "name",
+          "textField": "name",
+          "filters": [
+            {
+              "field": "site",
+              "operator": "",
+              "value": "$site"
+            }
+          ]
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "flow_ips",
+        "label": "Flow IPs",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "query": {
+          "query": "label_values(flow_bytes_total, dst_ip)",
+          "refId": "flowips"
+        }
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "type": "dashboard",
+        "name": "Annotations & Alerts",
+        "enable": true,
+        "iconColor": "rgba(0,211,255,1)",
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        }
+      },
+      {
+        "name": "NetBox device changes",
+        "enable": true,
+        "iconColor": "purple",
+        "datasource": {
+          "type": "netboxlabs-netbox-datasource",
+          "uid": "${DS_NETBOX}"
+        },
+        "target": {
+          "queryType": "annotations",
+          "objectTypes": [
+            "dcim.device"
+          ],
+          "limit": 100
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Devices in selection",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 8
+      },
+      "datasource": {
+        "type": "netboxlabs-netbox-datasource",
+        "uid": "${DS_NETBOX}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "objectType": "dcim/devices",
+          "filters": [
+            {
+              "field": "site",
+              "operator": "",
+              "value": "$site"
+            },
+            {
+              "field": "role",
+              "operator": "",
+              "value": "$role"
+            }
+          ],
+          "fields": [
+            "name"
+          ],
+          "limit": 1000
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "count"
+          ],
+          "fields": "/^name$/"
+        },
+        "graphMode": "none",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Device CPU (Prometheus) enriched with NetBox site/role/tenant",
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 20,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "targets": [
+        {
+          "refId": "CPU",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "device_cpu_percent",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "NB",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "objectType": "dcim/devices",
+          "fields": [
+            "name",
+            "site",
+            "role",
+            "tenant",
+            "platform",
+            "display_url"
+          ],
+          "joinKeys": [
+            {
+              "source": "name",
+              "output": "device",
+              "transform": "none"
+            }
+          ],
+          "limit": 1000
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields"
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "device",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [],
+            "sort": [
+              {
+                "field": "Value",
+                "desc": true
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "instance": true,
+              "exported_instance": true,
+              "job": true,
+              "__name__": true,
+              "device": true
+            },
+            "renameByName": {
+              "name": "Device",
+              "Value": "CPU %",
+              "site": "Site",
+              "role": "Role",
+              "tenant": "Tenant",
+              "platform": "Platform"
+            },
+            "indexByName": {}
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "display_url"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CPU %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge"
+                }
+              },
+              {
+                "id": "max",
+                "value": 100
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Top talkers \u2014 interface throughput enriched with NetBox",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "targets": [
+        {
+          "refId": "T",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "format": "table",
+          "instant": true,
+          "expr": "topk(15, sum by (device, interface) (rate(interface_in_octets_total[5m]) * 8))"
+        },
+        {
+          "refId": "NB",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "objectType": "dcim/devices",
+          "fields": [
+            "name",
+            "site",
+            "role",
+            "tenant",
+            "display_url"
+          ],
+          "joinKeys": [
+            {
+              "source": "name",
+              "output": "device",
+              "transform": "none"
+            }
+          ],
+          "limit": 1000
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields"
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "device",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "fieldName": "Value",
+                "config": {
+                  "id": "isNotNull",
+                  "options": {}
+                }
+              }
+            ],
+            "type": "include",
+            "match": "all"
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [],
+            "sort": [
+              {
+                "field": "Value",
+                "desc": true
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "instance": true,
+              "exported_instance": true,
+              "job": true,
+              "__name__": true,
+              "device": true
+            },
+            "renameByName": {
+              "name": "Device",
+              "interface": "Interface",
+              "Value": "In bps",
+              "site": "Site",
+              "role": "Role",
+              "tenant": "Tenant"
+            },
+            "indexByName": {}
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "display_url"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "In bps"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bps"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Incident: AMS1-leaf-01 throughput + NetBox change annotations",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(rate(interface_in_octets_total{device=\"AMS1-leaf-01\"}[2m]) * 8)",
+          "legendFormat": "in"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(rate(interface_out_octets_total{device=\"AMS1-leaf-01\"}[2m]) * 8)",
+          "legendFormat": "out"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "nodeGraph",
+      "title": "Topology \u2014 devices + cables (colored by NetBox status)",
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "netboxlabs-netbox-datasource",
+        "uid": "${DS_NETBOX}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "queryType": "topology",
+          "connectedOnly": true,
+          "limit": 500
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "geomap",
+      "title": "Sites",
+      "gridPos": {
+        "x": 12,
+        "y": 17,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "netboxlabs-netbox-datasource",
+        "uid": "${DS_NETBOX}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "objectType": "dcim/sites",
+          "fields": [
+            "name",
+            "latitude",
+            "longitude",
+            "display_url"
+          ],
+          "limit": 500
+        }
+      ],
+      "options": {
+        "view": {
+          "id": "coords",
+          "lat": 30,
+          "lon": 30,
+          "zoom": 2
+        },
+        "basemap": {
+          "type": "default"
+        },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "Sites",
+            "location": {
+              "mode": "coords",
+              "latitude": "latitude",
+              "longitude": "longitude"
+            },
+            "config": {
+              "showLegend": false,
+              "style": {
+                "size": {
+                  "fixed": 8
+                },
+                "color": {
+                  "fixed": "green"
+                },
+                "opacity": 0.8,
+                "symbol": {
+                  "fixed": "img/icons/marker/circle.svg"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Flow IP enrichment \u2014 longest-prefix match (no relabeling)",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "netboxlabs-netbox-datasource",
+        "uid": "${DS_NETBOX}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "queryType": "ip-enrichment",
+          "ips": "10.10.10.11, 10.10.10.12, 10.20.20.11, 10.30.30.5, 203.0.113.7",
+          "contextFields": [
+            "prefix",
+            "scope",
+            "tenant",
+            "role",
+            "vlan",
+            "description"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "scope"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Site"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Devices in $site \u2014 enriched inventory",
+      "gridPos": {
+        "x": 12,
+        "y": 27,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "netboxlabs-netbox-datasource",
+        "uid": "${DS_NETBOX}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "objectType": "dcim/devices",
+          "filters": [
+            {
+              "field": "site",
+              "operator": "",
+              "value": "$site"
+            },
+            {
+              "field": "role",
+              "operator": "",
+              "value": "$role"
+            }
+          ],
+          "fields": [
+            "name",
+            "site",
+            "role",
+            "status",
+            "platform",
+            "serial",
+            "display_url"
+          ],
+          "limit": 500
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "display_url"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Recipe 2 \u2014 Log volume by host (Loki) enriched with NetBox",
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "targets": [
+        {
+          "refId": "L",
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "queryType": "instant",
+          "expr": "sum by (host) (count_over_time({job=\"syslog\"}[15m]))"
+        },
+        {
+          "refId": "NB",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "objectType": "dcim/devices",
+          "fields": [
+            "name",
+            "site",
+            "role",
+            "tenant",
+            "display_url"
+          ],
+          "joinKeys": [
+            {
+              "source": "name",
+              "output": "host",
+              "transform": "host"
+            }
+          ],
+          "limit": 1000
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields"
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "fieldName": "Value #L",
+                "config": {
+                  "id": "isNotNull",
+                  "options": {}
+                }
+              }
+            ],
+            "type": "include",
+            "match": "all"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "name": true
+            },
+            "renameByName": {
+              "Value #L": "Log lines (15m)"
+            },
+            "indexByName": {}
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "display_url"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Recipe 3a \u2014 Top flows enriched by exact IP join",
+      "gridPos": {
+        "x": 12,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "targets": [
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "format": "table",
+          "instant": true,
+          "expr": "topk(15, rate(flow_bytes_total[5m]) * 8)"
+        },
+        {
+          "refId": "NB",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "objectType": "ipam/ip-addresses",
+          "fields": [
+            "address",
+            "tenant",
+            "description",
+            "display_url"
+          ],
+          "joinKeys": [
+            {
+              "source": "address",
+              "output": "src_ip",
+              "transform": "iphost"
+            }
+          ],
+          "limit": 1000
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "src_ip",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "fieldName": "Value",
+                "config": {
+                  "id": "isNotNull",
+                  "options": {}
+                }
+              }
+            ],
+            "type": "include",
+            "match": "all"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "address": true,
+              "ip": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "Value": "bps"
+            },
+            "indexByName": {}
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "display_url"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bps"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bps"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Recipe 3b \u2014 Flow IPs, longest-prefix NetBox context",
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "netboxlabs-netbox-datasource",
+        "uid": "${DS_NETBOX}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "queryType": "ip-enrichment",
+          "ips": "${flow_ips:csv}",
+          "contextFields": [
+            "prefix",
+            "scope",
+            "tenant",
+            "role",
+            "vlan"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "scope"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Site"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "type": "table",
+      "title": "Recipe 1 \u2014 Device CPU (Prometheus) enriched, join on instance",
+      "gridPos": {
+        "x": 12,
+        "y": 43,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "format": "table",
+          "instant": true,
+          "expr": "device_cpu_percent"
+        },
+        {
+          "refId": "NB",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "objectType": "dcim/devices",
+          "fields": [
+            "name",
+            "site",
+            "role",
+            "tenant"
+          ],
+          "joinKeys": [
+            {
+              "source": "name",
+              "output": "instance",
+              "transform": "host"
+            }
+          ],
+          "limit": 1000
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "instance",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "fieldName": "Value",
+                "config": {
+                  "id": "isNotNull",
+                  "options": {}
+                }
+              }
+            ],
+            "type": "include",
+            "match": "all"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "name": true,
+              "device": true,
+              "__name__": true,
+              "job": true
+            },
+            "renameByName": {},
+            "indexByName": {}
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "Prefix utilization (used vs available, %)",
+      "gridPos": {
+        "x": 0,
+        "y": 51,
+        "w": 24,
+        "h": 9
+      },
+      "datasource": {
+        "type": "netboxlabs-netbox-datasource",
+        "uid": "${DS_NETBOX}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "netboxlabs-netbox-datasource",
+            "uid": "${DS_NETBOX}"
+          },
+          "objectType": "ipam/prefixes",
+          "filters": [
+            {
+              "field": "tenant",
+              "operator": "",
+              "value": "grafana-demo"
+            }
+          ],
+          "fields": [
+            "prefix",
+            "utilization",
+            "used",
+            "available"
+          ],
+          "limit": 1000
+        }
+      ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [],
+            "sort": [
+              {
+                "field": "utilization",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "utilization"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "max",
+                "value": 100
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 75
+                    },
+                    {
+                      "color": "red",
+                      "value": 90
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "__inputs": [
+    {
+      "name": "DS_NETBOX",
+      "label": "NetBox",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "netboxlabs-netbox-datasource",
+      "pluginName": "NetBox"
+    },
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    },
+    {
+      "name": "DS_LOKI",
+      "label": "Loki",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "loki",
+      "pluginName": "Loki"
+    }
+  ],
+  "__requires": []
+}

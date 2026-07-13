@@ -4,6 +4,7 @@
 # override directly WITH the bundled coordinates set — compose interpolates the required
 # ${NETBOX_URL:?}/${NETBOX_TOKEN:?} below per-file, BEFORE the override merge:
 #   NETBOX_URL=http://netbox:8080 NETBOX_TOKEN=0123456789abcdef0123456789abcdef01234567 \
+#     NETBOX_PUBLIC_URL=http://localhost:8000 \
 #     docker compose -f demo/docker-compose.yaml -f demo/docker-compose.full.yaml up
 name: netbox-grafana-demo
 
@@ -44,6 +45,10 @@ services:
       # The shared root provisioning (../provisioning) interpolates
       # ${NETBOX_API_TOKEN} in datasources.yml — alias it to the demo token.
       NETBOX_API_TOKEN: ${NETBOX_TOKEN:?set NETBOX_TOKEN}
+      # Browser-facing NetBox base for deep links. Full mode sets this to the
+      # published port (localhost:8000); BYO mode defaults to empty because
+      # the user's NETBOX_URL is already browser-reachable.
+      NETBOX_PUBLIC_URL: ${NETBOX_PUBLIC_URL:-}
       GF_AUTH_ANONYMOUS_ENABLED: 'true'
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: 'true'

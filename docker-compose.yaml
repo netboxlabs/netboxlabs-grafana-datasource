@@ -3,3 +3,7 @@ services:
     extends:
       file: .config/docker-compose-base.yaml
       service: grafana
+    environment:
+      # Shared provisioning interpolates ${NETBOX_PUBLIC_URL}; define it so the
+      # dev stack never dangles (empty = deep links pass through verbatim).
+      NETBOX_PUBLIC_URL: ${NETBOX_PUBLIC_URL:-}

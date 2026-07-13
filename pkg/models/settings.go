@@ -25,6 +25,10 @@ type PluginSettings struct {
 	// URL is the base URL of the NetBox instance (or NCS endpoint), e.g.
 	// https://netbox.example.com — without a trailing /api.
 	URL string `json:"url"`
+	// PublicURL, when set, is where users' browsers reach NetBox if that
+	// differs from URL (compose/k8s service DNS). Deep-link URLs in results
+	// are rewritten from URL's base to PublicURL's. Empty = no rewrite.
+	PublicURL string `json:"publicUrl"`
 	// Mode selects the enrichment backend. Defaults to "netbox".
 	Mode ProviderMode `json:"mode"`
 	// TLSSkipVerify disables TLS certificate verification (self-signed certs).

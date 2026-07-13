@@ -62,6 +62,9 @@ export interface NetBoxVariableQuery extends DataQuery {
 
 export interface NetBoxDataSourceOptions extends DataSourceJsonData {
   url?: string;
+  /** Browser-facing NetBox base URL, if different from url (e.g. Grafana
+   * reaches NetBox via internal service DNS). Used to rewrite deep links. */
+  publicUrl?: string;
   mode?: ProviderMode;
   tlsSkipVerify?: boolean;
   timeoutSeconds?: number;

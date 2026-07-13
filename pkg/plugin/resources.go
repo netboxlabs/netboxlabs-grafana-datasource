@@ -98,6 +98,7 @@ func (d *Datasource) handleQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
+	rewriteLinks(res, d.provider.BaseURL(), d.cfg.PublicURL)
 	writeJSON(w, res)
 }
 

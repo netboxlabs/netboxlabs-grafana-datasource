@@ -61,13 +61,14 @@ runnable stack (synthetic Prometheus + Loki labeled to match NetBox + a rich das
 
 Add the data source (**Connections → Data sources → NetBox**) and set:
 
-| Field               | Description                                                                                                            |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| **Mode**            | `NetBox REST API` (default). `Network Context Service` is reserved for a future release — see [Modes](#modes).         |
-| **NetBox URL**      | Base URL of your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`).                              |
-| **API Token**       | A NetBox API token. Both classic 40-character (v1) tokens and `nbt_…` (v2) tokens are auto-detected. Stored encrypted. |
-| **Skip TLS verify** | Accept self-signed certificates.                                                                                       |
-| **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                             |
+| Field               | Description                                                                                                                                                                                                     |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Mode**            | `NetBox REST API` (default). `Network Context Service` is reserved for a future release — see [Modes](#modes).                                                                                                  |
+| **NetBox URL**      | Base URL of your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`).                                                                                                                       |
+| **Browser URL**     | Optional. Where users' browsers reach NetBox when Grafana connects over an internal address (Docker/k8s service DNS). Deep links are rewritten to this base; leave empty if the URL above is browser-reachable. |
+| **API Token**       | A NetBox API token. Both classic 40-character (v1) tokens and `nbt_…` (v2) tokens are auto-detected. Stored encrypted.                                                                                          |
+| **Skip TLS verify** | Accept self-signed certificates.                                                                                                                                                                                |
+| **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                      |
 
 Click **Save & test** — a healthy data source reports the connected NetBox version.
 
@@ -81,6 +82,8 @@ datasources:
     access: proxy
     jsonData:
       url: ${NETBOX_URL}
+      # Browser-facing base for deep links, if url is not browser-reachable.
+      publicUrl: ${NETBOX_PUBLIC_URL}
       mode: netbox
     secureJsonData:
       apiToken: ${NETBOX_API_TOKEN}

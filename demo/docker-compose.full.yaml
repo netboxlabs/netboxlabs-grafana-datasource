@@ -3,6 +3,7 @@
 # directly — the BASE file's ${NETBOX_URL:?}/${NETBOX_TOKEN:?} interpolate per-file,
 # before this override merges:
 #   NETBOX_URL=http://netbox:8080 NETBOX_TOKEN=0123456789abcdef0123456789abcdef01234567 \
+#     NETBOX_PUBLIC_URL=http://localhost:8000 \
 #     docker compose -f demo/docker-compose.yaml -f demo/docker-compose.full.yaml up
 name: netbox-grafana-demo
 

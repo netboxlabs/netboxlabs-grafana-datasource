@@ -13,6 +13,9 @@ datasources:
       # Base URL of the NetBox instance (no trailing /api). Interpolated from
       # the NETBOX_URL environment variable.
       url: ${NETBOX_URL}
+      # Browser-facing NetBox base for deep links, when the URL above is an
+      # internal address (compose/k8s DNS). Empty = links pass through verbatim.
+      publicUrl: ${NETBOX_PUBLIC_URL}
       mode: netbox
       tlsSkipVerify: false
       timeoutSeconds: 30

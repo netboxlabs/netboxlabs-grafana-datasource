@@ -79,6 +79,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 			return backend.ErrDataResponse(backend.StatusInternal, err.Error())
 		}
 		applyJoinKeys(res, qm.JoinKeys)
+		rewriteLinks(res, d.provider.BaseURL(), d.cfg.PublicURL)
 		frame := buildFrame("ip-enrichment", res, d.provider.BaseURL())
 		frame.RefID = q.RefID
 		return backend.DataResponse{Frames: data.Frames{frame}}
@@ -128,6 +129,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 	}
 
 	applyJoinKeys(res, qm.JoinKeys)
+	rewriteLinks(res, d.provider.BaseURL(), d.cfg.PublicURL)
 	frame := buildFrame(qm.ObjectType, res, d.provider.BaseURL())
 	frame.RefID = q.RefID
 	return backend.DataResponse{Frames: data.Frames{frame}}

@@ -21,5 +21,7 @@ fi
 # override alone doesn't satisfy them). The override also sets them on services.
 export NETBOX_URL="http://netbox:8080"
 export NETBOX_TOKEN="0123456789abcdef0123456789abcdef01234567"
+# Deep links must open on the published host port, not the internal netbox:8080.
+export NETBOX_PUBLIC_URL="${NETBOX_PUBLIC_URL:-http://localhost:8000}"
 echo "== starting full demo (bundled NetBox; first boot seeds, ~2-3 min) =="
 exec docker compose -f demo/docker-compose.yaml -f demo/docker-compose.full.yaml up "$@"

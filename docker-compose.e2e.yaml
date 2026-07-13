@@ -13,6 +13,8 @@ services:
     environment:
       NETBOX_URL: http://netbox-stub:8080
       NETBOX_API_TOKEN: e2e-stub-token
+      # No browser-facing rewrite in e2e; defined so provisioning never dangles.
+      NETBOX_PUBLIC_URL: ''
     depends_on:
       - netbox-stub
 

@@ -59,6 +59,20 @@ export function ConfigEditor(props: Props) {
           />
         </InlineField>
 
+        <InlineField
+          label="Browser URL"
+          labelWidth={20}
+          tooltip="Where users' browsers reach NetBox, if different from the URL above (e.g. Grafana connects via an internal service name). Used to build 'View in NetBox' links. Leave empty if both match."
+        >
+          <Input
+            id="config-public-url"
+            width={40}
+            value={jsonData.publicUrl ?? ''}
+            placeholder="(optional) where browsers reach NetBox"
+            onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ publicUrl: e.target.value })}
+          />
+        </InlineField>
+
         <InlineField label="API Token" labelWidth={20} tooltip="NetBox API token (v1 or v2)">
           <SecretInput
             required

@@ -93,8 +93,8 @@ Logs usually carry a `host` or `hostname` label. Use a join key
 `name` → `host` (strip domain) on a Devices query. Note: a Loki **instant**
 metric query returns one frame _per stream_, so use **Labels to fields**
 followed by **Merge series/tables** (not _Join by field_) to correlate them
-with the NetBox rows on the shared `host` column — the README's Loki recipe
-shows the full transform chain.
+with the NetBox rows on the shared `host` column — the Loki recipe in
+[RECIPES.md](./RECIPES.md) shows the full transform chain.
 
 ### Flow / NetFlow (by IP)
 

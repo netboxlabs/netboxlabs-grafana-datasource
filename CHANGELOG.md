@@ -4,6 +4,8 @@
 
 Initial release of the NetBox data source for Grafana.
 
+- Compatibility statement: NetBox ≥ 4.1 (validated 4.1 → 4.6 via `demo/compat-check.sh`),
+  Grafana ≥ 12.3.
 - Backend (Go) data source with a provider abstraction (`pkg/provider`) — NetBox REST API
   implemented; Network Context Service (NCS) mode stubbed for a fast-follow.
 - Dynamic object-type discovery across core and plugin models.

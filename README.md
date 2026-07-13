@@ -57,8 +57,14 @@ runnable stack (synthetic Prometheus + Loki labeled to match NetBox + a rich das
 
 ## Requirements
 
-- Grafana **>= 12.3**
-- A reachable NetBox instance and an API token
+- **NetBox 4.1 or later** (validated against 4.1 → 4.6). The plugin depends on two NetBox
+  4.1 API additions: `display_url` on all serializers (deep links) and the
+  `/api/core/object-changes/` endpoint (change-log annotations). Both classic (v1) and
+  `nbt_…` (v2, NetBox 4.5+) API tokens are supported and auto-detected.
+- **Grafana 12.3 or later** (the plugin's `grafanaDependency`; e2e-tested against
+  12.3 → 13.1 and nightly in CI).
+
+Re-verify any NetBox version locally with [`demo/compat-check.sh`](demo/compat-check.sh).
 
 ## Configuration
 

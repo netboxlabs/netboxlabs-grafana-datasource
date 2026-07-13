@@ -6,6 +6,9 @@ Initial release of the NetBox data source for Grafana.
 
 - Compatibility statement: NetBox ≥ 4.1 (validated 4.1 → 4.6 via `demo/compat-check.sh`),
   Grafana ≥ 12.3.
+- Topology: logical path edges by default (patch panels and circuits resolve to the far
+  device via NetBox cable paths), `connections` query option (`logical`/`physical` — the
+  physical view renders panels as nodes), wireless links, and an edge `kind` detail.
 - Backend (Go) data source with a provider abstraction (`pkg/provider`) — NetBox REST API
   implemented.
 - Dynamic object-type discovery across core and plugin models.

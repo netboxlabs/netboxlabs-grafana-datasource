@@ -45,6 +45,9 @@ type queryModel struct {
 	ContextFields []string `json:"contextFields"`
 	// ConnectedOnly (for topology) drops devices with no inter-device cable.
 	ConnectedOnly bool `json:"connectedOnly"`
+	// Connections (for topology): "logical" (default — NetBox cable paths) or
+	// "physical" (raw cables; panels appear as nodes).
+	Connections string `json:"connections"`
 }
 
 // query executes a single query and returns its data response.
@@ -85,7 +88,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 		return backend.DataResponse{Frames: data.Frames{frame}}
 
 	case queryTypeTopology:
-		graph, err := d.provider.Topology(ctx, provider.TopologySpec{Filters: qm.Filters, Limit: qm.Limit, ConnectedOnly: qm.ConnectedOnly})
+		graph, err := d.provider.Topology(ctx, provider.TopologySpec{Filters: qm.Filters, Limit: qm.Limit, ConnectedOnly: qm.ConnectedOnly, Connections: qm.Connections})
 		if err != nil {
 			return backend.ErrDataResponse(backend.StatusInternal, err.Error())
 		}

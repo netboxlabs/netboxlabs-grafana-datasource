@@ -24,6 +24,7 @@ type fakeProvider struct {
 	changes   []provider.Change
 	ipResult  *provider.Result
 	graph     *provider.Graph
+	topoSpec  provider.TopologySpec // captured by Topology for passthrough asserts
 }
 
 func (f *fakeProvider) Name() string    { return "fake" }
@@ -49,7 +50,8 @@ func (f *fakeProvider) Changes(context.Context, provider.ChangeSpec) ([]provider
 func (f *fakeProvider) ResolveIPs(context.Context, []string, []string, int) (*provider.Result, error) {
 	return f.ipResult, nil
 }
-func (f *fakeProvider) Topology(context.Context, provider.TopologySpec) (*provider.Graph, error) {
+func (f *fakeProvider) Topology(_ context.Context, spec provider.TopologySpec) (*provider.Graph, error) {
+	f.topoSpec = spec
 	return f.graph, nil
 }
 
@@ -125,18 +127,22 @@ func TestQueryData_Annotations(t *testing.T) {
 }
 
 func TestQueryData_Topology(t *testing.T) {
-	d := newTestDatasource(&fakeProvider{
+	fp := &fakeProvider{
 		graph: &provider.Graph{
 			Nodes: []provider.GraphNode{{ID: "1", Title: "leaf1", Status: "active"}, {ID: "2", Title: "leaf2", Status: "offline"}},
 			Edges: []provider.GraphEdge{{ID: "10", Source: "1", Target: "2"}},
 		},
-	})
+	}
+	d := newTestDatasource(fp)
 	req := &backend.QueryDataRequest{
-		Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(`{"queryType":"topology"}`)}},
+		Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(`{"queryType":"topology","connections":"physical"}`)}},
 	}
 	resp, err := d.QueryData(context.Background(), req)
 	if err != nil {
 		t.Fatalf("QueryData: %v", err)
+	}
+	if fp.topoSpec.Connections != "physical" {
+		t.Errorf("connections passthrough = %q, want physical", fp.topoSpec.Connections)
 	}
 	frames := resp.Responses["A"].Frames
 	if len(frames) != 2 {

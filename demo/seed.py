@@ -69,22 +69,30 @@ def goc(endpoint, lookup, create, label):
     return _id
 
 
-def cable(a_id, b_id, label):
-    """Connect two interfaces with a cable, unless the A-side is already cabled.
+# Endpoint path per cable-termination object type (for cable_ends probes).
+TERMINATION_ENDPOINTS = {
+    "dcim.interface": "dcim/interfaces",
+    "dcim.frontport": "dcim/front-ports",
+    "dcim.rearport": "dcim/rear-ports",
+}
+
+
+def cable_ends(a_type, a_id, b_type, b_id, label):
+    """Connect two endpoints (interface / front port / rear port) with a cable.
 
     Cable idempotency has no clean list filter that's stable across NetBox
-    versions, so instead check the interface itself: if it already has a
-    `cable`, there is nothing to do (an interface can only terminate one
-    cable, so this is a reliable "already wired" signal).
+    versions, so instead check the A-side endpoint itself: if it already has a
+    `cable`, there is nothing to do (an endpoint can only terminate one cable,
+    so this is a reliable "already wired" signal).
     """
-    code, data = req("GET", f"dcim/interfaces/{a_id}/")
+    code, data = req("GET", f"{TERMINATION_ENDPOINTS[a_type]}/{a_id}/")
     if code == 200 and data.get("cable"):
         STATS["reused"] += 1
         print(f"  = dcim/cables              {label} -> already connected")
         return
     body = {
-        "a_terminations": [{"object_type": "dcim.interface", "object_id": a_id}],
-        "b_terminations": [{"object_type": "dcim.interface", "object_id": b_id}],
+        "a_terminations": [{"object_type": a_type, "object_id": a_id}],
+        "b_terminations": [{"object_type": b_type, "object_id": b_id}],
         "status": "connected",
     }
     code, data = req("POST", "dcim/cables/", body)
@@ -93,6 +101,11 @@ def cable(a_id, b_id, label):
         sys.exit(1)
     STATS["new"] += 1
     print(f"  + dcim/cables              {label} -> id {data['id']}")
+
+
+def cable(a_id, b_id, label):
+    """Connect two interfaces with a cable (see cable_ends)."""
+    cable_ends("dcim.interface", a_id, "dcim.interface", b_id, label)
 
 
 print("== tenant ==")
@@ -166,6 +179,48 @@ for slug in sites:
         b_id = get_iface(b_suffix, b_ifname)
         label = f"{slug.upper()}-{a_suffix} {a_ifname} <-> {slug.upper()}-{b_suffix} {b_ifname}"
         cable(a_id, b_id, label)
+
+print("== patch panel pass-through (AMS1) ==")
+# A dedicated leaf-02 <-> access-01 run through a patch panel — that pair has
+# no direct cable in LINKS, so the logical (path) edge across the panel is
+# unambiguously new. NetBox 4.4 front-port shape (rear_port/rear_port_position);
+# 4.5 replaced this with PortMapping, but the demo pins 4.4.
+pp_role = goc("dcim/device-roles", {"slug": "patch-panel"},
+              {"name": "Patch Panel", "slug": "patch-panel", "color": "9e9e9e"}, "Patch Panel")
+pp_type = goc("dcim/device-types", {"slug": "pp-24"},
+              {"manufacturer": mfr, "model": "PP-24", "slug": "pp-24"}, "PP-24")
+pp = goc("dcim/devices", {"name": "AMS1-pp-01"},
+         {"name": "AMS1-pp-01", "device_type": pp_type, "role": pp_role,
+          "site": sites["ams1"], "tenant": tenant, "status": "active"}, "AMS1-pp-01")
+pp_rear = goc("dcim/rear-ports", {"device_id": pp, "name": "Rear1"},
+              {"device": pp, "name": "Rear1", "type": "8p8c", "positions": 1}, "AMS1-pp-01 Rear1")
+pp_front = goc("dcim/front-ports", {"device_id": pp, "name": "Front1"},
+               {"device": pp, "name": "Front1", "type": "8p8c",
+                "rear_port": pp_rear, "rear_port_position": 1}, "AMS1-pp-01 Front1")
+pp_a = goc("dcim/interfaces", {"device_id": devices[("ams1", "leaf-02")], "name": "Ethernet3"},
+           {"device": devices[("ams1", "leaf-02")], "name": "Ethernet3", "type": "1000base-t"},
+           "AMS1-leaf-02 Ethernet3")
+pp_b = goc("dcim/interfaces", {"device_id": devices[("ams1", "access-01")], "name": "Ethernet3"},
+           {"device": devices[("ams1", "access-01")], "name": "Ethernet3", "type": "1000base-t"},
+           "AMS1-access-01 Ethernet3")
+cable_ends("dcim.interface", pp_a, "dcim.frontport", pp_front,
+           "AMS1-leaf-02 Ethernet3 <-> AMS1-pp-01 Front1")
+cable_ends("dcim.rearport", pp_rear, "dcim.interface", pp_b,
+           "AMS1-pp-01 Rear1 <-> AMS1-access-01 Ethernet3")
+
+print("== wireless link (AMS1) ==")
+ap_role = goc("dcim/device-roles", {"slug": "ap"},
+              {"name": "Access Point", "slug": "ap", "color": "ff9800"}, "Access Point")
+aps = {}
+for n in ("AMS1-ap-01", "AMS1-ap-02"):
+    dev = goc("dcim/devices", {"name": n},
+              {"name": n, "device_type": dtype, "role": ap_role,
+               "site": sites["ams1"], "tenant": tenant, "status": "active"}, n)
+    aps[n] = goc("dcim/interfaces", {"device_id": dev, "name": "wlan0"},
+                 {"device": dev, "name": "wlan0", "type": "ieee802.11ax"}, f"{n} wlan0")
+goc("wireless/wireless-links", {"interface_a_id": aps["AMS1-ap-01"]},
+    {"interface_a": aps["AMS1-ap-01"], "interface_b": aps["AMS1-ap-02"], "status": "connected"},
+    "AMS1-ap-01 wlan0 <-> AMS1-ap-02 wlan0")
 
 print("== ipam role ==")
 ipam_role = goc("ipam/roles", {"slug": "lan"}, {"name": "LAN", "slug": "lan"}, "LAN")

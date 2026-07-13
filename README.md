@@ -25,8 +25,14 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else — turning `device="lea
 - **Prefix/IP utilization.** Opt-in `utilization` (%), `used` and `available` columns for
   prefixes and IP ranges, computed to match NetBox's own utilization — gauge or threshold on
   capacity right in Grafana. See [Prefix & IP utilization](#prefix--ip-utilization).
-- **Topology node graph.** Devices + cables as a Grafana node graph, colored by device
-  status.
+- **Topology node graph.** Devices + links as a Grafana node graph, colored by device
+  status. Two edge views: **logical** (default — NetBox-computed cable paths, so patch
+  panels and circuits resolve to the far device) and **physical** (raw cables; panels
+  appear as nodes). Wireless links are always included, and every edge carries a
+  `kind` detail (`path`/`cable`/`wireless`). Live-metric node coloring isn't possible
+  panel-side — the Node Graph needs its nodes+edges frames untouched, and a
+  transformation join collapses the edges frame (verified) — so colors follow NetBox
+  status; use correlations/data links to drill into live metrics instead.
 - **Geomap.** Plot sites from their NetBox latitude/longitude.
 - **Dynamic object-type discovery.** Object types are discovered from the live NetBox API —
   core models _and_ plugin-provided models (e.g. BGP, custom objects) — with no code changes.
@@ -89,7 +95,7 @@ datasources:
 | ----------------- | -------------------------------------------------------------- | --------------------------------- |
 | **Objects**       | A joinable table for any object type (with optional join keys) | Table, or Outer-join onto metrics |
 | **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`                   | Join onto flow/log data by IP     |
-| **Topology**      | Devices (nodes) + cables (edges)                               | Node Graph panel                  |
+| **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)     | Node Graph panel                  |
 | **Annotations**   | Change-log events (`time/title/text/tags`)                     | Dashboard annotations             |
 
 See [Demo](#demo) below for a one-command runnable stack (synthetic Prometheus + Loki

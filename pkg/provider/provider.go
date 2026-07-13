@@ -100,6 +100,10 @@ type TopologySpec struct {
 	// ConnectedOnly drops devices that have no cable to another device, so the
 	// graph shows the connected fabric rather than isolated nodes.
 	ConnectedOnly bool
+	// Connections selects edge derivation: "logical" (default — NetBox-computed
+	// cable paths, so patch panels and circuits resolve to the far device) or
+	// "physical" (raw cables; panels appear as nodes).
+	Connections string
 }
 
 // GraphNode is a device in the topology graph.
@@ -112,12 +116,14 @@ type GraphNode struct {
 	Status string `json:"status"`
 }
 
-// GraphEdge is a link (cable) between two devices.
+// GraphEdge is a link between two devices.
 type GraphEdge struct {
 	ID     string `json:"id"`
 	Source string `json:"source"`
 	Target string `json:"target"`
 	Label  string `json:"label"`
+	// Kind tags the edge source: "path" | "cable" | "wireless".
+	Kind string `json:"kind"`
 }
 
 // Graph is a device/link topology.

@@ -1,5 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { InlineField, Input, Select, MultiSelect, Stack, Button, IconButton, TextArea, InlineSwitch } from '@grafana/ui';
+import {
+  InlineField,
+  Input,
+  Select,
+  MultiSelect,
+  Stack,
+  Button,
+  IconButton,
+  TextArea,
+  InlineSwitch,
+} from '@grafana/ui';
 import { QueryEditorProps, SelectableValue } from '@grafana/data';
 import { DataSource } from '../datasource';
 import {
@@ -18,7 +28,11 @@ type Props = QueryEditorProps<DataSource, NetBoxQuery, NetBoxDataSourceOptions>;
 
 const QUERY_TYPES: Array<SelectableValue<QueryType>> = [
   { label: 'Objects', value: 'objects', description: 'Query a NetBox object type as a joinable table' },
-  { label: 'IP enrichment', value: 'ip-enrichment', description: 'Resolve IPs to their NetBox prefix/site/tenant (longest match)' },
+  {
+    label: 'IP enrichment',
+    value: 'ip-enrichment',
+    description: 'Resolve IPs to their NetBox prefix/site/tenant (longest match)',
+  },
   { label: 'Topology', value: 'topology', description: 'Devices + cables as a node graph' },
 ];
 
@@ -81,7 +95,9 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
           value={QUERY_TYPES.find((o) => o.value === queryType)}
           onChange={(v) => {
             const qt = v?.value ?? 'objects';
-            update(qt === 'topology' ? { queryType: qt, connectedOnly: query.connectedOnly ?? true } : { queryType: qt });
+            update(
+              qt === 'topology' ? { queryType: qt, connectedOnly: query.connectedOnly ?? true } : { queryType: qt }
+            );
             onRunQuery();
           }}
         />
@@ -134,10 +150,29 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
       {queryType === 'topology' && (
         <>
           <div style={{ opacity: 0.75, fontSize: 12, marginLeft: 4 }}>
-            Returns NetBox devices as nodes and inter-device cables as edges, colored by device status. Use the Node Graph
-            visualization. Filter the device set below (e.g. site or role).
+            Returns NetBox devices as nodes and inter-device links as edges, colored by device status. Use the Node
+            Graph visualization. Filter the device set below (e.g. site or role).
           </div>
-          <InlineField label="Connected only" labelWidth={20} tooltip="Drop devices with no inter-device cable">
+          <InlineField
+            label="Connections"
+            labelWidth={20}
+            tooltip="logical: NetBox cable paths — patch panels and circuits resolve to the far device. physical: raw cables — panels appear as nodes. Wireless links are always included."
+          >
+            <Select
+              inputId="query-connections"
+              width={30}
+              options={[
+                { label: 'logical (cable paths)', value: 'logical' },
+                { label: 'physical (raw cables)', value: 'physical' },
+              ]}
+              value={query.connections ?? 'logical'}
+              onChange={(v) => {
+                update({ connections: (v?.value as 'logical' | 'physical') ?? 'logical' });
+                onRunQuery();
+              }}
+            />
+          </InlineField>
+          <InlineField label="Connected only" labelWidth={20} tooltip="Drop devices with no inter-device link">
             <InlineSwitch
               value={query.connectedOnly ?? true}
               onChange={(e) => {
@@ -264,7 +299,11 @@ function JoinKeysEditor({ joinKeys, fieldOptions, onChange, onRunQuery }: JoinKe
     <Stack gap={1} direction="column">
       {joinKeys.map((k, i) => (
         <Stack key={i} gap={1} direction="row" alignItems="flex-end">
-          <InlineField label={i === 0 ? 'Join key' : ' '} labelWidth={20} tooltip="Derive a key column to match a metric label">
+          <InlineField
+            label={i === 0 ? 'Join key' : ' '}
+            labelWidth={20}
+            tooltip="Derive a key column to match a metric label"
+          >
             <Select
               width={22}
               options={fieldOptions}

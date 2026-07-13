@@ -47,6 +47,10 @@ export interface NetBoxQuery extends DataQuery {
   contextFields?: string[];
   /** For topology: drop devices with no inter-device cable (default true). */
   connectedOnly?: boolean;
+  /** For topology: edge derivation — 'logical' (NetBox cable paths; panels and
+   * circuits resolve to the far device) or 'physical' (raw cables; panels
+   * appear as nodes). Default 'logical'. */
+  connections?: 'logical' | 'physical';
 }
 
 export const DEFAULT_QUERY: Partial<NetBoxQuery> = {

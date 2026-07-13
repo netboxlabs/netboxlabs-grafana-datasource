@@ -220,15 +220,18 @@ func buildNodeGraphFrames(g *provider.Graph) data.Frames {
 	eid := make([]string, m)
 	esrc := make([]string, m)
 	etgt := make([]string, m)
+	kinds := make([]string, m)
 	for i, e := range g.Edges {
 		eid[i] = e.ID
 		esrc[i] = e.Source
 		etgt[i] = e.Target
+		kinds[i] = e.Kind
 	}
 	edges := data.NewFrame("edges",
 		data.NewField("id", nil, eid),
 		data.NewField("source", nil, esrc),
 		data.NewField("target", nil, etgt),
+		data.NewField("detail__kind", nil, kinds),
 	)
 	edges.Meta = &data.FrameMeta{PreferredVisualization: data.VisTypeNodeGraph}
 

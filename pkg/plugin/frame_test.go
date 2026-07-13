@@ -127,3 +127,21 @@ func TestBuildCountFrame(t *testing.T) {
 		t.Errorf("count value = %v, want 3", frame.Fields[0].At(0))
 	}
 }
+
+func TestBuildNodeGraphFrames_EdgeKind(t *testing.T) {
+	g := &provider.Graph{
+		Nodes: []provider.GraphNode{{ID: "1", Title: "a"}, {ID: "2", Title: "b"}},
+		Edges: []provider.GraphEdge{{ID: "e1", Source: "1", Target: "2", Kind: "path"}},
+	}
+	frames := buildNodeGraphFrames(g)
+	edges := frames[1]
+	for _, f := range edges.Fields {
+		if f.Name == "detail__kind" {
+			if got, ok := f.At(0).(string); !ok || got != "path" {
+				t.Fatalf("detail__kind = %v, want path", f.At(0))
+			}
+			return
+		}
+	}
+	t.Fatal("edges frame missing detail__kind field")
+}

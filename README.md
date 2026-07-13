@@ -42,18 +42,6 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else — turning `device="lea
 - **Secure & backend-based.** API token stored in Grafana's encrypted secret store; all
   upstream calls happen server-side. Works with NetBox **v1 and v2** API tokens.
 
-## Query types
-
-| Type              | Returns                                                        | Use with                          |
-| ----------------- | -------------------------------------------------------------- | --------------------------------- |
-| **Objects**       | A joinable table for any object type (with optional join keys) | Table, or Outer-join onto metrics |
-| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`                   | Join onto flow/log data by IP     |
-| **Topology**      | Devices (nodes) + cables (edges)                               | Node Graph panel                  |
-| **Annotations**   | Change-log events (`time/title/text/tags`)                     | Dashboard annotations             |
-
-See [Demo](#demo) below for a one-command runnable stack (synthetic Prometheus + Loki
-labeled to match NetBox + a rich dashboard).
-
 ## Requirements
 
 - **NetBox 4.1 or later** (validated against 4.1 → 4.6). The plugin depends on two NetBox
@@ -94,6 +82,27 @@ datasources:
     secureJsonData:
       apiToken: ${NETBOX_API_TOKEN}
 ```
+
+## Query types
+
+| Type              | Returns                                                        | Use with                          |
+| ----------------- | -------------------------------------------------------------- | --------------------------------- |
+| **Objects**       | A joinable table for any object type (with optional join keys) | Table, or Outer-join onto metrics |
+| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`                   | Join onto flow/log data by IP     |
+| **Topology**      | Devices (nodes) + cables (edges)                               | Node Graph panel                  |
+| **Annotations**   | Change-log events (`time/title/text/tags`)                     | Dashboard annotations             |
+
+See [Demo](#demo) below for a one-command runnable stack (synthetic Prometheus + Loki
+labeled to match NetBox + a rich dashboard).
+
+## Dynamic object-type discovery
+
+The query editor's **Object type** list is built by walking the NetBox API
+(`/api/` + `/api/plugins/`). Any model exposed by the REST API — including plugins like
+`netbox-bgp` — appears automatically. Columns are derived by flattening a sample object, so
+nested references become readable values (`site`) plus their ids/slugs (`site_id`,
+`site_slug`), choice fields expose both label and value, and custom fields are hoisted to
+`cf_*` columns.
 
 ## Enrichment recipes
 
@@ -149,26 +158,6 @@ child ranges, a container prefix is measured by child-prefix coverage, and an IP
 child-IP count. It's computed only when a utilization field is requested (a few extra NetBox
 calls per row), so ordinary IPAM queries are unaffected.
 
-## Demo
-
-A one-command stack that exercises the enrichment recipes and prefix/IP utilization above
-end to end.
-
-- **Full mode** (self-contained): `./demo/run.sh` — builds the plugin, then brings up a real,
-  seeded NetBox (a multi-site fabric), Prometheus, Loki, synthetic telemetry, and Grafana at
-  [http://localhost:3001](http://localhost:3001) (anonymous admin) with the dashboard above
-  pre-provisioned. First boot seeds NetBox, ~2-3 min.
-- **Fast / bring-your-own-NetBox mode** — point the stack at your own NetBox instead of the
-  bundled one (same script, so the plugin gets built too):
-  ```bash
-  NETBOX_URL=https://your-netbox NETBOX_TOKEN=... ./demo/run.sh
-  ```
-  (Equivalent, if the plugin is already built: the same env vars with
-  `docker compose -f demo/docker-compose.yaml up`.)
-- **Just want the dashboard?** Import
-  [demo/netbox-demo-dashboard.json](./demo/netbox-demo-dashboard.json) into any Grafana
-  (**Dashboards → Import**) — it prompts for your NetBox, Prometheus and Loki datasources.
-
 ## Alerting
 
 The data source is alerting-capable (`backend: true` + `alerting: true` in `plugin.json`),
@@ -199,23 +188,6 @@ each check is light regardless of how many objects match — the levers on load 
 **1m or longer**, and lengthen for many rules). High-frequency alerting at scale is the
 motivation for the planned high-volume enrichment backend (zero load on NetBox).
 
-## Dynamic object-type discovery
-
-The query editor's **Object type** list is built by walking the NetBox API
-(`/api/` + `/api/plugins/`). Any model exposed by the REST API — including plugins like
-`netbox-bgp` — appears automatically. Columns are derived by flattening a sample object, so
-nested references become readable values (`site`) plus their ids/slugs (`site_id`,
-`site_slug`), choice fields expose both label and value, and custom fields are hoisted to
-`cf_*` columns.
-
-## Architecture
-
-The datasource never imports a NetBox client directly — it depends only on the small
-[`provider.Provider`](./pkg/provider/provider.go) interface. Today the only
-implementation is the **NetBox REST API**. A second backend — a high-volume enrichment
-projection of NetBox for NetBox Cloud/Enterprise — is planned, and slots in behind the
-same interface as a drop-in rather than a rewrite.
-
 ## Grafana Cloud
 
 This is a **backend** datasource, so it runs on Grafana Cloud once published to the Grafana
@@ -231,7 +203,33 @@ The backend ships binaries for `linux/amd64` and `linux/arm64` (Cloud) plus the 
 catalog target matrix (darwin/windows/arm). See [docs/PUBLISHING.md](./docs/PUBLISHING.md)
 for the catalog/signing checklist.
 
+## Demo
+
+A one-command stack that exercises the enrichment recipes and prefix/IP utilization above
+end to end.
+
+- **Full mode** (self-contained): `./demo/run.sh` — builds the plugin, then brings up a real,
+  seeded NetBox (a multi-site fabric), Prometheus, Loki, synthetic telemetry, and Grafana at
+  [http://localhost:3001](http://localhost:3001) (anonymous admin) with the dashboard above
+  pre-provisioned. First boot seeds NetBox, ~2-3 min.
+- **Fast / bring-your-own-NetBox mode** — point the stack at your own NetBox instead of the
+  bundled one (same script, so the plugin gets built too):
+  ```bash
+  NETBOX_URL=https://your-netbox NETBOX_TOKEN=... ./demo/run.sh
+  ```
+  (Equivalent, if the plugin is already built: the same env vars with
+  `docker compose -f demo/docker-compose.yaml up`.)
+- **Just want the dashboard?** Import
+  [demo/netbox-demo-dashboard.json](./demo/netbox-demo-dashboard.json) into any Grafana
+  (**Dashboards → Import**) — it prompts for your NetBox, Prometheus and Loki datasources.
+
 ## Development
+
+The datasource never imports a NetBox client directly — it depends only on the small
+[`provider.Provider`](./pkg/provider/provider.go) interface. Today the only
+implementation is the **NetBox REST API**. A second backend — a high-volume enrichment
+projection of NetBox for NetBox Cloud/Enterprise — is planned, and slots in behind the
+same interface as a drop-in rather than a rewrite.
 
 ```bash
 # Frontend
@@ -267,8 +265,8 @@ docker run --rm -v "$PWD":/src -w /src -e GOOS=linux -e GOARCH=amd64 \
 ## Support & contributing
 
 - **Found a bug or want a feature?** [Open an issue](https://github.com/netboxlabs/netboxlabs-grafana-datasource/issues/new/choose)
-  using the matching template. [SUPPORT.md](./SUPPORT.md) explains how to file a good
-  issue and where to get help.
+  using the matching template — the version and environment fields it asks for are what we
+  need to reproduce a problem.
 - **Want to contribute?** See [CONTRIBUTING.md](./CONTRIBUTING.md).
 - **Security issue?** Report privately per [SECURITY.md](./SECURITY.md) — not via a public
   issue.

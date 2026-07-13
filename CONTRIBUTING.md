@@ -5,14 +5,15 @@ Thanks for your interest in improving the NetBox data source for Grafana.
 ## Reporting bugs and requesting features
 
 Use the [issue templates](https://github.com/netboxlabs/netboxlabs-grafana-datasource/issues/new/choose)
-— see [SUPPORT.md](./SUPPORT.md) for where to get help. For anything beyond a small fix,
-open an issue first so the approach can be agreed before you invest time in a pull request.
+— see the README's [Support & contributing](./README.md#support--contributing) section for
+where to get help. For anything beyond a small fix, open an issue first so the approach can
+be agreed before you invest time in a pull request.
 
 ## Development setup
 
-The **Development** section of the [README](./README.md#development) covers the frontend
-(npm), backend (Go/mage), and the docker-compose dev Grafana. The README's
-[Architecture](./README.md#architecture) section explains how the plugin is put together.
+The **Development** section of the [README](./README.md#development) explains how the
+plugin is put together and covers the frontend (npm), backend (Go/mage), and the
+docker-compose dev Grafana.
 
 ## Pull requests
 

@@ -346,6 +346,23 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "Device"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "NetBox: device details",
+                    "url": "/explore?schemaVersion=1&panes={%22nb%22%3A{%22datasource%22%3A%22${DS_NETBOX}%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22queryType%22%3A%22objects%22%2C%22objectType%22%3A%22dcim%2Fdevices%22%2C%22filters%22%3A%5B{%22field%22%3A%22name%22%2C%22operator%22%3A%22%22%2C%22value%22%3A%22${__data.fields.Device}%22}%5D%2C%22limit%22%3A10}%5D}}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "CPU %"
             },
             "properties": [
@@ -491,6 +508,23 @@
               {
                 "id": "custom.hidden",
                 "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Device"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "NetBox: device details",
+                    "url": "/explore?schemaVersion=1&panes={%22nb%22%3A{%22datasource%22%3A%22${DS_NETBOX}%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22queryType%22%3A%22objects%22%2C%22objectType%22%3A%22dcim%2Fdevices%22%2C%22filters%22%3A%5B{%22field%22%3A%22name%22%2C%22operator%22%3A%22%22%2C%22value%22%3A%22${__data.fields.Device}%22}%5D%2C%22limit%22%3A10}%5D}}"
+                  }
+                ]
               }
             ]
           },

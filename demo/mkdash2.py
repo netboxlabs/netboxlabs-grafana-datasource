@@ -26,6 +26,7 @@ import json
 import os
 import sys
 import urllib.request
+from urllib.parse import quote
 
 NB = os.environ.get("NB_UID", "P8334760067B51B4B")
 PROM = os.environ.get("PROM_UID", "bfqenuth8fapsc")
@@ -53,6 +54,26 @@ def hide_url():
             "properties": [{"id": "custom.hidden", "value": True}]}
 
 
+def netbox_device_link(device_col):
+    """byName override: clicking a device cell opens Explore with a NetBox
+    devices query for that row's device — the dashboards complement to the
+    Explore-only correlations. __NB_UID__ is swapped per emit mode (data-link
+    URLs are plain strings, invisible to rewrite_datasources). The row value
+    interpolates via the DOT form ${__data.fields.<col>} — Grafana resolves
+    field paths with lodash.property, which cannot parse JSON-escaped bracket
+    quotes — keep the column name free of . } and :. quote() keeps $ { } .
+    unencoded so Grafana's variable regex still matches after encoding."""
+    panes = ('{"nb":{"datasource":"__NB_UID__","queries":[{"refId":"A",'
+             '"queryType":"objects","objectType":"dcim/devices",'
+             '"filters":[{"field":"name","operator":"","value":'
+             '"${__data.fields.' + device_col + '}"}],'
+             '"limit":10}]}}')
+    return {"matcher": {"id": "byName", "options": device_col},
+            "properties": [{"id": "links", "value": [{
+                "title": "NetBox: device details",
+                "url": "/explore?schemaVersion=1&panes=" + quote(panes, safe="${}")}]}]}
+
+
 panels = [
     {"id": 1, "type": "stat", "title": "Devices in selection", "gridPos": {"x": 0, "y": 0, "w": 4, "h": 8},
      "datasource": nb,
@@ -74,7 +95,7 @@ panels = [
                          organize(["Time", "instance", "exported_instance", "job", "__name__", "device"],
                                   {"name": "Device", "Value": "CPU %",
                                    "site": "Site", "role": "Role", "tenant": "Tenant", "platform": "Platform"})],
-     "fieldConfig": {"defaults": {}, "overrides": [hide_url(),
+     "fieldConfig": {"defaults": {}, "overrides": [hide_url(), netbox_device_link("Device"),
         {"matcher": {"id": "byName", "options": "CPU %"},
          "properties": [{"id": "unit", "value": "percent"}, {"id": "custom.cellOptions", "value": {"type": "gauge"}},
                         {"id": "max", "value": 100}]}]}},
@@ -94,7 +115,7 @@ panels = [
                          organize(["Time", "instance", "exported_instance", "job", "__name__", "device"],
                                   {"name": "Device", "interface": "Interface", "Value": "In bps",
                                    "site": "Site", "role": "Role", "tenant": "Tenant"})],
-     "fieldConfig": {"defaults": {}, "overrides": [hide_url(),
+     "fieldConfig": {"defaults": {}, "overrides": [hide_url(), netbox_device_link("Device"),
         {"matcher": {"id": "byName", "options": "In bps"},
          "properties": [{"id": "unit", "value": "bps"}, {"id": "custom.cellOptions", "value": {"type": "gauge"}}]}]}},
 
@@ -295,6 +316,20 @@ def rewrite_datasources(obj, uid_map):
             rewrite_datasources(item, uid_map)
 
 
+def rewrite_link_uids(obj, nb_uid):
+    """Data-link URLs carry the NetBox uid inside a plain string (an Explore
+    panes= URL) that rewrite_datasources cannot see — swap the sentinel."""
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key == "url" and isinstance(value, str) and "__NB_UID__" in value:
+                obj[key] = value.replace("__NB_UID__", nb_uid)
+            else:
+                rewrite_link_uids(value, nb_uid)
+    elif isinstance(obj, list):
+        for item in obj:
+            rewrite_link_uids(item, nb_uid)
+
+
 def _dump(d, path):
     with open(path, "w") as f:
         json.dump(d, f, indent=2)
@@ -304,6 +339,7 @@ def _dump(d, path):
 def write_provisioned(path):
     d = copy.deepcopy(dash)
     rewrite_datasources(d, FIXED_UIDS)
+    rewrite_link_uids(d, FIXED_UIDS["netboxlabs-netbox-datasource"])
     d.pop("__inputs", None)
     _dump(d, path)
 
@@ -311,6 +347,8 @@ def write_provisioned(path):
 def write_importable(path):
     d = copy.deepcopy(dash)
     rewrite_datasources(d, DS_VARS)
+    # The import wizard interpolates ${DS_NETBOX} in plain strings too.
+    rewrite_link_uids(d, DS_VARS["netboxlabs-netbox-datasource"])
     d.pop("uid", None)
     d["__inputs"] = INPUTS
     d["__requires"] = []
@@ -354,4 +392,5 @@ if not emit_provisioned and not emit_importable:
     if not LOKI:
         raise SystemExit("set LOKI_UID to the Loki datasource uid (Grafana -> Connections -> Data sources -> Loki)")
     AUTH = "Basic " + base64.b64encode(b"admin:admin").decode()
+    rewrite_link_uids(dash, NB)
     print(json.dumps(api("POST", "/api/dashboards/db", {"dashboard": dash, "overwrite": True}))[:400])

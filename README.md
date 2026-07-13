@@ -36,6 +36,9 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else — turning `device="lea
   time-series panel using Grafana's `time/title/text/tags` convention.
 - **Deep links.** Every row links straight back to the NetBox object page — and the link
   survives the join, so an enriched metrics table stays clickable through to NetBox.
+- **Correlations (Explore drill-downs).** Provision links from any Prometheus/Loki series
+  into a NetBox query — device → inventory, IP → longest-prefix context. The demo ships
+  them; recipes in [docs/CORRELATIONS.md](docs/CORRELATIONS.md).
 - **Secure & backend-based.** API token stored in Grafana's encrypted secret store; all
   upstream calls happen server-side. Works with NetBox **v1 and v2** API tokens.
 

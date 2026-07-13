@@ -32,6 +32,43 @@ datasources:
     access: proxy
     isDefault: false
     url: http://prometheus:9090
+    # Correlations add Explore drill-downs from telemetry into NetBox queries
+    # (they render in Explore table/logs views, not on dashboard panels).
+    # $$ escapes provisioning-time env interpolation: Grafana must receive the
+    # literal ${device}/${src_ip}/${dst_ip}, resolved per clicked row.
+    correlations:
+      - targetUID: netboxlabs-netbox-alerting
+        label: 'NetBox: device details'
+        description: Open the NetBox inventory row for this device
+        type: query
+        config:
+          field: device
+          target:
+            queryType: objects
+            objectType: dcim/devices
+            filters:
+              - field: name
+                operator: ''
+                value: $${device}
+            limit: 10
+      - targetUID: netboxlabs-netbox-alerting
+        label: 'NetBox: source IP context'
+        description: Longest-prefix match the source IP against NetBox IPAM
+        type: query
+        config:
+          field: src_ip
+          target:
+            queryType: ip-enrichment
+            ips: $${src_ip}
+      - targetUID: netboxlabs-netbox-alerting
+        label: 'NetBox: destination IP context'
+        description: Longest-prefix match the destination IP against NetBox IPAM
+        type: query
+        config:
+          field: dst_ip
+          target:
+            queryType: ip-enrichment
+            ips: $${dst_ip}
 
   - name: Loki
     type: loki
@@ -39,3 +76,26 @@ datasources:
     access: proxy
     isDefault: false
     url: http://loki:3100
+    correlations:
+      - targetUID: netboxlabs-netbox-alerting
+        label: 'NetBox: device details'
+        description: Open the NetBox inventory row for the host emitting this log line
+        type: query
+        config:
+          # Loki log frames carry stream labels in the "labels" field — a JSON
+          # object Grafana stringifies before applying the regex (raw JS
+          # pattern, no slashes). Extract the host label into ${host}.
+          field: labels
+          transformations:
+            - type: regex
+              field: labels
+              expression: '"host":\s*"([^"]+)"'
+              mapValue: host
+          target:
+            queryType: objects
+            objectType: dcim/devices
+            filters:
+              - field: name
+                operator: ''
+                value: $${host}
+            limit: 10

@@ -11,6 +11,8 @@ Initial release of the NetBox data source for Grafana.
 - Query-driven template variables (`CustomVariableSupport`).
 - Change-log annotations (`time/title/text/tags`).
 - Deep links from rows to NetBox object pages (survive joins).
+- Provisioned Grafana Correlations (Explore drill-downs from Prometheus/Loki series into
+  NetBox queries) plus dashboard drill-down links in the demo — see docs/CORRELATIONS.md.
 - Browser URL option (`jsonData.publicUrl`): deep links are rewritten to a browser-facing
   NetBox base when Grafana reaches NetBox over an internal address (Docker/k8s DNS).
 - v1 and v2 NetBox API token support (auto-detected).

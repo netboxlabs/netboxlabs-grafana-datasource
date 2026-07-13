@@ -14,7 +14,6 @@ import (
 
 	"github.com/netboxlabs/netbox/pkg/models"
 	"github.com/netboxlabs/netbox/pkg/provider"
-	"github.com/netboxlabs/netbox/pkg/provider/ncs"
 	"github.com/netboxlabs/netbox/pkg/provider/netbox"
 )
 
@@ -27,7 +26,7 @@ var (
 )
 
 // Datasource is a NetBox enrichment datasource instance. It is provider-backed:
-// today the provider is the NetBox REST API, with NCS planned (see pkg/provider).
+// today the provider is the NetBox REST API (see pkg/provider).
 type Datasource struct {
 	cfg             *models.PluginSettings
 	provider        provider.Provider
@@ -80,8 +79,6 @@ func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings bac
 // newProvider selects the enrichment backend based on the configured mode.
 func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.Provider, error) {
 	switch cfg.Mode {
-	case models.ModeNCS:
-		return ncs.New(cfg.URL, cfg.Secrets.APIToken, httpClient), nil
 	case models.ModeNetBox, "":
 		return netbox.New(cfg.URL, cfg.Secrets.APIToken, httpClient), nil
 	default:

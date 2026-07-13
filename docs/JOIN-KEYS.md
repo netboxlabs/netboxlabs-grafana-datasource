@@ -108,8 +108,8 @@ IPs as a Grafana **query variable** (from your flow data source), reference it a
   If your fleet has duplicates, a name join can fan out — prefer a unique key
   (asset tag, primary IP) where it matters.
 - **Cardinality / scale.** Joins run client-side in the browser; very large
-  tables get heavy. Keep NetBox queries scoped (filters, `Return fields`), and
-  for high-volume enrichment use the forthcoming **NCS** mode.
+  tables get heavy. Keep NetBox queries scoped (filters, `Return fields`); a
+  dedicated high-volume enrichment backend is planned for this.
 - **Stale vs live.** Query-time joins are always current. If you instead need the
   context frozen into the metric historically, that's the ingest-time relabeling
   pattern (`netbox-plugin-prometheus-sd`) — complementary, not replaced.

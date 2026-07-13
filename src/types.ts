@@ -1,7 +1,10 @@
 import { DataSourceJsonData } from '@grafana/data';
 import { DataQuery } from '@grafana/schema';
 
-export type ProviderMode = 'netbox' | 'ncs';
+/** Enrichment backend. Only 'netbox' exists today; the type and the `mode`
+ * option are kept as the seam for a planned second, high-volume backend
+ * (no UI selector until then). */
+export type ProviderMode = 'netbox';
 
 /** A single field/operator/value constraint applied to a query. */
 export interface FilterRow {

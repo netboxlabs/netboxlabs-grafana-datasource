@@ -3,10 +3,9 @@
 //
 // The datasource never talks to NetBox (or any other source) directly. Instead
 // it talks to a Provider. Today there is one implementation that queries the
-// NetBox REST API (package netbox). A second implementation that targets a
-// high-volume Network Context Service (package ncs) is planned as a fast-follow
-// for NetBox Cloud/Enterprise; keeping the datasource behind this interface is
-// what makes that addition a drop-in rather than a rewrite.
+// NetBox REST API (package netbox). A second, high-volume enrichment backend is
+// planned; keeping the datasource behind this interface is what makes that
+// addition a drop-in rather than a rewrite.
 package provider
 
 import (

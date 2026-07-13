@@ -11,8 +11,8 @@ open an issue first so the approach can be agreed before you invest time in a pu
 ## Development setup
 
 The **Development** section of the [README](./README.md#development) covers the frontend
-(npm), backend (Go/mage), and the docker-compose dev Grafana. [ARCHITECTURE.md](./ARCHITECTURE.md)
-explains how the plugin is put together.
+(npm), backend (Go/mage), and the docker-compose dev Grafana. The README's
+[Architecture](./README.md#architecture) section explains how the plugin is put together.
 
 ## Pull requests
 

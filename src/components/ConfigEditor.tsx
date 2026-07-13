@@ -1,18 +1,9 @@
 import React, { ChangeEvent } from 'react';
-import { InlineField, Input, SecretInput, Select, InlineSwitch, FieldSet } from '@grafana/ui';
-import { DataSourcePluginOptionsEditorProps, SelectableValue } from '@grafana/data';
-import { NetBoxDataSourceOptions, NetBoxSecureJsonData, ProviderMode } from '../types';
+import { InlineField, Input, SecretInput, InlineSwitch, FieldSet } from '@grafana/ui';
+import { DataSourcePluginOptionsEditorProps } from '@grafana/data';
+import { NetBoxDataSourceOptions, NetBoxSecureJsonData } from '../types';
 
 interface Props extends DataSourcePluginOptionsEditorProps<NetBoxDataSourceOptions, NetBoxSecureJsonData> {}
-
-const MODE_OPTIONS: Array<SelectableValue<ProviderMode>> = [
-  { label: 'NetBox REST API', value: 'netbox', description: 'Query the NetBox REST API directly' },
-  {
-    label: 'Network Context Service (coming soon)',
-    value: 'ncs',
-    description: 'High-volume enrichment service for NetBox Cloud/Enterprise',
-  },
-];
 
 export function ConfigEditor(props: Props) {
   const { onOptionsChange, options } = props;
@@ -34,21 +25,9 @@ export function ConfigEditor(props: Props) {
     });
   };
 
-  const mode = jsonData.mode ?? 'netbox';
-
   return (
     <>
       <FieldSet label="Connection">
-        <InlineField label="Mode" labelWidth={20} tooltip="Where to read NetBox context from">
-          <Select<ProviderMode>
-            inputId="config-mode"
-            width={40}
-            options={MODE_OPTIONS}
-            value={MODE_OPTIONS.find((o) => o.value === mode)}
-            onChange={(v) => onJsonChange({ mode: (v.value as ProviderMode) ?? 'netbox' })}
-          />
-        </InlineField>
-
         <InlineField label="NetBox URL" labelWidth={20} tooltip="Base URL of the NetBox instance, without /api">
           <Input
             id="config-url"

@@ -95,6 +95,10 @@ func (p *Provider) ObjectTypes(ctx context.Context) ([]provider.ObjectType, erro
 	return types, nil
 }
 
+// discover walks NetBox's tree of URL indexes to enumerate every queryable
+// collection, so nothing is hard-coded: GET /api/ yields {app: url} (dcim,
+// ipam, …) and each app index yields {model: url}. Plugin endpoints are
+// handled by discoverPlugins.
 func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) {
 	root, err := p.urlMap(ctx, p.client.apiURL("", nil))
 	if err != nil {

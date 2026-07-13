@@ -14,22 +14,20 @@ const (
 	// ModeNetBox queries the NetBox REST API directly. This is the default and
 	// the only mode implemented today.
 	ModeNetBox ProviderMode = "netbox"
-	// ModeNCS queries a Network Context Service — a high-volume enrichment
-	// projection of NetBox tuned for NetBox Cloud/Enterprise. Reserved for a
-	// fast-follow release; see pkg/provider/ncs.
-	ModeNCS ProviderMode = "ncs"
 )
 
 // PluginSettings holds the non-secret configuration for a datasource instance.
 type PluginSettings struct {
-	// URL is the base URL of the NetBox instance (or NCS endpoint), e.g.
+	// URL is the base URL of the NetBox instance, e.g.
 	// https://netbox.example.com — without a trailing /api.
 	URL string `json:"url"`
 	// PublicURL, when set, is where users' browsers reach NetBox if that
 	// differs from URL (compose/k8s service DNS). Deep-link URLs in results
 	// are rewritten from URL's base to PublicURL's. Empty = no rewrite.
 	PublicURL string `json:"publicUrl"`
-	// Mode selects the enrichment backend. Defaults to "netbox".
+	// Mode selects the enrichment backend. Defaults to "netbox" — the only
+	// implemented backend today. The field is kept as the seam for a planned
+	// second, high-volume backend; there is no UI selector until that ships.
 	Mode ProviderMode `json:"mode"`
 	// TLSSkipVerify disables TLS certificate verification (self-signed certs).
 	TLSSkipVerify bool `json:"tlsSkipVerify"`

@@ -16,7 +16,6 @@ datasources:
       # Browser-facing NetBox base for deep links, when the URL above is an
       # internal address (compose/k8s DNS). Empty = links pass through verbatim.
       publicUrl: ${NETBOX_PUBLIC_URL}
-      mode: netbox
       tlsSkipVerify: false
       timeoutSeconds: 30
     secureJsonData:

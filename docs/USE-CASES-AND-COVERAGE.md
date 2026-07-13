@@ -1,8 +1,8 @@
 # NetBox data source — use cases & coverage
 
 A map of what operators want to do with a NetBox data source in Grafana, how well the
-plugin covers each today, and where the gaps are. See [ARCHITECTURE.md](../ARCHITECTURE.md)
-for how it works.
+plugin covers each today, and where the gaps are. See the README's
+[Architecture](../README.md#architecture) section for how it works.
 
 ## Two enrichment paradigms
 
@@ -20,8 +20,8 @@ cardinality, requires pipeline changes.
 **2. Query-time join (this plugin).** NetBox context is fetched live and joined onto _any_
 datasource's results in the panel. Always current, zero metric-cardinality cost, works
 across Prometheus **and** Loki/Influx/Tempo/SQL, no pipeline changes. Downsides: join-key
-friction and client-side join cost at high scale (the latter is what the future NCS mode
-mitigates).
+friction and client-side join cost at high scale (the latter is what the planned
+high-volume enrichment backend mitigates).
 
 > There is **no first-class NetBox data source in the Grafana catalog today** — every
 > existing integration is the indirect relabeling path. This plugin is greenfield and
@@ -72,9 +72,9 @@ value**, with the **same field name**. Common mismatches:
 
 ## Remaining gaps, ranked by value
 
-1. **Scale path (NCS + response cache)** — query-time joins on thousands of objects get heavy
-   client-side; high-frequency alerting multiplies NetBox load. The concrete justification for
-   the NCS mode (stubbed behind the provider seam).
+1. **Scale path (high-volume backend + response cache)** — query-time joins on thousands of
+   objects get heavy client-side; high-frequency alerting multiplies NetBox load. The concrete
+   justification for the planned high-volume enrichment backend (behind the provider seam).
 2. **Alert-notification enrichment** (#12) — rules work today via count queries; enriching the
    _notification_ with owner/contact from NetBox is open (pairs with #13's contact resolver).
 3. **Topology depth** (#7, #9) — trace cables through patch panels (front/rear-port
@@ -88,4 +88,4 @@ None require rearchitecting — the provider seam and frame model already accomm
 Enrichment is covered end to end: joins with server-side key shaping (1–4), inventory +
 deep links (5), change annotations (6), topology node graph (7), geomap (8), utilization
 (10), multi-tenant (11), and count-backed alert rules (12). The remaining work is scale
-(NCS) and notification enrichment.
+(the planned high-volume enrichment backend) and notification enrichment.

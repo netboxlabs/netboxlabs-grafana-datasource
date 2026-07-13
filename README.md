@@ -72,7 +72,6 @@ Add the data source (**Connections → Data sources → NetBox**) and set:
 
 | Field               | Description                                                                                                                                                                                                     |
 | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Mode**            | `NetBox REST API` (default). `Network Context Service` is reserved for a future release — see [Modes](#modes).                                                                                                  |
 | **NetBox URL**      | Base URL of your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`).                                                                                                                       |
 | **Browser URL**     | Optional. Where users' browsers reach NetBox when Grafana connects over an internal address (Docker/k8s service DNS). Deep links are rewritten to this base; leave empty if the URL above is browser-reachable. |
 | **API Token**       | A NetBox API token. Both classic 40-character (v1) tokens and `nbt_…` (v2) tokens are auto-detected. Stored encrypted.                                                                                          |
@@ -93,7 +92,6 @@ datasources:
       url: ${NETBOX_URL}
       # Browser-facing base for deep links, if url is not browser-reachable.
       publicUrl: ${NETBOX_PUBLIC_URL}
-      mode: netbox
     secureJsonData:
       apiToken: ${NETBOX_API_TOKEN}
 ```
@@ -339,13 +337,13 @@ long"_). So to alert on NetBox, return a **count**:
 > from the API response envelope. To change what's counted, adjust the query's **filters**
 > (e.g. `status = offline`); the **Limit** field has no effect on a count-only query.
 
-**Evaluation interval — mind your NetBox load.** Alert rules poll on a schedule, 24/7. In
-the default direct-REST mode, every evaluation is a live NetBox API call, so that load
-lands on your NetBox instance. A count-only query fetches just one page per evaluation, so
+**Evaluation interval — mind your NetBox load.** Alert rules poll on a schedule, 24/7.
+Every evaluation is a live NetBox API call, so that load lands on your NetBox
+instance. A count-only query fetches just one page per evaluation, so
 each check is light regardless of how many objects match — the levers on load are the
 **evaluation interval** and the **number of rules**. Choose sensible intervals (start at
 **1m or longer**, and lengthen for many rules). High-frequency alerting at scale is the
-motivation for the managed context backend (zero load on NetBox).
+motivation for the planned high-volume enrichment backend (zero load on NetBox).
 
 ## Dynamic object-type discovery
 
@@ -356,13 +354,22 @@ nested references become readable values (`site`) plus their ids/slugs (`site_id
 `site_slug`), choice fields expose both label and value, and custom fields are hoisted to
 `cf_*` columns.
 
-## Modes
+## Architecture
 
-The data source talks to NetBox through a small provider interface. Today the only
-implementation is the **NetBox REST API**. A second mode — the **Network Context Service
-(NCS)**, a high-volume enrichment projection of NetBox for NetBox Cloud/Enterprise — is a
-planned fast-follow and slots in behind the same interface. See
-[ARCHITECTURE.md](./ARCHITECTURE.md).
+The datasource never imports a NetBox client directly — it depends only on the small
+[`provider.Provider`](./pkg/provider/provider.go) interface. Today the only
+implementation is the **NetBox REST API**. A second backend — a high-volume enrichment
+projection of NetBox for NetBox Cloud/Enterprise — is planned, and slots in behind the
+same interface as a drop-in rather than a rewrite.
+
+Two more choices shape the code:
+
+- **Generic over hard-coded.** Nothing is model-specific — object types and columns come
+  from [dynamic discovery](#dynamic-object-type-discovery), so new NetBox versions and
+  plugin models are supported the day they ship.
+- **Joinability is the product.** The frame contract (non-nullable string keys, table
+  visualization, data links that survive joins) is tuned so the Outer-join transformation
+  "just works" against any metric source.
 
 ## Grafana Cloud
 

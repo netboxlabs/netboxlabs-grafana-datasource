@@ -40,7 +40,9 @@ func frameName(objectType string) string {
 	return "netbox_" + strings.ReplaceAll(last, "-", "_")
 }
 
-// buildField creates a typed data.Field for a column by scanning its values.
+// buildField creates a typed data.Field for a column by scanning its values:
+// numbers → nullable float, booleans → nullable bool, known timestamp columns →
+// time, everything else → non-nullable string.
 func buildField(name string, rows []map[string]interface{}) *data.Field {
 	switch classifyColumn(name, rows) {
 	case colBool:

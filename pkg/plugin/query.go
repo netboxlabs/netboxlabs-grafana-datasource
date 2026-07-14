@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -35,6 +36,14 @@ type queryModel struct {
 	// Count, when true on an objects query, returns a single-value numeric
 	// "count" frame (row count) instead of the table — used by alert rules.
 	Count bool `json:"count"`
+	// AlertTable, when true on an objects query, reshapes the result into the
+	// tabular form Grafana alerting evaluates: string label columns plus one
+	// numeric "value" column, one alert instance per row. Count wins if both
+	// are set.
+	AlertTable bool `json:"alertTable"`
+	// ValueField names the column that supplies the numeric value for
+	// AlertTable (e.g. "utilization"). Empty means a constant 1 per row.
+	ValueField string `json:"valueField"`
 	// ObjectTypes optionally restricts annotation queries to specific NetBox
 	// content types (e.g. "dcim.device").
 	ObjectTypes []string `json:"objectTypes"`
@@ -117,6 +126,31 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 			return backend.ErrDataResponse(backend.StatusInternal, err.Error())
 		}
 		frame := buildCountFrame(qm.ObjectType, res.Total)
+		frame.RefID = q.RefID
+		return backend.DataResponse{Frames: data.Frames{frame}}
+	}
+
+	if qm.AlertTable {
+		fields := qm.Fields
+		if qm.ValueField != "" && len(fields) > 0 && !slices.Contains(fields, qm.ValueField) {
+			fields = append(slices.Clone(fields), qm.ValueField)
+		}
+		res, err := d.provider.Query(ctx, provider.QuerySpec{
+			ObjectType: qm.ObjectType,
+			Filters:    qm.Filters,
+			Fields:     fields,
+			Limit:      qm.Limit,
+		})
+		if err != nil {
+			return backend.ErrDataResponse(backend.StatusInternal, err.Error())
+		}
+		if qm.ValueField != "" && !slices.Contains(res.Columns, qm.ValueField) {
+			return backend.ErrDataResponse(backend.StatusBadRequest,
+				fmt.Sprintf("value field %q not found in results — add it to Return fields", qm.ValueField))
+		}
+		applyJoinKeys(res, qm.JoinKeys)
+		rewriteLinks(res, d.provider.BaseURL(), d.cfg.PublicURL)
+		frame := buildAlertFrame(qm.ObjectType, res, qm.ValueField)
 		frame.RefID = q.RefID
 		return backend.DataResponse{Frames: data.Frames{frame}}
 	}

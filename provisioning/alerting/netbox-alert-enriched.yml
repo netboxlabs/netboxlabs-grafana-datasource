@@ -1,0 +1,56 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: netbox-alerting-enriched
+    folder: NetBox
+    interval: 1m
+    rules:
+      - uid: netbox-alert-enriched
+        title: NetBox offline devices (enriched)
+        # Query A uses alertTable: string columns (name/site/role/tenant)
+        # become alert-instance labels; the numeric "value" column is a
+        # constant 1 per matching row, thresholded > 0 — one alert instance
+        # per offline device, carrying its NetBox context as labels.
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: >-
+            Device {{ $labels.name }} ({{ $labels.role }}) at
+            {{ $labels.site }} is offline.
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: netboxlabs-netbox-alerting
+            model:
+              refId: A
+              datasource:
+                type: netboxlabs-netbox-datasource
+                uid: netboxlabs-netbox-alerting
+              queryType: objects
+              objectType: dcim/devices
+              alertTable: true
+              filters:
+                - field: status
+                  operator: ''
+                  value: offline
+              fields: [name, site, role, tenant]
+              limit: 500
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]

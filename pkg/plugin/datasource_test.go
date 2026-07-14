@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,6 +26,7 @@ type fakeProvider struct {
 	ipResult  *provider.Result
 	graph     *provider.Graph
 	topoSpec  provider.TopologySpec // captured by Topology for passthrough asserts
+	querySpec provider.QuerySpec    // captured by Query for passthrough asserts
 }
 
 func (f *fakeProvider) Name() string    { return "fake" }
@@ -38,7 +40,8 @@ func (f *fakeProvider) ObjectTypes(context.Context) ([]provider.ObjectType, erro
 func (f *fakeProvider) Fields(context.Context, string) ([]provider.Field, error) {
 	return []provider.Field{{Name: "name", Type: provider.FieldTypeString}}, nil
 }
-func (f *fakeProvider) Query(context.Context, provider.QuerySpec) (*provider.Result, error) {
+func (f *fakeProvider) Query(_ context.Context, spec provider.QuerySpec) (*provider.Result, error) {
+	f.querySpec = spec
 	return f.result, nil
 }
 func (f *fakeProvider) FieldValues(context.Context, string, string, string, int) ([]string, error) {
@@ -208,4 +211,131 @@ func TestResource_Query(t *testing.T) {
 	if len(got.Rows) != 1 {
 		t.Errorf("rows = %d", len(got.Rows))
 	}
+}
+
+func TestQueryData_AlertTable(t *testing.T) {
+	d := newTestDatasource(&fakeProvider{
+		result: &provider.Result{
+			Columns: []string{"name", "site", "status"},
+			Rows: []map[string]interface{}{
+				{"name": "leaf1", "site": "dc1", "status": "offline"},
+				{"name": "leaf2", "site": "dc2", "status": "offline"},
+			},
+		},
+	})
+	req := &backend.QueryDataRequest{
+		Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(`{"objectType":"dcim/devices","alertTable":true}`)}},
+	}
+	resp, err := d.QueryData(context.Background(), req)
+	if err != nil {
+		t.Fatalf("QueryData: %v", err)
+	}
+	dr := resp.Responses["A"]
+	if dr.Error != nil {
+		t.Fatalf("response error: %v", dr.Error)
+	}
+	if len(dr.Frames) != 1 {
+		t.Fatalf("frames = %d, want 1", len(dr.Frames))
+	}
+	f := dr.Frames[0]
+	last := f.Fields[len(f.Fields)-1]
+	if last.Name != "value" {
+		t.Fatalf("last field = %q, want value", last.Name)
+	}
+	if last.Len() != 2 || last.At(0).(float64) != 1 {
+		t.Errorf("value column = len %d first %v, want len 2 first 1", last.Len(), last.At(0))
+	}
+	// count precedence: count:true beats alertTable:true
+	req2 := &backend.QueryDataRequest{
+		Queries: []backend.DataQuery{{RefID: "B", JSON: []byte(`{"objectType":"dcim/devices","alertTable":true,"count":true}`)}},
+	}
+	resp2, _ := d.QueryData(context.Background(), req2)
+	f2 := resp2.Responses["B"].Frames[0]
+	if f2.Fields[0].Name != "count" {
+		t.Errorf("count should win over alertTable, got field %q", f2.Fields[0].Name)
+	}
+}
+
+func TestQueryData_AlertTable_MissingValueField(t *testing.T) {
+	d := newTestDatasource(&fakeProvider{
+		result: &provider.Result{
+			Columns: []string{"prefix", "site"},
+			Rows:    []map[string]interface{}{{"prefix": "10.0.0.0/24", "site": "dc1"}},
+		},
+	})
+	req := &backend.QueryDataRequest{
+		Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(`{"objectType":"ipam/prefixes","alertTable":true,"valueField":"utilization"}`)}},
+	}
+	resp, err := d.QueryData(context.Background(), req)
+	if err != nil {
+		t.Fatalf("QueryData: %v", err)
+	}
+	if resp.Responses["A"].Error == nil {
+		t.Fatal("expected an error when valueField is absent from results, got none")
+	}
+}
+
+// TestQueryData_AlertTable_ValueFieldProjection locks both halves of the
+// query.go:135 guard that appends an implied Value field to Fields:
+//   - a non-empty requested subset gets the Value field appended when missing,
+//     without losing the originally requested fields;
+//   - an empty requested subset (meaning "all fields") is left empty — the
+//     len(fields)>0 guard must not narrow it down to just the Value field.
+func TestQueryData_AlertTable_ValueFieldProjection(t *testing.T) {
+	t.Run("value field appended to a non-empty subset", func(t *testing.T) {
+		fp := &fakeProvider{
+			result: &provider.Result{
+				Columns: []string{"name", "site", "utilization"},
+				Rows: []map[string]interface{}{
+					{"name": "leaf1", "site": "dc1", "utilization": 42.0},
+				},
+			},
+		}
+		d := newTestDatasource(fp)
+		req := &backend.QueryDataRequest{
+			Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(
+				`{"objectType":"ipam/prefixes","alertTable":true,"fields":["name","site"],"valueField":"utilization"}`,
+			)}},
+		}
+		resp, err := d.QueryData(context.Background(), req)
+		if err != nil {
+			t.Fatalf("QueryData: %v", err)
+		}
+		if dr := resp.Responses["A"]; dr.Error != nil {
+			t.Fatalf("response error: %v", dr.Error)
+		}
+		if !slices.Contains(fp.querySpec.Fields, "utilization") {
+			t.Errorf("provider Fields = %v, want it to contain the appended valueField %q", fp.querySpec.Fields, "utilization")
+		}
+		if !slices.Contains(fp.querySpec.Fields, "name") || !slices.Contains(fp.querySpec.Fields, "site") {
+			t.Errorf("provider Fields = %v, want it to still contain the originally requested fields", fp.querySpec.Fields)
+		}
+	})
+
+	t.Run("empty requested fields stay empty despite a value field", func(t *testing.T) {
+		fp := &fakeProvider{
+			result: &provider.Result{
+				Columns: []string{"name", "site", "utilization"},
+				Rows: []map[string]interface{}{
+					{"name": "leaf1", "site": "dc1", "utilization": 42.0},
+				},
+			},
+		}
+		d := newTestDatasource(fp)
+		req := &backend.QueryDataRequest{
+			Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(
+				`{"objectType":"ipam/prefixes","alertTable":true,"valueField":"utilization"}`,
+			)}},
+		}
+		resp, err := d.QueryData(context.Background(), req)
+		if err != nil {
+			t.Fatalf("QueryData: %v", err)
+		}
+		if dr := resp.Responses["A"]; dr.Error != nil {
+			t.Fatalf("response error: %v", dr.Error)
+		}
+		if len(fp.querySpec.Fields) != 0 {
+			t.Errorf("provider Fields = %v, want empty (len(fields)>0 guard must not narrow an unset field selection)", fp.querySpec.Fields)
+		}
+	})
 }

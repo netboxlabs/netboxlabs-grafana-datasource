@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -296,4 +297,70 @@ func buildCountFrame(objectType string, n int) *data.Frame {
 	return data.NewFrame(frameName(objectType),
 		data.NewField("count", nil, []float64{float64(n)}),
 	)
+}
+
+// buildAlertFrame reshapes a Result into the tabular form Grafana alerting
+// evaluates: every column except valueField becomes a plain string label
+// column, plus exactly one numeric column named "value" (each row is one
+// alert instance). valueField == "" emits a constant 1 per row — "this row
+// matched the filters"; otherwise the named column supplies the number
+// (unparseable values become 0).
+//
+// The frame is tagged numeric-long (the dataplane "SQL table" contract: string
+// fields are labels, numeric fields are values). Without this type tag Grafana's
+// server-side expression engine cannot classify the multi-row frame and a
+// Reduce/Threshold step fails with "input data must be a wide series but got
+// type ...". The tag lets Grafana convert it to numeric-multi — one series per
+// row, keyed by the string columns — so a Threshold expression yields one alert
+// instance per row with those columns as labels.
+func buildAlertFrame(objectType string, res *provider.Result, valueField string) *data.Frame {
+	frame := data.NewFrame(frameName(objectType))
+	frame.Meta = &data.FrameMeta{
+		Type:        data.FrameTypeNumericLong,
+		TypeVersion: data.FrameTypeVersion{0, 1},
+	}
+
+	for _, col := range res.Columns {
+		if col == valueField {
+			continue
+		}
+		vals := make([]string, len(res.Rows))
+		for i, r := range res.Rows {
+			vals[i] = toString(r[col])
+		}
+		frame.Fields = append(frame.Fields, data.NewField(col, nil, vals))
+	}
+
+	nums := make([]float64, len(res.Rows))
+	for i, r := range res.Rows {
+		if valueField == "" {
+			nums[i] = 1
+			continue
+		}
+		nums[i] = toFloat(r[valueField])
+	}
+	frame.Fields = append(frame.Fields, data.NewField("value", nil, nums))
+	return frame
+}
+
+// toFloat coerces a JSON-native value to a float64, returning 0 when the
+// value is missing, unparseable, or of an unsupported type.
+func toFloat(v interface{}) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case bool:
+		if x {
+			return 1
+		}
+		return 0
+	case string:
+		n, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		if err != nil {
+			return 0
+		}
+		return n
+	default:
+		return 0
+	}
 }

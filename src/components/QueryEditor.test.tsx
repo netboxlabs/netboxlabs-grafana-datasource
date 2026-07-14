@@ -40,3 +40,40 @@ describe('QueryEditor — Return count only', () => {
     expect(screen.queryByRole('switch', { name: /Return count only/i })).not.toBeInTheDocument();
   });
 });
+
+describe('QueryEditor — Alert table', () => {
+  it('toggles alert table mode and clears count', async () => {
+    const { onChange, onRunQuery } = setup({ count: true });
+    const sw = await screen.findByRole('switch', { name: /Alert table/i });
+    expect(sw).toBeInTheDocument();
+    expect(sw).not.toBeChecked();
+
+    fireEvent.click(sw);
+
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ alertTable: true, count: false }));
+    expect(onRunQuery).toHaveBeenCalled();
+  });
+
+  it('clears valueField when alert table mode is toggled off', async () => {
+    const { onChange } = setup({ alertTable: true, valueField: 'utilization' });
+    const sw = await screen.findByRole('switch', { name: /Alert table/i });
+    expect(sw).toBeChecked();
+
+    fireEvent.click(sw);
+
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ alertTable: false, valueField: undefined })
+    );
+  });
+
+  it('clears valueField when Return count only is toggled on', async () => {
+    const { onChange } = setup({ alertTable: true, valueField: 'utilization' });
+    const sw = await screen.findByRole('switch', { name: /Return count only/i });
+
+    fireEvent.click(sw);
+
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ count: true, alertTable: false, valueField: undefined })
+    );
+  });
+});

@@ -166,33 +166,11 @@ calls per row), so ordinary IPAM queries are unaffected.
 
 ## Alerting
 
-The data source is alerting-capable (`backend: true` + `alerting: true` in `plugin.json`),
-so NetBox queries can back **Grafana-managed alert rules**. Alerting itself is native to
-Grafana — the data source only supplies query results; alert rules, evaluation, and
-notifications are configured in Grafana.
-
-Grafana's alert expressions evaluate a **number**, not a table. A normal object query
-returns a table, which alerting rejects (_"input data must be a wide series but got type
-long"_). So to alert on NetBox, return a **count**:
-
-1. **New alert rule** → query **A**: data source **NetBox**, query type **Objects**,
-   object type e.g. `dcim/devices` (add filters as needed, e.g. `status = offline`), and
-   enable **Return count only**. The query now emits a single numeric `count`.
-2. Add a **Threshold** expression on **A** (e.g. _IS ABOVE 0_ to fire when any matching
-   object exists) and set it as the alert condition.
-
-> The `count` is the **total number of matching objects** reported by NetBox, independent
-> of the query's **Limit** — a count-only query fetches a single page and reads the total
-> from the API response envelope. To change what's counted, adjust the query's **filters**
-> (e.g. `status = offline`); the **Limit** field has no effect on a count-only query.
-
-**Evaluation interval — mind your NetBox load.** Alert rules poll on a schedule, 24/7.
-Every evaluation is a live NetBox API call, so that load lands on your NetBox
-instance. A count-only query fetches just one page per evaluation, so
-each check is light regardless of how many objects match — the levers on load are the
-**evaluation interval** and the **number of rules**. Choose sensible intervals (start at
-**1m or longer**, and lengthen for many rules). High-frequency alerting at scale is the
-motivation for the planned high-volume enrichment backend (zero load on NetBox).
+Alert on NetBox state itself — object counts ("fewer than N active devices"),
+per-object conditions with context labels (offline devices, hot prefixes), and
+"who do I page?" contact resolution. The full guide, including how to put
+NetBox context onto alert labels, annotations and notifications, is
+[docs/ALERTING.md](./docs/ALERTING.md).
 
 ## Grafana Cloud
 

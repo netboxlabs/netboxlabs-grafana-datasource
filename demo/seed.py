@@ -152,6 +152,24 @@ for slug, site_id in sites.items():
             {"name": name, "device_type": dtype, "role": roles[ROLE_OF[suffix]],
              "site": site_id, "tenant": tenant, "status": "active"}, name)
 
+print("== contacts (who do I page?) ==")
+# One NOC contact assigned to AMS1-leaf-01 for the "who do I page?" recipe
+# (docs/ALERTING.md). AMS1-leaf-01 is also the device incident.py takes
+# offline (see demo/docker-compose.full.yaml INCIDENT_DEVICE), so the
+# enriched alert rule's contact-assignment lookup resolves for the device
+# that's actually firing.
+noc_role = goc("tenancy/contact-roles", {"slug": "noc"},
+               {"name": "NOC", "slug": "noc"}, "NOC")
+noc = goc("tenancy/contacts", {"name": "NOC (Dunder-Mifflin)"},
+          {"name": "NOC (Dunder-Mifflin)", "email": "noc@dm.example"},
+          "NOC (Dunder-Mifflin)")
+noc_device = devices[("ams1", "leaf-01")]
+goc("tenancy/contact-assignments",
+    {"contact_id": noc, "object_type": "dcim.device", "object_id": noc_device},
+    {"object_type": "dcim.device", "object_id": noc_device, "contact": noc,
+     "role": noc_role, "priority": "primary"},
+    "NOC -> AMS1-leaf-01")
+
 print("== interfaces + cables ==")
 # One Ethernet1 per device by default; devices with two fabric links (the
 # spine, and leaf-01 which also drops to access) get an Ethernet2 too. Link

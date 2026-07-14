@@ -29,6 +29,10 @@ Initial release of the NetBox data source for Grafana.
 - Grafana-managed **alerting** support: count-only object queries (**Return count only**)
   emit a single number suitable for alert rules; a sample provisioned alert rule ships in
   `provisioning/alerting/`.
+- Alert-table query mode: per-row alert instances with NetBox context as
+  labels (one numeric `value` column — constant 1 or a chosen field), plus
+  docs/ALERTING.md with label/annotation, "who do I page?", and webhook
+  enrichment recipes.
 - **Prefix/IP utilization**: opt-in `utilization` (%), `used` and `available` columns for
   `ipam/prefixes` and `ipam/ip-ranges`, computed to match NetBox's own `get_utilization()`
   (containers, pools, `mark_utilized`, utilized child ranges, VRF-scoped).

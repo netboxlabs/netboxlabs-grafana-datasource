@@ -145,3 +145,84 @@ func TestBuildNodeGraphFrames_EdgeKind(t *testing.T) {
 	}
 	t.Fatal("edges frame missing detail__kind field")
 }
+
+func TestBuildAlertFrame_NumericLongType(t *testing.T) {
+	res := &provider.Result{
+		Columns: []string{"name", "site"},
+		Rows:    []map[string]interface{}{{"name": "leaf1", "site": "dc1"}},
+	}
+	f := buildAlertFrame("dcim/devices", res, "")
+
+	// Grafana's server-side expression engine (Reduce/Threshold) rejects an
+	// untyped multi-row string+numeric frame ("input data must be a wide series
+	// but got type ..."). Declaring numeric-long lets it convert the frame to
+	// numeric-multi — one alert instance per row, string columns as labels.
+	if f.Meta == nil {
+		t.Fatal("alert frame has no Meta; SSE cannot classify it")
+	}
+	if f.Meta.Type != data.FrameTypeNumericLong {
+		t.Errorf("Meta.Type = %q, want %q", f.Meta.Type, data.FrameTypeNumericLong)
+	}
+	if f.Meta.TypeVersion != (data.FrameTypeVersion{0, 1}) {
+		t.Errorf("Meta.TypeVersion = %v, want {0 1}", f.Meta.TypeVersion)
+	}
+}
+
+func TestBuildAlertFrame_ConstantValue(t *testing.T) {
+	res := &provider.Result{
+		Columns: []string{"name", "site", "role"},
+		Rows: []map[string]interface{}{
+			{"name": "leaf1", "site": "dc1", "role": "switch"},
+			{"name": "rtr1", "site": "dc2", "role": nil}, // nil label -> ""
+		},
+	}
+	f := buildAlertFrame("dcim/devices", res, "")
+
+	if f.Name != "netbox_devices" {
+		t.Errorf("frame name = %q, want netbox_devices", f.Name)
+	}
+	if len(f.Fields) != 4 {
+		t.Fatalf("fields = %d, want 4 (3 labels + value)", len(f.Fields))
+	}
+	// Exactly one numeric column, named "value", and it is the last field.
+	last := f.Fields[len(f.Fields)-1]
+	if last.Name != "value" {
+		t.Errorf("last field = %q, want value", last.Name)
+	}
+	for _, fld := range f.Fields[:len(f.Fields)-1] {
+		if _, ok := fld.At(0).(string); !ok {
+			t.Errorf("label field %q is not a plain string", fld.Name)
+		}
+	}
+	if got := last.At(0).(float64); got != 1 {
+		t.Errorf("value[0] = %v, want 1", got)
+	}
+	if got := f.Fields[2].At(1).(string); got != "" {
+		t.Errorf("nil label = %q, want empty string", got)
+	}
+}
+
+func TestBuildAlertFrame_ValueField(t *testing.T) {
+	res := &provider.Result{
+		Columns: []string{"prefix", "site", "utilization"},
+		Rows: []map[string]interface{}{
+			{"prefix": "10.0.0.0/24", "site": "dc1", "utilization": 87.5},
+			{"prefix": "10.0.1.0/24", "site": "dc1", "utilization": "42"},   // numeric string parses
+			{"prefix": "10.0.2.0/24", "site": "dc2", "utilization": "n/a"}, // unparseable -> 0
+		},
+	}
+	f := buildAlertFrame("ipam/prefixes", res, "utilization")
+
+	if len(f.Fields) != 3 {
+		t.Fatalf("fields = %d, want 3 (prefix, site, value)", len(f.Fields))
+	}
+	if f.Fields[0].Name != "prefix" || f.Fields[1].Name != "site" || f.Fields[2].Name != "value" {
+		t.Fatalf("field names = %q,%q,%q", f.Fields[0].Name, f.Fields[1].Name, f.Fields[2].Name)
+	}
+	want := []float64{87.5, 42, 0}
+	for i, w := range want {
+		if got := f.Fields[2].At(i).(float64); got != w {
+			t.Errorf("value[%d] = %v, want %v", i, got, w)
+		}
+	}
+}

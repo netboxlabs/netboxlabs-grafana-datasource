@@ -36,6 +36,13 @@ export interface NetBoxQuery extends DataQuery {
    * instead of a table. Required to alert on object counts — Grafana alert
    * expressions evaluate a number, not a table. */
   count?: boolean;
+  /** For objects queries: reshape the result for Grafana alerting — string
+   * label columns plus one numeric `value` column, one alert instance per
+   * row. Mutually exclusive with `count` (the editor enforces it). */
+  alertTable?: boolean;
+  /** Column supplying the numeric value in alert-table mode (e.g.
+   * 'utilization'). Empty = constant 1 per row. */
+  valueField?: string;
   limit?: number;
   /** Derived key columns so the result lines up with metric labels. */
   joinKeys?: JoinKeyMapping[];

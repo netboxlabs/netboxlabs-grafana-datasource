@@ -113,7 +113,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             value={typeOptions.find((o) => o.value === query.objectType) ?? null}
             placeholder="Select an object type (e.g. Devices)"
             onChange={(v) => {
-              update({ objectType: v?.value, fields: [], filters: [] });
+              update({ objectType: v?.value, fields: [], filters: [], valueField: undefined });
               onRunQuery();
             }}
           />
@@ -252,7 +252,49 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             label="Return count only"
             value={query.count ?? false}
             onChange={(e) => {
-              update({ count: e.currentTarget.checked });
+              update({ count: e.currentTarget.checked, alertTable: false, valueField: undefined });
+              onRunQuery();
+            }}
+          />
+        </InlineField>
+      )}
+
+      {queryType === 'objects' && (
+        <InlineField
+          label="Alert table"
+          labelWidth={20}
+          tooltip="Shape the result for Grafana alerting: every selected column becomes an alert label and a single numeric 'value' column drives the condition — one alert instance per row. Pick a Value field (e.g. utilization) or leave it empty to emit a constant 1 per matching object."
+        >
+          <InlineSwitch
+            label="Alert table"
+            value={query.alertTable ?? false}
+            onChange={(e) => {
+              update({
+                alertTable: e.currentTarget.checked,
+                count: false,
+                valueField: e.currentTarget.checked ? query.valueField : undefined,
+              });
+              onRunQuery();
+            }}
+          />
+        </InlineField>
+      )}
+
+      {queryType === 'objects' && (query.alertTable ?? false) && (
+        <InlineField
+          label="Value field"
+          labelWidth={20}
+          tooltip="Numeric column used as the alert value. Leave empty to emit a constant 1 per row (alert on existence, e.g. offline devices)."
+        >
+          <Select
+            inputId="query-alert-value-field"
+            width={40}
+            isClearable
+            placeholder="constant 1"
+            options={fieldOptions}
+            value={query.valueField ? { label: query.valueField, value: query.valueField } : null}
+            onChange={(v) => {
+              update({ valueField: v?.value ?? undefined });
               onRunQuery();
             }}
           />

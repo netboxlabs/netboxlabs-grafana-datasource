@@ -12,3 +12,15 @@ test('alerting: NetBox object-count rule evaluates', async ({
   const alertRuleEditPage = await gotoAlertRuleEditPage(alertRule);
   await expect(alertRuleEditPage.evaluate()).toBeOK();
 });
+
+// Proves the alertTable-shaped rule also evaluates: the provisioned enriched
+// rule (query (alertTable) -> Threshold) reshapes offline devices into one
+// alert instance per row, carrying NetBox context as labels.
+test('alerting: NetBox alert-enriched rule evaluates', async ({
+  readProvisionedAlertRule,
+  gotoAlertRuleEditPage,
+}) => {
+  const alertRule = await readProvisionedAlertRule({ fileName: 'netbox-alert-enriched.yml' });
+  const alertRuleEditPage = await gotoAlertRuleEditPage(alertRule);
+  await expect(alertRuleEditPage.evaluate()).toBeOK();
+});

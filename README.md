@@ -192,10 +192,16 @@ for the catalog/signing checklist.
 A one-command stack that exercises the enrichment recipes and prefix/IP utilization above
 end to end.
 
-- **Full mode** (self-contained): `./demo/run.sh` — builds the plugin, then brings up a real,
-  seeded NetBox (a multi-site fabric), Prometheus, Loki, synthetic telemetry, and Grafana at
-  [http://localhost:3001](http://localhost:3001) (anonymous admin) with the dashboard above
-  pre-provisioned. First boot seeds NetBox, ~2-3 min.
+**Prerequisites:** Docker Desktop (or an equivalent Docker daemon) running, and Node.js/npm
+on `PATH`. `mage`/Go are optional — if `mage` isn't installed, the script builds the backend
+in a `golang:1.26` container instead.
+
+- **Full mode** (self-contained): `./demo/run.sh` — installs npm dependencies and builds the
+  plugin if needed, then brings up a real, seeded NetBox (a multi-site fabric), Prometheus,
+  Loki, synthetic telemetry, and Grafana at [http://localhost:3001](http://localhost:3001)
+  (anonymous admin) with the dashboard above pre-provisioned. First run additionally builds
+  the frontend and both backend binaries (a few minutes, mostly Go module/image downloads);
+  after that, NetBox seeding is the only wait, ~2-3 min.
 - **Fast / bring-your-own-NetBox mode** — point the stack at your own NetBox instead of the
   bundled one (same script, so the plugin gets built too):
   ```bash
@@ -235,9 +241,14 @@ The Go toolchain floor follows the Grafana plugin SDK (currently Go 1.26 / SDK 0
 your local Go is older, build the backend in a container:
 
 ```bash
-docker run --rm -v "$PWD":/src -w /src -e GOOS=linux -e GOARCH=amd64 \
+docker run --rm -v "$PWD":/src -w /src -e GOOS=linux -e GOARCH=amd64 -e CGO_ENABLED=0 \
   golang:1.26 go build -o dist/gpx_netbox_linux_amd64 ./pkg
 ```
+
+`CGO_ENABLED=0` matters here: without it you get a binary dynamically linked against
+glibc, and Grafana's own image is musl-based (Alpine) — the plugin backend then fails
+`fork/exec` with a misleading "no such file or directory" (the missing piece is the ELF
+interpreter, not the binary itself).
 
 ## Testing
 

@@ -5,11 +5,32 @@
 # Extra args are passed to `docker compose up` (e.g. -d).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+if ! docker info >/dev/null 2>&1; then
+  echo "== Docker isn't running — start Docker Desktop (or your Docker daemon) and re-run this script ==" >&2
+  exit 1
+fi
+
 if [ ! -f dist/module.js ] || [ ! -f dist/gpx_netbox_linux_amd64 ] || [ ! -f dist/gpx_netbox_linux_arm64 ]; then
   echo "== building plugin (frontend + linux amd64/arm64 backend) =="
+  if [ ! -d node_modules ]; then
+    npm install
+  fi
   npm run build
-  mage build:linux
-  mage build:linuxARM64
+  if command -v mage >/dev/null 2>&1; then
+    mage build:linux
+    mage build:linuxARM64
+  else
+    echo "== mage not found — building backend in a golang:1.26 container instead =="
+    for arch in amd64 arm64; do
+      # CGO_ENABLED=0: Grafana's own image is musl-based (Alpine), so a
+      # dynamically-linked glibc binary fails fork/exec with a misleading
+      # "no such file or directory" (the missing piece is the ELF interpreter,
+      # not the binary). Static linking sidesteps libc entirely.
+      docker run --rm -v "$PWD":/src -w /src -e GOOS=linux -e GOARCH="$arch" -e CGO_ENABLED=0 \
+        golang:1.26 go build -o "dist/gpx_netbox_linux_$arch" ./pkg
+    done
+  fi
 fi
 if [ -n "${NETBOX_URL:-}" ]; then
   : "${NETBOX_TOKEN:?set NETBOX_TOKEN alongside NETBOX_URL for BYO mode}"

@@ -81,6 +81,30 @@ func (c *Client) getJSON(ctx context.Context, rawURL string, out interface{}) er
 	return nil
 }
 
+// getListPage fetches one page of a list endpoint, tolerating both the standard
+// DRF paginated envelope ({count,next,results}) and endpoints that return a bare
+// JSON array of objects (e.g. /api/plugins/installed-plugins/). A bare array is
+// normalized to a single page: Results = the array, Next = nil, Count = len.
+func (c *Client) getListPage(ctx context.Context, rawURL string) (listPage, error) {
+	body, err := c.getBytes(ctx, rawURL)
+	if err != nil {
+		return listPage{}, err
+	}
+	var page listPage
+	envErr := json.Unmarshal(body, &page)
+	if envErr == nil {
+		return page, nil
+	}
+	// Some endpoints return a bare JSON array instead of the envelope. There is
+	// no pagination cursor, so Count = len(arr) assumes the array is the full
+	// result set (true for known array endpoints, which ignore ?limit).
+	var arr []json.RawMessage
+	if json.Unmarshal(body, &arr) == nil {
+		return listPage{Count: len(arr), Results: arr}, nil
+	}
+	return listPage{}, fmt.Errorf("decode %s: %w", rawURL, envErr)
+}
+
 // getBytes performs an authenticated GET and returns the raw response body.
 func (c *Client) getBytes(ctx context.Context, rawURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)

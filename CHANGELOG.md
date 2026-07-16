@@ -9,6 +9,9 @@ Initial release of the NetBox data source for Grafana.
 - Unqueryable NetBox endpoints (e.g. action endpoints returning 405, or plugin
   models whose list 500s on pagination) now show a clear message instead of the
   raw API error/exception; the raw detail is logged for operators.
+- Object types whose NetBox endpoint returns a bare JSON array instead of the
+  paginated `{count,next,results}` envelope (e.g. **Installed Plugins**) now
+  parse and return rows, instead of failing with a JSON unmarshal error.
 - Topology: logical path edges by default (patch panels and circuits resolve to the far
   device via NetBox cable paths), `connections` query option (`logical`/`physical` — the
   physical view renders panels as nodes), wireless links, and an edge `kind` detail.

@@ -34,9 +34,9 @@ func mockNetBox(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/api/plugins/bgp/", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, `{"bgp-sessions":"%s/api/plugins/bgp/bgp-sessions/"}`, base)
 	})
-	// installed-plugins is a paginated collection, NOT a URL index.
+	// installed-plugins returns a BARE JSON ARRAY, not the DRF envelope (real NetBox behavior).
 	mux.HandleFunc("/api/plugins/installed-plugins/", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"name":"bgp"}]}`)
+		_, _ = fmt.Fprint(w, `[{"name":"NetBox Labs Console","package":"netbox_labs_console","version":"2.0.1"},{"name":"NetBox Branching","package":"netbox_branching","version":"1.0.4"}]`)
 	})
 	mux.HandleFunc("/api/status/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
@@ -405,5 +405,57 @@ func TestFilterFields_BranchCachePartition(t *testing.T) {
 	}
 	if len(branches) != 2 || branches[1] != "td5smq0f" {
 		t.Errorf("expected a second branch-scoped schema fetch; saw header values %v", branches)
+	}
+}
+
+func TestQuery_InstalledPlugins_BareArray(t *testing.T) {
+	p := newTestProvider(t)
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "plugins/installed-plugins", Limit: 10})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(res.Rows))
+	}
+	if res.Total != 2 {
+		t.Errorf("Total = %d, want 2 (len of bare array)", res.Total)
+	}
+	if !containsStr(res.Columns, "name") || !containsStr(res.Columns, "package") || !containsStr(res.Columns, "version") {
+		t.Errorf("columns missing plugin fields: %v", res.Columns)
+	}
+	if res.Rows[0]["package"] != "netbox_labs_console" {
+		t.Errorf("row0 package = %v, want netbox_labs_console", res.Rows[0]["package"])
+	}
+}
+
+// The bare-array path clamps Rows to the caller's limit while Total still
+// reports the full array length — the same split as the envelope path (Rows =
+// page, Total = full match count).
+func TestQuery_InstalledPlugins_BareArray_LimitClamp(t *testing.T) {
+	p := newTestProvider(t)
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "plugins/installed-plugins", Limit: 1})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Errorf("Rows = %d, want 1 (clamped to limit)", len(res.Rows))
+	}
+	if res.Total != 2 {
+		t.Errorf("Total = %d, want 2 (full array length, not the clamped page)", res.Total)
+	}
+}
+
+func TestFields_InstalledPlugins_BareArray(t *testing.T) {
+	p := newTestProvider(t)
+	fields, err := p.Fields(context.Background(), "plugins/installed-plugins")
+	if err != nil {
+		t.Fatalf("Fields: %v", err)
+	}
+	var names []string
+	for _, f := range fields {
+		names = append(names, f.Name)
+	}
+	if !containsStr(names, "name") || !containsStr(names, "package") || !containsStr(names, "version") {
+		t.Errorf("Fields missing plugin columns: %v", names)
 	}
 }

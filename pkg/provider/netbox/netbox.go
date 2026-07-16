@@ -274,8 +274,8 @@ func (p *Provider) fetchRows(ctx context.Context, objectType string, q url.Value
 	total := 0
 	firstPage := true
 	for next != "" && len(rows) < limit {
-		var page listPage
-		if err := p.client.getJSON(ctx, next, &page); err != nil {
+		page, err := p.client.getListPage(ctx, next)
+		if err != nil {
 			return nil, 0, err
 		}
 		if firstPage {

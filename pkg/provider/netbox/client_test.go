@@ -38,3 +38,41 @@ func TestGetBytes_BranchHeader(t *testing.T) {
 		t.Error("X-NetBox-Branch must be absent when no branch is set")
 	}
 }
+
+func TestGetListPage_ShapeTolerant(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	t.Run("envelope", func(t *testing.T) {
+		body = `{"count":3,"next":null,"results":[{"name":"a"}]}`
+		page, err := c.getListPage(context.Background(), srv.URL)
+		if err != nil {
+			t.Fatalf("getListPage: %v", err)
+		}
+		if page.Count != 3 || len(page.Results) != 1 || page.Next != nil {
+			t.Errorf("envelope not parsed: count=%d results=%d next=%v", page.Count, len(page.Results), page.Next)
+		}
+	})
+
+	t.Run("bare array normalized to one page", func(t *testing.T) {
+		body = `[{"name":"x"},{"name":"y"}]`
+		page, err := c.getListPage(context.Background(), srv.URL)
+		if err != nil {
+			t.Fatalf("getListPage: %v", err)
+		}
+		if page.Count != 2 || len(page.Results) != 2 || page.Next != nil {
+			t.Errorf("bare array not normalized: count=%d results=%d next=%v", page.Count, len(page.Results), page.Next)
+		}
+	})
+
+	t.Run("neither shape errors", func(t *testing.T) {
+		body = `"not a list"`
+		if _, err := c.getListPage(context.Background(), srv.URL); err == nil {
+			t.Error("expected an error for a non-list JSON body, got nil")
+		}
+	})
+}

@@ -45,6 +45,13 @@ type Field struct {
 	Type FieldType `json:"type"`
 }
 
+// FilterField is a queryable filter parameter for an object type and the set of
+// operators NetBox supports on it (operator tokens match Filter.Operator).
+type FilterField struct {
+	Name      string   `json:"name"`
+	Operators []string `json:"operators"`
+}
+
 // Filter is a single field/operator/value constraint applied to a query.
 type Filter struct {
 	Field    string `json:"field"`
@@ -148,6 +155,11 @@ type Provider interface {
 	// Fields returns the columns available for an object type, derived from a
 	// sample object so plugin models work without hard-coding.
 	Fields(ctx context.Context, objectType string) ([]Field, error)
+
+	// FilterFields returns the valid filter parameters for an object type and,
+	// for each, the operators NetBox supports — so the editor can offer only
+	// combinations the API honors. Empty result ⇒ caller should fall back.
+	FilterFields(ctx context.Context, objectType string) ([]FilterField, error)
 
 	// Query executes an object query and returns flattened, joinable rows.
 	Query(ctx context.Context, spec QuerySpec) (*Result, error)

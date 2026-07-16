@@ -4,11 +4,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 
 	"github.com/netboxlabs/netbox/pkg/provider"
 )
+
+// sanitizeLog strips CR/LF from a user-derived value so it can't forge or inject
+// extra log lines (CodeQL: log entries created from user input).
+func sanitizeLog(s string) string {
+	return strings.NewReplacer("\n", "", "\r", "").Replace(s)
+}
 
 // newRouter wires the resource endpoints consumed by the frontend query editor
 // and variable support.
@@ -17,6 +24,7 @@ func (d *Datasource) newRouter() http.Handler {
 	mux.HandleFunc("/object-types", d.handleObjectTypes)
 	mux.HandleFunc("/fields", d.handleFields)
 	mux.HandleFunc("/field-values", d.handleFieldValues)
+	mux.HandleFunc("/filter-fields", d.handleFilterFields)
 	mux.HandleFunc("/query", d.handleQuery)
 	return mux
 }
@@ -65,6 +73,28 @@ func (d *Datasource) handleFieldValues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, values)
+}
+
+// GET /filter-fields?type=<objectType>&branch=<branch> -> []provider.FilterField
+// On provider error we log and return an empty list (HTTP 200) so the editor
+// falls back to the column list + all operators rather than losing filtering.
+func (d *Datasource) handleFilterFields(w http.ResponseWriter, r *http.Request) {
+	objectType := r.URL.Query().Get("type")
+	if objectType == "" {
+		writeError(w, http.StatusBadRequest, errMsg("type is required"))
+		return
+	}
+	ctx := provider.WithBranch(r.Context(), r.URL.Query().Get("branch"))
+	fields, err := d.provider.FilterFields(ctx, objectType)
+	if err != nil {
+		log.DefaultLogger.Warn("filter-fields unavailable; editor will fall back", "type", sanitizeLog(objectType), "error", err)
+		writeJSON(w, []provider.FilterField{})
+		return
+	}
+	if fields == nil {
+		fields = []provider.FilterField{}
+	}
+	writeJSON(w, fields)
 }
 
 // queryResourceRequest is the body for POST /query, used by variable queries and

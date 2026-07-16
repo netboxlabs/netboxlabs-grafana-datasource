@@ -315,3 +315,95 @@ func TestFields_BranchCachePartition(t *testing.T) {
 		t.Errorf("expected a second branch-scoped request; saw header values %v", branches)
 	}
 }
+
+func TestFilterFields_FromSchema(t *testing.T) {
+	var schemaHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/schema/", func(w http.ResponseWriter, r *http.Request) {
+		schemaHits++
+		_, _ = fmt.Fprint(w, `{"paths":{"/api/ipam/prefixes/":{"get":{"parameters":[
+			{"name":"prefix","in":"query"},
+			{"name":"status","in":"query"},
+			{"name":"status__ic","in":"query"},
+			{"name":"limit","in":"query"}
+		]}}}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	ff, err := p.FilterFields(context.Background(), "ipam/prefixes")
+	if err != nil {
+		t.Fatalf("FilterFields: %v", err)
+	}
+	byName := map[string][]string{}
+	for _, f := range ff {
+		byName[f.Name] = f.Operators
+	}
+	if got := byName["prefix"]; len(got) != 1 || got[0] != "" {
+		t.Errorf("prefix operators = %v, want [\"\"]", got)
+	}
+	if got := byName["status"]; len(got) != 2 || got[0] != "" || got[1] != "ic" {
+		t.Errorf("status operators = %v, want [\"\" \"ic\"]", got)
+	}
+	if _, ok := byName["limit"]; ok {
+		t.Error("limit must be excluded")
+	}
+	// second call is cached (no second schema fetch)
+	if _, err := p.FilterFields(context.Background(), "ipam/prefixes"); err != nil {
+		t.Fatal(err)
+	}
+	if schemaHits != 1 {
+		t.Errorf("schema fetched %d times, want 1 (cached)", schemaHits)
+	}
+}
+
+// TestFilterFields_BranchCachePartition guards that the OpenAPI filter-schema
+// cache is keyed by branch, not global: a branch-scoped FilterFields call must
+// issue its own schema fetch (carrying X-NetBox-Branch) rather than return the
+// cached main schema, so branch-only custom-field filters (cf_*) are discovered
+// and main-only filters don't leak into a branch.
+func TestFilterFields_BranchCachePartition(t *testing.T) {
+	var branches []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/schema/", func(w http.ResponseWriter, r *http.Request) {
+		b := r.Header.Get("X-NetBox-Branch")
+		branches = append(branches, b)
+		extra := ""
+		if b != "" {
+			extra = `,{"name":"cf_branch_only","in":"query"}` // a custom-field filter that exists only in the branch
+		}
+		_, _ = fmt.Fprint(w, `{"paths":{"/api/ipam/prefixes/":{"get":{"parameters":[{"name":"prefix","in":"query"}`+extra+`]}}}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	has := func(ff []provider.FilterField, name string) bool {
+		for _, f := range ff {
+			if f.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	mainFF, err := p.FilterFields(context.Background(), "ipam/prefixes")
+	if err != nil {
+		t.Fatalf("FilterFields(main): %v", err)
+	}
+	if has(mainFF, "cf_branch_only") {
+		t.Fatal("main schema must not include the branch-only filter")
+	}
+
+	branchFF, err := p.FilterFields(provider.WithBranch(context.Background(), "td5smq0f"), "ipam/prefixes")
+	if err != nil {
+		t.Fatalf("FilterFields(branch): %v", err)
+	}
+	if !has(branchFF, "cf_branch_only") {
+		t.Errorf("branch schema should include cf_branch_only (cache not partitioned by branch)")
+	}
+	if len(branches) != 2 || branches[1] != "td5smq0f" {
+		t.Errorf("expected a second branch-scoped schema fetch; saw header values %v", branches)
+	}
+}

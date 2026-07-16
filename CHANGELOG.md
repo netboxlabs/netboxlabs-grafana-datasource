@@ -51,3 +51,7 @@ Initial release of the NetBox data source for Grafana.
   `$variable`) scopes objects/IP enrichment/topology/annotations queries — plus
   branch-scoped dashboard **variable** queries — to that branch via the `X-NetBox-Branch`
   header.
+- Filters are now schema-aware: the query editor offers only the fields and operators
+  NetBox supports per object type (from its OpenAPI schema), fixing text/other operators
+  that previously sent an unsupported lookup the API silently ignored (returning unfiltered
+  results). Falls back to the discovered columns when the schema is unavailable.

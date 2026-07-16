@@ -101,3 +101,14 @@ describe('filterQuery', () => {
     expect(ds.filterQuery({ refId: 'A' })).toBe(false);
   });
 });
+
+describe('resource helpers', () => {
+  it('getFilterFields calls the /filter-fields resource with type and branch', async () => {
+    const ds = makeDS();
+    const spy = jest.fn().mockResolvedValue([{ name: 'status', operators: ['', 'ic'] }]);
+    (ds as any).getResource = spy;
+    const out = await ds.getFilterFields('ipam/prefixes', 'td5smq0f');
+    expect(spy).toHaveBeenCalledWith('filter-fields', { type: 'ipam/prefixes', branch: 'td5smq0f' });
+    expect(out[0].operators).toEqual(['', 'ic']);
+  });
+});

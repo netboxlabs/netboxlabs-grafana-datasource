@@ -30,6 +30,10 @@ type fakeProvider struct {
 	branchSeen        string                // captured from the context by Query
 	fieldsBranch      string                // captured from the context by Fields
 	fieldValuesBranch string                // captured from the context by FieldValues
+
+	filterFields       []provider.FilterField
+	filterFieldsBranch string                // captured from the context by FilterFields
+	filterFieldsErr    error
 }
 
 func (f *fakeProvider) Name() string    { return "fake" }
@@ -62,6 +66,10 @@ func (f *fakeProvider) ResolveIPs(context.Context, []string, []string, int) (*pr
 func (f *fakeProvider) Topology(_ context.Context, spec provider.TopologySpec) (*provider.Graph, error) {
 	f.topoSpec = spec
 	return f.graph, nil
+}
+func (f *fakeProvider) FilterFields(ctx context.Context, _ string) ([]provider.FilterField, error) {
+	f.filterFieldsBranch = provider.BranchFromContext(ctx)
+	return f.filterFields, f.filterFieldsErr
 }
 
 func newTestDatasource(p provider.Provider) *Datasource {

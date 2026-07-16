@@ -1,4 +1,4 @@
-import { DataSourceJsonData } from '@grafana/data';
+import { DataSourceJsonData, SelectableValue } from '@grafana/data';
 import { DataQuery } from '@grafana/schema';
 
 /** Enrichment backend. Only 'netbox' exists today; the type and the `mode`
@@ -107,6 +107,12 @@ export interface FieldOption {
   type: string;
 }
 
+/** A valid filter parameter for an object type and the operators NetBox supports on it. */
+export interface FilterField {
+  name: string;
+  operators: string[];
+}
+
 /** Join-key value transforms surfaced in the query editor. */
 export const JOIN_KEY_TRANSFORMS: Array<{ label: string; value: string; description?: string }> = [
   { label: 'none', value: 'none', description: 'Use the value as-is' },
@@ -122,15 +128,61 @@ export const JOIN_KEY_TRANSFORMS: Array<{ label: string; value: string; descript
 export const IP_CONTEXT_FIELDS: string[] = ['prefix', 'site', 'tenant', 'role', 'vrf', 'vlan', 'description'];
 
 /** NetBox filter lookup operators surfaced in the query editor. */
+// NetBox lookup operators. `value` is the lookup suffix sent to the API
+// (empty = exact); the backend maps `field__<value>`. Keep this in sync with
+// suffixToken/operatorOrder in pkg/provider/netbox/schema.go — the query editor
+// only offers operators present in BOTH this list and the object type's schema.
 export const FILTER_OPERATORS: Array<{ label: string; value: string }> = [
   { label: '=', value: '' },
-  { label: 'contains', value: 'ic' },
   { label: 'not', value: 'n' },
+  { label: '= (ci)', value: 'ie' },
+  { label: 'not (ci)', value: 'nie' },
+  { label: 'contains', value: 'ic' },
+  { label: 'not contains', value: 'nic' },
   { label: 'starts with', value: 'isw' },
+  { label: 'not starts with', value: 'nisw' },
   { label: 'ends with', value: 'iew' },
+  { label: 'not ends with', value: 'niew' },
+  { label: 'regex', value: 'regex' },
+  { label: 'regex (ci)', value: 'iregex' },
   { label: '>=', value: 'gte' },
   { label: '<=', value: 'lte' },
   { label: '>', value: 'gt' },
   { label: '<', value: 'lt' },
   { label: 'empty', value: 'empty' },
 ];
+
+type OpOption = { label: string; value: string };
+
+/** Filter-field dropdown options: schema filter fields when available, else the
+ * fallback column options (schema unavailable). */
+export function filterFieldOptionsFrom(
+  filterFields: FilterField[],
+  fallback: Array<SelectableValue<string>>
+): Array<SelectableValue<string>> {
+  return filterFields.length > 0 ? filterFields.map((f) => ({ label: f.name, value: f.name })) : fallback;
+}
+
+/** Operators offered for a filter field. Schema-restricted when the field is
+ * known; falls back to all operators when the schema is unavailable
+ * (filterFields empty) or the field isn't in the schema (legacy/custom), so
+ * saved queries are never blocked. A stored operator not in the allowed set is
+ * appended so it stays visible/editable. */
+export function filterOperatorsFor(filterFields: FilterField[], field: string, storedOperator: string): OpOption[] {
+  const ff = filterFields.find((f) => f.name === field);
+  let ops: OpOption[] =
+    filterFields.length === 0 || !ff ? FILTER_OPERATORS : FILTER_OPERATORS.filter((o) => ff.operators.includes(o.value));
+  if (!ops.some((o) => o.value === storedOperator)) {
+    ops = [...ops, FILTER_OPERATORS.find((o) => o.value === storedOperator) ?? { label: storedOperator || '=', value: storedOperator }];
+  }
+  return ops;
+}
+
+/** Whether an operator is valid for a filter field per the schema. Unknown
+ * fields and the empty-schema fallback are permissive (true) so nothing is
+ * blocked; a schema-known field validates against its operator set. Used to
+ * reset a stale operator when the user switches a filter's field. */
+export function isOperatorValidForField(filterFields: FilterField[], field: string, operator: string): boolean {
+  const ff = filterFields.find((f) => f.name === field);
+  return !ff || ff.operators.includes(operator);
+}

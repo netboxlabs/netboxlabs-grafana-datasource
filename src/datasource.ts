@@ -4,6 +4,7 @@ import { DataSourceWithBackend, getTemplateSrv } from '@grafana/runtime';
 import {
   DEFAULT_QUERY,
   FieldOption,
+  FilterField,
   FilterRow,
   NetBoxDataSourceOptions,
   NetBoxQuery,
@@ -91,6 +92,10 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
 
   getFieldValues(objectType: string, field: string, q = '', branch?: string): Promise<string[]> {
     return this.getResource('field-values', { type: objectType, field, q, ...(branch ? { branch } : {}) });
+  }
+
+  getFilterFields(objectType: string, branch?: string): Promise<FilterField[]> {
+    return this.getResource('filter-fields', { type: objectType, ...(branch ? { branch } : {}) });
   }
 
   runResourceQuery(body: {

@@ -14,7 +14,10 @@ import { QueryEditorProps, SelectableValue } from '@grafana/data';
 import { getTemplateSrv } from '@grafana/runtime';
 import { DataSource } from '../datasource';
 import {
-  FILTER_OPERATORS,
+  FilterField,
+  filterFieldOptionsFrom,
+  filterOperatorsFor,
+  isOperatorValidForField,
   FilterRow,
   IP_CONTEXT_FIELDS,
   JOIN_KEY_TRANSFORMS,
@@ -41,6 +44,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   const queryType: QueryType = query.queryType ?? 'objects';
   const [objectTypes, setObjectTypes] = useState<ObjectTypeOption[]>([]);
   const [fields, setFields] = useState<string[]>([]);
+  const [filterFields, setFilterFields] = useState<FilterField[]>([]);
   const [loadingTypes, setLoadingTypes] = useState(true);
 
   useEffect(() => {
@@ -69,6 +73,16 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
     };
   }, [datasource, fieldType, query.branch]);
 
+  useEffect(() => {
+    let active = true;
+    const branch = query.branch ? getTemplateSrv().replace(query.branch) : undefined;
+    const p = fieldType ? datasource.getFilterFields(fieldType, branch) : Promise.resolve<FilterField[]>([]);
+    p.then((ff) => active && setFilterFields(ff)).catch(() => active && setFilterFields([]));
+    return () => {
+      active = false;
+    };
+  }, [datasource, fieldType, query.branch]);
+
   const typeOptions: Array<SelectableValue<string>> = useMemo(
     () => objectTypes.map((t) => ({ label: t.label, value: t.value, description: t.value })),
     [objectTypes]
@@ -77,6 +91,9 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
     () => fields.map((f) => ({ label: f, value: f })),
     [fields]
   );
+
+  const filterFieldOptions = filterFieldOptionsFrom(filterFields, fieldOptions);
+  const schemaMode = filterFields.length > 0;
 
   const filters = query.filters ?? [];
   const update = (patch: Partial<NetBoxQuery>) => onChange({ ...query, ...patch });
@@ -207,20 +224,39 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
           <Stack key={i} gap={1} direction="row" alignItems="flex-end">
             <InlineField label={i === 0 ? filterLabel : ' '} labelWidth={20}>
               <Select
+                aria-label={`filter-field-${i}`}
                 width={24}
-                options={fieldOptions}
-                allowCustomValue
+                options={
+                  f.field && !filterFieldOptions.some((o) => o.value === f.field)
+                    ? [...filterFieldOptions, { label: f.field, value: f.field }]
+                    : filterFieldOptions
+                }
+                allowCustomValue={!schemaMode}
                 value={f.field ? { label: f.field, value: f.field } : null}
                 placeholder="field"
-                onChange={(v) => updateFilter(i, { field: v?.value ?? '' })}
+                onChange={(v) => {
+                  const nf = v?.value ?? '';
+                  // Reset a stale operator when the new field doesn't support it
+                  // (schema-known fields only); otherwise carrying e.g. `contains`
+                  // onto a field that only supports `=` re-creates a silently
+                  // ignored filter. Unknown/fallback fields keep the operator.
+                  const operator = isOperatorValidForField(filterFields, nf, f.operator) ? f.operator : '';
+                  updateFilter(i, { field: nf, operator });
+                }}
               />
             </InlineField>
-            <Select
-              width={16}
-              options={FILTER_OPERATORS}
-              value={FILTER_OPERATORS.find((o) => o.value === f.operator) ?? FILTER_OPERATORS[0]}
-              onChange={(v) => updateFilter(i, { operator: v?.value ?? '' })}
-            />
+            {(() => {
+              const opts = filterOperatorsFor(filterFields, f.field, f.operator);
+              return (
+                <Select
+                  aria-label={`filter-operator-${i}`}
+                  width={16}
+                  options={opts}
+                  value={opts.find((o) => o.value === f.operator) ?? opts[0]}
+                  onChange={(v) => updateFilter(i, { operator: v?.value ?? '' })}
+                />
+              );
+            })()}
             <Input
               width={24}
               value={f.value}

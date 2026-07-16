@@ -18,6 +18,10 @@ import (
 // cacheTTL bounds how long discovery and field metadata are cached.
 const cacheTTL = 5 * time.Minute
 
+// schemaTTL bounds how long the parsed OpenAPI filter schema is cached. The
+// schema changes only on a NetBox upgrade, so this is much longer than cacheTTL.
+const schemaTTL = 30 * time.Minute
+
 // defaultLimit / maxLimit bound result sizes when the caller does not specify.
 const (
 	defaultLimit = 1000
@@ -40,6 +44,17 @@ type Provider struct {
 	types       []provider.ObjectType
 	typesExpiry time.Time
 	fields      map[string]fieldsCacheEntry
+
+	// schemaByBranch caches the parsed OpenAPI filter schema keyed by branch
+	// ("" = main). The schema is fetched branch-scoped (X-NetBox-Branch), and a
+	// branch may define custom-field filters (cf_*) main lacks, so main and each
+	// branch must cache separately — mirroring the fields cache.
+	schemaByBranch map[string]schemaCacheEntry
+}
+
+type schemaCacheEntry struct {
+	filters map[string][]provider.FilterField
+	expiry  time.Time
 }
 
 type fieldsCacheEntry struct {
@@ -323,6 +338,40 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	p.fields[cacheKey] = fieldsCacheEntry{fields: fields, expiry: time.Now().Add(cacheTTL)}
 	p.mu.Unlock()
 	return fields, nil
+}
+
+// FilterFields returns the valid filter parameters and operators for an object
+// type, parsed from NetBox's OpenAPI schema (cached schemaTTL). On any fetch or
+// parse failure it returns an error and an empty slice so callers can fall back.
+func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provider.FilterField, error) {
+	branch := provider.BranchFromContext(ctx)
+
+	p.mu.Lock()
+	if e, ok := p.schemaByBranch[branch]; ok && time.Now().Before(e.expiry) {
+		ff := e.filters[objectType]
+		p.mu.Unlock()
+		return ff, nil
+	}
+	p.mu.Unlock()
+
+	// The fetch carries the branch via ctx (X-NetBox-Branch), so the parsed
+	// result is cached under that branch, never shared with main/other branches.
+	raw, err := p.client.getBytes(ctx, p.client.apiURL("schema", url.Values{"format": {"json"}}))
+	if err != nil {
+		return nil, fmt.Errorf("fetch OpenAPI schema: %w", err)
+	}
+	parsed, err := parseFilterFields(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse OpenAPI schema: %w", err)
+	}
+
+	p.mu.Lock()
+	if p.schemaByBranch == nil {
+		p.schemaByBranch = map[string]schemaCacheEntry{}
+	}
+	p.schemaByBranch[branch] = schemaCacheEntry{filters: parsed, expiry: time.Now().Add(schemaTTL)}
+	p.mu.Unlock()
+	return parsed[objectType], nil
 }
 
 // FieldValues returns distinct values of a column for autocomplete.

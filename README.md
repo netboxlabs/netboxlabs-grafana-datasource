@@ -101,6 +101,13 @@ datasources:
 See [Demo](#demo) below for a one-command runnable stack (synthetic Prometheus + Loki
 labeled to match NetBox + a rich dashboard).
 
+> **Filters** are schema-aware: the field and operator dropdowns are derived from NetBox's
+> OpenAPI schema (`/api/schema/`), so only combinations NetBox actually supports for that
+> object type are offered — no more picking an operator that the API silently ignores and
+> returns unfiltered results for. This needs no setup (NetBox always exposes its schema); if
+> the schema can't be read, the editor falls back to the discovered columns with all
+> operators available.
+
 ## Branches (netbox-branching)
 
 If your NetBox runs the [netbox-branching](https://github.com/netboxlabs/netbox-branching)

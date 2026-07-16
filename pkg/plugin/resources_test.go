@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,5 +44,47 @@ func TestResource_Query_Branch(t *testing.T) {
 	}
 	if fp.branchSeen != "td5smq0f" {
 		t.Errorf("Query branch = %q, want td5smq0f", fp.branchSeen)
+	}
+}
+
+func TestResource_FilterFields(t *testing.T) {
+	fp := &fakeProvider{filterFields: []provider.FilterField{{Name: "status", Operators: []string{"", "ic"}}}}
+	d := newTestDatasource(fp)
+	rec := httptest.NewRecorder()
+	d.newRouter().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/filter-fields?type=ipam/prefixes&branch=td5smq0f", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var got []provider.FilterField
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "status" || len(got[0].Operators) != 2 {
+		t.Errorf("got %+v", got)
+	}
+	if fp.filterFieldsBranch != "td5smq0f" {
+		t.Errorf("branch = %q, want td5smq0f", fp.filterFieldsBranch)
+	}
+}
+
+func TestResource_FilterFields_FallbackOnError(t *testing.T) {
+	fp := &fakeProvider{filterFieldsErr: errMsg("boom")}
+	d := newTestDatasource(fp)
+	rec := httptest.NewRecorder()
+	d.newRouter().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/filter-fields?type=ipam/prefixes", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (fallback)", rec.Code)
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Errorf("body = %q, want []", rec.Body.String())
+	}
+}
+
+func TestSanitizeLog(t *testing.T) {
+	if got := sanitizeLog("dcim/devices\ninjected=evil\r"); got != "dcim/devicesinjected=evil" {
+		t.Errorf("sanitizeLog = %q, want CR/LF stripped", got)
+	}
+	if got := sanitizeLog("ipam/prefixes"); got != "ipam/prefixes" {
+		t.Errorf("sanitizeLog changed a clean value: %q", got)
 	}
 }

@@ -13,6 +13,12 @@ const datasource = {
     .fn()
     .mockResolvedValue([{ value: 'dcim/devices', label: 'Devices', app: 'dcim', model: 'devices' }]),
   getFields: jest.fn().mockResolvedValue([{ name: 'name' }, { name: 'status' }]),
+  getFilterFields: jest
+    .fn()
+    .mockResolvedValue([
+      { name: 'prefix', operators: [''] },
+      { name: 'status', operators: ['', 'ic', 'isw', 'n', 'empty'] },
+    ]),
 } as any;
 
 function setup(queryOverrides: Record<string, unknown> = {}) {
@@ -98,5 +104,13 @@ describe('QueryEditor — Alert table', () => {
     expect(onChange).toHaveBeenCalledWith(
       expect.objectContaining({ count: true, alertTable: false, valueField: undefined })
     );
+  });
+});
+
+describe('QueryEditor — schema filters', () => {
+  it('loads filter fields for the object type and shows them', async () => {
+    setup({ queryType: 'objects', objectType: 'ipam/prefixes', filters: [{ field: 'prefix', operator: '', value: '' }] });
+    await waitFor(() => expect(datasource.getFilterFields).toHaveBeenCalledWith('ipam/prefixes', undefined));
+    expect(await screen.findByText('prefix')).toBeInTheDocument();
   });
 });

@@ -49,6 +49,19 @@ export function AnnotationQueryEditor({ query, onChange }: Props) {
           onChange={(e) => onChange({ ...query, limit: parseInt(e.currentTarget.value, 10) || 0 })}
         />
       </InlineField>
+      <InlineField
+        label="Branch"
+        labelWidth={20}
+        tooltip="Optional netbox-branching schema id, or a $variable (e.g. from a variable querying plugins/branching/branches). Empty targets the main branch. Requires the netbox-branching plugin."
+      >
+        <Input
+          id="annotation-branch"
+          width={40}
+          value={query.branch ?? ''}
+          placeholder="(main)"
+          onChange={(e) => onChange({ ...query, branch: e.currentTarget.value || undefined })}
+        />
+      </InlineField>
     </Stack>
   );
 }

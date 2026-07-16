@@ -101,6 +101,20 @@ datasources:
 See [Demo](#demo) below for a one-command runnable stack (synthetic Prometheus + Loki
 labeled to match NetBox + a rich dashboard).
 
+## Branches (netbox-branching)
+
+If your NetBox runs the [netbox-branching](https://github.com/netboxlabs/netbox-branching)
+plugin, set a query's **Branch** field to a branch **schema id** to read that branch's
+state instead of main (via the `X-NetBox-Branch` header). Leave it empty for main.
+
+For a branch picker, add a single-value dashboard **variable** (type Query → NetBox →
+object type `plugins/branching/branches`, value field `schema_id`, text field `name`) and
+put `$branch` in the Branch field. Objects, IP enrichment, topology, and annotation
+queries all honor the selected branch (annotation and variable queries each have their own
+Branch field), and the field / value-autocomplete pickers reload against it. Only the
+**object-type** list is always read from main (NetBox models are code-level and identical
+across branches).
+
 ## Dynamic object-type discovery
 
 The query editor's **Object type** list is built by walking the NetBox API

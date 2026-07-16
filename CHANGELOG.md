@@ -47,3 +47,7 @@ Initial release of the NetBox data source for Grafana.
   Prometheus + Loki + synthetic telemetry + Grafana with provisioned datasources, dashboard
   and alert rule; bring-your-own-NetBox fast mode; importable dashboard JSON
   (`demo/netbox-demo-dashboard.json`).
+- Branch support: a query's optional **Branch** field (a netbox-branching schema id or
+  `$variable`) scopes objects/IP enrichment/topology/annotations queries — plus
+  branch-scoped dashboard **variable** queries — to that branch via the `X-NetBox-Branch`
+  header.

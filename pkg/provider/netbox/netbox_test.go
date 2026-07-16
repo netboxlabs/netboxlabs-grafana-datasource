@@ -265,3 +265,53 @@ func containsStr(s []string, v string) bool {
 	}
 	return false
 }
+
+// TestFields_BranchCachePartition guards that the fields cache is keyed by
+// branch, not objectType alone: a branch-scoped Fields call must issue its own
+// NetBox request (carrying X-NetBox-Branch) rather than return the cached main
+// fields, so branch-only columns (e.g. a custom field defined in the branch)
+// are discoverable.
+func TestFields_BranchCachePartition(t *testing.T) {
+	var branches []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		b := r.Header.Get("X-NetBox-Branch")
+		branches = append(branches, b)
+		extra := ""
+		if b != "" {
+			extra = `,"cf_branch_only":"x"` // a custom field that exists only in the branch
+		}
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"id":1,"name":"leaf1"`+extra+`}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	has := func(fields []provider.Field, name string) bool {
+		for _, f := range fields {
+			if f.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	mainFields, err := p.Fields(context.Background(), "dcim/devices")
+	if err != nil {
+		t.Fatalf("Fields(main): %v", err)
+	}
+	if has(mainFields, "cf_branch_only") {
+		t.Fatal("main fields should not include the branch-only field")
+	}
+
+	branchFields, err := p.Fields(provider.WithBranch(context.Background(), "td5smq0f"), "dcim/devices")
+	if err != nil {
+		t.Fatalf("Fields(branch): %v", err)
+	}
+	if !has(branchFields, "cf_branch_only") {
+		t.Errorf("branch fields should include the branch-only field (cache not partitioned by branch)")
+	}
+	if len(branches) != 2 || branches[1] != "td5smq0f" {
+		t.Errorf("expected a second branch-scoped request; saw header values %v", branches)
+	}
+}

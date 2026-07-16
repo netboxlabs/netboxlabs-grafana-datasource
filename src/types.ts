@@ -29,6 +29,10 @@ export interface NetBoxQuery extends DataQuery {
   queryType?: QueryType;
   /** Object type path, e.g. 'dcim/devices' or 'plugins/bgp/bgp-sessions'. */
   objectType?: string;
+  /** Optional netbox-branching schema id (or a $variable resolving to one).
+   * When set, the query targets that branch; empty targets main. Requires the
+   * netbox-branching plugin on the NetBox side. */
+  branch?: string;
   filters?: FilterRow[];
   /** Optional subset (and order) of columns to return. */
   fields?: string[];
@@ -72,6 +76,8 @@ export interface NetBoxVariableQuery extends DataQuery {
   valueField?: string;
   textField?: string;
   filters?: FilterRow[];
+  /** Optional netbox-branching schema id (or $variable) to scope the variable's options. */
+  branch?: string;
 }
 
 export interface NetBoxDataSourceOptions extends DataSourceJsonData {

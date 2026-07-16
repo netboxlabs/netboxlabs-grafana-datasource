@@ -13,6 +13,23 @@ import {
 import { NetBoxVariableSupport } from './variables';
 import { AnnotationQueryEditor } from './components/AnnotationQueryEditor';
 
+/**
+ * Builds the NetBoxQuery sent for an annotation query from the annotation's target.
+ * Exported standalone (rather than kept as a constructor closure) so it can be unit-tested
+ * directly. `branch` is carried raw here — DataSourceWithBackend.query() runs
+ * applyTemplateVariables (which interpolates it) on annotation targets before dispatch.
+ */
+export function prepareAnnotationQuery(anno: any): NetBoxQuery {
+  const target: Partial<NetBoxQuery> = anno?.target ?? {};
+  return {
+    refId: target.refId || 'Annotation',
+    queryType: 'annotations',
+    objectTypes: target.objectTypes ?? [],
+    limit: target.limit,
+    branch: target.branch,
+  };
+}
+
 export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSourceOptions> {
   constructor(instanceSettings: DataSourceInstanceSettings<NetBoxDataSourceOptions>) {
     super(instanceSettings);
@@ -24,15 +41,7 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     // fields follow Grafana's time/title/text/tags convention.
     this.annotations = {
       QueryEditor: AnnotationQueryEditor,
-      prepareQuery: (anno: any): NetBoxQuery => {
-        const target: Partial<NetBoxQuery> = anno?.target ?? {};
-        return {
-          refId: target.refId || 'Annotation',
-          queryType: 'annotations',
-          objectTypes: target.objectTypes ?? [],
-          limit: target.limit,
-        };
-      },
+      prepareQuery: prepareAnnotationQuery,
     };
   }
 
@@ -66,6 +75,7 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
       ...query,
       filters,
       ips: query.ips === undefined ? undefined : srv.replace(query.ips, scopedVars, 'csv'),
+      branch: query.branch === undefined ? undefined : srv.replace(query.branch, scopedVars),
     };
   }
 
@@ -75,12 +85,12 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     return this.getResource('object-types');
   }
 
-  getFields(objectType: string): Promise<FieldOption[]> {
-    return this.getResource('fields', { type: objectType });
+  getFields(objectType: string, branch?: string): Promise<FieldOption[]> {
+    return this.getResource('fields', { type: objectType, ...(branch ? { branch } : {}) });
   }
 
-  getFieldValues(objectType: string, field: string, q = ''): Promise<string[]> {
-    return this.getResource('field-values', { type: objectType, field, q });
+  getFieldValues(objectType: string, field: string, q = '', branch?: string): Promise<string[]> {
+    return this.getResource('field-values', { type: objectType, field, q, ...(branch ? { branch } : {}) });
   }
 
   runResourceQuery(body: {
@@ -88,6 +98,7 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     filters?: FilterRow[];
     fields?: string[];
     limit?: number;
+    branch?: string;
   }): Promise<{ columns: string[]; rows: Array<Record<string, unknown>> }> {
     return this.postResource('query', body);
   }
@@ -105,8 +116,9 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     const valueField = query.valueField || 'name';
     const textField = query.textField || valueField;
     const fields = Array.from(new Set([valueField, textField]));
+    const branch = query.branch ? srv.replace(query.branch, options?.scopedVars) : undefined;
 
-    const res = await this.runResourceQuery({ objectType: query.objectType, filters, fields, limit: 1000 });
+    const res = await this.runResourceQuery({ objectType: query.objectType, filters, fields, limit: 1000, branch });
 
     const seen = new Set<string>();
     const out: MetricFindValue[] = [];

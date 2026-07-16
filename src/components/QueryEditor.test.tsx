@@ -1,6 +1,11 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { QueryEditor } from './QueryEditor';
+
+jest.mock('@grafana/runtime', () => ({
+  ...jest.requireActual('@grafana/runtime'),
+  getTemplateSrv: () => ({ replace: (s: string) => (s === '$branch' ? 'td5smq0f' : s) }),
+}));
 
 // Minimal datasource stub: the editor calls these in effects on mount.
 const datasource = {
@@ -38,6 +43,24 @@ describe('QueryEditor — Return count only', () => {
     // let mount effects resolve
     await screen.findByText(/node graph/i);
     expect(screen.queryByRole('switch', { name: /Return count only/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('QueryEditor — Branch', () => {
+  it('sets the branch field', async () => {
+    const { onChange } = setup({ queryType: 'objects', objectType: 'dcim/devices' });
+
+    const input = await screen.findByLabelText('Branch');
+    fireEvent.change(input, { target: { value: 'td5smq0f' } });
+
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ branch: 'td5smq0f' }));
+  });
+
+  it('loads fields scoped to the query branch (interpolating a variable)', async () => {
+    // '$branch' → 'td5smq0f' via the getTemplateSrv mock, so this proves the
+    // branch is interpolated (not passed raw) before reaching getFields.
+    setup({ queryType: 'objects', objectType: 'dcim/devices', branch: '$branch' });
+    await waitFor(() => expect(datasource.getFields).toHaveBeenCalledWith('dcim/devices', 'td5smq0f'));
   });
 });
 

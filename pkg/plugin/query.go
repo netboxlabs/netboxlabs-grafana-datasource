@@ -57,6 +57,10 @@ type queryModel struct {
 	// Connections (for topology): "logical" (default — NetBox cable paths) or
 	// "physical" (raw cables; panels appear as nodes).
 	Connections string `json:"connections"`
+	// Branch, when set, is a netbox-branching schema id; the query (and every
+	// upstream request it makes) targets that branch via the X-NetBox-Branch
+	// header. Empty targets the default (main) branch.
+	Branch string `json:"branch"`
 }
 
 // query executes a single query and returns its data response.
@@ -65,6 +69,9 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 	if err := json.Unmarshal(q.JSON, &qm); err != nil {
 		return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err))
 	}
+
+	// Scope every request this query makes to the selected branch (no-op when empty).
+	ctx = provider.WithBranch(ctx, qm.Branch)
 
 	switch qm.QueryType {
 	case queryTypeAnnotations:

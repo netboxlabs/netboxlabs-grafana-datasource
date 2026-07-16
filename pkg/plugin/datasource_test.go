@@ -18,15 +18,18 @@ import (
 
 // fakeProvider is a controllable provider.Provider for unit tests.
 type fakeProvider struct {
-	healthMsg string
-	healthErr error
-	types     []provider.ObjectType
-	result    *provider.Result
-	changes   []provider.Change
-	ipResult  *provider.Result
-	graph     *provider.Graph
-	topoSpec  provider.TopologySpec // captured by Topology for passthrough asserts
-	querySpec provider.QuerySpec    // captured by Query for passthrough asserts
+	healthMsg         string
+	healthErr         error
+	types             []provider.ObjectType
+	result            *provider.Result
+	changes           []provider.Change
+	ipResult          *provider.Result
+	graph             *provider.Graph
+	topoSpec          provider.TopologySpec // captured by Topology for passthrough asserts
+	querySpec         provider.QuerySpec    // captured by Query for passthrough asserts
+	branchSeen        string                // captured from the context by Query
+	fieldsBranch      string                // captured from the context by Fields
+	fieldValuesBranch string                // captured from the context by FieldValues
 }
 
 func (f *fakeProvider) Name() string    { return "fake" }
@@ -37,14 +40,17 @@ func (f *fakeProvider) HealthCheck(context.Context) (string, error) {
 func (f *fakeProvider) ObjectTypes(context.Context) ([]provider.ObjectType, error) {
 	return f.types, nil
 }
-func (f *fakeProvider) Fields(context.Context, string) ([]provider.Field, error) {
+func (f *fakeProvider) Fields(ctx context.Context, _ string) ([]provider.Field, error) {
+	f.fieldsBranch = provider.BranchFromContext(ctx)
 	return []provider.Field{{Name: "name", Type: provider.FieldTypeString}}, nil
 }
-func (f *fakeProvider) Query(_ context.Context, spec provider.QuerySpec) (*provider.Result, error) {
+func (f *fakeProvider) Query(ctx context.Context, spec provider.QuerySpec) (*provider.Result, error) {
 	f.querySpec = spec
+	f.branchSeen = provider.BranchFromContext(ctx)
 	return f.result, nil
 }
-func (f *fakeProvider) FieldValues(context.Context, string, string, string, int) ([]string, error) {
+func (f *fakeProvider) FieldValues(ctx context.Context, _, _, _ string, _ int) ([]string, error) {
+	f.fieldValuesBranch = provider.BranchFromContext(ctx)
 	return []string{"a", "b"}, nil
 }
 func (f *fakeProvider) Changes(context.Context, provider.ChangeSpec) ([]provider.Change, error) {
@@ -338,4 +344,18 @@ func TestQueryData_AlertTable_ValueFieldProjection(t *testing.T) {
 			t.Errorf("provider Fields = %v, want empty (len(fields)>0 guard must not narrow an unset field selection)", fp.querySpec.Fields)
 		}
 	})
+}
+
+func TestQueryData_BranchContext(t *testing.T) {
+	fp := &fakeProvider{result: &provider.Result{Columns: []string{"name"}, Rows: []map[string]interface{}{{"name": "leaf1"}}}}
+	d := newTestDatasource(fp)
+	req := &backend.QueryDataRequest{
+		Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(`{"objectType":"dcim/devices","branch":"td5smq0f"}`)}},
+	}
+	if _, err := d.QueryData(context.Background(), req); err != nil {
+		t.Fatalf("QueryData: %v", err)
+	}
+	if fp.branchSeen != "td5smq0f" {
+		t.Errorf("branch reaching provider = %q, want td5smq0f", fp.branchSeen)
+	}
 }

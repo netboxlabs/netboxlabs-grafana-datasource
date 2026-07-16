@@ -22,6 +22,7 @@ func (d *Datasource) newRouter() http.Handler {
 }
 
 // GET /object-types -> []provider.ObjectType
+// object-types are code-level (branch-invariant); not branch-scoped.
 func (d *Datasource) handleObjectTypes(w http.ResponseWriter, r *http.Request) {
 	types, err := d.provider.ObjectTypes(r.Context())
 	if err != nil {
@@ -31,14 +32,15 @@ func (d *Datasource) handleObjectTypes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, types)
 }
 
-// GET /fields?type=<objectType> -> []provider.Field
+// GET /fields?type=<objectType>&branch=<branch> -> []provider.Field
 func (d *Datasource) handleFields(w http.ResponseWriter, r *http.Request) {
 	objectType := r.URL.Query().Get("type")
 	if objectType == "" {
 		writeError(w, http.StatusBadRequest, errMsg("type is required"))
 		return
 	}
-	fields, err := d.provider.Fields(r.Context(), objectType)
+	ctx := provider.WithBranch(r.Context(), r.URL.Query().Get("branch"))
+	fields, err := d.provider.Fields(ctx, objectType)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
@@ -46,7 +48,7 @@ func (d *Datasource) handleFields(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, fields)
 }
 
-// GET /field-values?type=<objectType>&field=<field>&q=<substr>&limit=<n> -> []string
+// GET /field-values?type=<objectType>&field=<field>&q=<substr>&limit=<n>&branch=<branch> -> []string
 func (d *Datasource) handleFieldValues(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	objectType := q.Get("type")
@@ -56,7 +58,8 @@ func (d *Datasource) handleFieldValues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	values, err := d.provider.FieldValues(r.Context(), objectType, field, q.Get("q"), limit)
+	ctx := provider.WithBranch(r.Context(), q.Get("branch"))
+	values, err := d.provider.FieldValues(ctx, objectType, field, q.Get("q"), limit)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
@@ -71,6 +74,7 @@ type queryResourceRequest struct {
 	Filters    []provider.Filter `json:"filters"`
 	Fields     []string          `json:"fields"`
 	Limit      int               `json:"limit"`
+	Branch     string            `json:"branch"`
 }
 
 // POST /query -> provider.Result {columns, rows}
@@ -88,7 +92,8 @@ func (d *Datasource) handleQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errMsg("objectType is required"))
 		return
 	}
-	res, err := d.provider.Query(r.Context(), provider.QuerySpec{
+	ctx := provider.WithBranch(r.Context(), req.Branch)
+	res, err := d.provider.Query(ctx, provider.QuerySpec{
 		ObjectType: req.ObjectType,
 		Filters:    req.Filters,
 		Fields:     req.Fields,

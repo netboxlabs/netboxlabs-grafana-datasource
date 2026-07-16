@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/netboxlabs/netbox/pkg/provider"
 )
 
 // Client is a thin authenticated HTTP client for the NetBox REST API. The
@@ -89,6 +91,9 @@ func (c *Client) getBytes(ctx context.Context, rawURL string) ([]byte, error) {
 		req.Header.Set("Authorization", authHeader(c.token))
 	}
 	req.Header.Set("Accept", "application/json")
+	if branch := provider.BranchFromContext(ctx); branch != "" {
+		req.Header.Set("X-NetBox-Branch", branch)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

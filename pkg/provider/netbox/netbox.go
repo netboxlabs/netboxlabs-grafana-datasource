@@ -281,8 +281,17 @@ func (p *Provider) fetchRows(ctx context.Context, objectType string, q url.Value
 
 // Fields returns the columns of an object type, inferred from a sample object.
 func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Field, error) {
+	// Partition the cache by branch: a branch may define custom fields that main
+	// (or another branch) does not, so main and each branch must cache their
+	// field sets separately. The null byte cannot appear in an object-type path
+	// or a branch schema id, so it is a collision-free key separator.
+	cacheKey := objectType
+	if branch := provider.BranchFromContext(ctx); branch != "" {
+		cacheKey = objectType + "\x00" + branch
+	}
+
 	p.mu.Lock()
-	if e, ok := p.fields[objectType]; ok && time.Now().Before(e.expiry) {
+	if e, ok := p.fields[cacheKey]; ok && time.Now().Before(e.expiry) {
 		p.mu.Unlock()
 		return e.fields, nil
 	}
@@ -311,7 +320,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	}
 
 	p.mu.Lock()
-	p.fields[objectType] = fieldsCacheEntry{fields: fields, expiry: time.Now().Add(cacheTTL)}
+	p.fields[cacheKey] = fieldsCacheEntry{fields: fields, expiry: time.Now().Add(cacheTTL)}
 	p.mu.Unlock()
 	return fields, nil
 }

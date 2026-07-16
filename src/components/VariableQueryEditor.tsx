@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { InlineField, Select, Input, Stack, Button, IconButton } from '@grafana/ui';
 import { SelectableValue } from '@grafana/data';
 import { DataSource } from '../datasource';
+import { getTemplateSrv } from '@grafana/runtime';
 import { FieldOption, FilterRow, NetBoxVariableQuery, ObjectTypeOption } from '../types';
 
 interface Props {
@@ -20,12 +21,15 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
 
   useEffect(() => {
     let active = true;
-    const p = query.objectType ? datasource.getFields(query.objectType) : Promise.resolve<FieldOption[]>([]);
+    const branch = query.branch ? getTemplateSrv().replace(query.branch) : undefined;
+    const p = query.objectType
+      ? datasource.getFields(query.objectType, branch)
+      : Promise.resolve<FieldOption[]>([]);
     p.then((f) => active && setFields(f.map((x) => x.name))).catch(() => active && setFields([]));
     return () => {
       active = false;
     };
-  }, [datasource, query.objectType]);
+  }, [datasource, query.objectType, query.branch]);
 
   const typeOptions: Array<SelectableValue<string>> = useMemo(
     () => objectTypes.map((t) => ({ label: t.label, value: t.value, description: t.value })),
@@ -43,6 +47,19 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
 
   return (
     <Stack gap={1} direction="column">
+      <InlineField
+        label="Branch"
+        labelWidth={16}
+        tooltip="Optional netbox-branching schema id, or a $variable (e.g. from a variable querying plugins/branching/branches). Empty targets the main branch. Requires the netbox-branching plugin."
+      >
+        <Input
+          id="variable-branch"
+          width={40}
+          value={query.branch ?? ''}
+          placeholder="(main)"
+          onChange={(e) => update({ branch: e.currentTarget.value || undefined })}
+        />
+      </InlineField>
       <InlineField label="Object type" labelWidth={16} grow>
         <Select
           width={40}

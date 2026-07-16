@@ -11,6 +11,7 @@ import {
   InlineSwitch,
 } from '@grafana/ui';
 import { QueryEditorProps, SelectableValue } from '@grafana/data';
+import { getTemplateSrv } from '@grafana/runtime';
 import { DataSource } from '../datasource';
 import {
   FILTER_OPERATORS,
@@ -60,12 +61,13 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
 
   useEffect(() => {
     let active = true;
-    const p = fieldType ? datasource.getFields(fieldType) : Promise.resolve<Array<{ name: string }>>([]);
+    const branch = query.branch ? getTemplateSrv().replace(query.branch) : undefined;
+    const p = fieldType ? datasource.getFields(fieldType, branch) : Promise.resolve<Array<{ name: string }>>([]);
     p.then((f) => active && setFields(f.map((x) => x.name))).catch(() => active && setFields([]));
     return () => {
       active = false;
     };
-  }, [datasource, fieldType]);
+  }, [datasource, fieldType, query.branch]);
 
   const typeOptions: Array<SelectableValue<string>> = useMemo(
     () => objectTypes.map((t) => ({ label: t.label, value: t.value, description: t.value })),
@@ -100,6 +102,21 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             );
             onRunQuery();
           }}
+        />
+      </InlineField>
+
+      <InlineField
+        label="Branch"
+        labelWidth={20}
+        tooltip="Optional netbox-branching schema id, or a $variable (e.g. from a variable querying plugins/branching/branches). Empty targets the main branch. Requires the netbox-branching plugin."
+      >
+        <Input
+          id="query-branch"
+          width={40}
+          value={query.branch ?? ''}
+          placeholder="(main)"
+          onChange={(e) => update({ branch: e.currentTarget.value || undefined })}
+          onBlur={() => onRunQuery()}
         />
       </InlineField>
 

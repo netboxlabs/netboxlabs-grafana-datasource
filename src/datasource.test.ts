@@ -1,4 +1,4 @@
-import { DataSource } from './datasource';
+import { DataSource, prepareAnnotationQuery } from './datasource';
 import { NetBoxQuery } from './types';
 
 jest.mock('@grafana/runtime', () => ({
@@ -10,6 +10,9 @@ jest.mock('@grafana/runtime', () => ({
       }
       if (s === '$flow_ips') {
         return '10.112.128.1,203.0.113.7';
+      }
+      if (s === '$branch') {
+        return 'td5smq0f';
       }
       return s;
     },
@@ -40,6 +43,14 @@ describe('metricFindQuery', () => {
     const ds = makeDS();
     expect(await ds.metricFindQuery({ refId: 'v' } as any)).toEqual([]);
   });
+
+  it('passes the interpolated branch to the resource query', async () => {
+    const ds = makeDS();
+    const spy = jest.fn().mockResolvedValue({ columns: ['name'], rows: [{ name: 'leaf1' }] });
+    (ds as any).runResourceQuery = spy;
+    await ds.metricFindQuery({ refId: 'A', objectType: 'dcim/devices', branch: '$branch' } as any, {});
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ branch: 'td5smq0f' }));
+  });
 });
 
 describe('applyTemplateVariables', () => {
@@ -59,6 +70,23 @@ describe('applyTemplateVariables', () => {
     const q: NetBoxQuery = { refId: 'A', queryType: 'ip-enrichment', ips: '$flow_ips' };
     const out = ds.applyTemplateVariables(q, {});
     expect(out.ips).toBe('10.112.128.1,203.0.113.7');
+  });
+
+  it('interpolates the branch variable', () => {
+    const ds = makeDS();
+    const out = ds.applyTemplateVariables(
+      { refId: 'A', queryType: 'objects', objectType: 'dcim/devices', branch: '$branch' } as any,
+      {}
+    );
+    expect(out.branch).toBe('td5smq0f');
+  });
+});
+
+describe('prepareAnnotationQuery', () => {
+  it('carries the branch from the annotation target', () => {
+    const out = prepareAnnotationQuery({ target: { objectTypes: ['dcim.device'], branch: 'td5smq0f' } });
+    expect(out.branch).toBe('td5smq0f');
+    expect(out.queryType).toBe('annotations');
   });
 });
 

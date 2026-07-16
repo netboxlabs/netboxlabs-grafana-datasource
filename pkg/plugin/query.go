@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
 	"github.com/netboxlabs/netbox/pkg/provider"
@@ -82,7 +83,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 			Limit:       qm.Limit,
 		})
 		if err != nil {
-			return backend.ErrDataResponse(backend.StatusInternal, err.Error())
+			return queryErrorResponse(err)
 		}
 		frame := buildAnnotationsFrame(changes)
 		frame.RefID = q.RefID
@@ -95,7 +96,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 		}
 		res, err := d.provider.ResolveIPs(ctx, ips, qm.ContextFields, qm.Limit)
 		if err != nil {
-			return backend.ErrDataResponse(backend.StatusInternal, err.Error())
+			return queryErrorResponse(err)
 		}
 		applyJoinKeys(res, qm.JoinKeys)
 		rewriteLinks(res, d.provider.BaseURL(), d.cfg.PublicURL)
@@ -106,7 +107,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 	case queryTypeTopology:
 		graph, err := d.provider.Topology(ctx, provider.TopologySpec{Filters: qm.Filters, Limit: qm.Limit, ConnectedOnly: qm.ConnectedOnly, Connections: qm.Connections})
 		if err != nil {
-			return backend.ErrDataResponse(backend.StatusInternal, err.Error())
+			return queryErrorResponse(err)
 		}
 		frames := buildNodeGraphFrames(graph)
 		for _, f := range frames {
@@ -130,7 +131,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 			Limit:      1,
 		})
 		if err != nil {
-			return backend.ErrDataResponse(backend.StatusInternal, err.Error())
+			return queryErrorResponse(err)
 		}
 		frame := buildCountFrame(qm.ObjectType, res.Total)
 		frame.RefID = q.RefID
@@ -149,7 +150,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 			Limit:      qm.Limit,
 		})
 		if err != nil {
-			return backend.ErrDataResponse(backend.StatusInternal, err.Error())
+			return queryErrorResponse(err)
 		}
 		if qm.ValueField != "" && !slices.Contains(res.Columns, qm.ValueField) {
 			return backend.ErrDataResponse(backend.StatusBadRequest,
@@ -169,7 +170,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 		Limit:      qm.Limit,
 	})
 	if err != nil {
-		return backend.ErrDataResponse(backend.StatusInternal, err.Error())
+		return queryErrorResponse(err)
 	}
 
 	applyJoinKeys(res, qm.JoinKeys)
@@ -206,4 +207,40 @@ func healthErrorMessage(err error) string {
 		return fmt.Sprintf("NetBox returned HTTP %d", apiErr.Status)
 	}
 	return "Cannot reach NetBox: " + err.Error()
+}
+
+// queryErrorMessage maps an upstream error to a concise, user-facing message so
+// raw NetBox API errors (500/405/etc.) and exception bodies aren't surfaced to
+// the user. The raw error is logged separately (sanitized) for operators.
+func queryErrorMessage(err error) string {
+	var apiErr *netbox.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Status {
+		case 405:
+			return "This object type can't be queried — the NetBox endpoint doesn't support listing (HTTP 405). It may be an action endpoint, not a queryable collection."
+		case 400:
+			return "NetBox rejected this query (HTTP 400). Check the filters and try again."
+		case 401, 403:
+			return "Authentication failed (check the API token)."
+		case 404:
+			return "This object type was not found in NetBox (HTTP 404)."
+		case 500:
+			// QuerySetNotOrdered appears near the start of NetBox's error body,
+			// well within snippet()'s 300-char cap. A longer body (e.g. a debug
+			// traceback) could push the token past the cap; the match then falls
+			// through to the generic HTTP 500 message below — still safe.
+			if strings.Contains(apiErr.Body, "QuerySetNotOrdered") {
+				return "NetBox couldn't list this object type — the endpoint doesn't support pagination (HTTP 500). This model may not be queryable."
+			}
+		}
+		return fmt.Sprintf("NetBox returned HTTP %d for this object type.", apiErr.Status)
+	}
+	return "Couldn't reach NetBox: " + err.Error()
+}
+
+// queryErrorResponse logs the raw upstream error (sanitized) and returns a data
+// response carrying only the user-facing mapped message.
+func queryErrorResponse(err error) backend.DataResponse {
+	log.DefaultLogger.Warn("netbox query error", "detail", sanitizeLog(err.Error()))
+	return backend.ErrDataResponse(backend.StatusInternal, queryErrorMessage(err))
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netbox/pkg/provider/netbox"
 )
 
 func TestResource_Fields_Branch(t *testing.T) {
@@ -86,5 +87,19 @@ func TestSanitizeLog(t *testing.T) {
 	}
 	if got := sanitizeLog("ipam/prefixes"); got != "ipam/prefixes" {
 		t.Errorf("sanitizeLog changed a clean value: %q", got)
+	}
+}
+
+func TestResource_Query_MapsAPIError(t *testing.T) {
+	fp := &fakeProvider{queryErr: &netbox.APIError{Status: 500, Body: `{"exception":"QuerySetNotOrdered"}`}}
+	d := newTestDatasource(fp)
+	rec := httptest.NewRecorder()
+	d.newRouter().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/query", strings.NewReader(`{"objectType":"plugins/x/checkpoints"}`)))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "pagination") || strings.Contains(body, "QuerySetNotOrdered") {
+		t.Errorf("body = %q; want mapped pagination message without raw exception", body)
 	}
 }

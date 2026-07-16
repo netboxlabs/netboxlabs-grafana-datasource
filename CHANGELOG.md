@@ -6,6 +6,9 @@ Initial release of the NetBox data source for Grafana.
 
 - Compatibility statement: NetBox ≥ 4.1 (validated 4.1 → 4.6 via `demo/compat-check.sh`),
   Grafana ≥ 12.3.
+- Unqueryable NetBox endpoints (e.g. action endpoints returning 405, or plugin
+  models whose list 500s on pagination) now show a clear message instead of the
+  raw API error/exception; the raw detail is logged for operators.
 - Topology: logical path edges by default (patch panels and circuits resolve to the far
   device via NetBox cable paths), `connections` query option (`logical`/`physical` — the
   physical view renders panels as nodes), wireless links, and an edge `kind` detail.

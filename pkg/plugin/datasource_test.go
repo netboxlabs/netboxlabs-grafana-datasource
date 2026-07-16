@@ -14,6 +14,7 @@ import (
 
 	"github.com/netboxlabs/netbox/pkg/models"
 	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netbox/pkg/provider/netbox"
 )
 
 // fakeProvider is a controllable provider.Provider for unit tests.
@@ -30,6 +31,7 @@ type fakeProvider struct {
 	branchSeen        string                // captured from the context by Query
 	fieldsBranch      string                // captured from the context by Fields
 	fieldValuesBranch string                // captured from the context by FieldValues
+	queryErr          error
 
 	filterFields       []provider.FilterField
 	filterFieldsBranch string                // captured from the context by FilterFields
@@ -51,6 +53,9 @@ func (f *fakeProvider) Fields(ctx context.Context, _ string) ([]provider.Field, 
 func (f *fakeProvider) Query(ctx context.Context, spec provider.QuerySpec) (*provider.Result, error) {
 	f.querySpec = spec
 	f.branchSeen = provider.BranchFromContext(ctx)
+	if f.queryErr != nil {
+		return nil, f.queryErr
+	}
 	return f.result, nil
 }
 func (f *fakeProvider) FieldValues(ctx context.Context, _, _, _ string, _ int) ([]string, error) {
@@ -365,5 +370,24 @@ func TestQueryData_BranchContext(t *testing.T) {
 	}
 	if fp.branchSeen != "td5smq0f" {
 		t.Errorf("branch reaching provider = %q, want td5smq0f", fp.branchSeen)
+	}
+}
+
+func TestQueryData_MapsAPIError(t *testing.T) {
+	d := newTestDatasource(&fakeProvider{queryErr: &netbox.APIError{Status: 405, URL: "http://nb/api/extras/scripts/upload/", Body: `{"detail":"Method \"GET\" not allowed."}`}})
+	req := &backend.QueryDataRequest{
+		Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(`{"objectType":"extras/scripts/upload"}`)}},
+	}
+	resp, err := d.QueryData(context.Background(), req)
+	if err != nil {
+		t.Fatalf("QueryData: %v", err)
+	}
+	dr := resp.Responses["A"]
+	if dr.Error == nil {
+		t.Fatal("expected an error response")
+	}
+	msg := dr.Error.Error()
+	if !strings.Contains(msg, "HTTP 405") || strings.Contains(msg, "not allowed") {
+		t.Errorf("response error = %q; want mapped 405 message without raw body", msg)
 	}
 }

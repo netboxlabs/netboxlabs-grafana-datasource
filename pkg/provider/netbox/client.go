@@ -127,7 +127,10 @@ func (c *Client) getBytes(ctx context.Context, rawURL string) ([]byte, error) {
 	}
 	req.Header.Set("Accept", "application/json")
 	if branch := provider.BranchFromContext(ctx); branch != "" && ctx.Value(noBranchResolveKey{}) == nil {
-		req.Header.Set("X-NetBox-Branch", c.resolveBranch(ctx, branch))
+		// A resolved value of "" means the default (main) branch — send no header.
+		if resolved := c.resolveBranch(ctx, branch); resolved != "" {
+			req.Header.Set("X-NetBox-Branch", resolved)
+		}
 	}
 
 	resp, err := c.http.Do(req)
@@ -170,7 +173,11 @@ type noBranchResolveKey struct{}
 // already a schema id (or is unknown, or branching isn't installed) passes
 // through unchanged so NetBox makes the final call.
 func (c *Client) resolveBranch(ctx context.Context, value string) string {
-	if value == "" {
+	// "" and "main"/"Main" mean the default branch (NetBox-branching's base, which
+	// is addressed by sending NO header). NetBox does not list the default as a
+	// branch, and branch names are not unique, so treat the reserved default
+	// keyword as the base rather than trying to resolve it to a schema id.
+	if value == "" || strings.EqualFold(value, "main") {
 		return ""
 	}
 	c.branchMu.Lock()

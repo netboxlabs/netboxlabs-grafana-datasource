@@ -18,6 +18,10 @@ Initial release of the NetBox data source for Grafana.
 - A query's Branch field accepts a branch **name** or schema id; names resolve
   to the schema id automatically (netbox-branching's header only takes the schema
   id). An unrecognized branch shows a clear message instead of a generic HTTP 400.
+  `main` (any case) selects the default branch, and a branch **variable** query
+  offers a selectable `main` plus each branch shown as `name (schema id)` to
+  disambiguate NetBox's non-unique branch names — degrading to just `main` when
+  branching is not installed.
 - Topology: logical path edges by default (patch panels and circuits resolve to the far
   device via NetBox cable paths), `connections` query option (`logical`/`physical` — the
   physical view renders panels as nodes), wireless links, and an edge `kind` detail.

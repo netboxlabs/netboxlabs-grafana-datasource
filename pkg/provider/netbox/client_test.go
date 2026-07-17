@@ -30,6 +30,34 @@ func branchResolveServer(t *testing.T, got *string, branchesBody string, branche
 	return srv
 }
 
+// "main"/"Main" (any case) is the default branch and must send NO X-NetBox-Branch
+// header — even when branching isn't installed (the branches endpoint 404s, but
+// "main" short-circuits before any fetch).
+func TestResolveBranch_MainIsDefaultNoHeader(t *testing.T) {
+	var present bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/plugins/branching/branches/") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"detail":"Not found."}`))
+			return
+		}
+		_, present = r.Header["X-Netbox-Branch"] // canonicalized header key
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "t", &http.Client{Timeout: 5 * time.Second})
+
+	for _, v := range []string{"main", "Main", "MAIN"} {
+		present = false
+		if _, err := c.getBytes(provider.WithBranch(context.Background(), v), srv.URL+"/api/x/"); err != nil {
+			t.Fatalf("getBytes(%q): %v", v, err)
+		}
+		if present {
+			t.Errorf("branch %q must send NO X-NetBox-Branch header (it is the default)", v)
+		}
+	}
+}
+
 func TestResolveBranch_NameToSchemaID(t *testing.T) {
 	var got string
 	srv := branchResolveServer(t, &got,

@@ -51,6 +51,67 @@ describe('metricFindQuery', () => {
     await ds.metricFindQuery({ refId: 'A', objectType: 'dcim/devices', branch: '$branch' } as any, {});
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ branch: 'td5smq0f' }));
   });
+
+  it('prepends a selectable "main" for the branch variable', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({
+      columns: ['schema_id', 'name'],
+      rows: [{ schema_id: 'kc4v9jtd', name: 'demo-branch' }],
+    });
+    const out = await ds.metricFindQuery({
+      refId: 'v',
+      objectType: 'plugins/branching/branches',
+      valueField: 'schema_id',
+      textField: 'name',
+    });
+    expect(out).toEqual([
+      { text: 'main', value: 'main' },
+      { text: 'demo-branch (kc4v9jtd)', value: 'kc4v9jtd' },
+    ]);
+  });
+
+  it('degrades to just "main" for the branch variable when branching is not installed', async () => {
+    const ds = makeDS();
+    // Backend maps a NetBox 404 to a 502 with a "not found" message (OBS-3588).
+    (ds as any).runResourceQuery = jest
+      .fn()
+      .mockRejectedValue({ status: 502, data: { error: 'This object type was not found in NetBox (HTTP 404).' } });
+    const out = await ds.metricFindQuery({
+      refId: 'v',
+      objectType: 'plugins/branching/branches',
+      valueField: 'schema_id',
+      textField: 'name',
+    });
+    expect(out).toEqual([{ text: 'main', value: 'main' }]);
+  });
+
+  it('rethrows a real branch-list failure (outage/auth) instead of hiding it behind "main"', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest
+      .fn()
+      .mockRejectedValue({ status: 502, data: { error: "Couldn't reach NetBox: dial tcp: connection refused" } });
+    await expect(
+      ds.metricFindQuery({
+        refId: 'v',
+        objectType: 'plugins/branching/branches',
+        valueField: 'schema_id',
+        textField: 'name',
+      })
+    ).rejects.toBeDefined();
+  });
+
+  it('does not prepend "main" for non-branch variables', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({ columns: ['name'], rows: [{ name: 'leaf1' }] });
+    const out = await ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'name' });
+    expect(out).toEqual([{ text: 'leaf1', value: 'leaf1' }]);
+  });
+
+  it('re-throws (does not swallow) errors for non-branch variables', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockRejectedValue(new Error('boom'));
+    await expect(ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'name' })).rejects.toThrow('boom');
+  });
 });
 
 describe('applyTemplateVariables', () => {

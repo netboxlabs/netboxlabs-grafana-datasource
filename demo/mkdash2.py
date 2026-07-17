@@ -38,6 +38,10 @@ prom = {"type": "prometheus", "uid": PROM}
 loki = {"type": "loki", "uid": LOKI or "loki"}
 mixed = {"type": "datasource", "uid": "-- Mixed --"}
 
+# Whether to emit netbox-branching content (the global $branch scope and
+# branch-aware device links). Only the bundled full demo passes --with-branching.
+WITH_BRANCHING = "--with-branching" in sys.argv
+
 
 def organize(exclude, rename):
     return {"id": "organize", "options": {
@@ -63,11 +67,14 @@ def netbox_device_link(device_col):
     field paths with lodash.property, which cannot parse JSON-escaped bracket
     quotes — keep the column name free of . } and :. quote() keeps $ { } .
     unencoded so Grafana's variable regex still matches after encoding."""
+    # Under branching, carry $branch so clicking a device in a branch view opens
+    # Explore scoped to the same branch (else branch-only devices show no row).
+    branch = ',"branch":"$branch"' if WITH_BRANCHING else ""
     panes = ('{"nb":{"datasource":"__NB_UID__","queries":[{"refId":"A",'
              '"queryType":"objects","objectType":"dcim/devices",'
              '"filters":[{"field":"name","operator":"","value":'
              '"${__data.fields.' + device_col + '}"}],'
-             '"limit":10}]}}')
+             '"limit":10' + branch + '}]}}')
     return {"matcher": {"id": "byName", "options": device_col},
             "properties": [{"id": "links", "value": [{
                 "title": "NetBox: device details",
@@ -200,7 +207,7 @@ panels = [
     {"id": 11, "type": "table", "title": "Recipe 3b — Flow IPs, longest-prefix NetBox context",
      "gridPos": {"x": 0, "y": 43, "w": 12, "h": 8}, "datasource": nb,
      "targets": [{"refId": "A", "datasource": nb, "queryType": "ip-enrichment",
-                  "ips": "${flow_ips:csv}",
+                  "ips": "$flow_ips",
                   "contextFields": ["prefix", "scope", "tenant", "role", "vlan"]}],
      "fieldConfig": {"defaults": {}, "overrides": [
         {"matcher": {"id": "byName", "options": "scope"},
@@ -252,9 +259,6 @@ dash = {
     "templating": {"list": [
         var("site", "Site", "dcim/sites", "slug", "name"),
         var("role", "Role", "dcim/device-roles", "slug", "name"),
-        var("tenant", "Tenant", "tenancy/tenants", "slug", "name"),
-        var("device", "Device", "dcim/devices", "name", "name",
-            extra={"filters": [{"field": "site", "operator": "", "value": "$site"}]}),
         {"name": "flow_ips", "label": "Flow IPs", "type": "query", "datasource": prom,
          "refresh": 2, "includeAll": True, "multi": True,
          "current": {"selected": True, "text": ["All"], "value": ["$__all"]},
@@ -273,24 +277,36 @@ dash = {
 # guaranteed in the bundled full demo. The importable and shared/dev dashboards
 # run against an arbitrary user NetBox, so gate it behind --with-branching to
 # avoid a failing plugins/branching/branches variable query there.
-if "--with-branching" in sys.argv:
-    dash["templating"]["list"].append(
-        var("branch", "Branch", "plugins/branching/branches", "schema_id", "name",
-            include_all=False, multi=False))
-    dash["panels"].extend([
-        {"id": 14, "type": "row", "title": "Branching (netbox-branching): main vs $branch",
-         "collapsed": False, "gridPos": {"x": 0, "y": 60, "w": 24, "h": 1}, "panels": []},
-        {"id": 15, "type": "stat", "title": "Devices on main", "gridPos": {"x": 0, "y": 61, "w": 12, "h": 8},
-         "datasource": nb,
-         "targets": [{"refId": "A", "datasource": nb, "objectType": "dcim/devices",
-                      "fields": ["name"], "limit": 1000, "branch": ""}],
-         "options": {"reduceOptions": {"calcs": ["count"], "fields": "/^name$/"}, "graphMode": "none", "colorMode": "value"}},
-        {"id": 16, "type": "stat", "title": "Devices on $branch", "gridPos": {"x": 12, "y": 61, "w": 12, "h": 8},
-         "datasource": nb,
-         "targets": [{"refId": "A", "datasource": nb, "objectType": "dcim/devices",
-                      "fields": ["name"], "limit": 1000, "branch": "$branch"}],
-         "options": {"reduceOptions": {"calcs": ["count"], "fields": "/^name$/"}, "graphMode": "none", "colorMode": "value"}},
-    ])
+if WITH_BRANCHING:
+    # A visible Branch picker that scopes the WHOLE dashboard. Options are "main"
+    # (the default; metricFindQuery prepends it) plus each real branch shown as
+    # "name (schema_id)". The datasource treats branch "main"/"" as the base (no
+    # X-NetBox-Branch header), so selecting a branch re-queries every panel against
+    # it. Default is main, so the dashboard opens on the base state. It is inserted
+    # FIRST so the NetBox filter variables below can depend on it.
+    dash["templating"]["list"].insert(0,
+        {**var("branch", "Branch", "plugins/branching/branches", "schema_id", "name",
+               include_all=False, multi=False),
+         "current": {"selected": True, "text": "main", "value": "main"}})
+    # Scope the NetBox filter variables (site/role) to the branch too, so their
+    # dropdown options reflect the selected branch (a branch may add/remove sites
+    # or roles). The branch variable itself is excluded (it lists all branches, a
+    # base-level concept), and flow_ips is a Prometheus variable (untouched).
+    for _v in dash["templating"]["list"]:
+        _vds = _v.get("datasource") or {}
+        if isinstance(_vds, dict) and _vds.get("type") == "netboxlabs-netbox-datasource" and _v["name"] != "branch":
+            _v.setdefault("query", {})["branch"] = "$branch"
+    # Make the branch global: every NetBox panel target (and the change-log
+    # annotation) honors $branch.
+    for _panel in dash["panels"]:
+        for _t in _panel.get("targets", []):
+            _ds = _t.get("datasource") or {}
+            if isinstance(_ds, dict) and _ds.get("type") == "netboxlabs-netbox-datasource":
+                _t["branch"] = "$branch"
+    for _anno in dash["annotations"]["list"]:
+        _ads = _anno.get("datasource") or {}
+        if isinstance(_ads, dict) and _ads.get("type") == "netboxlabs-netbox-datasource" and "target" in _anno:
+            _anno["target"]["branch"] = "$branch"
 
 
 # --- Datasource-ref rewriting + emit modes -------------------------------

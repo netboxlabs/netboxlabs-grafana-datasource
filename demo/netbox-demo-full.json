@@ -9,6 +9,29 @@
   "templating": {
     "list": [
       {
+        "name": "branch",
+        "label": "Branch",
+        "type": "query",
+        "datasource": {
+          "type": "netboxlabs-netbox-datasource",
+          "uid": "netboxlabs-netbox-alerting"
+        },
+        "query": {
+          "refId": "var",
+          "objectType": "plugins/branching/branches",
+          "valueField": "schema_id",
+          "textField": "name"
+        },
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "main",
+          "value": "main"
+        }
+      },
+      {
         "name": "site",
         "label": "Site",
         "type": "query",
@@ -20,7 +43,8 @@
           "refId": "var",
           "objectType": "dcim/sites",
           "valueField": "slug",
-          "textField": "name"
+          "textField": "name",
+          "branch": "$branch"
         },
         "refresh": 1,
         "includeAll": true,
@@ -47,68 +71,8 @@
           "refId": "var",
           "objectType": "dcim/device-roles",
           "valueField": "slug",
-          "textField": "name"
-        },
-        "refresh": 1,
-        "includeAll": true,
-        "multi": true,
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        }
-      },
-      {
-        "name": "tenant",
-        "label": "Tenant",
-        "type": "query",
-        "datasource": {
-          "type": "netboxlabs-netbox-datasource",
-          "uid": "netboxlabs-netbox-alerting"
-        },
-        "query": {
-          "refId": "var",
-          "objectType": "tenancy/tenants",
-          "valueField": "slug",
-          "textField": "name"
-        },
-        "refresh": 1,
-        "includeAll": true,
-        "multi": true,
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        }
-      },
-      {
-        "name": "device",
-        "label": "Device",
-        "type": "query",
-        "datasource": {
-          "type": "netboxlabs-netbox-datasource",
-          "uid": "netboxlabs-netbox-alerting"
-        },
-        "query": {
-          "refId": "var",
-          "objectType": "dcim/devices",
-          "valueField": "name",
           "textField": "name",
-          "filters": [
-            {
-              "field": "site",
-              "operator": "",
-              "value": "$site"
-            }
-          ]
+          "branch": "$branch"
         },
         "refresh": 1,
         "includeAll": true,
@@ -147,25 +111,6 @@
           "query": "label_values(flow_bytes_total, dst_ip)",
           "refId": "flowips"
         }
-      },
-      {
-        "name": "branch",
-        "label": "Branch",
-        "type": "query",
-        "datasource": {
-          "type": "netboxlabs-netbox-datasource",
-          "uid": "netboxlabs-netbox-alerting"
-        },
-        "query": {
-          "refId": "var",
-          "objectType": "plugins/branching/branches",
-          "valueField": "schema_id",
-          "textField": "name"
-        },
-        "refresh": 1,
-        "includeAll": false,
-        "multi": false,
-        "current": {}
       }
     ]
   },
@@ -195,7 +140,8 @@
           "objectTypes": [
             "dcim.device"
           ],
-          "limit": 100
+          "limit": 100,
+          "branch": "$branch"
         }
       }
     ]
@@ -238,7 +184,8 @@
           "fields": [
             "name"
           ],
-          "limit": 1000
+          "limit": 1000,
+          "branch": "$branch"
         }
       ],
       "options": {
@@ -299,7 +246,8 @@
               "transform": "none"
             }
           ],
-          "limit": 1000
+          "limit": 1000,
+          "branch": "$branch"
         }
       ],
       "transformations": [
@@ -374,7 +322,7 @@
                 "value": [
                   {
                     "title": "NetBox: device details",
-                    "url": "/explore?schemaVersion=1&panes={%22nb%22%3A{%22datasource%22%3A%22netboxlabs-netbox-alerting%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22queryType%22%3A%22objects%22%2C%22objectType%22%3A%22dcim%2Fdevices%22%2C%22filters%22%3A%5B{%22field%22%3A%22name%22%2C%22operator%22%3A%22%22%2C%22value%22%3A%22${__data.fields.Device}%22}%5D%2C%22limit%22%3A10}%5D}}"
+                    "url": "/explore?schemaVersion=1&panes={%22nb%22%3A{%22datasource%22%3A%22netboxlabs-netbox-alerting%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22queryType%22%3A%22objects%22%2C%22objectType%22%3A%22dcim%2Fdevices%22%2C%22filters%22%3A%5B{%22field%22%3A%22name%22%2C%22operator%22%3A%22%22%2C%22value%22%3A%22${__data.fields.Device}%22}%5D%2C%22limit%22%3A10%2C%22branch%22%3A%22$branch%22}%5D}}"
                   }
                 ]
               }
@@ -451,7 +399,8 @@
               "transform": "none"
             }
           ],
-          "limit": 1000
+          "limit": 1000,
+          "branch": "$branch"
         }
       ],
       "transformations": [
@@ -542,7 +491,7 @@
                 "value": [
                   {
                     "title": "NetBox: device details",
-                    "url": "/explore?schemaVersion=1&panes={%22nb%22%3A{%22datasource%22%3A%22netboxlabs-netbox-alerting%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22queryType%22%3A%22objects%22%2C%22objectType%22%3A%22dcim%2Fdevices%22%2C%22filters%22%3A%5B{%22field%22%3A%22name%22%2C%22operator%22%3A%22%22%2C%22value%22%3A%22${__data.fields.Device}%22}%5D%2C%22limit%22%3A10}%5D}}"
+                    "url": "/explore?schemaVersion=1&panes={%22nb%22%3A{%22datasource%22%3A%22netboxlabs-netbox-alerting%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22queryType%22%3A%22objects%22%2C%22objectType%22%3A%22dcim%2Fdevices%22%2C%22filters%22%3A%5B{%22field%22%3A%22name%22%2C%22operator%22%3A%22%22%2C%22value%22%3A%22${__data.fields.Device}%22}%5D%2C%22limit%22%3A10%2C%22branch%22%3A%22$branch%22}%5D}}"
                   }
                 ]
               }
@@ -636,7 +585,8 @@
           },
           "queryType": "topology",
           "connectedOnly": true,
-          "limit": 500
+          "limit": 500,
+          "branch": "$branch"
         }
       ]
     },
@@ -668,7 +618,8 @@
             "longitude",
             "display_url"
           ],
-          "limit": 500
+          "limit": 500,
+          "branch": "$branch"
         }
       ],
       "options": {
@@ -739,7 +690,8 @@
             "role",
             "vlan",
             "description"
-          ]
+          ],
+          "branch": "$branch"
         }
       ],
       "fieldConfig": {
@@ -803,7 +755,8 @@
             "serial",
             "display_url"
           ],
-          "limit": 500
+          "limit": 500,
+          "branch": "$branch"
         }
       ],
       "fieldConfig": {
@@ -869,7 +822,8 @@
               "transform": "host"
             }
           ],
-          "limit": 1000
+          "limit": 1000,
+          "branch": "$branch"
         }
       ],
       "transformations": [
@@ -973,7 +927,8 @@
               "transform": "iphost"
             }
           ],
-          "limit": 1000
+          "limit": 1000,
+          "branch": "$branch"
         }
       ],
       "transformations": [
@@ -1069,14 +1024,15 @@
             "uid": "netboxlabs-netbox-alerting"
           },
           "queryType": "ip-enrichment",
-          "ips": "${flow_ips:csv}",
+          "ips": "$flow_ips",
           "contextFields": [
             "prefix",
             "scope",
             "tenant",
             "role",
             "vlan"
-          ]
+          ],
+          "branch": "$branch"
         }
       ],
       "fieldConfig": {
@@ -1142,7 +1098,8 @@
               "transform": "host"
             }
           ],
-          "limit": 1000
+          "limit": 1000,
+          "branch": "$branch"
         }
       ],
       "transformations": [
@@ -1224,7 +1181,8 @@
             "used",
             "available"
           ],
-          "limit": 1000
+          "limit": 1000,
+          "branch": "$branch"
         }
       ],
       "transformations": [
@@ -1287,99 +1245,6 @@
             ]
           }
         ]
-      }
-    },
-    {
-      "id": 14,
-      "type": "row",
-      "title": "Branching (netbox-branching): main vs $branch",
-      "collapsed": false,
-      "gridPos": {
-        "x": 0,
-        "y": 60,
-        "w": 24,
-        "h": 1
-      },
-      "panels": []
-    },
-    {
-      "id": 15,
-      "type": "stat",
-      "title": "Devices on main",
-      "gridPos": {
-        "x": 0,
-        "y": 61,
-        "w": 12,
-        "h": 8
-      },
-      "datasource": {
-        "type": "netboxlabs-netbox-datasource",
-        "uid": "netboxlabs-netbox-alerting"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "netboxlabs-netbox-datasource",
-            "uid": "netboxlabs-netbox-alerting"
-          },
-          "objectType": "dcim/devices",
-          "fields": [
-            "name"
-          ],
-          "limit": 1000,
-          "branch": ""
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "count"
-          ],
-          "fields": "/^name$/"
-        },
-        "graphMode": "none",
-        "colorMode": "value"
-      }
-    },
-    {
-      "id": 16,
-      "type": "stat",
-      "title": "Devices on $branch",
-      "gridPos": {
-        "x": 12,
-        "y": 61,
-        "w": 12,
-        "h": 8
-      },
-      "datasource": {
-        "type": "netboxlabs-netbox-datasource",
-        "uid": "netboxlabs-netbox-alerting"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "netboxlabs-netbox-datasource",
-            "uid": "netboxlabs-netbox-alerting"
-          },
-          "objectType": "dcim/devices",
-          "fields": [
-            "name"
-          ],
-          "limit": 1000,
-          "branch": "$branch"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "count"
-          ],
-          "fields": "/^name$/"
-        },
-        "graphMode": "none",
-        "colorMode": "value"
       }
     }
   ]

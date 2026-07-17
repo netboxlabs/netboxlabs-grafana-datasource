@@ -123,17 +123,43 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     const fields = Array.from(new Set([valueField, textField]));
     const branch = query.branch ? srv.replace(query.branch, options?.scopedVars) : undefined;
 
-    const res = await this.runResourceQuery({ objectType: query.objectType, filters, fields, limit: 1000, branch });
+    // The branch selector always offers "main" (the default branch, sent as no
+    // X-NetBox-Branch header). Prepend it so a picker can switch back to main,
+    // and so the variable still yields "main" when netbox-branching isn't
+    // installed (the branches endpoint 404s below — degrade to just "main"
+    // instead of breaking the dashboard).
+    const isBranches = query.objectType === 'plugins/branching/branches';
+    const out: MetricFindValue[] = isBranches ? [{ text: 'main', value: 'main' }] : [];
 
-    const seen = new Set<string>();
-    const out: MetricFindValue[] = [];
+    let res: { columns: string[]; rows: Array<Record<string, unknown>> };
+    try {
+      res = await this.runResourceQuery({ objectType: query.objectType, filters, fields, limit: 1000, branch });
+    } catch (err) {
+      // Degrade the branch variable to a "main"-only list ONLY when branching
+      // isn't installed (the branches endpoint 404s, surfaced by the backend as
+      // a "not found" message). Any other failure (auth, 5xx, network) is
+      // rethrown so the outage/misconfig surfaces instead of being hidden behind
+      // main. If the message can't be matched, we rethrow — the safe default.
+      const detail = String(
+        (err as { data?: { error?: string }; message?: string })?.data?.error ?? (err as Error)?.message ?? ''
+      );
+      if (isBranches && /not found|404/i.test(detail)) {
+        return out;
+      }
+      throw err;
+    }
+
+    const seen = new Set<string>(isBranches ? ['main'] : []);
     for (const row of res.rows ?? []) {
       const value = String(row[valueField] ?? '');
       if (!value || seen.has(value)) {
         continue;
       }
       seen.add(value);
-      out.push({ text: String(row[textField] ?? value), value });
+      const label = String(row[textField] ?? value);
+      // Branch names are NOT unique in NetBox, so show "name (schema_id)" to
+      // disambiguate same-named branches (the schema id is the value sent).
+      out.push({ text: isBranches ? `${label} (${value})` : label, value });
     }
     return out;
   }

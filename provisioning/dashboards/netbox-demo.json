@@ -63,67 +63,6 @@
         }
       },
       {
-        "name": "tenant",
-        "label": "Tenant",
-        "type": "query",
-        "datasource": {
-          "type": "netboxlabs-netbox-datasource",
-          "uid": "netboxlabs-netbox-alerting"
-        },
-        "query": {
-          "refId": "var",
-          "objectType": "tenancy/tenants",
-          "valueField": "slug",
-          "textField": "name"
-        },
-        "refresh": 1,
-        "includeAll": true,
-        "multi": true,
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        }
-      },
-      {
-        "name": "device",
-        "label": "Device",
-        "type": "query",
-        "datasource": {
-          "type": "netboxlabs-netbox-datasource",
-          "uid": "netboxlabs-netbox-alerting"
-        },
-        "query": {
-          "refId": "var",
-          "objectType": "dcim/devices",
-          "valueField": "name",
-          "textField": "name",
-          "filters": [
-            {
-              "field": "site",
-              "operator": "",
-              "value": "$site"
-            }
-          ]
-        },
-        "refresh": 1,
-        "includeAll": true,
-        "multi": true,
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        }
-      },
-      {
         "name": "flow_ips",
         "label": "Flow IPs",
         "type": "query",
@@ -1050,7 +989,7 @@
             "uid": "netboxlabs-netbox-alerting"
           },
           "queryType": "ip-enrichment",
-          "ips": "${flow_ips:csv}",
+          "ips": "$flow_ips",
           "contextFields": [
             "prefix",
             "scope",

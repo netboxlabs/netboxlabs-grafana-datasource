@@ -8,7 +8,7 @@ it must pass. Sources are linked inline.
 **Grafana Cloud only runs plugins that are published to the Grafana plugin catalog and signed
 by Grafana.** There is no sideload/upload path, and private/unsigned plugins cannot run on
 Cloud. (Self-hosted OSS/Enterprise Grafana _can_ run a privately-signed or
-`allow_loading_unsigned_plugins` build — that's how the demo runs today.)
+`allow_loading_unsigned_plugins` build; that's how the demo runs today.)
 See [Find and use plugins](https://grafana.com/docs/grafana-cloud/introduction/find-and-use-plugins/).
 
 So Cloud support = **a catalog submission**. Because NetBox Labs is a commercial entity, this
@@ -26,7 +26,7 @@ See [plugin policy](https://grafana.com/legal/plugins/) and
   HTTP client from the Grafana SDK (`backend/httpclient`) using the datasource instance
   settings, so the PDC tunnel, proxy and TLS options are applied automatically.
 
-This matters because most NetBox installs are private — PDC is the expected path for them.
+This matters because most NetBox installs are private. PDC is the expected path for them.
 
 ## Signing
 
@@ -37,7 +37,7 @@ npm run sign                                  # wraps @grafana/sign-plugin
 ```
 
 Signing writes `MANIFEST.txt` (SHA-256 of every file + signature) into `dist/`. For a public
-(catalog) plugin you do **not** pass `--rootUrls` — Grafana signs after review. Re-sign after
+(catalog) plugin you do **not** pass `--rootUrls`; Grafana signs after review. Re-sign after
 any change to `dist/`. See [sign a plugin](https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin).
 
 ## Build artifacts in the packaged zip
@@ -66,7 +66,7 @@ npx -y @grafana/plugin-validator@latest \
 ```
 
 It checks archive structure, `plugin.json`, `module.js`, **backend binary presence/consistency**,
-README, **CHANGELOG (required)**, LICENSE (must be an OSI license — Apache-2.0 ✓), **real
+README, **CHANGELOG (required)**, LICENSE (must be an OSI license, Apache-2.0 ✓), **real
 (non-placeholder) logos**, screenshots, keywords, broken links, and security scanners
 (gosec/govulncheck/osv-scanner/semgrep/virus). **Zero `error`-severity findings** is required.
 
@@ -86,7 +86,7 @@ README, **CHANGELOG (required)**, LICENSE (must be an OSI license — Apache-2.0
 | No telemetry / tracking scripts                             | ✅                                                                                                 |
 | Signed by Grafana                                           | ⏳ at submission (needs access-policy token)                                                       |
 | Catalog submission (Community/Commercial)                   | ⏳ business decision (Commercial likely)                                                           |
-| README images/links absolute for the catalog                | ⏳ at submission — currently repo-relative (see step 4)                                            |
+| README images/links absolute for the catalog                | ⏳ at submission, currently repo-relative (see step 4)                                             |
 
 ## Remaining business/process steps (not code)
 

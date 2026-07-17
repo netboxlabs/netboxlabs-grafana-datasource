@@ -4,17 +4,17 @@ Step-by-step patterns for joining NetBox context onto metrics, logs and flows.
 
 **How enrichment works.** A NetBox query returns a flat table (one row per
 device/IP/prefix). A **join key** renames one NetBox field into a column that exactly
-matches a label on your metrics or logs — same name, same value — optionally transforming
-it on the way (lowercase, strip domain, drop CIDR mask, regex). A Grafana transformation —
-usually **Join by field** — then lines the two tables up, and every series row carries its
+matches a label on your metrics or logs (same name, same value), optionally transforming
+it on the way (lowercase, strip domain, drop CIDR mask, regex). A Grafana transformation,
+usually **Join by field**, then lines the two tables up, and every series row carries its
 NetBox context. Full transform reference:
 [JOIN-KEYS.md](./JOIN-KEYS.md).
 
-> Want a sandbox with everything pre-wired? See the [Demo](../README.md#demo) —
+> Want a sandbox with everything pre-wired? See the [Demo](../README.md#demo):
 > `./demo/run.sh` brings up a real NetBox plus Prometheus, Loki and synthetic telemetry, all
 > labeled to match.
 
-## Recipe 1 — Enrich Prometheus/SNMP metrics with site, role and tenant
+## Recipe 1: Enrich Prometheus/SNMP metrics with site, role and tenant
 
 ![Prometheus join result](../screenshots/recipes/prometheus-join.png)
 
@@ -44,12 +44,12 @@ identifier label (here: `instance`), and this plugin connected to your NetBox.
 | dmi01-akron-rtr01 | 38.2  | DM-Akron  | Router        | Dunder-Mifflin |
 | dmi01-albany-sw01 | 21.7  | DM-Albany | Access Switch | Dunder-Mifflin |
 
-**If it doesn't match:** your series may use a different label (`device`, `node`) — set
+**If it doesn't match:** your series may use a different label (`device`, `node`): set
 the join key _output_ to that name instead. Case mismatches (`LEAF1` vs `leaf1`) →
 transform **lowercase**. All transforms:
 [JOIN-KEYS.md](./JOIN-KEYS.md).
 
-## Recipe 2 — Enrich Loki logs with device context
+## Recipe 2: Enrich Loki logs with device context
 
 ![Loki join result](../screenshots/recipes/loki-join.png)
 
@@ -63,12 +63,12 @@ transform **lowercase**. All transforms:
    `name`, `site`, `role`, `tenant`; **Limit** e.g. 1000; **Join key** `name` → `host`,
    transform **strip domain**.
 3. **Transformations:** add **Labels to fields**, then **Merge series/tables** (Loki
-   returns one frame per host; _merge_ correlates them with the NetBox rows on the
-   shared `host` column — don't use _Join by field_ here), then
+   returns one frame per host, and _merge_ correlates them with the NetBox rows on the
+   shared `host` column; don't use _Join by field_ here), then
    **Filter data by values** → keep where the log-count column **is not null**, then
    **Organize fields**: hide `Time` and `name`, and rename the log-count column to
    `Log lines (15m)`. Grafana names that column `Value #A` (after the Loki query's
-   refId) — pick whatever it shows in the field dropdown; it will not be plain `Value`
+   refId), so pick whatever it shows in the field dropdown: it will not be plain `Value`
    the way a single Prometheus query is.
 
 **Expected result:**
@@ -86,16 +86,16 @@ logs carry FQDNs but NetBox has short names → keep **strip domain**; the rever
 apply a regex transform instead
 ([JOIN-KEYS.md](./JOIN-KEYS.md)).
 
-## Recipe 3 — Enrich flows or logs by IP
+## Recipe 3: Enrich flows or logs by IP
 
 Two variants: **exact** (the observed IP exists in NetBox IPAM) and **longest-prefix**
-(any IP — resolved to its containing prefix's context). Start with exact; switch when
+(any IP, resolved to its containing prefix's context). Start with exact; switch when
 you see empty joins.
 
 **You need:** any datasource whose rows carry bare IP labels/fields (flow collector,
 firewall or DNS logs, …) and this plugin connected to your NetBox.
 
-**3a — exact IP join**
+**3a: exact IP join**
 
 ![Exact IP join result](../screenshots/recipes/flow-ip-exact.png)
 
@@ -117,7 +117,7 @@ firewall or DNS logs, …) and this plugin connected to your NetBox.
 | 10.112.128.1  | 10.113.1.7  | 48,200,113 | Dunder-Mifflin | rtr01 uplink |
 | 10.112.129.10 | 203.0.113.7 | 9,881,220  | Dunder-Mifflin |              |
 
-**3b — longest-prefix match (works for any IP)**
+**3b: longest-prefix match (works for any IP)**
 
 ![Longest-prefix result](../screenshots/recipes/flow-ip-lpm.png)
 
@@ -129,9 +129,9 @@ Exact joins fail for IPs that aren't individually registered in IPAM. The
    **Include All**.
 2. Add a NetBox query: query type **IP enrichment**; in **IPs** enter
    `${flow_ips:csv}`; pick context fields (`prefix`, `site`, `tenant`, `role`, `vlan`).
-   On **NetBox 4.2+** a prefix's site moved to a generic scope — pick `scope` instead of
+   On **NetBox 4.2+** a prefix's site moved to a generic scope: pick `scope` instead of
    `site` (it carries the site name).
-3. The result is a table keyed by `ip` — use it standalone, or **Join by field** on `ip`
+3. The result is a table keyed by `ip`. Use it standalone, or **Join by field** on `ip`
    against your flow table (rename the flow label to `ip` with an _organize fields_
    transform, or set a join key output accordingly).
 
@@ -142,7 +142,7 @@ Exact joins fail for IPs that aren't individually registered in IPAM. The
 | 10.112.128.9 | 10.112.128.0/24 | DM-Akron | Dunder-Mifflin | LAN  | 128  |
 | 203.0.113.7  |                 |          |                |      |      |
 
-An empty row means NetBox has no containing prefix — that's signal too (unknown/external
+An empty row means NetBox has no containing prefix, which is signal too (unknown/external
 traffic).
 
 **If it doesn't match:** exact join (3a) returning mostly empty context → your observed
@@ -152,6 +152,42 @@ the containing prefixes aren't in NetBox, or the variable is empty (check its
 reference in
 [JOIN-KEYS.md](./JOIN-KEYS.md).
 
+## Prefix & IP utilization
+
+Prefixes and IP ranges expose three extra columns: `utilization` (percent used, 0 to
+100), `used`, and `available`. The backend computes them to match the figure shown in
+NetBox's own UI (network/broadcast excluded for IPv4 non-pool prefixes, container
+prefixes measured by child-prefix coverage, `mark_utilized` ⇒ 100%).
+
+They are opt-in: they appear only when you add them to **Return fields**, so ordinary
+IPAM queries pay no extra cost.
+
+![Prefix utilization](../screenshots/recipes/prefix-utilization.png)
+
+**Steps:**
+
+1. Add a panel with query type **Objects**, object type **Prefixes** (`ipam/prefixes`) or
+   **Ip Addresses → IP ranges** (`ipam/ip-ranges`). Add filters as usual (e.g. `site`,
+   `tenant`, `role`).
+2. In **Return fields**, pick `prefix` (or `start_address`) plus `utilization`, `used`,
+   `available`.
+3. Visualize: a **Gauge** or **Bar gauge** on `utilization` with thresholds (e.g. green < 75,
+   red ≥ 90) shows capacity per subnet. A **Table** with all three columns gives the raw
+   numbers, sorted by `utilization` to surface the fullest subnets.
+
+**Expected result** (Table):
+
+| prefix        | utilization | used | available |
+| ------------- | ----------- | ---- | --------- |
+| 10.10.10.0/24 | 1           | 3    | 251       |
+| 10.20.20.0/24 | 0           | 2    | 252       |
+
+**Notes:** utilization is scoped to the object's VRF and mirrors NetBox's own figure. A
+leaf prefix's `used` is the de-duplicated set of its child IP addresses plus any
+marked-utilized child ranges, a container prefix is measured by child-prefix coverage,
+and an IP range by its child-IP count. It's computed only when a utilization field is
+requested (a few extra NetBox calls per row), so ordinary IPAM queries are unaffected.
+
 ## Beyond joins
 
 - **Dashboard variables:** variable type **Query** → NetBox datasource → object type
@@ -160,5 +196,5 @@ reference in
 - **Change annotations:** add a dashboard annotation backed by NetBox; optionally
   restrict to content types (`dcim.device`, `ipam.prefix`). Change-log events overlay
   your panels with who-changed-what.
-- **Deep links:** include the `display_url` column (hideable) and the primary label
-  column links each row back to its NetBox object page — links survive joins.
+- **Deep links:** include the `display_url` column (hideable); the primary label column
+  links each row back to its NetBox object page, and links survive joins.

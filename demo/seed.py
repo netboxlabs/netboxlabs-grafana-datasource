@@ -22,6 +22,7 @@ Env: NETBOX_URL (e.g. http://netbox:8080), NETBOX_TOKEN.
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,12 +34,15 @@ TOKEN = os.environ["NETBOX_TOKEN"]
 SCHEME = "Bearer " if TOKEN.startswith("nbt_") else "Token "
 
 
-def req(method, path, body=None):
+def req(method, path, body=None, headers=None):
     data = json.dumps(body).encode() if body is not None else None
     r = urllib.request.Request(NB + f"/api/{path}", data=data, method=method)
     r.add_header("Authorization", SCHEME + TOKEN)
     r.add_header("Content-Type", "application/json")
     r.add_header("Accept", "application/json")
+    if headers:
+        for k, v in headers.items():
+            r.add_header(k, v)
     try:
         # Local demo tooling; NETBOX_URL is operator-supplied and scheme-checked at startup.
         with urllib.request.urlopen(r, timeout=60) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
@@ -305,6 +309,57 @@ for i, (a, b) in enumerate(CIRCUIT_PAIRS, start=1):
     goc("circuits/circuits", {"cid": cid},
         {"cid": cid, "provider": provider_id, "type": circuit_type_id, "status": "active",
          "tenant": tenant, "description": f"{a.upper()} <-> {b.upper()} transit"}, cid)
+
+print("== branch (netbox-branching) ==")
+# Get-or-create the demo branch.
+code, data = req("GET", "plugins/branching/branches/?name=demo-branch")
+if code == 200 and data.get("count", 0) > 0:
+    branch = data["results"][0]
+    STATS["reused"] += 1
+    print(f"  = plugins/branching/branches demo-branch -> id {branch['id']}")
+else:
+    code, branch = req("POST", "plugins/branching/branches/",
+                       {"name": "demo-branch",
+                        "description": "Grafana demo branch (adds AMS1-leaf-99)"})
+    if code not in (200, 201):
+        print(f"  ERROR creating branch: {code} {branch}")
+        sys.exit(1)
+    STATS["new"] += 1
+    print(f"  + plugins/branching/branches demo-branch -> id {branch['id']}")
+
+# Provisioning runs on the rqworker; wait for the branch to reach ready.
+schema_id = branch.get("schema_id")
+deadline = time.monotonic() + 180
+while True:
+    code, cur = req("GET", f"plugins/branching/branches/{branch['id']}/")
+    st = cur.get("status")
+    st = st.get("value") if isinstance(st, dict) else st  # choice fields serialize as {value,label}
+    if st == "ready":
+        schema_id = cur.get("schema_id", schema_id)
+        break
+    if st == "failed" or time.monotonic() > deadline:
+        print(f"  ERROR branch not ready (status={st}); is the rqworker running?")
+        sys.exit(1)
+    time.sleep(3)
+print(f"  branch ready -> schema_id {schema_id}")
+
+# A branch-only device: present in the branch, absent on main.
+bh = {"X-NetBox-Branch": str(schema_id)}
+code, data = req("GET", "dcim/devices/?name=AMS1-leaf-99", headers=bh)
+if code == 200 and data.get("count", 0) > 0:
+    STATS["reused"] += 1
+    print("  = dcim/devices AMS1-leaf-99 (branch) -> reused")
+else:
+    code, data = req("POST", "dcim/devices/",
+                     {"name": "AMS1-leaf-99", "device_type": dtype, "role": roles["leaf"],
+                      "site": sites["ams1"], "tenant": tenant, "status": "active"},
+                     headers=bh)
+    if code not in (200, 201):
+        print(f"  ERROR creating branch device: {code} {data}")
+        sys.exit(1)
+    STATS["new"] += 1
+    print(f"  + dcim/devices AMS1-leaf-99 (branch) -> id {data['id']}")
+print("SEEDED_BRANCH_SCHEMA_ID=" + str(schema_id))
 
 print(f"\ndone: {STATS['new']} created, {STATS['reused']} reused")
 print("SEEDED_PREFIXES=" + ",".join(seeded_prefixes))

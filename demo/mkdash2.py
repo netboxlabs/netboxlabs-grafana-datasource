@@ -269,6 +269,29 @@ dash = {
     "panels": panels,
 }
 
+# Branch demo content assumes netbox-branching is installed, which is only
+# guaranteed in the bundled full demo. The importable and shared/dev dashboards
+# run against an arbitrary user NetBox, so gate it behind --with-branching to
+# avoid a failing plugins/branching/branches variable query there.
+if "--with-branching" in sys.argv:
+    dash["templating"]["list"].append(
+        var("branch", "Branch", "plugins/branching/branches", "schema_id", "name",
+            include_all=False, multi=False))
+    dash["panels"].extend([
+        {"id": 14, "type": "row", "title": "Branching (netbox-branching): main vs $branch",
+         "collapsed": False, "gridPos": {"x": 0, "y": 60, "w": 24, "h": 1}, "panels": []},
+        {"id": 15, "type": "stat", "title": "Devices on main", "gridPos": {"x": 0, "y": 61, "w": 12, "h": 8},
+         "datasource": nb,
+         "targets": [{"refId": "A", "datasource": nb, "objectType": "dcim/devices",
+                      "fields": ["name"], "limit": 1000, "branch": ""}],
+         "options": {"reduceOptions": {"calcs": ["count"], "fields": "/^name$/"}, "graphMode": "none", "colorMode": "value"}},
+        {"id": 16, "type": "stat", "title": "Devices on $branch", "gridPos": {"x": 12, "y": 61, "w": 12, "h": 8},
+         "datasource": nb,
+         "targets": [{"refId": "A", "datasource": nb, "objectType": "dcim/devices",
+                      "fields": ["name"], "limit": 1000, "branch": "$branch"}],
+         "options": {"reduceOptions": {"calcs": ["count"], "fields": "/^name$/"}, "graphMode": "none", "colorMode": "value"}},
+    ])
+
 
 # --- Datasource-ref rewriting + emit modes -------------------------------
 #

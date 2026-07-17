@@ -1,0 +1,5 @@
+# Custom NetBox image for the demo: base image + the netbox-branching plugin.
+# The base image's venv ships `uv` (no `pip`); VIRTUAL_ENV is preset so `uv pip`
+# installs into it. 1.1.1 supports NetBox 4.4.1-4.6.x (this base is 4.4.10).
+FROM netboxcommunity/netbox:v4.4-3.4.2
+RUN uv pip install netboxlabs-netbox-branching==1.1.1

@@ -4,8 +4,8 @@ Thanks for your interest in improving the NetBox data source for Grafana.
 
 ## Reporting bugs and requesting features
 
-Use the [issue templates](https://github.com/netboxlabs/netboxlabs-grafana-datasource/issues/new/choose)
-— see the README's [Support & contributing](./README.md#support--contributing) section for
+Use the [issue templates](https://github.com/netboxlabs/netboxlabs-grafana-datasource/issues/new/choose).
+See the README's [Support & contributing](./README.md#support--contributing) section for
 where to get help. For anything beyond a small fix, open an issue first so the approach can
 be agreed before you invest time in a pull request.
 
@@ -19,7 +19,7 @@ docker-compose dev Grafana.
 
 - Keep PRs small and focused on one change.
 - Use a [Conventional Commits](https://www.conventionalcommits.org/) style title, e.g.
-  `fix(query): handle paginated brief responses` — PR titles become the commit history.
+  `fix(query): handle paginated brief responses`. PR titles become the commit history.
 - Make sure the checks pass locally before pushing:
 
   ```bash

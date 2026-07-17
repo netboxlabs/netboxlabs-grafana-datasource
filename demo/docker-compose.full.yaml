@@ -29,12 +29,14 @@ services:
     healthcheck: {test: ['CMD', 'redis-cli', '-a', 'redis', 'ping'], interval: 5s, timeout: 5s, retries: 20}
 
   netbox:
-    image: netboxcommunity/netbox:v4.4-3.4.2
+    build: {context: ., dockerfile: Dockerfile.netbox}
+    image: netbox-grafana-demo/netbox:v4.4-3.4.2-branching
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
       redis-cache: {condition: service_healthy}
     env_file: netbox.env
+    volumes: ['./configuration/plugins.py:/etc/netbox/config/plugins.py:ro']
     healthcheck:
       test: ['CMD', 'curl', '-fsS', 'http://localhost:8080/login/']
       interval: 15s
@@ -43,9 +45,30 @@ services:
       start_period: 180s
     ports: ['8000:8080']
 
+  netbox-worker:
+    # Reuse the image the `netbox` service builds — do not declare `build` here
+    # too, or compose races to export the same tag concurrently ("image already
+    # exists"). pull_policy:never keeps it from trying to pull the local-only tag.
+    image: netbox-grafana-demo/netbox:v4.4-3.4.2-branching
+    pull_policy: never
+    depends_on: {netbox: {condition: service_healthy}}
+    env_file: netbox.env
+    # The worker needs the SAME plugin config as netbox, or netbox_branching is
+    # absent from its INSTALLED_APPS and it can't run provisioning jobs (the
+    # branch would sit at "new" forever).
+    volumes: ['./configuration/plugins.py:/etc/netbox/config/plugins.py:ro']
+    command: ['/opt/netbox/venv/bin/python', '/opt/netbox/netbox/manage.py', 'rqworker']
+    healthcheck:
+      test: ['CMD-SHELL', 'ps aux | grep -v grep | grep -q rqworker || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
   netbox-seed:
     image: python:3.12-slim
-    depends_on: {netbox: {condition: service_healthy}}
+    depends_on:
+      netbox: {condition: service_healthy}
+      netbox-worker: {condition: service_started}
     environment: *bundled-netbox
     volumes: ['./seed.py:/seed.py:ro']
     command: ['python', '/seed.py']
@@ -86,6 +109,11 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: 'true'
       GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: netboxlabs-netbox-datasource
+    # Only the bundled full demo has netbox-branching, so it swaps in the
+    # branch-enabled dashboard (the shared provisioning one is branch-free so
+    # BYO/dev NetBoxes without the plugin don't hit a failing branches query).
+    volumes:
+      - ./netbox-demo-full.json:/etc/grafana/provisioning/dashboards/netbox-demo.json:ro
     depends_on: {netbox-seed: {condition: service_completed_successfully}}
 
 volumes:

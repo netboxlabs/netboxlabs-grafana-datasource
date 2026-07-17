@@ -19,11 +19,11 @@ func mockTopologyNetBox(t *testing.T) *Provider {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, `{"count":5,"next":null,"results":[
-			{"id":1,"name":"leaf1","site":{"name":"dc1"},"role":{"name":"leaf"},"status":{"value":"active"}},
-			{"id":2,"name":"leaf2","site":{"name":"dc1"},"role":{"name":"leaf"},"status":{"value":"active"}},
-			{"id":3,"name":"pp1","site":{"name":"dc1"},"role":{"name":"panel"},"status":{"value":"active"}},
-			{"id":4,"name":"ap1","site":{"name":"dc1"},"role":{"name":"ap"},"status":{"value":"active"}},
-			{"id":5,"name":"ap2","site":{"name":"dc1"},"role":{"name":"ap"},"status":{"value":"active"}}
+			{"id":1,"name":"leaf1","site":{"name":"dc1"},"role":{"name":"leaf"},"status":{"value":"active"},"display_url":"https://nb/dcim/devices/1/"},
+			{"id":2,"name":"leaf2","site":{"name":"dc1"},"role":{"name":"leaf"},"status":{"value":"active"},"display_url":"https://nb/dcim/devices/2/"},
+			{"id":3,"name":"pp1","site":{"name":"dc1"},"role":{"name":"panel"},"status":{"value":"active"},"display_url":"https://nb/dcim/devices/3/"},
+			{"id":4,"name":"ap1","site":{"name":"dc1"},"role":{"name":"ap"},"status":{"value":"active"},"display_url":"https://nb/dcim/devices/4/"},
+			{"id":5,"name":"ap2","site":{"name":"dc1"},"role":{"name":"ap"},"status":{"value":"active"},"display_url":"https://nb/dcim/devices/5/"}
 		]}`)
 	})
 	// Physical: leaf1 -> pp1 front port; pp1 rear port -> leaf2; plus a
@@ -193,5 +193,22 @@ func TestTopology_ConnectedOnlyKeepsWirelessNodes(t *testing.T) {
 	}
 	if ids["3"] {
 		t.Errorf("panel should be dropped in logical+connectedOnly; nodes=%v", ids)
+	}
+}
+
+func TestTopology_NodeURL(t *testing.T) {
+	p := mockTopologyNetBox(t)
+	g, err := p.Topology(context.Background(), provider.TopologySpec{})
+	if err != nil {
+		t.Fatalf("Topology: %v", err)
+	}
+	var got string
+	for _, n := range g.Nodes {
+		if n.ID == "1" {
+			got = n.URL
+		}
+	}
+	if got != "https://nb/dcim/devices/1/" {
+		t.Errorf("node 1 URL = %q, want the device display_url", got)
 	}
 }

@@ -201,12 +201,30 @@ func buildNodeGraphFrames(g *provider.Graph) data.Frames {
 	subs := make([]string, n)
 	stats := make([]string, n)
 	colors := make([]string, n)
+	urls := make([]string, n)
+	allHaveURL := true
 	for i, node := range g.Nodes {
 		ids[i] = node.ID
 		titles[i] = node.Title
 		subs[i] = node.SubTitle
 		stats[i] = node.MainStat
 		colors[i] = statusColor(node.Status)
+		urls[i] = node.URL
+		if node.URL == "" {
+			allHaveURL = false
+		}
+	}
+	urlField := data.NewField("url", nil, urls)
+	// A field-level data link is advertised for every row, so only attach the
+	// "View in NetBox" link when every node has a URL — otherwise a node without
+	// one would show a dead menu item (empty href). Topology nodes are devices,
+	// which always carry display_url, so in practice the link is always attached.
+	if allHaveURL {
+		urlField.Config = &data.FieldConfig{Links: []data.DataLink{{
+			Title:       "View in NetBox",
+			URL:         `${__data.fields["url"]}`,
+			TargetBlank: true,
+		}}}
 	}
 	nodes := data.NewFrame("nodes",
 		data.NewField("id", nil, ids),
@@ -214,6 +232,7 @@ func buildNodeGraphFrames(g *provider.Graph) data.Frames {
 		data.NewField("subTitle", nil, subs),
 		data.NewField("mainStat", nil, stats),
 		data.NewField("color", nil, colors),
+		urlField,
 	)
 	nodes.Meta = &data.FrameMeta{PreferredVisualization: data.VisTypeNodeGraph}
 

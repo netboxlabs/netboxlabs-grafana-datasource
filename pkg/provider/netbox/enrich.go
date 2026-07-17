@@ -152,6 +152,7 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 			Status struct {
 				Value string `json:"value"`
 			} `json:"status"`
+			DisplayURL string `json:"display_url"`
 		}
 		if json.Unmarshal(raw, &d) != nil || d.ID == 0 {
 			continue
@@ -164,6 +165,7 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 			SubTitle: d.Site.Name,
 			MainStat: d.Role.Name,
 			Status:   d.Status.Value,
+			URL:      d.DisplayURL,
 		})
 	}
 

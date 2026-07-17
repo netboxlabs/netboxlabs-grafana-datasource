@@ -121,6 +121,8 @@ type GraphNode struct {
 	MainStat string `json:"mainStat"`
 	// Status drives node color (e.g. "active", "offline", "failed").
 	Status string `json:"status"`
+	// URL is the device's NetBox page (display_url); empty if unavailable.
+	URL string `json:"url,omitempty"`
 }
 
 // GraphEdge is a link between two devices.

@@ -9,6 +9,9 @@ Initial release of the NetBox data source for Grafana.
 - Unqueryable NetBox endpoints (e.g. action endpoints returning 405, or plugin
   models whose list 500s on pagination) now show a clear message instead of the
   raw API error/exception; the raw detail is logged for operators.
+- Topology: each Node Graph node offers a **View in NetBox** link (in the node's
+  click menu) to that device's page, browser-rewritten via `PublicURL` like the
+  table deep links.
 - Object types whose NetBox endpoint returns a bare JSON array instead of the
   paginated `{count,next,results}` envelope (e.g. **Installed Plugins**) now
   parse and return rows, instead of failing with a JSON unmarshal error.

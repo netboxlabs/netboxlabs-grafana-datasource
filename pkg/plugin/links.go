@@ -36,6 +36,21 @@ func rewriteLinks(res *provider.Result, internalBase, publicBase string) {
 	}
 }
 
+// rewriteGraphLinks rewrites topology node URLs from the internal NetBox base to
+// the browser-facing public base, mirroring rewriteLinks for table results.
+func rewriteGraphLinks(g *provider.Graph, internalBase, publicBase string) {
+	if g == nil || publicBase == "" {
+		return
+	}
+	internalBase = trimBase(internalBase)
+	publicBase = trimBase(publicBase)
+	for i := range g.Nodes {
+		if g.Nodes[i].URL != "" {
+			g.Nodes[i].URL = rewriteLinkURL(g.Nodes[i].URL, internalBase, publicBase)
+		}
+	}
+}
+
 func trimBase(base string) string {
 	return strings.TrimRight(base, "/")
 }

@@ -109,6 +109,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 		if err != nil {
 			return queryErrorResponse(err)
 		}
+		rewriteGraphLinks(graph, d.provider.BaseURL(), d.cfg.PublicURL)
 		frames := buildNodeGraphFrames(graph)
 		for _, f := range frames {
 			f.RefID = q.RefID

@@ -128,6 +128,26 @@ func TestBuildCountFrame(t *testing.T) {
 	}
 }
 
+func TestBuildNodeGraphFrames_NoLinkWhenURLMissing(t *testing.T) {
+	g := &provider.Graph{
+		Nodes: []provider.GraphNode{
+			{ID: "1", Title: "leaf1", URL: "https://nb.example/dcim/devices/1/"},
+			{ID: "2", Title: "leaf2"}, // no URL
+		},
+	}
+	nodes := buildNodeGraphFrames(g)[0]
+	for _, f := range nodes.Fields {
+		if f.Name != "url" {
+			continue
+		}
+		if f.Config != nil && len(f.Config.Links) > 0 {
+			t.Errorf("url field must not carry a link when any node URL is missing, got %+v", f.Config.Links)
+		}
+		return
+	}
+	t.Fatal("nodes frame missing url field")
+}
+
 func TestBuildNodeGraphFrames_EdgeKind(t *testing.T) {
 	g := &provider.Graph{
 		Nodes: []provider.GraphNode{{ID: "1", Title: "a"}, {ID: "2", Title: "b"}},
@@ -224,5 +244,30 @@ func TestBuildAlertFrame_ValueField(t *testing.T) {
 		if got := f.Fields[2].At(i).(float64); got != w {
 			t.Errorf("value[%d] = %v, want %v", i, got, w)
 		}
+	}
+}
+
+func TestBuildNodeGraphFrames_NodeURLLink(t *testing.T) {
+	g := &provider.Graph{
+		Nodes: []provider.GraphNode{{ID: "1", Title: "leaf1", URL: "https://nb.example/dcim/devices/1/"}},
+	}
+	nodes := buildNodeGraphFrames(g)[0]
+	var urlField *data.Field
+	for _, f := range nodes.Fields {
+		if f.Name == "url" {
+			urlField = f
+		}
+	}
+	if urlField == nil {
+		t.Fatal("nodes frame missing url field")
+	}
+	if got, _ := urlField.At(0).(string); got != "https://nb.example/dcim/devices/1/" {
+		t.Errorf("url[0] = %v, want the device URL", urlField.At(0))
+	}
+	if urlField.Config == nil || len(urlField.Config.Links) != 1 {
+		t.Fatalf("url field must carry exactly one data link, got %+v", urlField.Config)
+	}
+	if link := urlField.Config.Links[0]; link.Title != "View in NetBox" || link.URL != `${__data.fields["url"]}` || !link.TargetBlank {
+		t.Errorf("link = %+v, want {View in NetBox, ${__data.fields[\"url\"]}, TargetBlank}", link)
 	}
 }

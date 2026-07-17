@@ -108,26 +108,6 @@ labeled to match NetBox + a rich dashboard).
 > if the schema can't be read, the editor falls back to the discovered columns with all
 > operators available.
 
-## Branches (netbox-branching)
-
-If your NetBox runs the [netbox-branching](https://github.com/netboxlabs/netbox-branching)
-plugin, set a query's **Branch** field to a branch **schema id** to read that branch's
-state instead of main (via the `X-NetBox-Branch` header). Leave it empty for main.
-
-For a branch picker, add a single-value dashboard **variable** (type Query → NetBox →
-object type `plugins/branching/branches`, value field `schema_id`, text field `name`) and
-put `$branch` in the Branch field. Objects, IP enrichment, topology, and annotation
-queries all honor the selected branch (annotation and variable queries each have their own
-Branch field), and the field / value-autocomplete pickers reload against it. Only the
-**object-type** list is always read from main (NetBox models are code-level and identical
-across branches).
-
-The bundled demo ships the plugin already installed and a seeded `demo-branch` that adds a
-branch-only device, `AMS1-leaf-99`. To see branching in action, pick the dashboard's
-**Branch** variable (or set a query's Branch field to the branch's schema id) and switch it
-to `demo-branch`: `AMS1-leaf-99` appears only while that branch is selected, and disappears
-again once you switch back to main.
-
 ## Dynamic object-type discovery
 
 The query editor's **Object type** list is built by walking the NetBox API
@@ -185,6 +165,28 @@ The backend ships binaries for `linux/amd64` and `linux/arm64` (Cloud) plus the 
 catalog target matrix (darwin/windows/arm). See [docs/PUBLISHING.md](./docs/PUBLISHING.md)
 for the catalog/signing checklist.
 
+## Branches (netbox-branching)
+
+If your NetBox runs the [netbox-branching](https://github.com/netboxlabs/netbox-branching)
+plugin, set a query's **Branch** field to a branch **name** or **schema id** to read that
+branch's state instead of main (via the `X-NetBox-Branch` header). Leave it empty, or use
+`main`, for the default branch.
+
+For a branch picker, add a dashboard **variable** (type Query → NetBox → object type
+`plugins/branching/branches`, value field `schema_id`, text field `name`) and put `$branch`
+in the Branch field. The variable offers a selectable `main` alongside each branch labeled
+`name (schema_id)` — branch names are not unique in NetBox, so the schema id disambiguates
+them. Objects, IP enrichment, topology, and annotation queries all honor the selected
+branch (annotation and variable queries each have their own Branch field), and the field /
+value-autocomplete pickers reload against it. Only the **object-type** list is always read
+from main (NetBox models are code-level and identical across branches).
+
+The bundled demo ships the plugin already installed and a seeded `demo-branch` that adds a
+branch-only device, `AMS1-leaf-99`. To see branching in action, pick the dashboard's
+**Branch** variable (or set a query's Branch field to the branch's name or schema id) and
+switch it to `demo-branch`: `AMS1-leaf-99` appears only while that branch is selected, and
+disappears again once you switch back to main.
+
 ## Demo
 
 A one-command stack that exercises the enrichment recipes and prefix/IP utilization above
@@ -215,6 +217,16 @@ in a `golang:1.26` container instead.
 - **Just want the dashboard?** Import
   [demo/netbox-demo-dashboard.json](./demo/netbox-demo-dashboard.json) into any Grafana
   (**Dashboards → Import**). It prompts for your NetBox, Prometheus and Loki datasources.
+
+**Teardown.** Tear the demo stack down with `./demo/run.sh down` (works for both full and
+bring-your-own modes, and needs no env vars or setup):
+
+- `./demo/run.sh down` — stop and remove the containers but **keep** the seeded NetBox
+  data, so the next `./demo/run.sh` starts fast (no re-seed).
+- `./demo/run.sh down -v` — also remove the seeded-data volume for a clean slate (the next
+  run re-seeds, ~2-3 min).
+- `./demo/run.sh down -v --rmi local` — additionally drop the built NetBox image (~1 GB) to
+  reclaim disk. Any extra flags are passed straight through to `docker compose down`.
 
 ## Development
 

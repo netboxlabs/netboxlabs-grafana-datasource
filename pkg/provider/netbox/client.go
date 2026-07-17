@@ -3,11 +3,14 @@ package netbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/netboxlabs/netbox/pkg/provider"
 )
@@ -21,6 +24,14 @@ type Client struct {
 	base  string // base URL without trailing slash, e.g. https://netbox.example.com
 	token string
 	http  *http.Client
+
+	// branchNames/branchIDs cache the netbox-branching branch list so the Branch
+	// field can accept a name or a schema id. Both empty after a failed/absent
+	// fetch (e.g. branching not installed), in which case values pass through.
+	branchMu     sync.Mutex
+	branchNames  map[string]string // branch name -> schema id
+	branchIDs    map[string]bool   // known schema ids
+	branchExpiry time.Time
 }
 
 // NewClient builds a NetBox API client over the given HTTP client. base may
@@ -115,8 +126,8 @@ func (c *Client) getBytes(ctx context.Context, rawURL string) ([]byte, error) {
 		req.Header.Set("Authorization", authHeader(c.token))
 	}
 	req.Header.Set("Accept", "application/json")
-	if branch := provider.BranchFromContext(ctx); branch != "" {
-		req.Header.Set("X-NetBox-Branch", branch)
+	if branch := provider.BranchFromContext(ctx); branch != "" && ctx.Value(noBranchResolveKey{}) == nil {
+		req.Header.Set("X-NetBox-Branch", c.resolveBranch(ctx, branch))
 	}
 
 	resp, err := c.http.Do(req)
@@ -133,6 +144,104 @@ func (c *Client) getBytes(ctx context.Context, rawURL string) ([]byte, error) {
 		return nil, &APIError{Status: resp.StatusCode, URL: rawURL, Body: snippet(body)}
 	}
 	return body, nil
+}
+
+// branchTTL bounds how long the branch name -> schema id map is cached.
+const branchTTL = 5 * time.Minute
+
+// branchRetryTTL is a short negative cache after a transient branch-list failure
+// (timeout/5xx), so a blip doesn't block resolution for the full branchTTL.
+const branchRetryTTL = 15 * time.Second
+
+// maxBranchPages caps branch-list pagination (50 pages of 1000 is far beyond any
+// real deployment) so a malformed self-referential "next" can't loop forever.
+const maxBranchPages = 50
+
+// noBranchResolveKey marks a context whose requests must skip branch resolution
+// and the X-NetBox-Branch header. It is set on the internal branch-list fetch so
+// that fetch targets main and does not recurse back into resolveBranch (which
+// would deadlock on branchMu). WithBranch can't clear an existing branch (a
+// blank id is a no-op), so this flag is how the fetch opts out.
+type noBranchResolveKey struct{}
+
+// resolveBranch maps a Branch field value to a netbox-branching schema id.
+// NetBox's X-NetBox-Branch header only accepts the schema id, but users expect
+// to use the branch name: a name resolves to its schema id; a value that is
+// already a schema id (or is unknown, or branching isn't installed) passes
+// through unchanged so NetBox makes the final call.
+func (c *Client) resolveBranch(ctx context.Context, value string) string {
+	if value == "" {
+		return ""
+	}
+	c.branchMu.Lock()
+	defer c.branchMu.Unlock()
+	if c.branchNames == nil || time.Now().After(c.branchExpiry) {
+		if names, ids, ok := c.fetchBranches(ctx); ok {
+			c.branchNames, c.branchIDs = names, ids
+			c.branchExpiry = time.Now().Add(branchTTL)
+		} else {
+			// Transient failure (timeout/5xx): keep any prior cache and retry
+			// soon rather than blocking resolution for the full branchTTL.
+			if c.branchNames == nil {
+				c.branchNames, c.branchIDs = map[string]string{}, map[string]bool{}
+			}
+			c.branchExpiry = time.Now().Add(branchRetryTTL)
+		}
+	}
+	// A known schema id wins over a name: a branch name can collide with another
+	// branch's schema id (both are short alphanumerics), and the schema id is the
+	// canonical, unambiguous identifier, so honor it as-is first.
+	if c.branchIDs[value] {
+		return value
+	}
+	if id, ok := c.branchNames[value]; ok {
+		return id
+	}
+	return value
+}
+
+// fetchBranches reads the branch list into a name -> schema id map and a set of
+// known schema ids. The fetch carries no branch header (the list lives on main)
+// and is flagged to skip resolution, so it does not recurse through
+// resolveBranch. Returns empty maps if branching isn't installed or the list
+// can't be read; callers then pass values through.
+func (c *Client) fetchBranches(ctx context.Context) (map[string]string, map[string]bool, bool) {
+	names := map[string]string{}
+	ids := map[string]bool{}
+	ctx = context.WithValue(ctx, noBranchResolveKey{}, struct{}{})
+	next := c.apiURL("plugins/branching/branches", url.Values{"limit": {"1000"}})
+	// Follow pagination so a name on a later page still resolves; the page cap
+	// bounds a pathological self-referential "next".
+	for i := 0; next != "" && i < maxBranchPages; i++ {
+		page, err := c.getListPage(ctx, next)
+		if err != nil {
+			// 404 means branching isn't installed: an authoritative empty result
+			// (cache it). Anything else (5xx/timeout/network) is transient, so
+			// report failure and let the caller retry soon.
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+				return names, ids, true
+			}
+			return names, ids, false
+		}
+		for _, raw := range page.Results {
+			var b struct {
+				Name     string `json:"name"`
+				SchemaID string `json:"schema_id"`
+			}
+			if json.Unmarshal(raw, &b) == nil && b.SchemaID != "" {
+				ids[b.SchemaID] = true
+				if b.Name != "" {
+					names[b.Name] = b.SchemaID
+				}
+			}
+		}
+		if page.Next == nil {
+			break
+		}
+		next = *page.Next
+	}
+	return names, ids, true
 }
 
 // APIError represents a non-2xx response from NetBox.

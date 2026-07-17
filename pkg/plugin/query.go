@@ -219,6 +219,12 @@ func queryErrorMessage(err error) string {
 		case 405:
 			return "This object type can't be queried — the NetBox endpoint doesn't support listing (HTTP 405). It may be an action endpoint, not a queryable collection."
 		case 400:
+			// netbox-branching rejects an unknown branch with this exact 400. The
+			// Branch field accepts a branch name or schema id (names resolve to the
+			// schema id); a 400 here means neither matched a real branch.
+			if strings.Contains(apiErr.Body, "Invalid branch identifier") {
+				return "NetBox didn't recognize that branch. Check the branch name or schema id against the branch list."
+			}
 			return "NetBox rejected this query (HTTP 400). Check the filters and try again."
 		case 401, 403:
 			return "Authentication failed (check the API token)."

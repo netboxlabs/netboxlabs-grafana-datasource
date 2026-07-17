@@ -4,11 +4,142 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/netboxlabs/netbox/pkg/provider"
 )
+
+// branchResolveServer serves a branch list at the branching endpoint and echoes
+// the X-NetBox-Branch header (into *got) on every other path.
+func branchResolveServer(t *testing.T, got *string, branchesBody string, branchesStatus int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/plugins/branching/branches/") {
+			if branchesStatus != 0 {
+				w.WriteHeader(branchesStatus)
+			}
+			_, _ = w.Write([]byte(branchesBody))
+			return
+		}
+		*got = r.Header.Get("X-NetBox-Branch")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestResolveBranch_NameToSchemaID(t *testing.T) {
+	var got string
+	srv := branchResolveServer(t, &got,
+		`{"count":1,"next":null,"results":[{"name":"demo-branch","schema_id":"kc4v9jtd"}]}`, 0)
+	c := NewClient(srv.URL, "t", &http.Client{Timeout: 5 * time.Second})
+
+	cases := []struct{ in, want string }{
+		{"demo-branch", "kc4v9jtd"}, // a name resolves to its schema id
+		{"kc4v9jtd", "kc4v9jtd"},    // a schema id passes through
+		{"nope", "nope"},            // an unknown value passes through (NetBox rejects it)
+	}
+	for _, tc := range cases {
+		got = ""
+		if _, err := c.getBytes(provider.WithBranch(context.Background(), tc.in), srv.URL+"/api/dcim/devices/"); err != nil {
+			t.Fatalf("getBytes(%q): %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Errorf("Branch %q -> header %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestResolveBranch_SchemaIDBeatsCollidingName(t *testing.T) {
+	var got string
+	// Branch "collide" is NAMED "kc4v9jtd" — the same string as branch
+	// "demo-branch"'s schema id. Entering that schema id must resolve to itself,
+	// not to the branch that happens to be named it.
+	srv := branchResolveServer(t, &got,
+		`{"count":2,"next":null,"results":[`+
+			`{"name":"demo-branch","schema_id":"kc4v9jtd"},`+
+			`{"name":"kc4v9jtd","schema_id":"zzzz1111"}]}`, 0)
+	c := NewClient(srv.URL, "t", &http.Client{Timeout: 5 * time.Second})
+
+	if _, err := c.getBytes(provider.WithBranch(context.Background(), "kc4v9jtd"), srv.URL+"/api/x/"); err != nil {
+		t.Fatalf("getBytes: %v", err)
+	}
+	if got != "kc4v9jtd" {
+		t.Errorf("header = %q, want kc4v9jtd (a known schema id wins over a colliding branch name)", got)
+	}
+}
+
+func TestResolveBranch_FollowsPagination(t *testing.T) {
+	var got, base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/plugins/branching/branches/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("offset") == "1" { // page 2
+			_, _ = w.Write([]byte(`{"count":2,"next":null,"results":[{"name":"page2-branch","schema_id":"pp222222"}]}`))
+			return
+		}
+		// page 1 points to page 2 via an absolute "next"
+		_, _ = w.Write([]byte(`{"count":2,"next":"` + base + `/api/plugins/branching/branches/?offset=1","results":[{"name":"page1-branch","schema_id":"pp111111"}]}`))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-NetBox-Branch")
+		_, _ = w.Write([]byte(`{}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+	c := NewClient(srv.URL, "t", &http.Client{Timeout: 5 * time.Second})
+
+	// A branch name that only appears on the SECOND page still resolves.
+	if _, err := c.getBytes(provider.WithBranch(context.Background(), "page2-branch"), srv.URL+"/api/x/"); err != nil {
+		t.Fatalf("getBytes: %v", err)
+	}
+	if got != "pp222222" {
+		t.Errorf("header = %q, want pp222222 (resolved from page 2)", got)
+	}
+}
+
+// A transient branch-list failure (5xx/timeout) must not be cached like a real
+// result: fetchBranches reports ok=false so resolveBranch retries soon instead
+// of blocking resolution for the full TTL. A 404 (branching absent) is an
+// authoritative empty result (ok=true).
+func TestFetchBranches_TransientVsAuthoritative(t *testing.T) {
+	client := func(status int, body string) *Client {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if status != 0 {
+				w.WriteHeader(status)
+			}
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Cleanup(srv.Close)
+		return NewClient(srv.URL, "t", &http.Client{Timeout: 5 * time.Second})
+	}
+
+	if _, _, ok := client(http.StatusInternalServerError, `oops`).fetchBranches(context.Background()); ok {
+		t.Error("5xx should be a transient failure (ok=false)")
+	}
+	if names, _, ok := client(http.StatusNotFound, `{"detail":"Not found."}`).fetchBranches(context.Background()); !ok || len(names) != 0 {
+		t.Errorf("404 should be authoritative empty: ok=%v names=%d, want true/0", ok, len(names))
+	}
+	if names, _, ok := client(0, `{"count":1,"next":null,"results":[{"name":"b","schema_id":"s1"}]}`).fetchBranches(context.Background()); !ok || names["b"] != "s1" {
+		t.Errorf("success should populate: ok=%v names=%v, want true/{b:s1}", ok, names)
+	}
+}
+
+func TestResolveBranch_NoBranchingPlugin(t *testing.T) {
+	var got string
+	srv := branchResolveServer(t, &got, `{"detail":"Not found."}`, http.StatusNotFound)
+	c := NewClient(srv.URL, "t", &http.Client{Timeout: 5 * time.Second})
+
+	// Branching absent: the list fetch 404s, so a name passes through unresolved.
+	if _, err := c.getBytes(provider.WithBranch(context.Background(), "demo-branch"), srv.URL+"/api/x/"); err != nil {
+		t.Fatalf("getBytes: %v", err)
+	}
+	if got != "demo-branch" {
+		t.Errorf("header = %q, want demo-branch (passthrough when branching absent)", got)
+	}
+}
 
 func TestGetBytes_BranchHeader(t *testing.T) {
 	var gotBranch string

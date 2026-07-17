@@ -21,6 +21,7 @@ func TestQueryErrorMessage(t *testing.T) {
 			"pagination", "QuerySetNotOrdered"},
 		{"500 generic", &netbox.APIError{Status: 500, Body: "boom"}, "HTTP 500", "boom"},
 		{"400", &netbox.APIError{Status: 400, Body: "bad"}, "HTTP 400", "bad"},
+		{"400 invalid branch", &netbox.APIError{Status: 400, Body: "Invalid branch identifier"}, "recognize that branch", "Invalid branch identifier"},
 		{"401", &netbox.APIError{Status: 401, Body: "x"}, "Authentication failed", ""},
 		{"403", &netbox.APIError{Status: 403, Body: "x"}, "Authentication failed", ""},
 		{"404", &netbox.APIError{Status: 404, Body: "x"}, "HTTP 404", ""},

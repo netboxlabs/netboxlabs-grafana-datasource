@@ -12,6 +12,9 @@ Initial release of the NetBox data source for Grafana.
 - Object types whose NetBox endpoint returns a bare JSON array instead of the
   paginated `{count,next,results}` envelope (e.g. **Installed Plugins**) now
   parse and return rows, instead of failing with a JSON unmarshal error.
+- A query's Branch field accepts a branch **name** or schema id; names resolve
+  to the schema id automatically (netbox-branching's header only takes the schema
+  id). An unrecognized branch shows a clear message instead of a generic HTTP 400.
 - Topology: logical path edges by default (patch panels and circuits resolve to the far
   device via NetBox cable paths), `connections` query option (`logical`/`physical` — the
   physical view renders panels as nodes), wireless links, and an edge `kind` detail.

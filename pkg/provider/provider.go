@@ -185,3 +185,17 @@ type Provider interface {
 	// BaseURL returns the upstream base URL (used to build deep links).
 	BaseURL() string
 }
+
+// BranchingCapable is an OPTIONAL capability a Provider may implement when its
+// backend supports netbox-branching. It is deliberately kept OFF the core
+// Provider interface: the seam is backend-agnostic (a second, non-NetBox
+// backend is planned), and branching is a NetBox-specific plugin concept that
+// backend cannot meaningfully satisfy. Callers type-assert; a provider that
+// does not implement it is treated as "branching unavailable".
+type BranchingCapable interface {
+	// BranchingInstalled reports whether the netbox-branching plugin is
+	// installed on the connected upstream. conclusive is false when detection
+	// is inconclusive (a transient upstream failure); callers must treat that
+	// as "unknown" and fail open (do not disable branch UI), never as "absent".
+	BranchingInstalled(ctx context.Context) (installed bool, conclusive bool)
+}

@@ -50,6 +50,13 @@ type Provider struct {
 	// branch may define custom-field filters (cf_*) main lacks, so main and each
 	// branch must cache separately — mirroring the fields cache.
 	schemaByBranch map[string]schemaCacheEntry
+
+	// branchingInstalled caches whether netbox-branching is installed — an
+	// instance-wide, branch-invariant property, so a single value + expiry
+	// suffices (no per-branch map). Only conclusive probes are cached; the
+	// zero-value branchingExpiry forces the first probe.
+	branchingInstalled bool
+	branchingExpiry    time.Time
 }
 
 type schemaCacheEntry struct {
@@ -84,6 +91,32 @@ func (p *Provider) HealthCheck(ctx context.Context) (string, error) {
 		return "Connected to NetBox", nil
 	}
 	return fmt.Sprintf("Connected to NetBox %s", ver), nil
+}
+
+// BranchingInstalled reports whether netbox-branching is installed, cached for
+// cacheTTL. It satisfies the optional provider.BranchingCapable capability and
+// is deliberately NOT part of the backend-agnostic provider.Provider interface.
+// Inconclusive probes (transient upstream failures) are not cached and return
+// conclusive=false so callers fail open.
+func (p *Provider) BranchingInstalled(ctx context.Context) (installed bool, conclusive bool) {
+	p.mu.Lock()
+	if time.Now().Before(p.branchingExpiry) {
+		v := p.branchingInstalled
+		p.mu.Unlock()
+		return v, true
+	}
+	p.mu.Unlock()
+
+	v, ok := p.client.BranchingInstalled(ctx)
+	if !ok {
+		return false, false // inconclusive: don't cache, let the caller fail open
+	}
+
+	p.mu.Lock()
+	p.branchingInstalled = v
+	p.branchingExpiry = time.Now().Add(cacheTTL)
+	p.mu.Unlock()
+	return v, true
 }
 
 // ObjectTypes dynamically discovers the queryable object types, including

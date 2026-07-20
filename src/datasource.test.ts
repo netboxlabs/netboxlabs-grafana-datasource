@@ -201,4 +201,18 @@ describe('resource helpers', () => {
     await ds.runResourceQuery({ objectType: 'dcim/devices' }, { showErrorAlert: false });
     expect(spy).toHaveBeenCalledWith('query', { objectType: 'dcim/devices' }, { showErrorAlert: false });
   });
+
+  it('getBranchingInstalled returns the installed flag and suppresses the error toast', async () => {
+    const ds = makeDS();
+    const spy = jest.fn().mockResolvedValue({ installed: false });
+    (ds as any).getResource = spy;
+    expect(await ds.getBranchingInstalled()).toBe(false);
+    expect(spy).toHaveBeenCalledWith('branching', undefined, { showErrorAlert: false });
+  });
+
+  it('getBranchingInstalled fails open (true) when the response omits installed', async () => {
+    const ds = makeDS();
+    (ds as any).getResource = jest.fn().mockResolvedValue({});
+    expect(await ds.getBranchingInstalled()).toBe(true);
+  });
 });

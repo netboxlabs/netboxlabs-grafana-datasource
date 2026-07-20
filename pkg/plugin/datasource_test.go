@@ -36,6 +36,9 @@ type fakeProvider struct {
 	filterFields       []provider.FilterField
 	filterFieldsBranch string                // captured from the context by FilterFields
 	filterFieldsErr    error
+
+	branchingInstalled bool // returned by BranchingInstalled
+	branchingConcl     bool // conclusive flag returned by BranchingInstalled
 }
 
 func (f *fakeProvider) Name() string    { return "fake" }
@@ -75,6 +78,12 @@ func (f *fakeProvider) Topology(_ context.Context, spec provider.TopologySpec) (
 func (f *fakeProvider) FilterFields(ctx context.Context, _ string) ([]provider.FilterField, error) {
 	f.filterFieldsBranch = provider.BranchFromContext(ctx)
 	return f.filterFields, f.filterFieldsErr
+}
+
+// BranchingInstalled makes fakeProvider satisfy the optional
+// provider.BranchingCapable capability.
+func (f *fakeProvider) BranchingInstalled(context.Context) (bool, bool) {
+	return f.branchingInstalled, f.branchingConcl
 }
 
 func newTestDatasource(p provider.Provider) *Datasource {

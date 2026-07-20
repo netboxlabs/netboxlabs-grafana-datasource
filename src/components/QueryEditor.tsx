@@ -13,6 +13,7 @@ import {
 import { QueryEditorProps, SelectableValue } from '@grafana/data';
 import { getTemplateSrv } from '@grafana/runtime';
 import { DataSource } from '../datasource';
+import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, BRANCH_FIELD_DISABLED_TOOLTIP } from '../hooks/useBranchingInstalled';
 import {
   FilterField,
   filterFieldOptionsFrom,
@@ -42,6 +43,8 @@ const QUERY_TYPES: Array<SelectableValue<QueryType>> = [
 
 export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) {
   const queryType: QueryType = query.queryType ?? 'objects';
+  const branchingInstalled = useBranchingInstalled(datasource);
+  const branchDisabled = branchingInstalled === false;
   const [objectTypes, setObjectTypes] = useState<ObjectTypeOption[]>([]);
   const [fields, setFields] = useState<string[]>([]);
   const [filterFields, setFilterFields] = useState<FilterField[]>([]);
@@ -125,7 +128,8 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
       <InlineField
         label="Branch"
         labelWidth={20}
-        tooltip="Optional netbox-branching schema id, or a $variable (e.g. from a variable querying plugins/branching/branches). Empty targets the main branch. Requires the netbox-branching plugin."
+        disabled={branchDisabled}
+        tooltip={branchDisabled ? BRANCH_FIELD_DISABLED_TOOLTIP : BRANCH_FIELD_TOOLTIP}
       >
         <Input
           id="query-branch"

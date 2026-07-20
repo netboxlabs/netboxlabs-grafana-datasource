@@ -251,6 +251,32 @@ func (c *Client) fetchBranches(ctx context.Context) (map[string]string, map[stri
 	return names, ids, true
 }
 
+// BranchingInstalled probes the netbox-branching branches endpoint to detect
+// whether the plugin is installed. It reuses the exact signal fetchBranches /
+// resolveBranch rely on (an authoritative 404 on that endpoint means branching
+// is absent), so branch-field gating and branch resolution always agree.
+// Returns (installed, conclusive):
+//   - (true,  true):  the endpoint responded 2xx — branching is present.
+//   - (false, true):  an authoritative 404 — branching is absent.
+//   - (false, false): any other failure (5xx / auth / timeout / network) —
+//     inconclusive; callers must not treat this as absent.
+//
+// The probe carries no branch header (targets main) and skips branch
+// resolution via noBranchResolveKey, mirroring fetchBranches, so it cannot
+// recurse into resolveBranch or deadlock on branchMu.
+func (c *Client) BranchingInstalled(ctx context.Context) (installed bool, conclusive bool) {
+	ctx = context.WithValue(ctx, noBranchResolveKey{}, struct{}{})
+	_, err := c.getBytes(ctx, c.apiURL("plugins/branching/branches", url.Values{"limit": {"1"}}))
+	if err == nil {
+		return true, true
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+		return false, true
+	}
+	return false, false
+}
+
 // APIError represents a non-2xx response from NetBox.
 type APIError struct {
 	Status int

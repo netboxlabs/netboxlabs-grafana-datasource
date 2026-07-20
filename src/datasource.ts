@@ -98,6 +98,19 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     return this.getResource('filter-fields', { type: objectType, ...(branch ? { branch } : {}) });
   }
 
+  /**
+   * Reports whether the netbox-branching plugin is installed on the connected
+   * NetBox. Backed by the /branching resource, which always answers 200 with
+   * {installed} and fails open (installed:true) on an inconclusive upstream
+   * probe. showErrorAlert:false so a backend/plugin hiccup can't pop a global
+   * toast; a malformed/missing response also defaults to enabled (fail open).
+   */
+  getBranchingInstalled(): Promise<boolean> {
+    return this.getResource<{ installed?: boolean }>('branching', undefined, { showErrorAlert: false }).then(
+      (r) => r?.installed ?? true
+    );
+  }
+
   runResourceQuery(
     body: {
       objectType: string;

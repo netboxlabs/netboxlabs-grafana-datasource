@@ -26,7 +26,28 @@ func (d *Datasource) newRouter() http.Handler {
 	mux.HandleFunc("/field-values", d.handleFieldValues)
 	mux.HandleFunc("/filter-fields", d.handleFilterFields)
 	mux.HandleFunc("/query", d.handleQuery)
+	mux.HandleFunc("/branching", d.handleBranching)
 	return mux
+}
+
+// GET /branching -> {"installed": bool}
+// Branching detection is instance-wide (not branch-scoped). A provider that does
+// not implement provider.BranchingCapable (e.g. a future non-NetBox backend) has
+// no branching concept -> {"installed": false}. An inconclusive probe (transient
+// upstream failure) fails OPEN -> {"installed": true} so the branch UI stays
+// usable rather than latching a false "absent". Always HTTP 200 so this probe
+// never raises a frontend error toast.
+func (d *Datasource) handleBranching(w http.ResponseWriter, r *http.Request) {
+	bc, ok := d.provider.(provider.BranchingCapable)
+	if !ok {
+		writeJSON(w, map[string]bool{"installed": false})
+		return
+	}
+	installed, conclusive := bc.BranchingInstalled(r.Context())
+	if !conclusive {
+		installed = true // fail open on an inconclusive probe
+	}
+	writeJSON(w, map[string]bool{"installed": installed})
 }
 
 // GET /object-types -> []provider.ObjectType

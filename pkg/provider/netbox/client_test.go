@@ -155,6 +155,52 @@ func TestFetchBranches_TransientVsAuthoritative(t *testing.T) {
 	}
 }
 
+// BranchingInstalled must mirror the branches-endpoint signal: a 2xx means the
+// plugin is present, an authoritative 404 means absent, and anything else
+// (5xx/network/timeout) is inconclusive (conclusive=false) so callers fail open.
+func TestBranchingInstalled(t *testing.T) {
+	probe := func(status int, body string) (bool, bool) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if status != 0 {
+				w.WriteHeader(status)
+			}
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Cleanup(srv.Close)
+		c := NewClient(srv.URL, "t", &http.Client{Timeout: 5 * time.Second})
+		return c.BranchingInstalled(context.Background())
+	}
+
+	if inst, ok := probe(0, `{"count":0,"results":[]}`); !ok || !inst {
+		t.Errorf("2xx => installed+conclusive, got installed=%v conclusive=%v", inst, ok)
+	}
+	if inst, ok := probe(http.StatusNotFound, `{"detail":"Not found."}`); !ok || inst {
+		t.Errorf("404 => absent+conclusive, got installed=%v conclusive=%v", inst, ok)
+	}
+	if inst, ok := probe(http.StatusInternalServerError, `oops`); ok || inst {
+		t.Errorf("5xx => inconclusive (both false), got installed=%v conclusive=%v", inst, ok)
+	}
+}
+
+// The probe must target main and send no X-NetBox-Branch header even if a branch
+// sits on the context — it sets noBranchResolveKey (like fetchBranches).
+func TestBranchingInstalled_SendsNoBranchHeader(t *testing.T) {
+	var hadHeader bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, hadHeader = r.Header["X-Netbox-Branch"] // canonicalized key
+		_, _ = w.Write([]byte(`{"count":0,"results":[]}`))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "t", &http.Client{Timeout: 5 * time.Second})
+
+	if _, ok := c.BranchingInstalled(provider.WithBranch(context.Background(), "td5smq0f")); !ok {
+		t.Fatal("expected a conclusive probe")
+	}
+	if hadHeader {
+		t.Error("BranchingInstalled must send NO X-NetBox-Branch header (targets main)")
+	}
+}
+
 func TestResolveBranch_NoBranchingPlugin(t *testing.T) {
 	var got string
 	srv := branchResolveServer(t, &got, `{"detail":"Not found."}`, http.StatusNotFound)

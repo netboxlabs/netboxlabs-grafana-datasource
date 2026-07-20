@@ -3,6 +3,7 @@ import { InlineField, Select, Input, Stack, Button, IconButton } from '@grafana/
 import { SelectableValue } from '@grafana/data';
 import { DataSource } from '../datasource';
 import { getTemplateSrv } from '@grafana/runtime';
+import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, BRANCH_FIELD_DISABLED_TOOLTIP } from '../hooks/useBranchingInstalled';
 import { FieldOption, FilterRow, NetBoxVariableQuery, ObjectTypeOption } from '../types';
 
 interface Props {
@@ -12,6 +13,8 @@ interface Props {
 }
 
 export function VariableQueryEditor({ query, onChange, datasource }: Props) {
+  const branchingInstalled = useBranchingInstalled(datasource);
+  const branchDisabled = branchingInstalled === false;
   const [objectTypes, setObjectTypes] = useState<ObjectTypeOption[]>([]);
   const [fields, setFields] = useState<string[]>([]);
 
@@ -50,7 +53,8 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
       <InlineField
         label="Branch"
         labelWidth={16}
-        tooltip="Optional netbox-branching schema id, or a $variable (e.g. from a variable querying plugins/branching/branches). Empty targets the main branch. Requires the netbox-branching plugin."
+        disabled={branchDisabled}
+        tooltip={branchDisabled ? BRANCH_FIELD_DISABLED_TOOLTIP : BRANCH_FIELD_TOOLTIP}
       >
         <Input
           id="variable-branch"

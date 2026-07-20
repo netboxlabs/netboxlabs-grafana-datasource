@@ -9,6 +9,7 @@ jest.mock('@grafana/runtime', () => ({
 
 // Minimal datasource stub: the editor calls these in effects on mount.
 const datasource = {
+  uid: 'ds-query-editor',
   getObjectTypes: jest
     .fn()
     .mockResolvedValue([{ value: 'dcim/devices', label: 'Devices', app: 'dcim', model: 'devices' }]),
@@ -19,15 +20,16 @@ const datasource = {
       { name: 'prefix', operators: [''] },
       { name: 'status', operators: ['', 'ic', 'isw', 'n', 'empty'] },
     ]),
+  getBranchingInstalled: jest.fn().mockResolvedValue(true),
 } as any;
 
-function setup(queryOverrides: Record<string, unknown> = {}) {
+// The branching probe is cached per datasource INSTANCE (WeakMap); gating tests
+// use distinct stub objects, so no cache reset is needed between tests.
+function setup(queryOverrides: Record<string, unknown> = {}, ds: any = datasource) {
   const onChange = jest.fn();
   const onRunQuery = jest.fn();
   const query = { refId: 'A', queryType: 'objects', objectType: 'dcim/devices', ...queryOverrides } as any;
-  render(
-    <QueryEditor query={query} onChange={onChange} onRunQuery={onRunQuery} datasource={datasource} />
-  );
+  render(<QueryEditor query={query} onChange={onChange} onRunQuery={onRunQuery} datasource={ds} />);
   return { onChange, onRunQuery };
 }
 
@@ -104,6 +106,31 @@ describe('QueryEditor — Alert table', () => {
     expect(onChange).toHaveBeenCalledWith(
       expect.objectContaining({ count: true, alertTable: false, valueField: undefined })
     );
+  });
+});
+
+describe('QueryEditor — Branch field gating (OBS-3651)', () => {
+  it('disables the Branch field when branching is not installed', async () => {
+    const ds = { ...datasource, uid: 'ds-absent', getBranchingInstalled: jest.fn().mockResolvedValue(false) };
+    setup({}, ds);
+    const input = await screen.findByLabelText('Branch');
+    await waitFor(() => expect(input).toBeDisabled());
+  });
+
+  it('keeps the Branch field enabled when branching is installed', async () => {
+    const ds = { ...datasource, uid: 'ds-present', getBranchingInstalled: jest.fn().mockResolvedValue(true) };
+    setup({}, ds);
+    const input = await screen.findByLabelText('Branch');
+    await waitFor(() => expect(ds.getBranchingInstalled).toHaveBeenCalled());
+    expect(input).not.toBeDisabled();
+  });
+
+  it('fails open (Branch enabled) when the probe errors', async () => {
+    const ds = { ...datasource, uid: 'ds-error', getBranchingInstalled: jest.fn().mockRejectedValue(new Error('boom')) };
+    setup({}, ds);
+    const input = await screen.findByLabelText('Branch');
+    await waitFor(() => expect(ds.getBranchingInstalled).toHaveBeenCalled());
+    expect(input).not.toBeDisabled();
   });
 });
 

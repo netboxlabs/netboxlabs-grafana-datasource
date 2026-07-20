@@ -1,11 +1,17 @@
 import React from 'react';
 import { InlineField, MultiSelect, Input, Stack } from '@grafana/ui';
 import { SelectableValue } from '@grafana/data';
+import { DataSource } from '../datasource';
+import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, BRANCH_FIELD_DISABLED_TOOLTIP } from '../hooks/useBranchingInstalled';
 import { NetBoxQuery } from '../types';
 
 interface Props {
   query: NetBoxQuery;
   onChange: (query: NetBoxQuery) => void;
+  // Grafana passes the datasource to annotation query editors at runtime
+  // (AnnotationQueryEditorProps extends QueryEditorProps); declare it so we can
+  // gate the Branch field on branching availability.
+  datasource: DataSource;
 }
 
 // Common NetBox content types for filtering changelog annotations. Users can add
@@ -22,7 +28,9 @@ const CONTENT_TYPE_PRESETS: Array<SelectableValue<string>> = [
   { label: 'Circuit', value: 'circuits.circuit' },
 ];
 
-export function AnnotationQueryEditor({ query, onChange }: Props) {
+export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
+  const branchingInstalled = useBranchingInstalled(datasource);
+  const branchDisabled = branchingInstalled === false;
   const selected = (query.objectTypes ?? []).map((v) => ({ label: v, value: v }));
 
   return (
@@ -52,7 +60,8 @@ export function AnnotationQueryEditor({ query, onChange }: Props) {
       <InlineField
         label="Branch"
         labelWidth={20}
-        tooltip="Optional netbox-branching schema id, or a $variable (e.g. from a variable querying plugins/branching/branches). Empty targets the main branch. Requires the netbox-branching plugin."
+        disabled={branchDisabled}
+        tooltip={branchDisabled ? BRANCH_FIELD_DISABLED_TOOLTIP : BRANCH_FIELD_TOOLTIP}
       >
         <Input
           id="annotation-branch"

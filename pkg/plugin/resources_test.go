@@ -81,6 +81,58 @@ func TestResource_FilterFields_FallbackOnError(t *testing.T) {
 	}
 }
 
+func TestResource_Branching(t *testing.T) {
+	cases := []struct {
+		name       string
+		installed  bool
+		conclusive bool
+		want       bool // expected {"installed": want}
+	}{
+		{"present", true, true, true},
+		{"absent", false, true, false},
+		{"inconclusive fails open", false, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProvider{branchingInstalled: tc.installed, branchingConcl: tc.conclusive}
+			d := newTestDatasource(fp)
+			rec := httptest.NewRecorder()
+			d.newRouter().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/branching", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			var got map[string]bool
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got["installed"] != tc.want {
+				t.Errorf("installed = %v, want %v", got["installed"], tc.want)
+			}
+		})
+	}
+}
+
+// nonBranchingProvider embeds the provider.Provider interface (which does NOT
+// declare BranchingInstalled), so it satisfies provider.Provider but NOT
+// provider.BranchingCapable — modeling a future non-NetBox backend.
+type nonBranchingProvider struct{ provider.Provider }
+
+func TestResource_Branching_ProviderNotCapable(t *testing.T) {
+	d := newTestDatasource(nonBranchingProvider{&fakeProvider{}})
+	rec := httptest.NewRecorder()
+	d.newRouter().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/branching", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got map[string]bool
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["installed"] != false {
+		t.Errorf("installed = %v, want false (provider not branching-capable)", got["installed"])
+	}
+}
+
 func TestSanitizeLog(t *testing.T) {
 	if got := sanitizeLog("dcim/devices\ninjected=evil\r"); got != "dcim/devicesinjected=evil" {
 		t.Errorf("sanitizeLog = %q, want CR/LF stripped", got)

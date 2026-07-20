@@ -49,7 +49,7 @@ describe('metricFindQuery', () => {
     const spy = jest.fn().mockResolvedValue({ columns: ['name'], rows: [{ name: 'leaf1' }] });
     (ds as any).runResourceQuery = spy;
     await ds.metricFindQuery({ refId: 'A', objectType: 'dcim/devices', branch: '$branch' } as any, {});
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ branch: 'td5smq0f' }));
+    expect(spy.mock.calls[0][0]).toEqual(expect.objectContaining({ branch: 'td5smq0f' }));
   });
 
   it('prepends a selectable "main" for the branch variable', async () => {
@@ -112,6 +112,27 @@ describe('metricFindQuery', () => {
     (ds as any).runResourceQuery = jest.fn().mockRejectedValue(new Error('boom'));
     await expect(ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'name' })).rejects.toThrow('boom');
   });
+
+  it('suppresses the global error toast for the branch probe (branching may be absent -> expected 404)', async () => {
+    const ds = makeDS();
+    const spy = jest.fn().mockResolvedValue({ columns: ['schema_id', 'name'], rows: [] });
+    (ds as any).runResourceQuery = spy;
+    await ds.metricFindQuery({
+      refId: 'v',
+      objectType: 'plugins/branching/branches',
+      valueField: 'schema_id',
+      textField: 'name',
+    });
+    expect(spy).toHaveBeenCalledWith(expect.anything(), { showErrorAlert: false });
+  });
+
+  it('does NOT suppress the error toast for non-branch variables', async () => {
+    const ds = makeDS();
+    const spy = jest.fn().mockResolvedValue({ columns: ['name'], rows: [] });
+    (ds as any).runResourceQuery = spy;
+    await ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'name' });
+    expect(spy.mock.calls[0][1]?.showErrorAlert).not.toBe(false);
+  });
 });
 
 describe('applyTemplateVariables', () => {
@@ -171,5 +192,13 @@ describe('resource helpers', () => {
     const out = await ds.getFilterFields('ipam/prefixes', 'td5smq0f');
     expect(spy).toHaveBeenCalledWith('filter-fields', { type: 'ipam/prefixes', branch: 'td5smq0f' });
     expect(out[0].operators).toEqual(['', 'ic']);
+  });
+
+  it('runResourceQuery forwards request options (e.g. showErrorAlert) to postResource', async () => {
+    const ds = makeDS();
+    const spy = jest.fn().mockResolvedValue({ columns: [], rows: [] });
+    (ds as any).postResource = spy;
+    await ds.runResourceQuery({ objectType: 'dcim/devices' }, { showErrorAlert: false });
+    expect(spy).toHaveBeenCalledWith('query', { objectType: 'dcim/devices' }, { showErrorAlert: false });
   });
 });

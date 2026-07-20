@@ -1,5 +1,5 @@
 import { CoreApp, DataSourceInstanceSettings, MetricFindValue, ScopedVars } from '@grafana/data';
-import { DataSourceWithBackend, getTemplateSrv } from '@grafana/runtime';
+import { DataSourceWithBackend, getTemplateSrv, type BackendSrvRequest } from '@grafana/runtime';
 
 import {
   DEFAULT_QUERY,
@@ -98,14 +98,17 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     return this.getResource('filter-fields', { type: objectType, ...(branch ? { branch } : {}) });
   }
 
-  runResourceQuery(body: {
-    objectType: string;
-    filters?: FilterRow[];
-    fields?: string[];
-    limit?: number;
-    branch?: string;
-  }): Promise<{ columns: string[]; rows: Array<Record<string, unknown>> }> {
-    return this.postResource('query', body);
+  runResourceQuery(
+    body: {
+      objectType: string;
+      filters?: FilterRow[];
+      fields?: string[];
+      limit?: number;
+      branch?: string;
+    },
+    options?: Partial<BackendSrvRequest>
+  ): Promise<{ columns: string[]; rows: Array<Record<string, unknown>> }> {
+    return this.postResource('query', body, options);
   }
 
   /** Populate a dashboard variable from a NetBox object field. */
@@ -133,7 +136,16 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
 
     let res: { columns: string[]; rows: Array<Record<string, unknown>> };
     try {
-      res = await this.runResourceQuery({ objectType: query.objectType, filters, fields, limit: 1000, branch });
+      // For the branch probe, suppress Grafana's default error toast: on a NetBox
+      // without netbox-branching the branches endpoint 404s, which is expected and
+      // handled below (degrade to "main"). Without this, that expected 404 pops a
+      // toast on every variable refresh and won't clear. Other variables keep their
+      // error alerts; a genuine branch-list outage still rethrows (surfacing inline
+      // on the variable rather than as a recurring global toast).
+      res = await this.runResourceQuery(
+        { objectType: query.objectType, filters, fields, limit: 1000, branch },
+        isBranches ? { showErrorAlert: false } : undefined
+      );
     } catch (err) {
       // Degrade the branch variable to a "main"-only list ONLY when branching
       // isn't installed (the branches endpoint 404s, surfaced by the backend as

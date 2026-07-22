@@ -17,8 +17,8 @@
   "license": "Apache-2.0",
   "devDependencies": {
     "@grafana/eslint-config": "^9.0.0",
-    "@grafana/plugin-e2e": "^3.6.1",
-    "@grafana/sign-plugin": "^3.2.2",
+    "@grafana/plugin-e2e": "^3.10.0",
+    "@grafana/sign-plugin": "^3.3.3",
     "@grafana/tsconfig": "^2.0.1",
     "@playwright/test": "^1.57.0",
     "@stylistic/eslint-plugin-ts": "^4.4.0",
@@ -28,7 +28,7 @@
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.3.0",
     "@types/jest": "^30.0.0",
-    "@types/node": "^26.1.0",
+    "@types/node": "^26.1.1",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@typescript-eslint/eslint-plugin": "^8.62.1",
@@ -78,7 +78,7 @@
   },
   "packageManager": "npm@11.3.0",
   "overrides": {
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.12",
     "js-cookie": "^3.0.7"
   }
 }

@@ -1,0 +1,9 @@
+# Time-boxed exception. fast-uri 3.1.4 (fixes GHSA-v2hh-gcrm-f6hx) is within the
+# .npmrc `min-release-age=7` supply-chain cooldown, so it can't be adopted yet.
+# fast-uri is a dev/build-only dependency (ajv -> webpack tooling), not shipped
+# in the plugin. Remove this entry once 3.1.4 ages past the cooldown and is
+# bumped (Dependabot will open that PR); the ignoreUntil makes it auto-expire.
+[[IgnoredVulns]]
+id = "GHSA-v2hh-gcrm-f6hx"
+ignoreUntil = 2026-08-01
+reason = "fast-uri 3.1.4 fix is within the npmrc min-release-age=7 cooldown; dev-only (ajv build tooling). Remove once it ages in."

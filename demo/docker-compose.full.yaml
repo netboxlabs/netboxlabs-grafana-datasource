@@ -31,6 +31,8 @@ services:
   netbox:
     build: {context: ., dockerfile: Dockerfile.netbox}
     image: netbox-grafana-demo/netbox:v4.4-3.4.2-branching
+    # Built from Dockerfile.netbox, published nowhere — build it, never pull.
+    pull_policy: build
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}

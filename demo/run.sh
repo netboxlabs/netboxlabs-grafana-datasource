@@ -28,7 +28,21 @@ if [ "${1:-}" = "down" ]; then
   exec docker compose -f demo/docker-compose.yaml -f demo/docker-compose.full.yaml down "$@"
 fi
 
-if [ ! -f dist/module.js ] || [ ! -f dist/gpx_netbox_linux_amd64 ] || [ ! -f dist/gpx_netbox_linux_arm64 ]; then
+# Rebuild the plugin when its build artifacts are missing OR older than any
+# source file. dist/ is gitignored, so a plain re-run after `git pull` otherwise
+# reuses the previous build — and since Grafana bind-mounts dist/, it keeps
+# serving the OLD plugin (a common "I pulled but nothing changed" surprise).
+plugin_stale() {
+  # missing artifacts?
+  [ -f dist/module.js ] && [ -f dist/gpx_netbox_linux_amd64 ] && [ -f dist/gpx_netbox_linux_arm64 ] || return 0
+  # frontend source newer than the built bundle?
+  [ -n "$(find src package.json package-lock.json -newer dist/module.js 2>/dev/null | head -n1)" ] && return 0
+  # backend source newer than the built binary?
+  [ -n "$(find pkg go.mod go.sum -newer dist/gpx_netbox_linux_amd64 2>/dev/null | head -n1)" ] && return 0
+  return 1
+}
+
+if plugin_stale; then
   echo "== building plugin (frontend + linux amd64/arm64 backend) =="
   if [ ! -d node_modules ]; then
     npm install

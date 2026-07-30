@@ -79,6 +79,8 @@
   "packageManager": "npm@11.3.0",
   "overrides": {
     "dompurify": "^3.4.12",
-    "js-cookie": "^3.0.7"
+    "fast-uri": "3.1.4",
+    "js-cookie": "^3.0.7",
+    "postcss": "8.5.18"
   }
 }

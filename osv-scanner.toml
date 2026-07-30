@@ -1,9 +1,45 @@
-# Time-boxed exception. fast-uri 3.1.4 (fixes GHSA-v2hh-gcrm-f6hx) is within the
-# .npmrc `min-release-age=7` supply-chain cooldown, so it can't be adopted yet.
-# fast-uri is a dev/build-only dependency (ajv -> webpack tooling), not shipped
-# in the plugin. Remove this entry once 3.1.4 ages past the cooldown and is
-# bumped (Dependabot will open that PR); the ignoreUntil makes it auto-expire.
+# Suppressions for advisories that cannot currently be fixed by upgrading.
+# Every entry states why the fix is unavailable, not merely that it is wanted,
+# and carries a re-review date. Anything fixable is fixed instead — the
+# fast-uri exception that used to live here is gone because 3.1.4 aged past the
+# .npmrc `min-release-age=7` cooldown and is now pinned in package.json.
+
+# react-router 6.30.4 is pinned transitively by @grafana/ui@13.1.0 (via
+# react-router-dom-v5-compat, which requires react-router 6.x). Both advisories
+# are fixed only in react-router 7.x — a major that @grafana/ui's v6 usage
+# cannot take — so this is not upgradable from here. @grafana/ui is externalized
+# by Grafana at runtime and is not bundled into the shipped plugin. Remediation
+# belongs to @grafana/ui; drop these two entries when it ships a fixed
+# react-router. ignoreUntil is a re-review date, not an expected fix date.
 [[IgnoredVulns]]
-id = "GHSA-v2hh-gcrm-f6hx"
-ignoreUntil = 2026-08-01
-reason = "fast-uri 3.1.4 fix is within the npmrc min-release-age=7 cooldown; dev-only (ajv build tooling). Remove once it ages in."
+id = "GHSA-337j-9hxr-rhxg"
+ignoreUntil = 2026-10-01
+reason = "react-router 6.30.4 pinned transitively by @grafana/ui@13.1.0; fix is v7-only (incompatible). Externalized at runtime, not shipped. Re-review when @grafana/ui updates."
+[[IgnoredVulns]]
+id = "GHSA-wrjc-x8rr-h8h6"
+ignoreUntil = 2026-10-01
+reason = "react-router 6.30.4 pinned transitively by @grafana/ui@13.1.0; fix is v7-only (incompatible). Externalized at runtime, not shipped. Re-review when @grafana/ui updates."
+
+# brace-expansion: OSV models this advisory as a single range (introduced 0,
+# fixed 5.0.8), so it flags the 1.x and 2.x lines even though the maintainers
+# backported the mitigation to both. Verified in the installed trees: 1.1.18 and
+# 2.1.4 each carry the EXPANSION_MAX_LENGTH guard that 5.0.8 introduced, so the
+# flagged instances are already patched and this is a false positive against
+# coarse advisory data.
+#
+# Forcing 5.0.8 everywhere is not an option: v5 changed the CommonJS export from
+# a callable default to a named `{expand}`, so minimatch 3.x/9.x — which do
+# `require('brace-expansion')` and call the result — throw
+# "TypeError: expand is not a function". Verified: with 5.0.8 forced,
+# minimatch@3.1.5 still matches plain patterns but throws on any brace pattern
+# such as `*.{ts,tsx}`. That is a silent, latent break across the build
+# toolchain, strictly worse than the advisory it would silence.
+#
+# brace-expansion also never reaches the shipped artifact (0 occurrences in
+# dist/module.js) — it is build-time tooling only, reached via minimatch/glob.
+# Drop this entry once OSV records the 1.x/2.x backports, or once minimatch and
+# glob widen their ranges to v5.
+[[IgnoredVulns]]
+id = "GHSA-mh99-v99m-4gvg"
+ignoreUntil = 2026-10-01
+reason = "OSV models only the 5.0.8 fix branch; the flagged 1.1.18/2.1.4 already carry the backported EXPANSION_MAX_LENGTH guard. Forcing v5 breaks minimatch 3.x/9.x (CJS export changed to named `expand`) on brace patterns. Build-tooling only, not shipped."

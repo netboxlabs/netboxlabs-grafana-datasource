@@ -22,10 +22,12 @@ const cacheTTL = 5 * time.Minute
 // schema changes only on a NetBox upgrade, so this is much longer than cacheTTL.
 const schemaTTL = 30 * time.Minute
 
-// defaultLimit / maxLimit bound result sizes when the caller does not specify.
+// defaultLimit / MaxLimit bound result sizes when the caller does not specify.
+// MaxLimit is exported because the plugin layer must be able to tell the user
+// when their requested row limit was reduced to it.
 const (
 	defaultLimit = 1000
-	maxLimit     = 10000
+	MaxLimit     = 10000
 	pageSize     = 500
 )
 
@@ -245,8 +247,8 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if limit <= 0 {
 		limit = defaultLimit
 	}
-	if limit > maxLimit {
-		limit = maxLimit
+	if limit > MaxLimit {
+		limit = MaxLimit
 	}
 
 	q := buildFilterValues(spec.Filters)
@@ -451,7 +453,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 // Changes returns change-log events within a time window for annotations.
 func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]provider.Change, error) {
 	limit := spec.Limit
-	if limit <= 0 || limit > maxLimit {
+	if limit <= 0 || limit > MaxLimit {
 		limit = defaultLimit
 	}
 	q := url.Values{}

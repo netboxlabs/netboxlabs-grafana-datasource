@@ -71,3 +71,11 @@ Initial release of the NetBox data source for Grafana.
   NetBox supports per object type (from its OpenAPI schema), fixing text/other operators
   that previously sent an unsupported lookup the API silently ignored (returning unfiltered
   results). Falls back to the discovered columns when the schema is unavailable.
+- Filtering: results larger than the row limit now report how many of the total
+  matches are shown, so a truncated table is not mistaken for the full answer.
+  Alert queries in table mode fail on a truncated result instead of alerting on
+  a subset.
+- Filtering: the editor warns when two filter rows resolve to the same NetBox
+  parameter (which NetBox ORs) and when a row has a field but no value (which
+  NetBox ignores).
+- Filtering: new **has any value** operator, the complement of **is empty**.

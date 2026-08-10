@@ -13,6 +13,13 @@ import (
 // dropdown-only editor doesn't drop supported filters (e.g. regex, nic). A suffix
 // not listed here is ignored. Keep in sync with FILTER_OPERATORS in src/types.ts —
 // the editor only surfaces operators present in both.
+//
+// "nempty" is deliberately NOT a key here even though it IS in FILTER_OPERATORS
+// and operatorOrder: NetBox advertises only `__empty` (a BooleanFilter), never a
+// `__nempty` param, so there is no suffix to map. "nempty" is derived instead,
+// in the parse loop's `if tok == "empty"` branch below. Do not "fix" this by
+// adding `"nempty": "nempty"` here — that would make the parser accept a suffix
+// NetBox doesn't send.
 var suffixToken = map[string]string{
 	"n": "n", "ie": "ie", "nie": "nie",
 	"ic": "ic", "nic": "nic",
@@ -27,7 +34,7 @@ var suffixToken = map[string]string{
 // src/types.ts). Exact ("") first.
 var operatorOrder = []string{
 	"", "n", "ie", "nie", "ic", "nic", "isw", "nisw", "iew", "niew",
-	"regex", "iregex", "gte", "lte", "gt", "lt", "empty",
+	"regex", "iregex", "gte", "lte", "gt", "lt", "empty", "nempty",
 }
 
 // nonFilterParams are NetBox/DRF query params that shape the response or
@@ -117,6 +124,12 @@ func parseFilterFields(schema []byte) (map[string][]provider.FilterField, error)
 					if tok, ok := suffixToken[suf]; ok {
 						addField(base)
 						ops[base][tok] = true
+						// __empty is a BooleanFilter, so a field that supports it
+						// supports both directions: "is empty" (true) and "has any
+						// value" (false). NetBox advertises only the one param.
+						if tok == "empty" {
+							ops[base]["nempty"] = true
+						}
 					}
 					continue // do not treat X__Y as its own field
 				}

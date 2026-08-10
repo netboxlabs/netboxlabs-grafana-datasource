@@ -19,10 +19,14 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-# A devices list whose envelope "count" (500) intentionally exceeds the number of
-# returned rows (2), so count queries exercise the envelope-total path.
+# A devices list whose envelope "count" matches the rows served, as a real NetBox
+# does. It must stay consistent: the plugin treats rows < count as a truncated
+# result, which is a hard error for alertTable queries (see resultNotices /
+# truncationError in pkg/plugin/notices.go). The envelope-total path for count
+# queries is covered by unit tests (TestQuery_Count_NeverErrorsOnLargeTotal),
+# which assert a large total with zero rows far more directly than this stub can.
 DEVICES = {
-    "count": 500,
+    "count": 2,
     "next": None,
     "results": [
         {

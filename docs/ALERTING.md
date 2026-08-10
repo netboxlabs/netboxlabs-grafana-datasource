@@ -77,9 +77,12 @@ Tips:
 - **Mind the Limit ceiling.** Unlike count-only alerting, which reads the
   total from the API envelope independent of Limit, alert table emits **one
   alert instance per returned row**, so completeness is bounded by the
-  query's **Limit** (default 1000, max 10000). If more objects match than the
-  Limit, those objects silently produce no alert instance; set Limit
-  comfortably above the worst-case match count.
+  query's **Limit**. The query editor fills that field in with 100; a query
+  that leaves it unset falls back to 1000, and the ceiling either way is
+  10000. If more objects match than the Limit, the query now **fails** with an
+  error naming how many of the total matches were returned, rather than
+  quietly omitting alert instances. Set Limit comfortably above the worst-case
+  match count, or tighten the filters so every match fits.
 - If the Value field is a computed column (`utilization`, `used`,
   `available`), also add it to **Return fields** so the backend computes it;
   otherwise the query errors that the value field was not found.

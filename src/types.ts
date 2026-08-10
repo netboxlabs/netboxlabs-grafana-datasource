@@ -149,8 +149,61 @@ export const FILTER_OPERATORS: Array<{ label: string; value: string }> = [
   { label: '<=', value: 'lte' },
   { label: '>', value: 'gt' },
   { label: '<', value: 'lt' },
-  { label: 'empty', value: 'empty' },
+  { label: 'is empty', value: 'empty' },
+  { label: 'has any value', value: 'nempty' },
 ];
+
+/**
+ * Operators that ask about presence rather than value: they take no value and
+ * both map to the same NetBox param (`<field>__empty=true|false`).
+ */
+export const EMPTY_FAMILY_OPERATORS = ['empty', 'nempty'];
+
+/**
+ * NetBox filters whose repeated params are AND-ed rather than OR-ed
+ * (`TagFilter`/`TagIDFilter` set `conjoined=True`). Stacking two such rows
+ * already means what the UI implies, so they must NOT be flagged as colliding.
+ * Verified against NetBox 4.4.10: with one device tagged [crit, prod] and
+ * another tagged [crit], both `?tag=crit&tag=prod` and `?tag_id=1&tag_id=2`
+ * return only the device carrying both.
+ */
+export const CONJOINED_WIRE_KEYS = ['tag', 'tag_id'];
+
+/**
+ * Operators whose repeated params NetBox genuinely combines with OR — the only
+ * case where stacked rows mean something different from the AND the UI implies,
+ * and therefore the only case worth warning about.
+ *
+ * This is deliberately an allowlist rather than a list of exemptions. Repeated
+ * *negated* params are excluded as a group — `qs.exclude(Q(a) | Q(b))`, i.e.
+ * NOT a AND NOT b — which is exactly the stacked AND, so warning there would
+ * state the inverse of the truth. (Verified: `?site__n=ams1&site__n=nyc1`
+ * returns only the device in neither site.) An allowlist fails safe: a new
+ * operator that nobody adds here loses a warning, whereas a missed exemption
+ * would actively mislead.
+ *
+ * Caveat this list cannot express: whether repeated params OR is a property of
+ * the NetBox filter *class*, not the lookup suffix. `MultiValue*Filter` /
+ * `ModelMultipleChoiceFilter` OR; plain single-value filters read
+ * `QueryDict.get`, so the LAST value wins. Verified on NetBox 4.4.10:
+ * `?q=AMS1&q=NYC1` and `?q=NYC1&q=AMS1` return different sets (order matters =
+ * last wins), while `?name__ic=AMS1&name__ic=NYC1` returns the same union in
+ * either order. Both behaviours still differ from the stacked AND, so the
+ * warning is warranted either way — which is why the message wording avoids
+ * promising OR outright rather than plumbing a filter-class discriminator
+ * through provider.FilterField (that belongs with Phase 2's param-kind ladder).
+ *
+ * Includes the legacy `'exact'` token alongside `''`: the backend treats them
+ * byte-identically (`f.Operator != "" && f.Operator != "exact"` in
+ * buildFilterValues — same wire key, same `q.Add`), so repeated params OR
+ * exactly as they do for `''`. It looks like a redundant duplicate of `''`
+ * because the query editor itself never emits `'exact'` (FILTER_OPERATORS has
+ * no such entry); it only reaches here via a provisioned or hand-edited
+ * dashboard. Do not "clean up" this entry — removing it silently drops the
+ * warning for that case (see filterWireKey, which maps 'exact' to the same
+ * key as '').
+ */
+export const OR_COMBINING_OPERATORS = ['', 'exact', 'ie', 'ic', 'isw', 'iew', 'regex', 'iregex', 'gt', 'gte', 'lt', 'lte'];
 
 type OpOption = { label: string; value: string };
 
@@ -185,4 +238,159 @@ export function filterOperatorsFor(filterFields: FilterField[], field: string, s
 export function isOperatorValidForField(filterFields: FilterField[], field: string, operator: string): boolean {
   const ff = filterFields.find((f) => f.name === field);
   return !ff || ff.operators.includes(operator);
+}
+
+/**
+ * The NetBox query-param key a filter row will produce. Mirrors
+ * buildFilterValues in pkg/provider/netbox/enrich.go — keep the two in sync.
+ * Two rows sharing a key are OR-ed by NetBox even though the stacked UI reads
+ * as AND, which is what validateFilters warns about.
+ */
+export function filterWireKey(row: FilterRow): string {
+  // A missing `operator` (a provisioned/hand-edited row can omit it even
+  // though the type is non-optional) means exact match, identical to '' —
+  // that is how both the editor default and buildFilterValues treat it.
+  // Coerced explicitly rather than relied on via truthiness so this can't be
+  // "simplified" back into a check that silently mishandles the next
+  // absent-value variant (e.g. null).
+  const operator = row.operator ?? '';
+  if (EMPTY_FAMILY_OPERATORS.includes(operator)) {
+    return `${row.field}__empty`;
+  }
+  // Mirrors the backend's legacy branch: `f.Operator != "" && f.Operator != "exact"`
+  // treats the literal string "exact" the same as "" (both mean the bare field).
+  // Unreachable from the editor (FILTER_OPERATORS never emits "exact"), but a
+  // provisioned/hand-edited dashboard could use it.
+  if (!operator || operator === 'exact') {
+    return row.field;
+  }
+  return `${row.field}__${operator}`;
+}
+
+/**
+ * Something worth telling the user about one filter row, reported against its
+ * index. Severity is a ladder, not decoration:
+ *   - 'info'    — status the user may not have finished acting on yet (a row
+ *                 with no value). Must not read as a scolding: picking a field
+ *                 before typing a value is the normal authoring flow, and
+ *                 plenty of users are just browsing and never filter at all.
+ *   - 'warning' — the user probably did not mean this (two rows NetBox will
+ *                 combine differently from the AND the stacked UI implies).
+ */
+export interface FilterIssue {
+  index: number;
+  severity: 'info' | 'warning';
+  message: string;
+}
+
+/**
+ * A row's operator, normalised. `operator` is non-optional in the `FilterRow`
+ * type, but a provisioned or hand-edited dashboard's JSON can omit it, making
+ * it `undefined` at runtime. A missing operator means exact match, identical
+ * to `''` — that is how both the editor default and buildFilterValues treat
+ * it (`f.Operator != "" && f.Operator != "exact"` in
+ * pkg/provider/netbox/enrich.go). Coerced once, here, rather than added as
+ * another entry to EMPTY_FAMILY_OPERATORS/OR_COMBINING_OPERATORS: enumerating
+ * `undefined` alongside `''` only patches this one shape, and the next
+ * absent-value variant (`null`, say) would fail the same way `'exact'` did in
+ * an earlier round — the collision found, then the warning silently dropped
+ * because the raw value wasn't in the allowlist. Every read of `.operator` in
+ * this file goes through this function so they can't drift apart.
+ */
+function op(f: FilterRow): string {
+  return f.operator ?? '';
+}
+
+/**
+ * Whether a row will emit a NetBox param at all. Mirrors buildFilterValues in
+ * pkg/provider/netbox/enrich.go exactly: empty-family operators always emit
+ * `__empty` regardless of value; everything else splits `value` on `,` (CSV,
+ * for multi-value variables) and emits only if at least one segment survives
+ * a trim. `f.value ?? ''` because a provisioned/saved row can omit `value`
+ * entirely; `f.value.split` would throw and blank the whole editor (mirrors
+ * the defensive interpolation at src/datasource.ts:73). A value made only of
+ * separators — `','`, `',,'`, `' , '` — reads as populated by naive
+ * `.trim()` but the backend's per-segment split drops every segment, so it
+ * must count as NOT emitting here too. Used by both validation passes below
+ * so they can't drift apart on what "blank" means.
+ */
+function emitsParam(f: FilterRow): boolean {
+  return EMPTY_FAMILY_OPERATORS.includes(op(f)) || (f.value ?? '').split(',').some((v) => v.trim() !== '');
+}
+
+/**
+ * Validates filter rows against the two ways they silently misbehave today:
+ * a row with a field but no value is dropped by the backend (returning
+ * unfiltered data), and two rows resolving to the same NetBox param are OR-ed
+ * rather than AND-ed. A wholly blank row is ignored — the user is still typing.
+ */
+export function validateFilters(filters: FilterRow[]): FilterIssue[] {
+  const issues: FilterIssue[] = [];
+
+  filters.forEach((f, index) => {
+    if (!f.field) {
+      return; // nothing chosen yet
+    }
+    if (!emitsParam(f)) {
+      issues.push({
+        index,
+        severity: 'info',
+        message: "This filter has no value, so it isn't applied.",
+      });
+    }
+  });
+
+  const byKey = new Map<string, number[]>();
+  filters.forEach((f, index) => {
+    if (!f.field) {
+      return;
+    }
+    // A row that will not emit a param can't collide with anything. Without
+    // this, a row already flagged 'info' by the pass above would ALSO be
+    // flagged as OR-colliding with a populated row on the same field —
+    // self-contradictory, and wrong on the wire.
+    if (!emitsParam(f)) {
+      return;
+    }
+    const key = filterWireKey(f);
+    byKey.set(key, [...(byKey.get(key) ?? []), index]);
+  });
+  for (const [key, indexes] of byKey) {
+    if (indexes.length < 2) {
+      continue;
+    }
+    if (CONJOINED_WIRE_KEYS.includes(key)) {
+      // Repeated tag params are AND-ed by NetBox, so stacked tag rows already
+      // mean what the UI implies. Warning would state the opposite of the truth
+      // and push the user to delete a correct row.
+      continue;
+    }
+
+    let message: string;
+    if (indexes.every((i) => EMPTY_FAMILY_OPERATORS.includes(op(filters[i])))) {
+      // buildFilterValues uses Set for __empty (a boolean param), so the LAST
+      // row wins rather than the rows combining.
+      message = `Another filter also asks whether ${filters[indexes[0]].field} is empty — only the last one is applied.`;
+    } else if (indexes.every((i) => OR_COMBINING_OPERATORS.includes(op(filters[i])))) {
+      // Deliberately does not promise OR outright: whether repeated params OR is
+      // a property of the NetBox filter *class*, not the lookup suffix, and this
+      // allowlist can only see the suffix. Multi-value filters OR; single-value
+      // ones (q, contains, has_primary_ip) keep only the last value. Both differ
+      // from the AND the stacked UI implies, which is the actionable point.
+      message =
+        `Another filter uses ${key} too — NetBox does not AND repeated parameters: ` +
+        `it usually combines them with OR, and for single-value parameters such as q only the last value applies.`;
+    } else {
+      // Negated operators (and anything not known to OR): NetBox excludes the
+      // values as a group, which already equals the stacked AND. Say nothing
+      // rather than guess.
+      continue;
+    }
+
+    for (const index of indexes) {
+      issues.push({ index, severity: 'warning', message });
+    }
+  }
+
+  return issues;
 }

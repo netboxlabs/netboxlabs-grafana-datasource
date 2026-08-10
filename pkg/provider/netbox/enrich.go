@@ -22,8 +22,12 @@ func buildFilterValues(filters []provider.Filter) url.Values {
 		if f.Field == "" {
 			continue
 		}
-		if f.Operator == "empty" {
-			q.Set(f.Field+"__empty", "true")
+		// __empty is a BooleanFilter: "empty" asks for true, "nempty" ("has any
+		// value") asks for false. Set (not Add) because repeated __empty params
+		// resolve to the last one — two empty-family rows on one field are a
+		// conflict the editor flags rather than something to encode twice.
+		if f.Operator == "empty" || f.Operator == "nempty" {
+			q.Set(f.Field+"__empty", strconv.FormatBool(f.Operator == "empty"))
 			continue
 		}
 		key := f.Field
@@ -128,7 +132,7 @@ func pickLongestPrefix(results []json.RawMessage) json.RawMessage {
 // or raw physical cables, plus wireless links in both views.
 func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*provider.Graph, error) {
 	limit := spec.Limit
-	if limit <= 0 || limit > maxLimit {
+	if limit <= 0 || limit > MaxLimit {
 		limit = 1000
 	}
 
@@ -251,7 +255,7 @@ func linkKey(a, b int) string {
 // the far device. Each path is seen from both end interfaces — dedup by link
 // identity, so parallel paths between the same device pair all render.
 func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, seen map[string]bool) ([]provider.GraphEdge, error) {
-	rows, _, err := p.fetchRows(ctx, "dcim/interfaces", url.Values{"connected": {"true"}}, maxLimit)
+	rows, _, err := p.fetchRows(ctx, "dcim/interfaces", url.Values{"connected": {"true"}}, MaxLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +306,7 @@ func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, seen
 // device (the patch panel), so panel-cabled fabrics render device—panel—device
 // instead of dropping the link.
 func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool) ([]provider.GraphEdge, error) {
-	rows, _, err := p.fetchRows(ctx, "dcim/cables", url.Values{}, maxLimit)
+	rows, _, err := p.fetchRows(ctx, "dcim/cables", url.Values{}, MaxLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +335,7 @@ func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool) ([]
 // the same link as a computed path. Fetch failures are non-fatal: wired
 // topology still renders.
 func (p *Provider) wirelessEdges(ctx context.Context, inSet map[string]bool, seen map[string]bool) []provider.GraphEdge {
-	rows, _, err := p.fetchRows(ctx, "wireless/wireless-links", url.Values{}, maxLimit)
+	rows, _, err := p.fetchRows(ctx, "wireless/wireless-links", url.Values{}, MaxLimit)
 	if err != nil {
 		return nil
 	}

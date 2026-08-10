@@ -59,8 +59,8 @@ func TestParseFilterFields(t *testing.T) {
 	want := map[string][]string{
 		"prefix": {""},
 		// full documented lookup set is modeled; __foobar (unmodeled) is dropped.
-		// order follows operatorOrder: "", n, ic, nic, isw, regex, iregex, empty.
-		"status":      {"", "n", "ic", "nic", "isw", "regex", "iregex", "empty"},
+		// order follows operatorOrder: "", n, ic, nic, isw, regex, iregex, empty, nempty.
+		"status":      {"", "n", "ic", "nic", "isw", "regex", "iregex", "empty", "nempty"},
 		"mask_length": {"", "gte", "lte"},
 		"depth":       {"", "gte", "lte"}, // a real prefix filter, NOT a response param
 		"vrf":         {"", "n"},
@@ -124,6 +124,30 @@ func TestParseFilterFields(t *testing.T) {
 	}
 	if !equalStrs(devOps, []string{"", "ic"}) {
 		t.Errorf("dcim/devices name operators = %v, want [\"\" \"ic\"]", devOps)
+	}
+}
+
+func TestParseFilterFields_EmptyImpliesNempty(t *testing.T) {
+	m, err := parseFilterFields([]byte(`{"paths":{"/api/dcim/devices/":{"get":{"parameters":[
+		{"name":"serial","in":"query"},
+		{"name":"serial__empty","in":"query"}]}}}}`))
+	if err != nil {
+		t.Fatalf("parseFilterFields: %v", err)
+	}
+	var ops []string
+	for _, ff := range m["dcim/devices"] {
+		if ff.Name == "serial" {
+			ops = ff.Operators
+		}
+	}
+	want := []string{"", "empty", "nempty"}
+	if len(ops) != len(want) {
+		t.Fatalf("serial operators = %v, want %v", ops, want)
+	}
+	for i := range want {
+		if ops[i] != want[i] {
+			t.Fatalf("serial operators = %v, want %v", ops, want)
+		}
 	}
 }
 

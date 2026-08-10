@@ -108,6 +108,20 @@ labeled to match NetBox + a rich dashboard).
 > if the schema can't be read, the editor falls back to the discovered columns with all
 > operators available.
 
+> Filter rows stack with **AND**, but NetBox combines *repeated* parameters with **OR**, so
+> two rows that resolve to the same NetBox parameter (two `name contains` rows, say) are
+> OR-ed instead, and the editor warns on both. Two cases are not flagged, because there the
+> stacked AND is already what NetBox does: `tag`/`tag_id` rows (NetBox requires every listed
+> tag to match) and rows using a **not** operator (NetBox excludes every listed value, so
+> `status not offline` plus `status not planned` means neither). A row with a field but no
+> value is noted as not yet applied, since NetBox ignores it rather than filtering; use
+> **is empty** / **has any value** to filter on presence instead of a value.
+>
+> When a result is larger than the row limit, the panel reports how many of the matching
+> objects are shown, e.g. `Showing 100 of 104,231 matching objects.`, so a truncated table is
+> never mistaken for the full answer. In **Alert table** mode (see [Alerting](#alerting)
+> below), a truncated result fails the query instead of alerting on part of the data.
+
 ## Dynamic object-type discovery
 
 The query editor's **Object type** list is built by walking the NetBox API

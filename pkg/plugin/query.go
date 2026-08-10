@@ -157,6 +157,11 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 			return backend.ErrDataResponse(backend.StatusBadRequest,
 				fmt.Sprintf("value field %q not found in results — add it to Return fields", qm.ValueField))
 		}
+		// Grafana alert evaluation cannot see frame notices, so a truncated alert
+		// result must fail loudly instead of alerting on an arbitrary subset.
+		if msg := truncationError(res, qm.Limit); msg != "" {
+			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+		}
 		applyJoinKeys(res, qm.JoinKeys)
 		rewriteLinks(res, d.provider.BaseURL(), d.cfg.PublicURL)
 		frame := buildAlertFrame(qm.ObjectType, res, qm.ValueField)
@@ -178,6 +183,9 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 	rewriteLinks(res, d.provider.BaseURL(), d.cfg.PublicURL)
 	frame := buildFrame(qm.ObjectType, res, d.provider.BaseURL())
 	frame.RefID = q.RefID
+	// Tell the user when this is only part of the answer. buildFrame always sets
+	// Meta, so appending here is safe.
+	frame.Meta.Notices = append(frame.Meta.Notices, resultNotices(res, qm.Limit)...)
 	return backend.DataResponse{Frames: data.Frames{frame}}
 }
 

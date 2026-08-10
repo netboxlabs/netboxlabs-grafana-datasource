@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   InlineField,
   Input,
   Select,
@@ -13,8 +14,13 @@ import {
 import { QueryEditorProps, SelectableValue } from '@grafana/data';
 import { getTemplateSrv } from '@grafana/runtime';
 import { DataSource } from '../datasource';
-import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, BRANCH_FIELD_DISABLED_TOOLTIP } from '../hooks/useBranchingInstalled';
 import {
+  useBranchingInstalled,
+  BRANCH_FIELD_TOOLTIP,
+  BRANCH_FIELD_DISABLED_TOOLTIP,
+} from '../hooks/useBranchingInstalled';
+import {
+  EMPTY_FAMILY_OPERATORS,
   FilterField,
   filterFieldOptionsFrom,
   filterOperatorsFor,
@@ -27,6 +33,7 @@ import {
   NetBoxQuery,
   ObjectTypeOption,
   QueryType,
+  validateFilters,
 } from '../types';
 
 type Props = QueryEditorProps<DataSource, NetBoxQuery, NetBoxDataSourceOptions>;
@@ -99,6 +106,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   const schemaMode = filterFields.length > 0;
 
   const filters = query.filters ?? [];
+  const filterIssues = validateFilters(filters);
   const update = (patch: Partial<NetBoxQuery>) => onChange({ ...query, ...patch });
   const updateFilter = (i: number, patch: Partial<FilterRow>) =>
     update({ filters: filters.map((f, idx) => (idx === i ? { ...f, ...patch } : f)) });
@@ -225,50 +233,72 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
       {/* Filters — for objects and topology */}
       {(queryType === 'objects' || queryType === 'topology') &&
         filters.map((f, i) => (
-          <Stack key={i} gap={1} direction="row" alignItems="flex-end">
-            <InlineField label={i === 0 ? filterLabel : ' '} labelWidth={20}>
-              <Select
-                aria-label={`filter-field-${i}`}
-                width={24}
-                options={
-                  f.field && !filterFieldOptions.some((o) => o.value === f.field)
-                    ? [...filterFieldOptions, { label: f.field, value: f.field }]
-                    : filterFieldOptions
-                }
-                allowCustomValue={!schemaMode}
-                value={f.field ? { label: f.field, value: f.field } : null}
-                placeholder="field"
-                onChange={(v) => {
-                  const nf = v?.value ?? '';
-                  // Reset a stale operator when the new field doesn't support it
-                  // (schema-known fields only); otherwise carrying e.g. `contains`
-                  // onto a field that only supports `=` re-creates a silently
-                  // ignored filter. Unknown/fallback fields keep the operator.
-                  const operator = isOperatorValidForField(filterFields, nf, f.operator) ? f.operator : '';
-                  updateFilter(i, { field: nf, operator });
-                }}
-              />
-            </InlineField>
-            {(() => {
-              const opts = filterOperatorsFor(filterFields, f.field, f.operator);
-              return (
+          <Stack key={i} gap={0} direction="column">
+            <Stack gap={1} direction="row" alignItems="flex-end">
+              <InlineField label={i === 0 ? filterLabel : ' '} labelWidth={20}>
                 <Select
-                  aria-label={`filter-operator-${i}`}
-                  width={16}
-                  options={opts}
-                  value={opts.find((o) => o.value === f.operator) ?? opts[0]}
-                  onChange={(v) => updateFilter(i, { operator: v?.value ?? '' })}
+                  aria-label={`filter-field-${i}`}
+                  width={24}
+                  options={
+                    f.field && !filterFieldOptions.some((o) => o.value === f.field)
+                      ? [...filterFieldOptions, { label: f.field, value: f.field }]
+                      : filterFieldOptions
+                  }
+                  allowCustomValue={!schemaMode}
+                  value={f.field ? { label: f.field, value: f.field } : null}
+                  placeholder="field"
+                  onChange={(v) => {
+                    const nf = v?.value ?? '';
+                    // Reset a stale operator when the new field doesn't support it
+                    // (schema-known fields only); otherwise carrying e.g. `contains`
+                    // onto a field that only supports `=` re-creates a silently
+                    // ignored filter. Unknown/fallback fields keep the operator.
+                    const operator = isOperatorValidForField(filterFields, nf, f.operator) ? f.operator : '';
+                    updateFilter(i, { field: nf, operator });
+                  }}
                 />
-              );
-            })()}
-            <Input
-              width={24}
-              value={f.value}
-              placeholder="value or $variable"
-              onChange={(e) => updateFilter(i, { value: e.currentTarget.value })}
-              onBlur={() => onRunQuery()}
-            />
-            <IconButton name="trash-alt" aria-label="Remove filter" onClick={() => removeFilter(i)} />
+              </InlineField>
+              {(() => {
+                const opts = filterOperatorsFor(filterFields, f.field, f.operator);
+                return (
+                  <Select
+                    aria-label={`filter-operator-${i}`}
+                    width={16}
+                    options={opts}
+                    value={opts.find((o) => o.value === f.operator) ?? opts[0]}
+                    onChange={(v) => {
+                      const operator = v?.value ?? '';
+                      updateFilter(i, { operator });
+                      // Empty-family operators take no value, so the row is
+                      // already a complete filter the moment the operator is
+                      // picked — the value Input (the usual run trigger, via
+                      // its onBlur) doesn't render for these, so nothing else
+                      // would ever run the query. Other operators still wait
+                      // for the value Input's onBlur, so mid-edit changes don't
+                      // fire a query per keystroke/selection.
+                      if (EMPTY_FAMILY_OPERATORS.includes(operator)) {
+                        onRunQuery();
+                      }
+                    }}
+                  />
+                );
+              })()}
+              {!EMPTY_FAMILY_OPERATORS.includes(f.operator) && (
+                <Input
+                  width={24}
+                  value={f.value}
+                  placeholder="value or $variable"
+                  onChange={(e) => updateFilter(i, { value: e.currentTarget.value })}
+                  onBlur={() => onRunQuery()}
+                />
+              )}
+              <IconButton name="trash-alt" aria-label="Remove filter" onClick={() => removeFilter(i)} />
+            </Stack>
+            {filterIssues
+              .filter((issue) => issue.index === i)
+              .map((issue, k) => (
+                <Alert key={k} severity={issue.severity} title={issue.message} />
+              ))}
           </Stack>
         ))}
       {(queryType === 'objects' || queryType === 'topology') && (

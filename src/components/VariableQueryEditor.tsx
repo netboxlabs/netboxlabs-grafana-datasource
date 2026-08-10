@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { InlineField, Select, Input, Stack, Button, IconButton } from '@grafana/ui';
+import { Alert, InlineField, Select, Input, Stack, Button, IconButton } from '@grafana/ui';
 import { SelectableValue } from '@grafana/data';
 import { DataSource } from '../datasource';
 import { getTemplateSrv } from '@grafana/runtime';
 import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, BRANCH_FIELD_DISABLED_TOOLTIP } from '../hooks/useBranchingInstalled';
-import { FieldOption, FilterRow, NetBoxVariableQuery, ObjectTypeOption } from '../types';
+import { FieldOption, FilterRow, NetBoxVariableQuery, ObjectTypeOption, validateFilters } from '../types';
 
 interface Props {
   query: NetBoxVariableQuery;
@@ -44,6 +44,7 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
   );
 
   const filters = query.filters ?? [];
+  const filterIssues = validateFilters(filters);
   const update = (patch: Partial<NetBoxVariableQuery>) => onChange({ ...query, ...patch });
   const updateFilter = (i: number, patch: Partial<FilterRow>) =>
     update({ filters: filters.map((f, idx) => (idx === i ? { ...f, ...patch } : f)) });
@@ -95,28 +96,35 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
       </InlineField>
 
       {filters.map((f, i) => (
-        <Stack key={i} gap={1} direction="row" alignItems="flex-end">
-          <InlineField label={i === 0 ? 'Filter' : ' '} labelWidth={16}>
-            <Select
+        <Stack key={i} gap={0} direction="column">
+          <Stack gap={1} direction="row" alignItems="flex-end">
+            <InlineField label={i === 0 ? 'Filter' : ' '} labelWidth={16}>
+              <Select
+                width={24}
+                options={fieldOptions}
+                allowCustomValue
+                value={f.field ? { label: f.field, value: f.field } : null}
+                placeholder="field"
+                onChange={(v) => updateFilter(i, { field: v?.value ?? '' })}
+              />
+            </InlineField>
+            <Input
               width={24}
-              options={fieldOptions}
-              allowCustomValue
-              value={f.field ? { label: f.field, value: f.field } : null}
-              placeholder="field"
-              onChange={(v) => updateFilter(i, { field: v?.value ?? '' })}
+              value={f.value}
+              placeholder="value or $variable"
+              onChange={(e) => updateFilter(i, { value: e.currentTarget.value })}
             />
-          </InlineField>
-          <Input
-            width={24}
-            value={f.value}
-            placeholder="value or $variable"
-            onChange={(e) => updateFilter(i, { value: e.currentTarget.value })}
-          />
-          <IconButton
-            name="trash-alt"
-            aria-label="Remove filter"
-            onClick={() => update({ filters: filters.filter((_, idx) => idx !== i) })}
-          />
+            <IconButton
+              name="trash-alt"
+              aria-label="Remove filter"
+              onClick={() => update({ filters: filters.filter((_, idx) => idx !== i) })}
+            />
+          </Stack>
+          {filterIssues
+            .filter((issue) => issue.index === i)
+            .map((issue, k) => (
+              <Alert key={k} severity={issue.severity} title={issue.message} />
+            ))}
         </Stack>
       ))}
       <Stack gap={1} direction="row">

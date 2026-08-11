@@ -26,7 +26,7 @@ func buildFrame(objectType string, res *provider.Result, baseURL string) *data.F
 	frame.Meta = &data.FrameMeta{PreferredVisualization: data.VisTypeTable}
 
 	for _, col := range res.Columns {
-		frame.Fields = append(frame.Fields, buildField(col, res.Rows))
+		frame.Fields = append(frame.Fields, buildField(col, res.Rows, res.ColumnTypes))
 	}
 
 	addObjectDataLinks(frame, res.Columns)
@@ -43,9 +43,11 @@ func frameName(objectType string) string {
 
 // buildField creates a typed data.Field for a column by scanning its values:
 // numbers → nullable float, booleans → nullable bool, known timestamp columns →
-// time, everything else → non-nullable string.
-func buildField(name string, rows []map[string]interface{}) *data.Field {
-	switch classifyColumn(name, rows) {
+// time, everything else → non-nullable string. types carries the producer's
+// declared types for columns whose type is known independently of the values
+// (see provider.Result.ColumnTypes); it is nil for producers that declare none.
+func buildField(name string, rows []map[string]interface{}, types map[string]provider.FieldType) *data.Field {
+	switch classifyColumn(name, rows, types) {
 	case colBool:
 		vals := make([]*bool, len(rows))
 		for i, r := range rows {
@@ -91,7 +93,29 @@ const (
 	colTime
 )
 
-func classifyColumn(name string, rows []map[string]interface{}) colKind {
+// declaredKinds maps the provider seam's backend-agnostic column types onto the
+// frame kinds buildField emits. A producer that declares a type this table does
+// not cover falls through to inference, so the seam can grow a FieldType without
+// breaking frame building.
+var declaredKinds = map[provider.FieldType]colKind{
+	provider.FieldTypeString:  colString,
+	provider.FieldTypeNumber:  colNumber,
+	provider.FieldTypeBoolean: colBool,
+	provider.FieldTypeTime:    colTime,
+}
+
+// classifyColumn picks a column's frame type. Values decide it whenever there
+// are any; a producer-declared type (types, from provider.Result.ColumnTypes)
+// decides the one case values cannot — a column that is null in every row.
+//
+// The declared type is deliberately NOT allowed to override observed values. A
+// hint that contradicts the data would mean building a field of the declared
+// type and dropping every value that does not fit it, so a stale declaration
+// would delete data rather than mistype it. Inference alone is right for
+// discovered object columns, whose types are only knowable from the values;
+// the declaration is for fixed schemas (ip-enrichment) where a column has a type
+// even on the refresh where it has no values.
+func classifyColumn(name string, rows []map[string]interface{}, types map[string]provider.FieldType) colKind {
 	hasValue, allBool, allNumber := false, true, true
 	for _, r := range rows {
 		v, ok := r[name]
@@ -109,6 +133,12 @@ func classifyColumn(name string, rows []map[string]interface{}) colKind {
 		}
 	}
 	if !hasValue {
+		// Nothing to infer from. Reading types on a nil map yields the zero
+		// FieldType, which is not in declaredKinds, so an undeclared column keeps
+		// the historical string fallback.
+		if k, ok := declaredKinds[types[name]]; ok {
+			return k
+		}
 		return colString
 	}
 	if allBool {

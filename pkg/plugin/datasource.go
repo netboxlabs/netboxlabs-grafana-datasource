@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -92,10 +93,44 @@ func (d *Datasource) Dispose() {}
 // QueryData handles multiple queries and returns multiple responses.
 func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
 	response := backend.NewQueryDataResponse()
+	fromAlert := isAlertRequest(req)
 	for _, q := range req.Queries {
-		response.Responses[q.RefID] = d.query(ctx, q)
+		response.Responses[q.RefID] = d.query(ctx, q, fromAlert)
 	}
 	return response, nil
+}
+
+// fromAlertHeader is the key Grafana puts in QueryDataRequest.Headers when the
+// request is an alert-rule evaluation (including a rule preview via
+// POST /api/v1/eval). It is the only signal that distinguishes the two, and it
+// matters because alerting and dashboards want opposite things from a partial
+// result: a dashboard shows what it has plus a notice, an alert must refuse.
+//
+// The objects query type does not need it — it has an explicit alertTable flag
+// the rule author sets. ip-enrichment has no such mode, so the header is the
+// discriminator.
+
+// isAlertRequest reports whether this QueryData call is an alert evaluation.
+//
+// It reads req.Headers directly and NOT via the SDK's GetHTTPHeader: that
+// accessor (backend/http_headers.go) only surfaces the OAuth/cookie keys and
+// keys carrying the "http_" forwarding prefix, and FromAlert is none of those,
+// so GetHTTPHeader("FromAlert") returns "" no matter what Grafana sent.
+// Verified against grafana-plugin-sdk-go v0.294.0 and live against Grafana 13.
+//
+// The comparison is case-insensitive on both key and value: Headers is a plain
+// map with no canonicalization, so nothing guarantees the exact casing Grafana
+// happens to use today.
+func isAlertRequest(req *backend.QueryDataRequest) bool {
+	if req == nil {
+		return false
+	}
+	for k, v := range req.Headers {
+		if strings.EqualFold(k, backend.FromAlertHeaderName) {
+			return strings.EqualFold(strings.TrimSpace(v), "true")
+		}
+	}
+	return false
 }
 
 // CheckHealth verifies the datasource can reach and authenticate to NetBox.

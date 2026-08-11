@@ -26,7 +26,9 @@ import {
   filterOperatorsFor,
   isOperatorValidForField,
   FilterRow,
-  IP_CONTEXT_FIELDS,
+  IP_CONTEXT_FIELD_GROUPS,
+  IP_CONTEXT_FIELD_OPTIONS,
+  DEFAULT_IP_CONTEXT_FIELDS,
   JOIN_KEY_TRANSFORMS,
   JoinKeyMapping,
   NetBoxDataSourceOptions,
@@ -43,7 +45,7 @@ const QUERY_TYPES: Array<SelectableValue<QueryType>> = [
   {
     label: 'IP enrichment',
     value: 'ip-enrichment',
-    description: 'Resolve IPs to their NetBox prefix/site/tenant (longest match)',
+    description: 'Resolve IPs to their NetBox device, interface and address record (longest-prefix fallback)',
   },
   { label: 'Topology', value: 'topology', description: 'Devices + cables as a node graph' },
 ];
@@ -70,8 +72,15 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   }, [datasource]);
 
   // The object type used for field discovery depends on the query type.
+  //
+  // ip-enrichment deliberately discovers nothing. Its result columns are this
+  // plugin's own closed vocabulary (IP_CONTEXT_FIELD_OPTIONS), not any NetBox
+  // object type's fields, and the only consumer of `fields` for this query type
+  // is the join-key picker below. Pointing it at ipam/prefixes filled that picker
+  // with 29 names the frame never contains — every suggestion silently derived an
+  // empty join key — so there is nothing to fetch here.
   const fieldType =
-    queryType === 'ip-enrichment' ? 'ipam/prefixes' : queryType === 'topology' ? 'dcim/devices' : query.objectType;
+    queryType === 'ip-enrichment' ? undefined : queryType === 'topology' ? 'dcim/devices' : query.objectType;
 
   useEffect(() => {
     let active = true;
@@ -182,11 +191,15 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
               onBlur={() => onRunQuery()}
             />
           </InlineField>
-          <InlineField label="Context fields" labelWidth={20} grow tooltip="Prefix columns to return alongside each IP">
+          <InlineField
+            label="Context fields"
+            labelWidth={20}
+            grow
+            tooltip="Columns to return alongside each IP: identity, longest-matching prefix, the address record, the interface it's assigned to, and the owning device"
+          >
             <MultiSelect
-              options={IP_CONTEXT_FIELDS.map((f) => ({ label: f, value: f }))}
-              allowCustomValue
-              value={(query.contextFields ?? IP_CONTEXT_FIELDS).map((f) => ({ label: f, value: f }))}
+              options={IP_CONTEXT_FIELD_GROUPS}
+              value={(query.contextFields ?? DEFAULT_IP_CONTEXT_FIELDS).map((f) => ({ label: f, value: f }))}
               onChange={(vals) => update({ contextFields: vals.map((v) => v.value!).filter(Boolean) })}
             />
           </InlineField>
@@ -392,7 +405,20 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
       {(queryType === 'objects' || queryType === 'ip-enrichment') && (
         <JoinKeysEditor
           joinKeys={query.joinKeys ?? []}
-          fieldOptions={fieldOptions}
+          // The source field must be a column the result actually has, and for
+          // ip-enrichment that is the enrichment vocabulary, not a NetBox object
+          // type's schema. `device_name` — the column that joins against a
+          // Prometheus `device` label, see docs/RECIPES.md recipe 3b — used to
+          // require typing it in as a custom value.
+          //
+          // The whole vocabulary is offered, NOT just the Context fields
+          // selection, and the backend makes that honest: a source outside the
+          // selection is added to the enrichment request so the join can compute,
+          // then removed again so it does not appear as a column (see
+          // pkg/plugin.ipEnrichFields). Narrowing this list to the selection was
+          // the alternative, and it answers "join on device_name" with "you may
+          // not" for a request that is both expressible and cheap to honour.
+          fieldOptions={queryType === 'ip-enrichment' ? IP_CONTEXT_FIELD_OPTIONS : fieldOptions}
           onChange={(joinKeys) => update({ joinKeys })}
           onRunQuery={onRunQuery}
         />
@@ -434,6 +460,7 @@ function JoinKeysEditor({ joinKeys, fieldOptions, onChange, onRunQuery }: JoinKe
             tooltip="Derive a key column to match a metric label"
           >
             <Select
+              aria-label={`join-key-source-${i}`}
               width={22}
               options={fieldOptions}
               allowCustomValue

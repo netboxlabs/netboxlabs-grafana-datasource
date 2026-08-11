@@ -3,9 +3,11 @@ package plugin
 import (
 	"net"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netbox/pkg/provider/netbox"
 )
 
 // joinKey is one source→output key mapping with an optional value transform.
@@ -17,6 +19,104 @@ type joinKey struct {
 	Transform string `json:"transform"` // none|lower|upper|host|iphost|ifshort|regex
 	Regex     string `json:"regex"`
 	Replace   string `json:"replace"`
+}
+
+// ipEnrichFields decides which context fields an ip-enrichment query must
+// REQUEST, given what the user selected and what the join keys read. It returns
+// the field list to ask the provider for, plus the subset of it that only the
+// join keys wanted — which the caller drops from the result once the keys have
+// been derived (see dropColumns).
+//
+// A join key reads its source out of the row, and ResolveIPs' project() narrows
+// every row to the requested fields before the row is ever seen here. So a source
+// outside the selection was silently unreadable: applyJoinKeys found no value,
+// added the output column anyway, and emitted it EMPTY for every row. Confirmed
+// live — context fields [ip, device_name] with source device_name produced
+// ["ams1-leaf-01"], while [ip, prefix_cidr] with the same source produced [""].
+//
+// The alternative fix was to offer only the selected fields in the editor's
+// source picker. That answers "join on device_name" with "you may not", which is
+// worse than answering "yes": the user's intent is expressible and cheap to
+// honour, so it is honoured. Fetching the source is all that takes.
+//
+// The source does NOT become an output column. Asking to join on device_name is
+// not asking to display it, and adding a column the user never selected would
+// change every existing panel's table layout to fix a join. Hence the joinOnly
+// return: requested, used, then removed.
+//
+// Two guards on what counts as a source worth fetching:
+//   - It must be a real ip-enrichment column. A custom-typed name can never be
+//     produced, so requesting it would add nothing — but "prefix_typo" would
+//     still switch on the prefix fallback, which is SERIAL, one request per
+//     unmatched IP, and measured at ~20 ms each. A typo must not cost a
+//     thousand requests.
+//   - It must not itself be some key's output column, or the drop below would
+//     delete the very column the mapping produces (source == output is the
+//     documented way to rename nothing and transform in place).
+//
+// Selecting a source that is only reachable via a hop still costs that hop —
+// joining on prefix_cidr runs the prefix fallback. That is the price of the
+// join the user asked for, and it is paid only when they ask.
+func ipEnrichFields(selected []string, keys []joinKey) (fields, joinOnly []string) {
+	if len(selected) == 0 {
+		selected = netbox.DefaultIPEnrichFields()
+	}
+	have := make(map[string]bool, len(selected)+1)
+	for _, f := range selected {
+		have[f] = true
+	}
+	// ResolveIPs force-includes "ip" whatever the selection says, because it is
+	// the documented Grafana join key. Marking it present keeps a mapping like
+	// source "ip" → output "instance" from listing it as join-only and having the
+	// drop below delete the frame's join key.
+	have["ip"] = true
+	outputs := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		if k.Output != "" {
+			outputs[k.Output] = true
+		}
+	}
+	known := make(map[string]bool)
+	for _, c := range netbox.IPEnrichColumns() {
+		known[c] = true
+	}
+
+	fields = slices.Clone(selected)
+	for _, k := range keys {
+		// k.Output == "" is skipped by applyJoinKeys, so its source is not read.
+		if k.Source == "" || k.Output == "" || have[k.Source] || !known[k.Source] {
+			continue
+		}
+		have[k.Source] = true
+		fields = append(fields, k.Source)
+		if !outputs[k.Source] {
+			joinOnly = append(joinOnly, k.Source)
+		}
+	}
+	return fields, joinOnly
+}
+
+// dropColumns removes columns from a result: the values, the column list, and
+// any declared type. Used for fields fetched solely so a join key could read
+// them — present for applyJoinKeys, gone by the time a frame is built.
+func dropColumns(res *provider.Result, cols []string) {
+	if res == nil || len(cols) == 0 {
+		return
+	}
+	drop := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		drop[c] = true
+	}
+	res.Columns = slices.DeleteFunc(res.Columns, func(c string) bool { return drop[c] })
+	for _, row := range res.Rows {
+		for c := range drop {
+			delete(row, c)
+		}
+	}
+	// ColumnTypes is nil for most results; deleting from a nil map is a no-op.
+	for c := range drop {
+		delete(res.ColumnTypes, c)
+	}
 }
 
 // applyJoinKeys derives additional key columns on the result per the mappings,

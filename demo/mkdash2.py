@@ -42,6 +42,14 @@ mixed = {"type": "datasource", "uid": "-- Mixed --"}
 # branch-aware device links). Only the bundled full demo passes --with-branching.
 WITH_BRANCHING = "--with-branching" in sys.argv
 
+# Explicit row limit for ip-enrichment targets. Unlike an objects query, the
+# prefix fallback inside ip-enrichment issues one SERIAL request per IP that has
+# no address record (NetBox's ?contains= takes a single value and cannot be
+# batched), so the limit is a wall-clock ceiling. Omitting it lets the backend
+# default apply; stating it keeps these panels bounded regardless of how many
+# values the flow variable expands to.
+IP_ENRICH_LIMIT = 200
+
 
 def organize(exclude, rename):
     return {"id": "organize", "options": {
@@ -152,13 +160,38 @@ panels = [
                                         "style": {"size": {"fixed": 8}, "color": {"fixed": "green"},
                                                   "opacity": 0.8, "symbol": {"fixed": "img/icons/marker/circle.svg"}}}}]}},
 
-    {"id": 7, "type": "table", "title": "Flow IP enrichment — longest-prefix match (no relabeling)",
+    # The IP list is chosen to exercise every branch ip-enrichment can take, so
+    # that no column here is structurally blank:
+    #   10.10.10.11/.12, 10.20.20.11  registered + assigned to a Loopback0, primary
+    #   10.20.0.1                     registered + assigned, primary, on Ethernet1
+    #   10.99.99.99                   anycast on three interfaces -> match_count 3
+    #   10.40.0.5                     on a VM interface -> interface only, no device
+    #   10.10.10.50                   NO address record -> the prefix fallback, the
+    #                                 only branch that fills prefix_*
+    # Without that last one every demo IP resolves through the address branch and
+    # all six prefix_* columns render empty. prefix_description is deliberately
+    # not requested: the seeded site prefixes carry no description, so it would
+    # be a permanently blank column too.
+    {"id": 7, "type": "table", "title": "Flow IP enrichment — device identity, with longest-prefix fallback",
      "gridPos": {"x": 0, "y": 27, "w": 12, "h": 8}, "datasource": nb,
      "targets": [{"refId": "A", "datasource": nb, "queryType": "ip-enrichment",
-                  "ips": "10.10.10.11, 10.10.10.12, 10.20.20.11, 10.30.30.5, 203.0.113.7",
-                  "contextFields": ["prefix", "scope", "tenant", "role", "vlan", "description"]}],
+                  "ips": "10.10.10.11, 10.10.10.12, 10.20.20.11, 10.20.0.1, 10.99.99.99, 10.40.0.5, 10.10.10.50",
+                  "contextFields": ["match_count",
+                                     "prefix_cidr", "prefix_scope", "prefix_tenant", "prefix_role",
+                                     "prefix_vlan",
+                                     "device_name", "device_is_primary_ip", "interface_name",
+                                     "device_site"],
+                  "limit": IP_ENRICH_LIMIT}],
+     # Two different sites, so they get two different labels. prefix_scope is the
+     # site of the CONTAINING PREFIX and is populated only on the one row that
+     # reaches the prefix fallback; device_site is the site of the OWNING DEVICE
+     # and is populated on the six rows that identify a device. Labelling
+     # prefix_scope "Site" without selecting device_site left the column headed
+     # "Site" empty for every device the panel identified.
      "fieldConfig": {"defaults": {}, "overrides": [
-        {"matcher": {"id": "byName", "options": "scope"},
+        {"matcher": {"id": "byName", "options": "prefix_scope"},
+         "properties": [{"id": "displayName", "value": "Prefix site"}]},
+        {"matcher": {"id": "byName", "options": "device_site"},
          "properties": [{"id": "displayName", "value": "Site"}]}]}},
 
     {"id": 8, "type": "table", "title": "Devices in $site — enriched inventory",
@@ -204,14 +237,41 @@ panels = [
         {"matcher": {"id": "byName", "options": "bps"},
          "properties": [{"id": "unit", "value": "bps"}]}]}},
 
-    {"id": 11, "type": "table", "title": "Recipe 3b — Flow IPs, longest-prefix NetBox context",
-     "gridPos": {"x": 0, "y": 43, "w": 12, "h": 8}, "datasource": nb,
-     "targets": [{"refId": "A", "datasource": nb, "queryType": "ip-enrichment",
-                  "ips": "$flow_ips",
-                  "contextFields": ["prefix", "scope", "tenant", "role", "vlan"]}],
+    # $flow_ips comes from the flow metric's dst_ip label, and every one of those
+    # destinations is either a registered, interface-assigned address or an
+    # off-net TEST-NET host with no containing prefix in NetBox. Neither reaches
+    # the prefix fallback, so the prefix-only column set this panel used to
+    # request came back blank in every cell, under a title promising
+    # longest-prefix matching. It now asks for the columns its own data can fill
+    # — the device identity that is the point of the enrichment — and says so.
+    # The unresolvable TEST-NET rows stay visible with match_count 0, which is
+    # the honest answer for an IP NetBox has never heard of.
+    # The recipe's whole point is carrying a flow IP through to the device's own
+    # metrics, so the panel does it rather than only describing the halfway house.
+    # The join that works is device_name against Prometheus's `device` label:
+    # verified against this stack, all 10 flow_bytes_total src_ip values resolve
+    # to a device_name present in that label. Joining on the IP does NOT work
+    # here and cannot be made to — no metric on any device or interface carries an
+    # IP-shaped value on device/instance/interface/job — which is why the
+    # joinKeys mapping renames device_name rather than deriving an address key.
+    {"id": 11, "type": "table", "title": "Recipe 3b — Flow IPs → NetBox device identity → device CPU",
+     "gridPos": {"x": 0, "y": 43, "w": 12, "h": 8}, "datasource": mixed,
+     "targets": [
+         {"refId": "A", "datasource": nb, "queryType": "ip-enrichment",
+          "ips": "$flow_ips",
+          "contextFields": ["match_count", "address_description", "interface_name",
+                             "device_name", "device_is_primary_ip", "device_site"],
+          "joinKeys": [{"source": "device_name", "output": "device", "transform": "none"}],
+          "limit": IP_ENRICH_LIMIT},
+         {"refId": "P", "datasource": prom, "format": "table", "instant": True,
+          "expr": "device_cpu_percent"}],
+     "transformations": [{"id": "joinByField", "options": {"byField": "device", "mode": "outer"}},
+                         organize(["Time", "job", "instance"], {"Value": "CPU %"})],
      "fieldConfig": {"defaults": {}, "overrides": [
-        {"matcher": {"id": "byName", "options": "scope"},
-         "properties": [{"id": "displayName", "value": "Site"}]}]}},
+        {"matcher": {"id": "byName", "options": "device_site"},
+         "properties": [{"id": "displayName", "value": "Site"}]},
+        {"matcher": {"id": "byName", "options": "CPU %"},
+         "properties": [{"id": "unit", "value": "percent"}]}]}},
 
     {"id": 12, "type": "table", "title": "Recipe 1 — Device CPU (Prometheus) enriched, join on instance",
      "gridPos": {"x": 12, "y": 43, "w": 12, "h": 8}, "datasource": mixed,

@@ -20,8 +20,11 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
   lowercase, strip-domain, IP-host, interface-short-name, regex) so a NetBox field matches your metric label with
   no extra Grafana transforms. Add several to reuse one query different ways. See
   [docs/JOIN-KEYS.md](./docs/JOIN-KEYS.md).
-- **IP enrichment (longest-prefix match).** Resolve arbitrary observed IPs to their
-  containing NetBox prefix's site/tenant/role. It is the one enrichment a value-join can't do.
+- **IP enrichment (address, device and longest-prefix match).** Resolve arbitrary observed
+  IPs to their NetBox address record, the interface it's assigned to, and the owning
+  device — including whether it's that device's primary IP — falling back to the
+  containing prefix's site/tenant/role when the address isn't individually registered.
+  It is the one enrichment a value-join can't do.
 - **Prefix/IP utilization.** Opt-in `utilization` (%), `used` and `available` columns for
   prefixes and IP ranges, computed to match NetBox's own utilization, so you can gauge or
   threshold on capacity right in Grafana. See [Prefix & IP utilization](#prefix--ip-utilization).
@@ -50,10 +53,11 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
 
 ## Requirements
 
-- **NetBox 4.1 or later** (validated against 4.1 → 4.6). The plugin depends on two NetBox
-  4.1 API additions: `display_url` on all serializers (deep links) and the
-  `/api/core/object-changes/` endpoint (change-log annotations). Both classic (v1) and
-  `nbt_…` (v2, NetBox 4.5+) API tokens are supported and auto-detected.
+- **NetBox 4.2 or later** (validated against 4.2 → 4.6). The plugin depends on
+  `display_url` on all serializers (deep links), the `/api/core/object-changes/` endpoint
+  (change-log annotations), and a prefix's generic `scope`, returned by IP enrichment as
+  `prefix_scope`. Both classic (v1) and `nbt_…` (v2, NetBox 4.5+) API tokens are supported
+  and auto-detected.
 - **Grafana 12.3 or later** (the plugin's `grafanaDependency`; e2e-tested against
   12.3 → 13.1 and nightly in CI).
 

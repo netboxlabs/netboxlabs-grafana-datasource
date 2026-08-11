@@ -80,6 +80,75 @@ type Result struct {
 	// source (e.g. NetBox's list-envelope "count"), independent of Rows/limit.
 	// Used for count-only queries (alerting). 0 when the source cannot report it.
 	Total int `json:"total"`
+	// Warnings reports partial-result degradation: the rows are worth returning,
+	// but some column the caller asked for is blank because a lookup FAILED
+	// rather than because the source holds nothing there. Without this, a blank
+	// column is indistinguishable from genuine absence — the two carry opposite
+	// conclusions, so the gap has to be stated.
+	//
+	// Each entry is a complete, user-facing sentence naming what is missing and
+	// why. The plugin layer turns them into frame notices (pkg/plugin/notices.go)
+	// at WARNING severity; producers must therefore keep them free of raw
+	// upstream response bodies and URLs.
+	//
+	// Deliberately []string and not []data.Notice: this package is the seam a
+	// second, non-NetBox backend plugs into, so it stays free of Grafana SDK
+	// frame types — the same reason FieldType exists here instead of reusing
+	// data.FieldType. Optional: nil for a complete result, which is the normal
+	// case, so every existing consumer is unaffected.
+	//
+	// Grafana alert evaluation cannot see frame notices (the same limitation
+	// truncationError exists for), so a query path that feeds alerting must treat
+	// a non-empty Warnings as a hard failure rather than warn. The ip-enrichment
+	// branch does: it fails on both truncation and non-empty Warnings. The
+	// objects/alertTable branch currently fails on truncation only, keying off
+	// its explicit alertTable flag. A future producer that sets Warnings on
+	// alertTable must also wire degradationError there, as ip-enrichment does.
+	// A rule querying ip-enrichment and reducing over match_count was observed
+	// to keep evaluating silently on a degraded result — health ok, lastError
+	// nil, no notice surfaced — before that check existed. Any new alert-facing
+	// path must repeat the pattern; this field is invisible to alerting.
+	Warnings []string `json:"warnings,omitempty"`
+	// Notes reports something true about the result that is worth stating but is
+	// not a degradation: the rows are complete and correct, and the reader would
+	// still draw a wrong conclusion without the sentence. The plugin layer renders
+	// them as INFO frame notices, the same way Warnings become WARNING ones.
+	//
+	// The distinction from Warnings is severity, and it is load-bearing: a warning
+	// that fires on a routine, correct result trains users to ignore warnings, so
+	// the two must not be merged. ResolveIPs' only note today says some rows were
+	// picked out of several matching address records — deterministic, documented,
+	// and invisible once the opt-in match_count column is deselected.
+	//
+	// Alert evaluation treats Notes as harmless: unlike Warnings they do not mean
+	// a column is empty for a reason the data cannot show, so a rule may evaluate
+	// on a result that carries them.
+	Notes []string `json:"notes,omitempty"`
+	// ColumnTypes declares the logical type of a column whose name the producer
+	// knows the type of up front, independent of what this particular result
+	// happens to contain. It exists because the plugin layer otherwise infers a
+	// column's frame type by SCANNING the values, and a column that is entirely
+	// absent in one refresh is unclassifiable: it falls back to string.
+	//
+	// That inference is right for a discovered object query, whose columns come
+	// from NetBox's schema at runtime and can hold anything. It is wrong for a
+	// FIXED schema like ip-enrichment's, where device_is_primary_ip is a boolean
+	// by definition and merely happens to be null for every row of an IP set that
+	// resolves no device (all external, all VM-assigned, all unassigned). Without
+	// this hint the same saved query alternates between a boolean field and a
+	// string one as the data moves, and boolean value mappings, `filterByValue
+	// isTrue`, overrides and transformations silently stop applying on the refresh
+	// where nothing matched.
+	//
+	// It is a HINT for the unclassifiable case only: the plugin consults it when a
+	// column has no values at all, and observed values always win otherwise, so a
+	// wrong or stale entry can never delete data. Optional — nil means "infer
+	// everything", which is what the objects, alert-table and topology paths do.
+	//
+	// FieldType, not data.FieldType, for the same reason Warnings is []string and
+	// not []data.Notice: this package is the seam a second, non-NetBox backend
+	// plugs into, so it stays free of Grafana SDK frame types.
+	ColumnTypes map[string]FieldType `json:"columnTypes,omitempty"`
 }
 
 // Change is a single change-log/audit event, used to render annotations.

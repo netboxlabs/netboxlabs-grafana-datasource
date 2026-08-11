@@ -1,0 +1,2894 @@
+package netbox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/netboxlabs/netbox/pkg/provider"
+)
+
+func TestChunkByBudget(t *testing.T) {
+	t.Run("keeps every value exactly once, in order", func(t *testing.T) {
+		var vals []string
+		for i := 0; i < 500; i++ {
+			vals = append(vals, fmt.Sprintf("10.%d.%d.5", i/256, i%256))
+		}
+		var flat []string
+		for _, c := range chunkByBudget("address", vals, chunkBudgetBytes) {
+			flat = append(flat, c...)
+		}
+		if len(flat) != len(vals) {
+			t.Fatalf("lost values: got %d want %d", len(flat), len(vals))
+		}
+		for i := range vals {
+			if flat[i] != vals[i] {
+				t.Fatalf("order changed at %d: %q != %q", i, flat[i], vals[i])
+			}
+		}
+	})
+
+	t.Run("no chunk exceeds the budget once encoded", func(t *testing.T) {
+		var vals []string
+		for i := 0; i < 400; i++ {
+			vals = append(vals, fmt.Sprintf("2001:db8:85a3::8a2e:370:%04x", i))
+		}
+		for _, c := range chunkByBudget("address", vals, chunkBudgetBytes) {
+			q := url.Values{}
+			for _, v := range c {
+				q.Add("address", v)
+			}
+			if n := len(q.Encode()); n > chunkBudgetBytes {
+				t.Fatalf("chunk encodes to %d bytes, over budget %d", n, chunkBudgetBytes)
+			}
+		}
+	})
+
+	t.Run("ipv6 chunks more aggressively than ipv4 at equal count", func(t *testing.T) {
+		var v4, v6 []string
+		for i := 0; i < 300; i++ {
+			v4 = append(v4, fmt.Sprintf("10.%d.%d.5", i/256, i%256))
+			v6 = append(v6, fmt.Sprintf("2001:db8:85a3::8a2e:370:%04x", i))
+		}
+		n4 := len(chunkByBudget("address", v4, chunkBudgetBytes))
+		n6 := len(chunkByBudget("address", v6, chunkBudgetBytes))
+		if n6 <= n4 {
+			t.Fatalf("ipv6 must chunk more: v4=%d v6=%d", n4, n6)
+		}
+	})
+
+	t.Run("oversized single value gets its own chunk, not dropped", func(t *testing.T) {
+		oversized := strings.Repeat("x", chunkBudgetBytes+1000)
+		vals := []string{"10.0.0.1", oversized, "10.0.0.2"}
+		chunks := chunkByBudget("address", vals, chunkBudgetBytes)
+
+		// Verify we got 3 chunks (normal, oversized, normal)
+		if len(chunks) != 3 {
+			t.Fatalf("expected 3 chunks, got %d", len(chunks))
+		}
+
+		// Flatten and verify all values are present in order
+		var flat []string
+		for _, c := range chunks {
+			flat = append(flat, c...)
+		}
+		if len(flat) != 3 {
+			t.Fatalf("lost values: got %d want 3", len(flat))
+		}
+		if flat[0] != "10.0.0.1" || flat[1] != oversized || flat[2] != "10.0.0.2" {
+			t.Fatalf("order not preserved")
+		}
+
+		// Verify oversized value is in its own chunk
+		if len(chunks[1]) != 1 {
+			t.Fatalf("oversized value should be alone in chunk, got %d values", len(chunks[1]))
+		}
+	})
+}
+
+func TestHostOf(t *testing.T) {
+	cases := map[string]string{
+		"10.0.0.5/24":     "10.0.0.5",
+		"10.0.0.5":        "10.0.0.5",
+		"2001:db8::1/64":  "2001:db8::1",
+		"2001:db8::1":     "2001:db8::1",
+		"  10.0.0.5/32  ": "10.0.0.5",
+	}
+	for in, want := range cases {
+		if got := hostOf(in); got != want {
+			t.Errorf("hostOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestFetchAddressRecords is not in the task brief; it was added so
+// fetchAddressRecords has a real caller ahead of the task that wires it into
+// the enrichment path, and to lock in the behavior the brief's docstring
+// promises: results are indexed by host portion, and an anycast address that
+// matches multiple records keeps every one of them (no truncation to
+// len(chunk)).
+func TestFetchAddressRecords(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":3,"next":null,"results":[
+			{"address":"10.20.0.1/24"},
+			{"address":"10.99.99.99/32"},
+			{"address":"10.99.99.99/32"}
+		]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.fetchAddressRecords(context.Background(), []string{"10.20.0.1", "10.99.99.99"})
+	if err != nil {
+		t.Fatalf("fetchAddressRecords: %v", err)
+	}
+	if res.deg.any() {
+		t.Errorf("a fully successful hop must report no degradation, got %+v", res.deg)
+	}
+	if len(res.failed) != 0 {
+		t.Errorf("a fully successful hop must report no failed IPs, got %v", res.failed)
+	}
+	if len(res.byHost["10.20.0.1"]) != 1 {
+		t.Errorf("host 10.20.0.1: got %d record(s), want 1", len(res.byHost["10.20.0.1"]))
+	}
+	if len(res.byHost["10.99.99.99"]) != 2 {
+		t.Errorf("host 10.99.99.99 (anycast duplicate): got %d record(s), want 2", len(res.byHost["10.99.99.99"]))
+	}
+}
+
+// TestFetchAddressRecords_ChunkFailureDegrades locks in the spec's error
+// handling: "A failed chunk degrades only its own IPs ... other chunks still
+// return." Before this, the first chunk error aborted the whole call and the
+// panel got zero rows, so one transient 500 on a large flow panel cost the
+// entire result.
+func TestFetchAddressRecords_ChunkFailureDegrades(t *testing.T) {
+	// Enough IPs to span several byte-budget chunks.
+	ips := make([]string, 0, 1200)
+	for i := 0; i < 1200; i++ {
+		ips = append(ips, fmt.Sprintf("10.%d.%d.7", i/256, i%256))
+	}
+	chunks := chunkByBudget("address", ips, chunkBudgetBytes)
+	if len(chunks) < 3 {
+		t.Fatalf("test needs >=3 chunks to distinguish partial from total failure, got %d", len(chunks))
+	}
+
+	t.Run("one failing chunk still returns the others' records", func(t *testing.T) {
+		call := 0
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+			call++
+			if call == 2 { // a transient 500 on exactly one batch
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"detail":"boom"}`))
+				return
+			}
+			var results []string
+			for _, a := range r.URL.Query()["address"] {
+				results = append(results, fmt.Sprintf(`{"id":%d,"address":"%s/24"}`, call*100000+len(results), a))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+		res, err := p.fetchAddressRecords(context.Background(), ips)
+		if err != nil {
+			t.Fatalf("a partial failure must not fail the call: %v", err)
+		}
+		// The gap has to be REPORTED, not just survived: the failed chunk's IPs
+		// come back with no address record, which is exactly what an unregistered
+		// IP looks like. Without the degradation the caller cannot tell the two
+		// apart, and the panel shows blank columns as if NetBox had answered.
+		if !res.deg.any() {
+			t.Fatal("a partial failure must be reported as a degradation, not swallowed")
+		}
+		if res.deg.failed != len(chunks[1]) {
+			t.Errorf("degradation covers %d IPs, want %d (the failed chunk's)", res.deg.failed, len(chunks[1]))
+		}
+		if res.deg.total != len(ips) {
+			t.Errorf("degradation total = %d, want %d (every IP asked about)", res.deg.total, len(ips))
+		}
+		if res.deg.cause == nil {
+			t.Error("degradation must carry the cause; the warning text names it")
+		}
+		// The surviving chunks are everything except the second one.
+		wantHosts := 0
+		for i, c := range chunks {
+			if i != 1 {
+				wantHosts += len(c)
+			}
+		}
+		if len(res.byHost) != wantHosts {
+			t.Fatalf("got %d hosts, want %d (every chunk but the failed one)", len(res.byHost), wantHosts)
+		}
+		// Spot-check both sides of the gap: the first chunk's first IP resolved,
+		// the failed chunk's first IP did not.
+		if len(res.byHost[canonicalIP(chunks[0][0])]) == 0 {
+			t.Errorf("chunk 1's records are missing; a later chunk's failure must not discard earlier results")
+		}
+		if len(res.byHost[canonicalIP(chunks[1][0])]) != 0 {
+			t.Errorf("the failed chunk's IPs must come back with no records, got %v", res.byHost[canonicalIP(chunks[1][0])])
+		}
+		// The named set is what lets ResolveIPs tell "no record" from "no
+		// answer". Without it the two are the same empty bucket.
+		if len(res.failed) != len(chunks[1]) {
+			t.Errorf("failed set covers %d IPs, want %d (the failed chunk's)", len(res.failed), len(chunks[1]))
+		}
+		if !res.failed[chunks[1][0]] {
+			t.Errorf("the failed chunk's IPs must be named in the failed set")
+		}
+		if res.failed[chunks[0][0]] {
+			t.Errorf("a surviving chunk's IPs must not appear in the failed set")
+		}
+	})
+
+	t.Run("every chunk failing is still an error", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"detail":"boom"}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+		if _, err := p.fetchAddressRecords(context.Background(), ips); err == nil {
+			t.Fatal("want an error when there is no partial answer to give")
+		}
+	})
+}
+
+// TestFetchAddressRecords_OverflowingBatchIsExhausted covers the row cap.
+// fetchRows stops at MaxLimit and reports what NetBox says actually exists; that
+// second value used to be discarded (`raws, _, err := ...`), so a batch matching
+// more records than one request can carry lost the remainder with no signal.
+//
+// The mocks below make a response "overflow" by reporting a count higher than
+// the results they return, which is precisely the state fetchRows leaves behind
+// when the cap truncates a read — and is the condition the code tests. Faking it
+// this way costs one small response instead of 10,000 records over 20 pages, and
+// exercises the same branch.
+func TestFetchAddressRecords_OverflowingBatchIsExhausted(t *testing.T) {
+	// oneRecordEach renders a NetBox list envelope: one record per address,
+	// with count set independently so a response can claim to be truncated.
+	oneRecordEach := func(w http.ResponseWriter, addrs []string, count int) {
+		var results []string
+		for i, a := range addrs {
+			results = append(results, fmt.Sprintf(
+				`{"id":%d,"address":"%s/24","status":{"value":"active"},"assigned_object_type":null,"assigned_object":null}`,
+				1000+i, a))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, count, strings.Join(results, ","))
+	}
+
+	t.Run("a batch over the cap is halved until each half fits", func(t *testing.T) {
+		// Over four addresses, the server behaves as the cap does: it answers
+		// with a fraction of the matches and reports the true, larger total.
+		var sizes []int
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+			addrs := r.URL.Query()["address"]
+			sizes = append(sizes, len(addrs))
+			if len(addrs) > 4 {
+				oneRecordEach(w, addrs[:2], 99999) // truncated, and says so
+				return
+			}
+			oneRecordEach(w, addrs, len(addrs))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		var ips []string
+		for i := 0; i < 12; i++ {
+			ips = append(ips, fmt.Sprintf("10.0.0.%d", i+1))
+		}
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+		res, err := p.fetchAddressRecords(context.Background(), ips)
+		if err != nil {
+			t.Fatalf("fetchAddressRecords: %v", err)
+		}
+
+		// Every address ends up with its record. This is the whole point: an
+		// address whose records fell past the cap used to come back looking
+		// exactly like an address NetBox has never heard of.
+		for _, ip := range ips {
+			if len(res.byHost[canonicalIP(ip)]) != 1 {
+				t.Errorf("host %s: %d record(s), want 1", ip, len(res.byHost[canonicalIP(ip)]))
+			}
+		}
+		if len(res.truncated) != 0 {
+			t.Errorf("truncated = %v, want none: splitting resolved the overflow", res.truncated)
+		}
+		if res.deg.any() {
+			t.Errorf("deg.failed = %d, want 0: an overflow is not a failure", res.deg.failed)
+		}
+		// 12 -> 6,6 -> 3,3,3,3. The counts are asserted so a future change that
+		// "fixes" this by fetching everything twice, or by giving up after one
+		// split, is visible rather than merely still-passing.
+		want := []int{12, 6, 3, 3, 6, 3, 3}
+		if fmt.Sprint(sizes) != fmt.Sprint(want) {
+			t.Errorf("batch sizes = %v, want %v", sizes, want)
+		}
+	})
+
+	t.Run("a single address over the cap is stated, and its records still kept", func(t *testing.T) {
+		// The floor. One address matching more records than a request can carry
+		// cannot be split any further, so the only honest move left is to say so.
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+			oneRecordEach(w, r.URL.Query()["address"], 99999) // always "truncated"
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+		res, err := p.fetchAddressRecords(context.Background(), []string{"10.0.0.1", "10.0.0.2"})
+		if err != nil {
+			t.Fatalf("an overflow is not a failure: %v", err)
+		}
+		if got := sorted(res.truncated); fmt.Sprint(got) != "[10.0.0.1 10.0.0.2]" {
+			t.Errorf("truncated = %v, want both hosts named", got)
+		}
+		// Partial data still beats none, so what WAS read is indexed. The
+		// warning is what stops it being read as complete.
+		for _, ip := range []string{"10.0.0.1", "10.0.0.2"} {
+			if len(res.byHost[ip]) == 0 {
+				t.Errorf("host %s lost its records; a truncated read still returns what it read", ip)
+			}
+		}
+		if res.deg.any() {
+			t.Errorf("deg.failed = %d, want 0: nothing failed, it was merely incomplete", res.deg.failed)
+		}
+	})
+}
+
+// TestResolveIPs_CappedAddressBatchDoesNotFakeAnAbsentRecord is the user-visible
+// half of the cap fix, and names the harm exactly: a registered IP whose records
+// fell past the cap resolved to match_count 0, which sends the row down the
+// prefix fallback and reports it to the user as an address NetBox does not hold.
+// docs/RECIPES.md teaches that shape as "unknown/external traffic" — the precise
+// opposite of the truth for an address NetBox has a record for.
+func TestResolveIPs_CappedAddressBatchDoesNotFakeAnAbsentRecord(t *testing.T) {
+	var prefixCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		addrs := r.URL.Query()["address"]
+		// A multi-address batch answers for the FIRST address only and reports
+		// the true total, exactly as the cap truncating a read would. A
+		// single-address batch fits and answers in full.
+		shown := addrs
+		if len(addrs) > 1 {
+			shown = addrs[:1]
+		}
+		var results []string
+		for i, a := range shown {
+			results = append(results, fmt.Sprintf(
+				`{"id":%d,"address":"%s/24","dns_name":"%s.example.net","status":{"value":"active"},"assigned_object_type":null,"assigned_object":null}`,
+				500+i, a, strings.ReplaceAll(a, ".", "-")))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(addrs), strings.Join(results, ","))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		prefixCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
+			{"id":7,"prefix":"10.0.0.0/24","description":"should never reach a registered IP"}
+		]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.2"},
+		[]string{"ip", "match_count", "address_dns_name", "prefix_cidr"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+
+	byIP := map[string]map[string]interface{}{}
+	for _, row := range res.Rows {
+		byIP[fmt.Sprint(row["ip"])] = row
+	}
+	// 10.0.0.2 is the one the truncated first response left out.
+	row := byIP["10.0.0.2"]
+	if row["match_count"] != float64(1) {
+		t.Errorf("match_count = %v, want 1 — NetBox holds a record for this IP", row["match_count"])
+	}
+	if row["address_dns_name"] != "10-0-0-2.example.net" {
+		t.Errorf("address_dns_name = %v, want the record's own dns_name", row["address_dns_name"])
+	}
+	if row["prefix_cidr"] != nil {
+		t.Errorf("prefix_cidr = %v, want nil — a matched address must never fall through to the prefix fallback", row["prefix_cidr"])
+	}
+	if prefixCalls != 0 {
+		t.Errorf("the prefix fallback ran %d time(s); both IPs have address records", prefixCalls)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("Warnings = %v, want none — the overflow was resolved by splitting, not merely reported", res.Warnings)
+	}
+}
+
+// TestAddressTruncationWarning locks the sentence the floor case emits. It has
+// to name the addresses: unlike a failed batch, which covers an arbitrary slice
+// of the input, this one is actionable only if the reader knows which address in
+// NetBox to go and look at.
+func TestAddressTruncationWarning(t *testing.T) {
+	one := addressTruncationWarning([]string{"10.0.0.1"})
+	for _, want := range []string{"10,000", "1 IP", "10.0.0.1", "match_count is a floor"} {
+		if !strings.Contains(one, want) {
+			t.Errorf("warning %q does not mention %q", one, want)
+		}
+	}
+	many := addressTruncationWarning([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"})
+	if !strings.Contains(many, "5 IPs") {
+		t.Errorf("warning %q does not count the addresses", many)
+	}
+	// Capped: a panel notice is not a report.
+	if !strings.Contains(many, "and 2 more") {
+		t.Errorf("warning %q does not cap the named list", many)
+	}
+	if strings.Contains(many, "10.0.0.4") {
+		t.Errorf("warning %q names more addresses than the cap allows", many)
+	}
+}
+
+// twinnedSpellings builds an input where every host appears TWICE — once bare,
+// once masked — with the two spellings far enough apart that the byte-budget
+// chunker cannot put a pair in the same chunk. orphans are prepended and get no
+// twin, so they are the only inputs a first-chunk failure can genuinely lose.
+//
+// This is the shape that separates "this input was in a failed request" from
+// "this input has no answer": canonicalIP collapses both spellings onto one
+// bucket, so whichever chunk succeeds answers for both.
+func twinnedSpellings(hosts int, orphans ...string) []string {
+	ips := append([]string{}, orphans...)
+	for i := 0; i < hosts; i++ {
+		ips = append(ips, fmt.Sprintf("10.%d.%d.1", i/256, i%256))
+	}
+	for i := 0; i < hosts; i++ {
+		ips = append(ips, fmt.Sprintf("10.%d.%d.1/32", i/256, i%256))
+	}
+	return ips
+}
+
+// failFirstBatchServer answers ipam/ip-addresses like addressEchoServer but
+// fails the FIRST request outright, and reports how many requests it saw.
+func failFirstBatchServer(t *testing.T) (*httptest.Server, *int) {
+	t.Helper()
+	calls := 0
+	ids := map[string]int{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"detail":"boom"}`))
+			return
+		}
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			h := hostOf(a)
+			id, ok := ids[h]
+			if !ok {
+				id = len(ids) + 1
+				ids[h] = id
+			}
+			results = append(results, fmt.Sprintf(
+				`{"id":%d,"address":"%s/24","dns_name":"h%d.example.net","status":{"value":"active"},"assigned_object_type":null,"assigned_object":null}`,
+				id, h, id))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+// TestFetchAddressRecords_HostAnsweredByAnotherChunkIsNotDegraded closes a false
+// degradation. The hop used to tally `deg.record(len(chunk), err)` the moment a
+// chunk failed and never revisit it, but chunking is by the CALLER's spelling
+// while indexing is by canonical host: "10.20.0.1" and "10.20.0.1/32" are one
+// address in two chunks, and if one fails while the other succeeds the bucket is
+// populated and the row is complete.
+//
+// The row-level path already recovered — ResolveIPs tests
+// `addrFailed[ip] && len(cands) == 0` — so the visible columns were right while
+// the batch-level tally said the result was degraded. That number is not
+// cosmetic: pkg/plugin.degradationError turns ANY provider warning into an
+// alerting error, so a complete result was rejected outright. Failing an alert on
+// data that is not missing is the inverse of the bug the degradation reporting
+// was built to fix.
+func TestFetchAddressRecords_HostAnsweredByAnotherChunkIsNotDegraded(t *testing.T) {
+	// assertTwinsSplit fails the test unless the fixture really does put every
+	// member of the failing chunk's twins somewhere else. Without this the test
+	// could pass because nothing was ever recovered.
+	assertTwinsSplit := func(t *testing.T, chunks [][]string, exempt map[string]bool) {
+		t.Helper()
+		if len(chunks) < 3 {
+			t.Fatalf("fixture needs >=3 chunks to tell partial from total failure, got %d", len(chunks))
+		}
+		elsewhere := map[string]bool{}
+		for _, c := range chunks[1:] {
+			for _, ip := range c {
+				elsewhere[canonicalIP(ip)] = true
+			}
+		}
+		for _, ip := range chunks[0] {
+			if exempt[ip] || elsewhere[canonicalIP(ip)] {
+				continue
+			}
+			t.Fatalf("fixture drifted: %q is in the failing chunk with no twin in a surviving one", ip)
+		}
+	}
+
+	t.Run("a host every one of whose spellings recovered is not counted as degraded", func(t *testing.T) {
+		ips := twinnedSpellings(800)
+		assertTwinsSplit(t, chunkByBudget("address", ips, chunkBudgetBytes), nil)
+
+		srv, calls := failFirstBatchServer(t)
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
+		res, err := p.fetchAddressRecords(context.Background(), ips)
+		if err != nil {
+			t.Fatalf("a partial failure must not fail the call: %v", err)
+		}
+		if *calls < 2 {
+			t.Fatalf("the failure never happened: %d request(s)", *calls)
+		}
+		if len(res.failed) == 0 {
+			t.Fatal("the failed set must still name every spelling that was in the failed request")
+		}
+		// The property. Every input in the failed chunk has a twin that
+		// answered, so nothing was actually lost.
+		if res.deg.any() {
+			t.Errorf("deg.failed = %d, want 0: every IP the failed chunk covered was answered by another chunk", res.deg.failed)
+		}
+		// ...and the answers really are there, so "nothing degraded" is not
+		// "nothing was fetched".
+		for _, ip := range ips[:50] {
+			if len(res.byHost[canonicalIP(ip)]) == 0 {
+				t.Fatalf("no record for %q; the surviving chunk should have answered for it", ip)
+			}
+		}
+	})
+
+	t.Run("an input with no surviving twin is still counted, and it alone", func(t *testing.T) {
+		// The other direction, and the reason the recount cannot simply be
+		// "stop counting". orphan has one spelling only, so the failed chunk
+		// really did lose it.
+		const orphan = "10.255.255.254"
+		ips := twinnedSpellings(800, orphan)
+		assertTwinsSplit(t, chunkByBudget("address", ips, chunkBudgetBytes), map[string]bool{orphan: true})
+
+		srv, _ := failFirstBatchServer(t)
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
+		res, err := p.fetchAddressRecords(context.Background(), ips)
+		if err != nil {
+			t.Fatalf("a partial failure must not fail the call: %v", err)
+		}
+		if !res.failed[orphan] {
+			t.Fatal("the orphan must be named in the failed set")
+		}
+		if len(res.byHost[canonicalIP(orphan)]) != 0 {
+			t.Fatal("the orphan must have no record; nothing else asked for it")
+		}
+		if res.deg.failed != 1 {
+			t.Errorf("deg.failed = %d, want exactly 1 (the orphan) — the recount must not swallow a real loss", res.deg.failed)
+		}
+		if res.deg.total != len(ips) {
+			t.Errorf("deg.total = %d, want %d (every IP asked about)", res.deg.total, len(ips))
+		}
+		if res.deg.cause == nil {
+			t.Error("degradation must carry the cause; the warning text names it")
+		}
+	})
+
+	t.Run("a fully recovered result carries no warning, so alerting does not reject it", func(t *testing.T) {
+		// End-to-end, because the warning — not the tally — is what
+		// pkg/plugin.degradationError converts into an alert-query error.
+		ips := twinnedSpellings(800)
+		srv, _ := failFirstBatchServer(t)
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
+
+		// An explicit limit above len(ips): the default would clamp to 1,000 and
+		// cut the masked twins off, leaving nothing to recover with.
+		res, err := p.ResolveIPs(context.Background(), ips,
+			[]string{"ip", "match_count", "address_dns_name"}, len(ips)+10)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if len(res.Warnings) != 0 {
+			t.Errorf("Warnings = %v, want none — every IP the failed chunk covered was answered elsewhere", res.Warnings)
+		}
+		// The rows have to be complete too, or "no warning" would just be a
+		// second bug agreeing with the first.
+		for _, row := range res.Rows {
+			if row["match_count"] != float64(1) {
+				t.Fatalf("match_count for %v = %v, want 1", row["ip"], row["match_count"])
+			}
+			if row["address_dns_name"] == nil {
+				t.Fatalf("address_dns_name for %v is nil; the row is not actually complete", row["ip"])
+			}
+		}
+	})
+}
+
+// TestFetchDevices_ChunkFailureDegrades is the device-hop twin of the above:
+// a failed batch costs only its own devices' device_* columns.
+func TestFetchDevices_ChunkFailureDegrades(t *testing.T) {
+	ids := make([]int, 2000)
+	for i := range ids {
+		ids[i] = i + 1
+	}
+
+	call := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		call++
+		if call == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"detail":"boom"}`))
+			return
+		}
+		var results []string
+		for _, id := range r.URL.Query()["id"] {
+			results = append(results, fmt.Sprintf(`{"id":%s,"name":"dev-%s"}`, id, id))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	got, deg := p.fetchDevices(context.Background(), ids)
+	if len(got) == 0 {
+		t.Fatal("the surviving batches' devices must still come back")
+	}
+	if len(got) == len(ids) {
+		t.Fatal("test is not exercising the failure: every device resolved")
+	}
+	if call < 2 {
+		t.Fatalf("expected the call to continue past the failed batch, got %d requests", call)
+	}
+	// Degrading is only half the contract; the other half is saying so. The rows
+	// whose device is missing look identical to rows for IPs that genuinely have
+	// no device, so the degradation is the only thing that can tell them apart.
+	if !deg.any() {
+		t.Fatal("a partial failure must be reported as a degradation, not swallowed")
+	}
+	if deg.failed != len(ids)-len(got) {
+		t.Errorf("degradation covers %d devices, want %d (those the failed batch held)", deg.failed, len(ids)-len(got))
+	}
+	if deg.total != len(ids) {
+		t.Errorf("degradation total = %d, want %d", deg.total, len(ids))
+	}
+	if deg.cause == nil {
+		t.Error("degradation must carry the cause; the warning text names it")
+	}
+}
+
+func rawIP(id int, status string, assigned bool) json.RawMessage {
+	if !assigned {
+		return rawIPAssigned(id, status, "", "null")
+	}
+	return rawIPAssigned(id, status, assignedTypeInterface,
+		`{"id":9,"name":"Ethernet1","device":{"id":3,"name":"leaf-01"}}`)
+}
+
+// rawIPAssigned builds an address record with an explicit assignment TYPE.
+// assigned_object is a generic relation, so the type is what decides whether the
+// record can name an interface or a device — a fixture that omits it can only
+// exercise the middle of pickAddress' three tiers.
+func rawIPAssigned(id int, status, objectType, assignedObject string) json.RawMessage {
+	typ := "null"
+	if objectType != "" {
+		typ = fmt.Sprintf("%q", objectType)
+	}
+	return json.RawMessage(fmt.Sprintf(
+		`{"id":%d,"address":"10.0.0.1/24","status":{"value":%q},"assigned_object_type":%s,"assigned_object":%s}`,
+		id, status, typ, assignedObject))
+}
+
+// rawFHRP is an address assigned to an FHRP group: assigned_object is populated
+// and non-null, so it is indistinguishable from an interface assignment to
+// anything that only tests for nullness — which is exactly the bug.
+func rawFHRP(id int, status string) json.RawMessage {
+	return rawIPAssigned(id, status, "ipam.fhrpgroup",
+		`{"id":5,"display":"zz-probe-fhrp VRRPv3: 991 (10.0.0.1/24)","protocol":"vrrp3","group_id":991}`)
+}
+
+func idOf(t *testing.T, raw json.RawMessage) int {
+	t.Helper()
+	var o struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &o); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return o.ID
+}
+
+func TestPickAddress(t *testing.T) {
+	t.Run("prefers assigned over unassigned", func(t *testing.T) {
+		got := pickAddress([]json.RawMessage{rawIP(1, "active", false), rawIP(2, "active", true)})
+		if idOf(t, got) != 2 {
+			t.Fatalf("got id %d, want 2", idOf(t, got))
+		}
+	})
+	t.Run("prefers non-deprecated when both assigned", func(t *testing.T) {
+		got := pickAddress([]json.RawMessage{rawIP(1, "deprecated", true), rawIP(2, "active", true)})
+		if idOf(t, got) != 2 {
+			t.Fatalf("got id %d, want 2", idOf(t, got))
+		}
+	})
+	t.Run("falls back to lowest id for stability", func(t *testing.T) {
+		got := pickAddress([]json.RawMessage{rawIP(7, "active", true), rawIP(3, "active", true)})
+		if idOf(t, got) != 3 {
+			t.Fatalf("got id %d, want 3", idOf(t, got))
+		}
+	})
+	t.Run("returns nil for no candidates", func(t *testing.T) {
+		if pickAddress(nil) != nil {
+			t.Fatal("expected nil")
+		}
+	})
+
+	// The emergent bug from type-gating interface_*/device_*: an FHRP-assigned
+	// record and a dcim.interface-assigned one for the same host tied on
+	// "assigned_object is not null", and the lowest-id fallback then picked
+	// whichever NetBox created first. When that was the FHRP record — which the
+	// type gates in applyAddressColumns and deviceIDFromAddress correctly refuse —
+	// the row lost its identity columns entirely, with the device-backed candidate
+	// sitting unused in the same bucket. The lower id here is the whole point.
+	t.Run("an interface assignment beats an FHRP one with a lower id", func(t *testing.T) {
+		got := pickAddress([]json.RawMessage{
+			rawFHRP(1, "active"),
+			rawIPAssigned(2, "active", assignedTypeInterface,
+				`{"id":9,"name":"Ethernet1","device":{"id":3,"name":"leaf-01"}}`),
+		})
+		if idOf(t, got) != 2 {
+			t.Fatalf("got id %d, want 2 — the interface-assigned record is the only one that can fill interface_*/device_*", idOf(t, got))
+		}
+	})
+
+	// A VM interface fills interface_* (never device_*), so it belongs in the same
+	// top tier as a device interface — the pick must not hand the row to an FHRP
+	// record that can fill neither.
+	t.Run("a VM interface assignment also beats an FHRP one with a lower id", func(t *testing.T) {
+		got := pickAddress([]json.RawMessage{
+			rawFHRP(1, "active"),
+			rawIPAssigned(2, "active", assignedTypeVMInterface, `{"id":9,"name":"eth0"}`),
+		})
+		if idOf(t, got) != 2 {
+			t.Fatalf("got id %d, want 2", idOf(t, got))
+		}
+	})
+
+	// Assignment outranks status, as it always has. A deprecated interface record
+	// still names the device and the interface, and address_status says
+	// "deprecated" in plain sight; an active FHRP record names neither.
+	t.Run("a deprecated interface assignment still beats an active FHRP one", func(t *testing.T) {
+		got := pickAddress([]json.RawMessage{
+			rawFHRP(1, "active"),
+			rawIPAssigned(2, "deprecated", assignedTypeInterface,
+				`{"id":9,"name":"Ethernet1","device":{"id":3,"name":"leaf-01"}}`),
+		})
+		if idOf(t, got) != 2 {
+			t.Fatalf("got id %d, want 2", idOf(t, got))
+		}
+	})
+
+	// The documented middle tier: a non-interface assignment carries no identity
+	// either, but it does document an address something is using, so it still
+	// edges out a bare unassigned record.
+	t.Run("an FHRP assignment still beats no assignment at all", func(t *testing.T) {
+		got := pickAddress([]json.RawMessage{
+			rawIP(1, "active", false),
+			rawFHRP(2, "active"),
+		})
+		if idOf(t, got) != 2 {
+			t.Fatalf("got id %d, want 2", idOf(t, got))
+		}
+	})
+}
+
+// TestResolveIPs_FHRPRecordDoesNotStealTheRow is the end-to-end half of the same
+// finding, and the one that shows the symptom a user actually sees. A host with
+// both an FHRP-assigned record (lower id) and an interface-assigned one came back
+// with match_count 2 and every identity column blank — the row said "NetBox knows
+// this address but can tell you nothing about it" while the answer was in the
+// same response.
+func TestResolveIPs_FHRPRecordDoesNotStealTheRow(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":2,"next":null,"results":[%s,%s]}`,
+			`{"id":11,"address":"10.77.77.77/24","status":{"value":"active"},`+
+				`"assigned_object_type":"ipam.fhrpgroup",`+
+				`"assigned_object":{"id":5,"display":"zz-probe-fhrp VRRPv3: 991 (10.77.77.77/24)"}}`,
+			`{"id":12,"address":"10.77.77.77/24","status":{"value":"active"},`+
+				`"assigned_object_type":"dcim.interface",`+
+				`"assigned_object":{"id":9,"display":"Ethernet9","device":{"id":3,"name":"leaf-01"}}}`)
+	})
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"id":3,"name":"leaf-01","site":{"name":"AMS1"}}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), []string{"10.77.77.77"},
+		[]string{"ip", "match_count", "interface_name", "device_name", "device_site"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(res.Rows))
+	}
+	row := res.Rows[0]
+	// Both records are still counted: the pick is a pick, and match_count is what
+	// makes it visible.
+	if got := row["match_count"]; got != float64(2) {
+		t.Errorf("match_count = %v, want 2", got)
+	}
+	if got := row["interface_name"]; got != "Ethernet9" {
+		t.Errorf("interface_name = %v, want Ethernet9 — the FHRP record won the tie and the row went blank", got)
+	}
+	if got := row["device_name"]; got != "leaf-01" {
+		t.Errorf("device_name = %v, want leaf-01", got)
+	}
+	if got := row["device_site"]; got != "AMS1" {
+		t.Errorf("device_site = %v, want AMS1", got)
+	}
+}
+
+func TestIsPrimaryIP(t *testing.T) {
+	t.Run("true when primary_ip4 id matches", func(t *testing.T) {
+		if !isPrimaryIP(map[string]interface{}{"primary_ip4_id": float64(42)}, 42) {
+			t.Fatal("expected true")
+		}
+	})
+	t.Run("true when primary_ip6 id matches", func(t *testing.T) {
+		if !isPrimaryIP(map[string]interface{}{"primary_ip6_id": float64(7)}, 7) {
+			t.Fatal("expected true")
+		}
+	})
+	t.Run("false for a different primary", func(t *testing.T) {
+		if isPrimaryIP(map[string]interface{}{"primary_ip4_id": float64(99)}, 42) {
+			t.Fatal("expected false")
+		}
+	})
+	t.Run("false when no primary is set", func(t *testing.T) {
+		if isPrimaryIP(map[string]interface{}{}, 42) {
+			t.Fatal("expected false")
+		}
+	})
+}
+
+// TestFetchDevices is not in the task brief; it was added because
+// golangci-lint flags fetchDevices as unused until the next task wires it
+// into the enrichment path. It exercises the function for real rather than
+// suppressing the lint: enough ids are requested to force chunkByBudget into
+// multiple batches, each served by a separate request whose "id" params
+// reflect only that batch, and the results from every batch must land in one
+// map keyed by device id.
+func TestFetchDevices(t *testing.T) {
+	t.Run("batches large id sets into a single id-keyed map", func(t *testing.T) {
+		requests := 0
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			ids := r.URL.Query()["id"]
+			var b strings.Builder
+			b.WriteString(`{"count":0,"next":null,"results":[`)
+			for i, id := range ids {
+				if i > 0 {
+					b.WriteString(",")
+				}
+				fmt.Fprintf(&b, `{"id":%s,"name":"dev-%s","primary_ip4":{"id":%s,"address":"10.0.0.1/32"}}`, id, id, id)
+			}
+			b.WriteString("]}")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(b.String()))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+		const n = 2000 // comfortably over chunkBudgetBytes at "id=<n>" widths, forcing >1 chunk
+		ids := make([]int, n)
+		for i := range ids {
+			ids[i] = i + 1
+		}
+
+		got, deg := p.fetchDevices(context.Background(), ids)
+		if deg.any() {
+			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
+		}
+		if len(got) != n {
+			t.Fatalf("got %d devices, want %d", len(got), n)
+		}
+		if requests < 2 {
+			t.Fatalf("expected batching to span multiple requests, got %d", requests)
+		}
+
+		dev, ok := got[1]
+		if !ok {
+			t.Fatal("missing device id 1 in result map")
+		}
+		// primary_ip4 is a nested reference; flattenObject must have derived
+		// primary_ip4_id from it as a float64 for isPrimaryIP to match on.
+		if !isPrimaryIP(dev, 1) {
+			t.Fatalf("expected device 1's primary_ip4_id to equal its own id, got %v", dev["primary_ip4_id"])
+		}
+	})
+
+	t.Run("empty ids returns an empty map without a request", func(t *testing.T) {
+		requests := 0
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+		got, deg := p.fetchDevices(context.Background(), nil)
+		if deg.any() {
+			t.Fatalf("no ids means nothing to degrade, got %+v", deg)
+		}
+		if len(got) != 0 {
+			t.Fatalf("expected empty map, got %d entries", len(got))
+		}
+		if requests != 0 {
+			t.Fatalf("expected no requests for empty ids, got %d", requests)
+		}
+	})
+}
+
+func TestIPEnrichColumnsAreNamespaced(t *testing.T) {
+	cols := IPEnrichColumns()
+	if cols[0] != "ip" || cols[1] != "match_count" {
+		t.Fatalf("identity columns must lead un-namespaced, got %v", cols[:2])
+	}
+	for _, c := range cols[2:] {
+		switch {
+		case strings.HasPrefix(c, "prefix_"), strings.HasPrefix(c, "address_"),
+			strings.HasPrefix(c, "interface_"), strings.HasPrefix(c, "device_"):
+		default:
+			t.Errorf("column %q is not namespaced", c)
+		}
+	}
+	for _, banned := range []string{"site", "tenant", "role", "vrf", "vlan", "prefix", "prefix_site"} {
+		for _, c := range cols {
+			if c == banned {
+				t.Errorf("column %q must not exist", banned)
+			}
+		}
+	}
+	for _, unfillable := range []string{"interface_enabled", "interface_type", "interface_mtu", "interface_mac_address", "interface_lag"} {
+		for _, c := range cols {
+			if c == unfillable {
+				t.Errorf("column %q has no source and must not be offered", unfillable)
+			}
+		}
+	}
+	// NetBox 4.4's NestedIPAddress serializer (nat_inside and every
+	// nat_outside element) has no dns_name property at all — filling these
+	// would cost a second API call per referenced NAT partner, ruled not
+	// worth it. This guard is what stops them creeping back in.
+	for _, unfillable := range []string{"address_nat_inside_dns", "address_nat_outside_dns"} {
+		for _, c := range cols {
+			if c == unfillable {
+				t.Errorf("column %q has no source and must not be offered", unfillable)
+			}
+		}
+	}
+}
+
+// tsGroupOptions parses the namespaced groups out of IP_CONTEXT_FIELD_GROUPS,
+// each of which is a literal array of bare names mapped onto a prefix:
+//
+//	options: ['cidr', 'scope'].map((f) => ({ label: f, value: `prefix_${f}` })),
+//
+// (prettier sometimes wraps the .map( onto its own line, hence the \s*).
+var tsGroupOptions = regexp.MustCompile("(?s)options:\\s*\\[([^\\]]*)\\]\\.map\\(\\s*\\(f\\)\\s*=>\\s*\\(\\{[^`]*`([a-z]+)_\\$\\{f\\}`")
+
+// tsIdentityOption matches the un-namespaced Identity group, whose two options
+// are written out in full rather than mapped.
+var tsIdentityOption = regexp.MustCompile(`value: '([a-z_]+)'`)
+
+var tsQuoted = regexp.MustCompile(`'([a-z_0-9]+)'`)
+
+// TestIPContextFieldsMatchFrontend is the mechanical half of the "keep in sync"
+// comments that sit on both IPEnrichColumns() and src/types.ts'
+// IP_CONTEXT_FIELD_GROUPS. The picker is a closed vocabulary: a name offered in
+// the editor that the backend cannot produce renders a permanently blank
+// column, and a backend column missing from the editor is unreachable. Nothing
+// enforced the pairing, so drift shipped silently.
+//
+// The check reads the TypeScript source rather than executing it because it
+// belongs on whichever side can run it for free: reading a file from Jest needs
+// Node's fs typings, which this project's tsconfig does not include.
+func TestIPContextFieldsMatchFrontend(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "src", "types.ts"))
+	if err != nil {
+		t.Fatalf("read src/types.ts: %v", err)
+	}
+
+	// Narrow to the declaration so unrelated string literals elsewhere in the
+	// file (filter operators, join transforms) cannot leak into the comparison.
+	const startMarker = "export const IP_CONTEXT_FIELD_GROUPS"
+	start := strings.Index(string(src), startMarker)
+	if start < 0 {
+		t.Fatalf("IP_CONTEXT_FIELD_GROUPS not found in src/types.ts — update this guard, do not delete it")
+	}
+	rest := string(src)[start:]
+	end := strings.Index(rest, "\n];")
+	if end < 0 {
+		t.Fatalf("could not find the end of IP_CONTEXT_FIELD_GROUPS — update this guard, do not delete it")
+	}
+	decl := rest[:end]
+
+	var tsCols []string
+	for _, m := range tsIdentityOption.FindAllStringSubmatch(decl, -1) {
+		tsCols = append(tsCols, m[1])
+	}
+	for _, m := range tsGroupOptions.FindAllStringSubmatch(decl, -1) {
+		for _, q := range tsQuoted.FindAllStringSubmatch(m[1], -1) {
+			tsCols = append(tsCols, m[2]+"_"+q[1])
+		}
+	}
+
+	goCols := IPEnrichColumns()
+	if len(tsCols) != len(goCols) {
+		t.Fatalf("editor offers %d columns, IPEnrichColumns() emits %d\n editor: %v\n backend: %v",
+			len(tsCols), len(goCols), sorted(tsCols), sorted(goCols))
+	}
+	a, b := sorted(tsCols), sorted(goCols)
+	for i := range a {
+		if a[i] != b[i] {
+			t.Errorf("column mismatch at %d: editor %q, backend %q (full lists: %v vs %v)", i, a[i], b[i], a, b)
+		}
+	}
+}
+
+// TestIPContextDefaultsMatchFrontend pairs the two default selections. Drift
+// here means a brand-new query opens with a column nothing can fill.
+func TestIPContextDefaultsMatchFrontend(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "src", "types.ts"))
+	if err != nil {
+		t.Fatalf("read src/types.ts: %v", err)
+	}
+	const startMarker = "export const DEFAULT_IP_CONTEXT_FIELDS"
+	start := strings.Index(string(src), startMarker)
+	if start < 0 {
+		t.Fatalf("DEFAULT_IP_CONTEXT_FIELDS not found in src/types.ts — update this guard, do not delete it")
+	}
+	rest := string(src)[start:]
+	end := strings.Index(rest, "\n];")
+	if end < 0 {
+		t.Fatalf("could not find the end of DEFAULT_IP_CONTEXT_FIELDS")
+	}
+
+	var tsDefaults []string
+	for _, q := range tsQuoted.FindAllStringSubmatch(rest[:end], -1) {
+		tsDefaults = append(tsDefaults, q[1])
+	}
+	a, b := sorted(tsDefaults), sorted(defaultIPEnrichFields)
+	if len(a) != len(b) {
+		t.Fatalf("editor default is %v, backend default is %v", a, b)
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Errorf("default mismatch at %d: editor %q, backend %q", i, a[i], b[i])
+		}
+	}
+}
+
+func sorted(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
+}
+
+// TestResolveIPs_MatchCountIsNumber locks in match_count's Go type as float64.
+// pkg/plugin/frame.go's classifyColumn only treats float64 as numeric (the
+// type every other column already carries via encoding/json + flattenObject);
+// an int would silently render match_count as a string field in the Grafana
+// frame, which breaks thresholding, filtering, and color-by-value on the very
+// column that exists to flag an ambiguous pick.
+func TestResolveIPs_MatchCountIsNumber(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
+			{"id":1,"address":"10.0.0.5/24","status":{"value":"active"},"assigned_object":null}
+		]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.5"}, []string{"ip", "match_count"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(res.Rows))
+	}
+
+	v, ok := res.Rows[0]["match_count"].(float64)
+	if !ok {
+		t.Fatalf("match_count is %T, want float64 (an int here would render as a string column)", res.Rows[0]["match_count"])
+	}
+	if v != 1 {
+		t.Fatalf("match_count = %v, want 1", v)
+	}
+}
+
+// TestApplyAddressColumns_InterfaceDescriptionAndNATPeers locks in that
+// interface_description is read straight off the raw JSON — flattenObject's
+// generic nested-object rule only ever surfaces a nested object's
+// display/id/slug, so assigned_object's description had no source at all
+// before — alongside address_nat_inside/address_nat_outside, which DO come
+// through flattenObject as the peer address's display string. There is no
+// address_nat_inside_dns/address_nat_outside_dns: NetBox 4.4's
+// NestedIPAddress serializer (used for both nat_inside and every nat_outside
+// element) has no dns_name property, so that pair was dropped rather than
+// costing a second API call per referenced NAT partner.
+func TestApplyAddressColumns_InterfaceDescriptionAndNATPeers(t *testing.T) {
+	raw := json.RawMessage(`{
+		"id": 45,
+		"address": "203.0.113.10/32",
+		"status": {"value": "active"},
+		"assigned_object_type": "dcim.interface",
+		"assigned_object": {
+			"id": 9, "name": "Ethernet1", "description": "core uplink",
+			"device": {"id": 100, "name": "leaf-01"}
+		},
+		"nat_inside": {"id": 44, "display": "192.168.50.10/24"},
+		"nat_outside": [
+			{"id": 46, "display": "203.0.113.11/32"}
+		]
+	}`)
+
+	row := map[string]interface{}{}
+	applyAddressColumns(row, raw)
+
+	if got := row["interface_description"]; got != "core uplink" {
+		t.Errorf("interface_description = %v, want %q", got, "core uplink")
+	}
+	if got := row["address_nat_inside"]; got != "192.168.50.10/24" {
+		t.Errorf("address_nat_inside = %v, want %q", got, "192.168.50.10/24")
+	}
+	if got := row["address_nat_outside"]; got != "203.0.113.11/32" {
+		t.Errorf("address_nat_outside = %v, want %q", got, "203.0.113.11/32")
+	}
+	for _, c := range []string{"address_nat_inside_dns", "address_nat_outside_dns"} {
+		if _, ok := row[c]; ok {
+			t.Errorf("column %q = %v, want unset (dropped: NetBox has no source for it)", c, row[c])
+		}
+	}
+}
+
+// TestApplyAddressColumns_HandlesEmptyNATAndNoAssignment locks in that a bare
+// address record — no NAT relationship in either direction, no interface
+// assignment — leaves interface_description unset rather than panicking.
+func TestApplyAddressColumns_HandlesEmptyNATAndNoAssignment(t *testing.T) {
+	raw := json.RawMessage(`{
+		"id": 1, "address": "10.0.0.1/32", "status": {"value": "active"},
+		"assigned_object_type": null, "assigned_object": null,
+		"nat_inside": null, "nat_outside": []
+	}`)
+
+	row := map[string]interface{}{}
+	applyAddressColumns(row, raw) // must not panic
+
+	if _, ok := row["interface_description"]; ok {
+		t.Errorf("interface_description = %v, want unset", row["interface_description"])
+	}
+}
+
+// TestApplyAddressColumns_InterfaceColumnsRequireAnInterface is the reproduction
+// for a defect proved against live NetBox 4.4.10: assigned_object is a GENERIC
+// relation, and reading it without testing assigned_object_type put an FHRP
+// group's display string into interface_name.
+//
+// The fhrpGroup case below is the live payload verbatim (NetBox 4.4.10, group
+// "zz-codex2-fhrp VRRPv3: 993", address 10.77.77.78/24), reduced only by the
+// url/created/last_updated fields nothing here reads. Against the unfixed code
+// it yields:
+//
+//	interface_name        = "zz-codex2-fhrp VRRPv3: 993 (10.77.77.78/24)"
+//	interface_description = "temp fixture for codex round2 finding 3"
+//
+// A VRRP group rendered as a switch port, which is worse than a blank column:
+// blank invites a question, a plausible wrong value does not. Both interface_*
+// columns are checked because assigned_object.description is read by a second,
+// independent code path that had the same ungated defect.
+//
+// The two interface cases are here rather than left to the tests above so that
+// one table states the whole rule. A gate that excluded FHRP by excluding
+// everything would pass an FHRP-only test and silently blank the VM case, which
+// docs/RECIPES.md documents as populating interface_name.
+func TestApplyAddressColumns_InterfaceColumnsRequireAnInterface(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      string
+		wantName interface{} // nil = the column must be unset
+		wantDesc interface{}
+	}{
+		{
+			name: "a dcim.interface assignment fills interface_*",
+			raw: `{"id":1,"address":"10.20.0.1/24","status":{"value":"active"},
+				"assigned_object_type":"dcim.interface",
+				"assigned_object":{"id":9,"display":"Ethernet1","name":"Ethernet1",
+					"description":"uplink to AMS1-spine-01","device":{"id":100,"name":"AMS1-leaf-01"}}}`,
+			wantName: "Ethernet1",
+			wantDesc: "uplink to AMS1-spine-01",
+		},
+		{
+			name: "a virtualization.vminterface assignment fills interface_* too",
+			// device_* is what a VM withholds, NOT interface_*. If the gate is
+			// ever narrowed to dcim.interface alone this case fails, which is
+			// the point: the VM row's only context column would vanish.
+			raw: `{"id":31,"address":"10.40.0.5/24","status":{"value":"active"},
+				"assigned_object_type":"virtualization.vminterface",
+				"assigned_object":{"id":55,"display":"eth0","name":"eth0",
+					"description":"vm nic","virtual_machine":{"id":5,"name":"vm-01"}}}`,
+			wantName: "eth0",
+			wantDesc: "vm nic",
+		},
+		{
+			name: "an ipam.fhrpgroup assignment fills neither",
+			raw: `{"id":53,"display":"10.77.77.78/24","address":"10.77.77.78/24",
+				"vrf":null,"tenant":null,"status":{"value":"active","label":"Active"},"role":null,
+				"assigned_object_type":"ipam.fhrpgroup","assigned_object_id":2,
+				"assigned_object":{"id":2,"display":"zz-codex2-fhrp VRRPv3: 993 (10.77.77.78/24)",
+					"protocol":"vrrp3","group_id":993,
+					"description":"temp fixture for codex round2 finding 3"},
+				"nat_inside":null,"nat_outside":[],"dns_name":"zz-codex2-vip.example.net",
+				"description":"temp fixture codex round2"}`,
+		},
+		{
+			name: "an unassigned address fills neither",
+			raw: `{"id":21,"address":"10.0.0.2/32","status":{"value":"active"},
+				"assigned_object_type":null,"assigned_object":null}`,
+		},
+		{
+			name: "an assigned_object with no type at all fills neither",
+			// Not a shape NetBox sends; the point is that the gate fails CLOSED.
+			// An unrecognised or absent type must withhold interface_*, so a
+			// future NetBox assignment target cannot inherit the old defect
+			// merely by being unknown to this code.
+			raw: `{"id":77,"address":"10.0.0.7/32","status":{"value":"active"},
+				"assigned_object":{"id":3,"display":"something new","description":"who knows"}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := map[string]interface{}{}
+			applyAddressColumns(row, json.RawMessage(tc.raw))
+
+			if got := row["interface_name"]; got != tc.wantName {
+				t.Errorf("interface_name = %#v, want %#v", got, tc.wantName)
+			}
+			if got := row["interface_description"]; got != tc.wantDesc {
+				t.Errorf("interface_description = %#v, want %#v", got, tc.wantDesc)
+			}
+			// The address record itself is real whatever it is assigned to, so
+			// withholding interface_* must not withhold address_*. Only the
+			// assignment is something interface_* cannot describe.
+			if _, ok := row["address_status"]; !ok {
+				t.Errorf("address_status is unset; the address record is real regardless of what it is assigned to")
+			}
+		})
+	}
+}
+
+// TestDeviceIDFromAddress is the unit-level companion to the VM subtest in
+// TestResolveIPs below. It exists because deviceIDFromAddress has TWO
+// independent reasons to reject a VM interface — the assigned_object_type gate
+// and the "no assigned_object.device.id" fallback — and real NetBox
+// vminterface JSON (which carries virtual_machine, never device) trips the
+// second one, so an end-to-end test can never tell whether the type gate is
+// still there. The third case below settles that directly: it asserts the
+// documented contract ("VM interfaces return false") even for a payload the
+// fallback would let through.
+func TestDeviceIDFromAddress(t *testing.T) {
+	cases := []struct {
+		name   string
+		raw    string
+		wantID int
+		wantOK bool
+	}{
+		{
+			name:   "a dcim.interface assignment yields its device id",
+			raw:    `{"id":1,"assigned_object_type":"dcim.interface","assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"}}}`,
+			wantID: 100,
+			wantOK: true,
+		},
+		{
+			name:   "a virtualization.vminterface assignment is excluded",
+			raw:    `{"id":31,"assigned_object_type":"virtualization.vminterface","assigned_object":{"id":55,"name":"eth0","virtual_machine":{"id":5,"name":"vm-01"}}}`,
+			wantOK: false,
+		},
+		{
+			name: "the type gate excludes a vminterface even when a device id is present",
+			// Not a shape NetBox sends today — that is the point. The type gate
+			// is what makes the exclusion hold regardless of what the
+			// assigned_object serializer grows later, so it gets asserted on
+			// its own rather than through the device-id fallback.
+			raw:    `{"id":31,"assigned_object_type":"virtualization.vminterface","assigned_object":{"id":55,"name":"eth0","device":{"id":100,"name":"leaf-01"}}}`,
+			wantOK: false,
+		},
+		{
+			name:   "an unassigned address is excluded",
+			raw:    `{"id":21,"assigned_object_type":null,"assigned_object":null}`,
+			wantOK: false,
+		},
+		{
+			name:   "a dcim.interface with no nested device is excluded",
+			raw:    `{"id":2,"assigned_object_type":"dcim.interface","assigned_object":{"id":9,"name":"Ethernet1"}}`,
+			wantOK: false,
+		},
+		{
+			name:   "malformed JSON is excluded rather than panicking",
+			raw:    `{"id":`,
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, ok := deviceIDFromAddress(json.RawMessage(tc.raw))
+			if ok != tc.wantOK || id != tc.wantID {
+				t.Errorf("deviceIDFromAddress = (%d, %t), want (%d, %t)", id, ok, tc.wantID, tc.wantOK)
+			}
+		})
+	}
+}
+
+// addressEchoServer answers ipam/ip-addresses with exactly one record per
+// requested ?address= value, keyed on that value's host portion so the same
+// host always gets the same NetBox id however it was spelled. It is the
+// fixture for the two properties below — the chunk-boundary match_count bug and
+// the default row limit — both of which need a large IP set and neither of
+// which is about what the records contain.
+func addressEchoServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	ids := map[string]int{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			h := hostOf(a)
+			id, ok := ids[h]
+			if !ok {
+				id = len(ids) + 1
+				ids[h] = id
+			}
+			results = append(results, fmt.Sprintf(
+				`{"id":%d,"address":"%s/24","status":{"value":"active"},"assigned_object":null}`, id, h))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestResolveIPs_MatchCountCountsDistinctRecords reproduces a real
+// double-count: input IPs are indexed by host portion, so "10.0.0.5" and
+// "10.0.0.5/24" share a bucket, and when the two spellings land in DIFFERENT
+// byte-budget chunks each chunk's response contributes the same NetBox record.
+// len(bucket) then reported match_count 2 for a host with exactly one record —
+// flagging an unambiguous resolution as ambiguous, which is the opposite of
+// what the column exists for.
+func TestResolveIPs_MatchCountCountsDistinctRecords(t *testing.T) {
+	// Bracket a large filler set so the two spellings cannot share a chunk.
+	ips := []string{"10.0.0.5"}
+	for i := 0; i < 600; i++ {
+		ips = append(ips, fmt.Sprintf("10.%d.%d.9", i/256, i%256))
+	}
+	ips = append(ips, "10.0.0.5/24")
+
+	chunks := chunkByBudget("address", ips, chunkBudgetBytes)
+	if len(chunks) < 2 {
+		t.Fatalf("test needs the two spellings in different chunks, got %d chunk(s)", len(chunks))
+	}
+	first, last := chunks[0], chunks[len(chunks)-1]
+	if first[0] != "10.0.0.5" || last[len(last)-1] != "10.0.0.5/24" {
+		t.Fatalf("fixture drifted: %q ... %q", first[0], last[len(last)-1])
+	}
+
+	srv := addressEchoServer(t)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), ips, []string{"ip", "match_count"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+
+	for _, row := range res.Rows {
+		ip := fmt.Sprint(row["ip"])
+		if ip != "10.0.0.5" && ip != "10.0.0.5/24" {
+			continue
+		}
+		if got := row["match_count"]; got != float64(1) {
+			t.Errorf("match_count for %q = %v, want 1 (both spellings resolve to the same single record)", ip, got)
+		}
+	}
+}
+
+func TestDistinctAddressCount(t *testing.T) {
+	raw := func(id int) json.RawMessage {
+		return json.RawMessage(fmt.Sprintf(`{"id":%d,"address":"10.0.0.5/24"}`, id))
+	}
+	cases := []struct {
+		name string
+		in   []json.RawMessage
+		want int
+	}{
+		{"none", nil, 0},
+		{"one", []json.RawMessage{raw(1)}, 1},
+		{"the same record twice collapses", []json.RawMessage{raw(1), raw(1)}, 1},
+		{"genuine anycast duplicates all count", []json.RawMessage{raw(1), raw(2), raw(3)}, 3},
+		// A payload with no id cannot be deduped; counting it keeps the number an
+		// upper bound rather than silently hiding a candidate.
+		{"id-less records each count", []json.RawMessage{json.RawMessage(`{}`), json.RawMessage(`{}`)}, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := distinctAddressCount(tc.in); got != tc.want {
+				t.Errorf("distinctAddressCount = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveIPs_LimitDefaults locks the unset-limit fallback to defaultLimit
+// rather than MaxLimit. This is not cosmetic: the prefix fallback issues one
+// SERIAL ?contains= request per unmatched IP (contains takes a single value, so
+// it cannot be batched), which made an unset limit a multi-minute ceiling.
+// Query() has always defaulted the same way; ip-enrichment was the outlier.
+func TestResolveIPs_LimitDefaults(t *testing.T) {
+	makeIPs := func(n int) []string {
+		out := make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, fmt.Sprintf("10.%d.%d.1", i/256, i%256))
+		}
+		return out
+	}
+
+	srv := addressEchoServer(t)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
+
+	t.Run("an unset limit uses defaultLimit, not MaxLimit", func(t *testing.T) {
+		ips := makeIPs(defaultLimit + 5)
+		res, err := p.ResolveIPs(context.Background(), ips, []string{"ip"}, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if len(res.Rows) != defaultLimit {
+			t.Errorf("rows = %d, want %d (defaultLimit)", len(res.Rows), defaultLimit)
+		}
+		if res.Total != len(ips) {
+			t.Errorf("Total = %d, want %d — the clamp must still report as truncated", res.Total, len(ips))
+		}
+	})
+
+	t.Run("an explicit limit above the default is still honoured", func(t *testing.T) {
+		res, err := p.ResolveIPs(context.Background(), makeIPs(defaultLimit+300), []string{"ip"}, defaultLimit+200)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if len(res.Rows) != defaultLimit+200 {
+			t.Errorf("rows = %d, want %d — the default must be a default, not a cap", len(res.Rows), defaultLimit+200)
+		}
+	})
+}
+
+// TestResolveIPs covers the properties this task exists to guarantee that had
+// no unit test: Total is the pre-clamp distinct-input count (not the row
+// count), exactly one row per input IP (duplicates and whitespace collapse,
+// nothing is dropped), an anycast IP's match_count reflects every candidate,
+// a VM-assigned IP populates interface_name while every device_* stays nil,
+// and "ip" is force-included even when the caller's field list omits it.
+//
+// The mock serves BOTH ipam/ip-addresses and dcim/devices. The second one is
+// not incidental: ResolveIPs deliberately swallows a device-hop error, so a
+// mock without a devices endpoint makes every device_* column nil for reasons
+// that have nothing to do with the logic under test, and the VM subtest below
+// becomes unfalsifiable. See the deviceFixtures comment.
+func TestResolveIPs(t *testing.T) {
+	// Address fixtures, keyed by the bare host NetBox's ?address= filter
+	// matches on.
+	addrFixtures := map[string][]string{
+		"10.0.0.1": {
+			`{"id":1,"address":"10.0.0.1/32","status":{"value":"active"},"assigned_object_type":"dcim.interface","assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"}}}`,
+		},
+		"10.0.0.2": { // anycast: three distinct records at the same host
+			`{"id":21,"address":"10.0.0.2/32","status":{"value":"active"},"assigned_object_type":null,"assigned_object":null}`,
+			`{"id":22,"address":"10.0.0.2/32","status":{"value":"active"},"assigned_object_type":null,"assigned_object":null}`,
+			`{"id":23,"address":"10.0.0.2/32","status":{"value":"active"},"assigned_object_type":null,"assigned_object":null}`,
+		},
+		"10.0.0.3": { // VM-assigned: assigned_object_type is virtualization.vminterface
+			`{"id":31,"address":"10.0.0.3/24","status":{"value":"active"},"assigned_object_type":"virtualization.vminterface","assigned_object":{"id":55,"display":"eth0","name":"eth0","description":"","virtual_machine":{"id":5,"name":"vm-01"}}}`,
+		},
+		// FHRP-assigned: assigned_object is present and has a display string,
+		// but it is a VRRP group, not an interface. Shape taken from live
+		// NetBox 4.4.10.
+		"10.0.0.6": {
+			`{"id":53,"address":"10.0.0.6/24","dns_name":"vip.example.net","status":{"value":"active"},"assigned_object_type":"ipam.fhrpgroup","assigned_object_id":2,"assigned_object":{"id":2,"display":"web-vip VRRPv3: 993 (10.0.0.6/24)","protocol":"vrrp3","group_id":993,"description":"web tier VIP"}}`,
+		},
+	}
+
+	// Device fixtures for the dcim/devices hop, keyed by the id string that
+	// endpoint is queried with. Registering this endpoint at all is what makes
+	// the VM subtest below able to fail: with it, device_* columns demonstrably
+	// DO populate for a dcim.interface-assigned address in the very same call,
+	// so a nil device_* on the VM row can only mean the VM exclusion gate
+	// fired. Without it, fetchDevices 404s, ResolveIPs degrades rather than
+	// failing (see the comment on its fetchDevices call), and every device_*
+	// column comes out nil no matter what the VM logic does — a test that
+	// cannot distinguish "correctly excluded" from "lookup broke".
+	deviceFixtures := map[string]string{
+		"100": `{"id":100,"name":"leaf-01","role":{"id":2,"name":"Leaf Switch","slug":"leaf-switch"},` +
+			`"platform":{"id":3,"name":"Arista EOS","slug":"arista-eos"},` +
+			`"device_type":{"id":4,"model":"DCS-7050TX"},"site":{"id":5,"name":"AMS1","slug":"ams1"},` +
+			`"location":{"id":6,"name":"Hall 1","slug":"hall-1"},"rack":{"id":7,"name":"R101"},` +
+			`"tenant":{"id":8,"name":"NetOps","slug":"netops"},"status":{"value":"active","label":"Active"},` +
+			`"primary_ip4":{"id":1,"address":"10.0.0.1/32"}}`,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			results = append(results, addrFixtures[a]...)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		var results []string
+		for _, id := range r.URL.Query()["id"] {
+			if fx, ok := deviceFixtures[id]; ok {
+				results = append(results, fx)
+				continue
+			}
+			// An id outside the fixtures still gets a real, successful device
+			// back on purpose. If deviceIDFromAddress ever stops excluding VM
+			// interfaces it will hand some device id over for the VM address,
+			// and this makes that id resolve — so the VM subtest fails loudly
+			// on a populated device_* column instead of passing because the
+			// lookup happened to find nothing.
+			results = append(results, fmt.Sprintf(
+				`{"id":%s,"name":"unexpected-device-%s","status":{"value":"active","label":"Active"}}`, id, id))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	deviceColumns := []string{
+		"device_name", "device_role", "device_platform", "device_device_type",
+		"device_site", "device_location", "device_rack", "device_tenant",
+		"device_status", "device_is_primary_ip",
+	}
+
+	t.Run("Total is the pre-clamp distinct count, not the post-clamp row count", func(t *testing.T) {
+		ips := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"}
+		res, err := p.ResolveIPs(context.Background(), ips, []string{"ip"}, 2)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if res.Total != 5 {
+			t.Errorf("Total = %d, want 5 (every distinct input IP, before the limit clamp)", res.Total)
+		}
+		if len(res.Rows) != 2 {
+			t.Errorf("got %d rows, want 2 (clamped by limit)", len(res.Rows))
+		}
+	})
+
+	t.Run("Total equals the row count when the input is under the limit", func(t *testing.T) {
+		ips := []string{"10.0.0.1", "10.0.0.2"}
+		res, err := p.ResolveIPs(context.Background(), ips, []string{"ip"}, 10)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if res.Total != 2 || len(res.Rows) != 2 {
+			t.Errorf("Total=%d len(Rows)=%d, want both 2", res.Total, len(res.Rows))
+		}
+	})
+
+	t.Run("duplicates and whitespace-only entries collapse to one row each, nothing dropped", func(t *testing.T) {
+		ips := []string{"10.0.0.1", "", "   ", "10.0.0.1", "10.0.0.2", " 10.0.0.2 "}
+		res, err := p.ResolveIPs(context.Background(), ips, []string{"ip"}, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if res.Total != 2 {
+			t.Fatalf("Total = %d, want 2 distinct IPs", res.Total)
+		}
+		if len(res.Rows) != 2 {
+			t.Fatalf("got %d rows, want 2", len(res.Rows))
+		}
+		got := []string{fmt.Sprint(res.Rows[0]["ip"]), fmt.Sprint(res.Rows[1]["ip"])}
+		want := []string{"10.0.0.1", "10.0.0.2"}
+		if got[0] != want[0] || got[1] != want[1] {
+			t.Errorf("rows = %v, want %v in input order", got, want)
+		}
+	})
+
+	t.Run("an anycast IP returns exactly one row with match_count 3", func(t *testing.T) {
+		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.2"}, []string{"ip", "match_count"}, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if len(res.Rows) != 1 {
+			t.Fatalf("got %d rows, want 1", len(res.Rows))
+		}
+		if got := res.Rows[0]["match_count"]; got != float64(3) {
+			t.Errorf("match_count = %v (%T), want float64(3)", got, got)
+		}
+	})
+
+	t.Run("a device-assigned IP fills every device_* column while a VM-assigned IP in the same call leaves them all nil", func(t *testing.T) {
+		fields := append([]string{"ip", "interface_name"}, deviceColumns...)
+		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.3"}, fields, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if len(res.Rows) != 2 {
+			t.Fatalf("got %d rows, want 2", len(res.Rows))
+		}
+		byIP := make(map[string]map[string]interface{}, len(res.Rows))
+		for _, r := range res.Rows {
+			byIP[fmt.Sprint(r["ip"])] = r
+		}
+		devRow, ok := byIP["10.0.0.1"]
+		if !ok {
+			t.Fatalf("no row for the device-assigned IP, got %v", res.Rows)
+		}
+		vmRow, ok := byIP["10.0.0.3"]
+		if !ok {
+			t.Fatalf("no row for the VM-assigned IP, got %v", res.Rows)
+		}
+
+		// Control half. 10.0.0.1 is assigned to a dcim.interface whose device
+		// id resolves against the registered dcim/devices endpoint, so device
+		// context provably attaches in this exact call. Without this half, the
+		// VM half below would pass just as happily if the device hop had failed
+		// outright — ResolveIPs discards that error by design — which is how an
+		// earlier version of this subtest survived the VM gate being deleted.
+		for _, c := range deviceColumns {
+			if devRow[c] == nil {
+				t.Errorf("device column %q is nil for a dcim.interface-assigned address; device context must attach here or the VM assertion below proves nothing", c)
+			}
+		}
+		if devRow["device_name"] != "leaf-01" {
+			t.Errorf("device_name = %v, want %q", devRow["device_name"], "leaf-01")
+		}
+		if devRow["device_site"] != "AMS1" {
+			t.Errorf("device_site = %v, want %q", devRow["device_site"], "AMS1")
+		}
+		if devRow["device_is_primary_ip"] != true {
+			t.Errorf("device_is_primary_ip = %v, want true (device 100's primary_ip4 is address id 1)", devRow["device_is_primary_ip"])
+		}
+
+		// The property under test: a virtualization.vminterface assignment
+		// yields interface_name and nothing else — never a device.
+		if vmRow["interface_name"] != "eth0" {
+			t.Errorf("interface_name = %v, want %q", vmRow["interface_name"], "eth0")
+		}
+		for _, c := range deviceColumns {
+			if vmRow[c] != nil {
+				t.Errorf("device column %q = %v, want nil for a VM-assigned address", c, vmRow[c])
+			}
+		}
+	})
+
+	// The end-to-end half of TestApplyAddressColumns_InterfaceColumnsRequireAnInterface:
+	// the same call resolves an interface-assigned IP and an FHRP-assigned one,
+	// so an empty interface_name on the FHRP row cannot be passed off as the
+	// frame simply not carrying interface columns.
+	t.Run("an FHRP-assigned IP keeps its address context and leaves interface_* empty", func(t *testing.T) {
+		fields := []string{"ip", "match_count", "address_dns_name", "interface_name", "interface_description", "device_name"}
+		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.6"}, fields, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		byIP := make(map[string]map[string]interface{}, len(res.Rows))
+		for _, r := range res.Rows {
+			byIP[fmt.Sprint(r["ip"])] = r
+		}
+
+		// Control: interface context provably attaches in this very call.
+		if byIP["10.0.0.1"]["interface_name"] != "Ethernet1" {
+			t.Fatalf("interface_name = %v for the interface-assigned IP; the FHRP assertion below proves nothing without this",
+				byIP["10.0.0.1"]["interface_name"])
+		}
+
+		fhrp := byIP["10.0.0.6"]
+		if fhrp == nil {
+			t.Fatalf("no row for the FHRP-assigned IP, got %v", res.Rows)
+		}
+		if fhrp["interface_name"] != nil {
+			t.Errorf("interface_name = %v, want nil — an FHRP group is not an interface", fhrp["interface_name"])
+		}
+		if fhrp["interface_description"] != nil {
+			t.Errorf("interface_description = %v, want nil — that is the FHRP group's description", fhrp["interface_description"])
+		}
+		// The row is not blanked wholesale: the address record exists and
+		// everything it says about the ADDRESS is still true and still shown.
+		if fhrp["match_count"] != float64(1) {
+			t.Errorf("match_count = %v, want 1 — the address record is real", fhrp["match_count"])
+		}
+		if fhrp["address_dns_name"] != "vip.example.net" {
+			t.Errorf("address_dns_name = %v, want %q", fhrp["address_dns_name"], "vip.example.net")
+		}
+	})
+
+	t.Run("ip is force-included in columns and rows when the caller's field list omits it", func(t *testing.T) {
+		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"device_name"}, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if len(res.Columns) == 0 || res.Columns[0] != "ip" {
+			t.Errorf("Columns = %v, want \"ip\" present (and leading)", res.Columns)
+		}
+		if len(res.Rows) != 1 || res.Rows[0]["ip"] != "10.0.0.1" {
+			t.Errorf("row missing ip: %v", res.Rows[0])
+		}
+	})
+
+	// The negative half of the degradation contract, and the one that keeps the
+	// warning worth reading: a query where every hop answered must carry no
+	// warning at all. A mechanism that cries wolf on healthy results is no better
+	// than the silence it replaced. Both IPs here have address fixtures (so no
+	// prefix fallback runs) and the device hop resolves.
+	t.Run("a fully successful resolution reports no warnings", func(t *testing.T) {
+		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.2"},
+			[]string{"ip", "device_name"}, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if len(res.Warnings) != 0 {
+			t.Errorf("Warnings = %v, want none when nothing degraded", res.Warnings)
+		}
+	})
+}
+
+// TestResolveIPs_DeviceHopFailureIsStated is the finding this test file exists
+// to close. The spec's error handling reads: "Emit rows with address and
+// interface columns populated and device columns blank, plus a warning notice
+// naming the degradation. Do not fail the query — partial context beats none,
+// provided the gap is stated." Both halves are asserted here; only the first
+// half used to hold, and a blank device_name is precisely what an IP with no
+// device looks like, so the silent version told the dashboard author the
+// opposite of the truth.
+func TestResolveIPs_DeviceHopFailureIsStated(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
+			{"id":1,"address":"10.0.0.1/32","dns_name":"leaf-01.example.net","status":{"value":"active"},
+			 "assigned_object_type":"dcim.interface",
+			 "assigned_object":{"id":9,"name":"Ethernet1","description":"uplink","device":{"id":100,"name":"leaf-01"}}}
+		]}`))
+	})
+	// The whole device hop fails. 503, not 500, so the assertion below proves the
+	// status is read from the response rather than hardcoded.
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"detail":"upstream unavailable"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"},
+		[]string{"ip", "address_dns_name", "interface_name", "device_name", "device_site"}, 0)
+
+	// Half one: the query does not fail, and address+interface context survives.
+	if err != nil {
+		t.Fatalf("a device-hop failure must not fail the query: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(res.Rows))
+	}
+	row := res.Rows[0]
+	if row["address_dns_name"] != "leaf-01.example.net" {
+		t.Errorf("address_dns_name = %v, want the address hop's value to survive", row["address_dns_name"])
+	}
+	if row["interface_name"] != "Ethernet1" {
+		t.Errorf("interface_name = %v, want the interface context to survive", row["interface_name"])
+	}
+	if row["device_name"] != nil || row["device_site"] != nil {
+		t.Errorf("device columns = %v/%v, want blank", row["device_name"], row["device_site"])
+	}
+
+	// Half two: the gap is stated, and stated well enough to act on.
+	if len(res.Warnings) != 1 {
+		t.Fatalf("Warnings = %#v, want exactly one naming the device-hop failure", res.Warnings)
+	}
+	w := res.Warnings[0]
+	for _, want := range []string{"device", "device_*", "503", "not because"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warning %q must contain %q — a dashboard author needs to know blank device_* is a fetch failure, not absent data", w, want)
+		}
+	}
+	// The reason must not carry NetBox's raw body or the ~6 KB batched request
+	// URL into a panel notice; only the status travels.
+	for _, leak := range []string{"upstream unavailable", srv.URL} {
+		if strings.Contains(w, leak) {
+			t.Errorf("warning %q leaks upstream detail (%q) into a user-facing string", w, leak)
+		}
+	}
+}
+
+// TestResolveIPs_AddressChunkFailureIsStated is the same contract for the
+// chunk-degradation that landed in a535845: a batch that fails leaves its IPs
+// with no address record, which is byte-for-byte what an unregistered IP looks
+// like. Partial success was already tolerated; this locks in that it is also
+// reported.
+func TestResolveIPs_AddressChunkFailureIsStated(t *testing.T) {
+	ips := make([]string, 0, 1200)
+	for i := 0; i < 1200; i++ {
+		ips = append(ips, fmt.Sprintf("10.%d.%d.7", i/256, i%256))
+	}
+	chunks := chunkByBudget("address", ips, chunkBudgetBytes)
+	if len(chunks) < 3 {
+		t.Fatalf("test needs >=3 chunks to distinguish partial from total failure, got %d", len(chunks))
+	}
+
+	call := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		call++
+		if call == 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"detail":"boom"}`))
+			return
+		}
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			results = append(results, fmt.Sprintf(
+				`{"id":%d,"address":"%s/24","status":{"value":"active"},"assigned_object":null}`,
+				call*100000+len(results), a))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	// Registered so a stray fallback request would succeed rather than 404 into
+	// a second warning, which would make the "exactly one warning" assertion
+	// below pass for the wrong reason. The failed chunk's IPs must NOT reach it
+	// at all — that is TestResolveIPs_FailedChunkIsNotFallbackFodder's subject.
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), ips, []string{"ip", "address_dns_name"}, len(ips))
+	if err != nil {
+		t.Fatalf("a partial failure must not fail the query: %v", err)
+	}
+	if len(res.Rows) != len(ips) {
+		t.Fatalf("got %d rows, want one per IP (%d)", len(res.Rows), len(ips))
+	}
+	if len(res.Warnings) != 1 {
+		t.Fatalf("Warnings = %#v, want exactly one naming the address-hop failure", res.Warnings)
+	}
+	w := res.Warnings[0]
+	for _, want := range []string{"address", "500", "not because"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warning %q must contain %q", w, want)
+		}
+	}
+	// The count must be the affected IPs, not the number of failed batches:
+	// "1 of 3" would read as "one IP", understating the gap by two orders of
+	// magnitude.
+	if !strings.Contains(w, humanInt(len(chunks[1]))) {
+		t.Errorf("warning %q must name how many IPs degraded (%d), not how many batches failed",
+			w, len(chunks[1]))
+	}
+}
+
+// TestResolveIPs_FailedChunkIsNotFallbackFodder is the regression test for the
+// worst output this feature produced. An IP whose address chunk failed used to
+// get match_count 0 AND a longest-matching prefix — the exact rendering of an IP
+// that NetBox has genuinely never heard of — for a registered, interface-assigned
+// device address. Reproduced live against the demo stack: 10.20.0.1, the primary
+// IP of AMS1-leaf-01, came back as `match_count 0, prefix_cidr 10.0.0.0/8` and
+// nothing else, byte-identical to 10.10.10.50, which really does lack a record.
+//
+// Both halves are asserted because either alone still lies: a 0 match_count is a
+// positive numeric claim ("no record exists") emitted as float64 so users can
+// threshold on it, and a populated prefix_* set looks exactly like a successful
+// fallback.
+func TestResolveIPs_FailedChunkIsNotFallbackFodder(t *testing.T) {
+	// Two chunks: the first fails, the second answers. Everything about the
+	// second chunk's rows must be unaffected.
+	ips := make([]string, 0, 700)
+	for i := 0; i < 700; i++ {
+		ips = append(ips, fmt.Sprintf("10.%d.%d.7", i/256, i%256))
+	}
+	chunks := chunkByBudget("address", ips, chunkBudgetBytes)
+	if len(chunks) < 2 {
+		t.Fatalf("test needs >=2 chunks, got %d", len(chunks))
+	}
+	failedIP, okIP := chunks[0][0], chunks[1][0]
+
+	call := 0
+	var prefixAsked []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		call++
+		if call == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"detail":"boom"}`))
+			return
+		}
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			results = append(results, fmt.Sprintf(
+				`{"id":%d,"address":"%s/24","status":{"value":"active"},"assigned_object":null}`,
+				call*100000+len(results), a))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	// Answers with a real prefix, so a fallback that DID run would be visible as
+	// a populated prefix_cidr rather than silently indistinguishable from one
+	// that correctly did not.
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		prefixAsked = append(prefixAsked, r.URL.Query().Get("contains"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"id":1,"prefix":"10.0.0.0/8"}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), ips,
+		[]string{"ip", "match_count", "prefix_cidr"}, len(ips))
+	if err != nil {
+		t.Fatalf("a partial failure must not fail the query: %v", err)
+	}
+
+	byIP := map[string]map[string]interface{}{}
+	for _, r := range res.Rows {
+		byIP[r["ip"].(string)] = r
+	}
+
+	got := byIP[failedIP]
+	if got == nil {
+		t.Fatalf("no row for %s", failedIP)
+	}
+	if got["match_count"] != nil {
+		t.Errorf("match_count for an IP whose lookup failed = %v, want nil — 0 asserts that NetBox holds no record, which is exactly what is unknown", got["match_count"])
+	}
+	if got["prefix_cidr"] != nil {
+		t.Errorf("prefix_cidr for an IP whose lookup failed = %v, want nil — the fallback's precondition (no address record) was never established", got["prefix_cidr"])
+	}
+	for _, asked := range prefixAsked {
+		if asked == failedIP {
+			t.Errorf("the prefix fallback was queried for %s, whose address lookup failed", failedIP)
+		}
+	}
+
+	// The surviving chunk is untouched: this is a per-IP gap, not a per-query one.
+	if ok := byIP[okIP]; ok == nil || ok["match_count"] != float64(1) {
+		t.Errorf("match_count for an IP in a SUCCESSFUL chunk = %v, want 1", byIP[okIP]["match_count"])
+	}
+
+	// And the gap is stated, naming the two columns that mislead.
+	if len(res.Warnings) != 1 {
+		t.Fatalf("Warnings = %#v, want exactly one naming the address-hop failure", res.Warnings)
+	}
+	for _, want := range []string{"match_count", "prefix_*", "not because"} {
+		if !strings.Contains(res.Warnings[0], want) {
+			t.Errorf("warning %q must name %q", res.Warnings[0], want)
+		}
+	}
+}
+
+// TestCanonicalIP covers the spelling collapse both the request and the index
+// depend on. IPv4 and already-canonical input must be untouched — they are the
+// overwhelming majority of real traffic and were never broken.
+func TestCanonicalIP(t *testing.T) {
+	cases := map[string]string{
+		// unchanged: IPv4, canonical IPv6, and the masked forms of both
+		"10.0.0.5":        "10.0.0.5",
+		"10.0.0.5/24":     "10.0.0.5",
+		"  10.0.0.5/32  ": "10.0.0.5",
+		"2001:db8::1":     "2001:db8::1",
+		"2001:db8::1/64":  "2001:db8::1",
+		// uppercase
+		"2001:DB8:85A3::8A2E:370:7334":    "2001:db8:85a3::8a2e:370:7334",
+		"2001:DB8:85A3::8A2E:370:7334/64": "2001:db8:85a3::8a2e:370:7334",
+		// zero-expanded
+		"2001:0db8:85a3:0000:0000:8a2e:0370:7334": "2001:db8:85a3::8a2e:370:7334",
+		// IPv4-mapped IPv6 denotes the same record NetBox stores as IPv4
+		"::ffff:10.0.0.5": "10.0.0.5",
+		// unparseable input keeps the old bare-slice behaviour
+		"not-an-ip":    "not-an-ip",
+		"leaf01.dc/24": "leaf01.dc",
+		"":             "",
+	}
+	for in, want := range cases {
+		if got := canonicalIP(in); got != want {
+			t.Errorf("canonicalIP(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestResolveIPs_NonCanonicalFormsResolve is the end-to-end proof for B3. The
+// mock deliberately matches ?address= LITERALLY, exactly as NetBox's filter does
+// — so a request that still sent the caller's spelling gets nothing back, and
+// the test fails on the request side rather than passing by accident on a lenient
+// stub. The records it returns are spelled NetBox's way, so a lookup key that
+// still kept the caller's spelling fails on the index side too.
+//
+// Before this, all five non-canonical rows below came back completely blank,
+// which docs/RECIPES.md teaches readers to interpret as external traffic.
+func TestResolveIPs_NonCanonicalFormsResolve(t *testing.T) {
+	// What NetBox actually holds, in NetBox's own spelling.
+	stored := map[string]string{
+		"2001:db8:85a3::8a2e:370:7334": `{"id":1,"address":"2001:db8:85a3::8a2e:370:7334/64","dns_name":"v6.example.net","status":{"value":"active"},"assigned_object":null}`,
+		"10.20.0.1":                    `{"id":2,"address":"10.20.0.1/24","dns_name":"leaf01.example.net","status":{"value":"active"},"assigned_object":null}`,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			if fx, ok := stored[a]; ok { // literal match, like NetBox
+				results = append(results, fx)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	// A containing prefix exists for every one of these, so a row that failed to
+	// resolve would fall through and be visible as a prefix row rather than as
+	// an ambiguous blank.
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"id":9,"prefix":"10.0.0.0/8"}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cases := []struct{ name, in, wantDNS string }{
+		{"v6 canonical (unchanged)", "2001:db8:85a3::8a2e:370:7334", "v6.example.net"},
+		{"v6 uppercase", "2001:DB8:85A3::8A2E:370:7334", "v6.example.net"},
+		{"v6 uppercase + mask", "2001:DB8:85A3::8A2E:370:7334/64", "v6.example.net"},
+		{"v6 zero-expanded", "2001:0db8:85a3:0000:0000:8a2e:0370:7334", "v6.example.net"},
+		{"v6 expanded + mismatched mask", "2001:0DB8:85A3:0000:0000:8A2E:0370:7334/128", "v6.example.net"},
+		{"v4 bare (unchanged)", "10.20.0.1", "leaf01.example.net"},
+		{"v4 mask /32 vs stored /24", "10.20.0.1/32", "leaf01.example.net"},
+		{"v4 mask /8 vs stored /24", "10.20.0.1/8", "leaf01.example.net"},
+		{"v4 mask /25 vs stored /24", "10.20.0.1/25", "leaf01.example.net"},
+	}
+
+	// Each form is resolved ALONE. Sending them together would let one spelling
+	// pull another's record into the shared by-host bucket, which is precisely
+	// the batch-order dependence that made this bug intermittent: "10.20.0.1/32"
+	// resolved only when "10.20.0.1" happened to be in the same query.
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := p.ResolveIPs(context.Background(), []string{tc.in},
+				[]string{"ip", "match_count", "address_dns_name", "prefix_cidr"}, 10)
+			if err != nil {
+				t.Fatalf("ResolveIPs: %v", err)
+			}
+			row := res.Rows[0]
+			if row["address_dns_name"] != tc.wantDNS {
+				t.Errorf("address_dns_name = %v, want %q — the address record was not found", row["address_dns_name"], tc.wantDNS)
+			}
+			if row["match_count"] != float64(1) {
+				t.Errorf("match_count = %v, want 1", row["match_count"])
+			}
+			// A resolved IP must not also carry the prefix fallback.
+			if row["prefix_cidr"] != nil {
+				t.Errorf("prefix_cidr = %v, want nil for an IP with an address record", row["prefix_cidr"])
+			}
+			// The caller's own spelling is what the row is keyed by: it is the
+			// documented Grafana join key, so rewriting it would break the join
+			// against the user's flow data.
+			if row["ip"] != tc.in {
+				t.Errorf("ip = %v, want the caller's spelling %q", row["ip"], tc.in)
+			}
+		})
+	}
+}
+
+// TestResolveIPs_AmbiguityIsNotedWithoutMatchCount: match_count is opt-in, so a
+// user who deselects it sees one arbitrary-looking device for an anycast address
+// with nothing to suggest a pick happened at all. The note carries that fact
+// independently of the column.
+func TestResolveIPs_AmbiguityIsNotedWithoutMatchCount(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			if a == "10.0.0.2" { // anycast: three distinct records
+				for id := 21; id <= 23; id++ {
+					results = append(results, fmt.Sprintf(
+						`{"id":%d,"address":"10.0.0.2/32","status":{"value":"active"},"assigned_object":null}`, id))
+				}
+				continue
+			}
+			results = append(results, fmt.Sprintf(
+				`{"id":1,"address":"%s/32","status":{"value":"active"},"assigned_object":null}`, a))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
+
+	// match_count deliberately NOT requested.
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.2"},
+		[]string{"ip", "address_dns_name"}, 10)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Notes) != 1 {
+		t.Fatalf("Notes = %#v, want one stating the ambiguous pick", res.Notes)
+	}
+	for _, want := range []string{"1 of 2", "match_count", "picked"} {
+		if !strings.Contains(res.Notes[0], want) {
+			t.Errorf("note %q must contain %q", res.Notes[0], want)
+		}
+	}
+	// It is a NOTE, not a warning: the rows are complete and correct, and a
+	// warning that fires on a routine correct result teaches users to ignore
+	// warnings.
+	if len(res.Warnings) != 0 {
+		t.Errorf("Warnings = %#v, want none — an ambiguous pick is not a degradation", res.Warnings)
+	}
+
+	t.Run("unambiguous results carry no note", func(t *testing.T) {
+		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"ip"}, 10)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if len(res.Notes) != 0 {
+			t.Errorf("Notes = %#v, want none", res.Notes)
+		}
+	})
+}
+
+// TestResolveIPs_PrefixFallbackFailureIsStated covers the third hop. The
+// fallback's error was discarded at the same altitude as the device hop's, with
+// the same consequence: blank prefix_* columns that read as "no prefix contains
+// this IP" when the truth is "we could not ask".
+func TestResolveIPs_PrefixFallbackFailureIsStated(t *testing.T) {
+	mux := http.NewServeMux()
+	// No address record for either IP, so both go to the prefix fallback.
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	prefixCalls := 0
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		prefixCalls++
+		if prefixCalls == 1 { // one IP's fallback fails, the other's answers
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"detail":"boom"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
+			{"id":7,"prefix":"10.0.0.0/24","scope":{"id":5,"name":"AMS1","slug":"ams1"}}
+		]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.2"},
+		[]string{"ip", "prefix_cidr", "prefix_scope"}, 0)
+	if err != nil {
+		t.Fatalf("a prefix-fallback failure must not fail the query: %v", err)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(res.Rows))
+	}
+	// The IP whose fallback succeeded still gets its prefix context.
+	if res.Rows[1]["prefix_cidr"] != "10.0.0.0/24" {
+		t.Errorf("second row prefix_cidr = %v, want the surviving lookup's value", res.Rows[1]["prefix_cidr"])
+	}
+	if res.Rows[0]["prefix_cidr"] != nil {
+		t.Errorf("first row prefix_cidr = %v, want blank", res.Rows[0]["prefix_cidr"])
+	}
+	if len(res.Warnings) != 1 {
+		t.Fatalf("Warnings = %#v, want exactly one naming the prefix-hop failure", res.Warnings)
+	}
+	for _, want := range []string{"prefix_*", "1 of 2", "500", "not because"} {
+		if !strings.Contains(res.Warnings[0], want) {
+			t.Errorf("warning %q must contain %q", res.Warnings[0], want)
+		}
+	}
+}
+
+// TestResolveIPs_EmptyPrefixResultIsNotADegradation guards the distinction the
+// whole mechanism rests on. An IP that genuinely sits in no prefix is ABSENCE,
+// which blank columns already state correctly; warning about it would make the
+// warning meaningless on the day it matters.
+func TestResolveIPs_EmptyPrefixResultIsNotADegradation(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), []string{"192.0.2.1"}, []string{"ip", "prefix_cidr"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("Warnings = %v; an IP with no containing prefix is absent data, not a failure", res.Warnings)
+	}
+}
+
+// TestResolveIPs_MultipleHopFailuresAreListedSeparately checks that two
+// degradations in one query produce two distinct warnings rather than the first
+// masking the second — a dashboard author fixing only the hop they were told
+// about would still be reading blank columns from the other.
+func TestResolveIPs_MultipleHopFailuresAreListedSeparately(t *testing.T) {
+	mux := http.NewServeMux()
+	// 10.0.0.1 resolves to a device; 10.0.0.9 has no record and falls through.
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			if a == "10.0.0.1" {
+				results = append(results, `{"id":1,"address":"10.0.0.1/32","status":{"value":"active"},`+
+					`"assigned_object_type":"dcim.interface",`+
+					`"assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"}}}`)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.9"},
+		[]string{"ip", "device_name", "prefix_cidr"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Warnings) != 2 {
+		t.Fatalf("Warnings = %#v, want two (device hop and prefix fallback)", res.Warnings)
+	}
+	if !strings.Contains(res.Warnings[0], "device") {
+		t.Errorf("first warning should be the device hop (hops report in pipeline order), got %q", res.Warnings[0])
+	}
+	if !strings.Contains(res.Warnings[1], "prefix") {
+		t.Errorf("second warning should be the prefix fallback, got %q", res.Warnings[1])
+	}
+}
+
+func TestCauseText(t *testing.T) {
+	t.Run("an API error reports only the status", func(t *testing.T) {
+		err := &APIError{Status: 503, URL: "http://nb/api/dcim/devices/?id=1&id=2", Body: `{"detail":"secret"}`}
+		got := causeText(err)
+		if got != "NetBox returned HTTP 503" {
+			t.Errorf("causeText = %q", got)
+		}
+		if strings.Contains(got, "secret") || strings.Contains(got, "id=1") {
+			t.Errorf("causeText %q must not carry the body or the batched URL into a panel notice", got)
+		}
+	})
+	t.Run("a transport error gets a generic reason", func(t *testing.T) {
+		if got := causeText(errors.New("dial tcp: connection refused")); got != "NetBox could not be reached" {
+			t.Errorf("causeText = %q", got)
+		}
+	})
+}
+
+// TestDegradationScope pins the extent phrasing. "1 of 1 devices" reads as a
+// formatting bug, which is a real cost on a notice whose whole job is to be
+// believed.
+func TestDegradationScope(t *testing.T) {
+	cases := []struct {
+		deg  degradation
+		want string
+	}{
+		{degradation{failed: 1, total: 1}, "the only device"},
+		{degradation{failed: 12, total: 12}, "all 12 devices"},
+		{degradation{failed: 330, total: 1200}, "330 of 1,200 devices"},
+	}
+	for _, tc := range cases {
+		if got := tc.deg.scope("device", "devices"); got != tc.want {
+			t.Errorf("scope(%+v) = %q, want %q", tc.deg, got, tc.want)
+		}
+	}
+}
+
+// TestHopWarningTexts pins the three sentences verbatim. They are the whole
+// deliverable of the degradation mechanism — the only thing standing between a
+// blank device_* column and a dashboard author concluding the IP has no device —
+// so they get asserted as text rather than by keyword, where a rewrite that
+// dropped the "not because" clause would still pass.
+func TestHopWarningTexts(t *testing.T) {
+	apiErr := &APIError{Status: 503, URL: "http://nb/api/dcim/devices/?id=1", Body: `{"detail":"nope"}`}
+
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{
+			name: "address hop, partial",
+			got:  addressHopWarning(degradation{failed: 330, total: 1200, cause: apiErr}),
+			// match_count and prefix_* are named alongside the three namespaces
+			// the hop fills. They are the two that actively mislead: match_count
+			// 0 asserts "NetBox holds no record" and a prefix_cidr looks like a
+			// successful longest-match fallback, on an IP NetBox knows.
+			want: "Address lookup failed for 330 of 1,200 IPs — NetBox returned HTTP 503. " +
+				"The match_count, address_*, interface_*, device_* and prefix_* columns on the affected rows are empty " +
+				"because the lookup failed, not because NetBox has no record for those IPs.",
+		},
+		{
+			name: "device hop, total",
+			got:  deviceHopWarning(degradation{failed: 12, total: 12, cause: apiErr}),
+			want: "Device lookup failed for all 12 devices — NetBox returned HTTP 503. " +
+				"The device_* columns on the affected rows are blank because the lookup failed, " +
+				"not because those IPs have no device.",
+		},
+		{
+			name: "prefix fallback, single IP",
+			got:  prefixHopWarning(degradation{failed: 1, total: 1, cause: errors.New("dial tcp")}),
+			want: "Prefix lookup failed for the only IP with no address record — NetBox could not be reached. " +
+				"The prefix_* columns on the affected rows are blank because the lookup failed, " +
+				"not because no prefix contains those IPs.",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("warning text drifted:\n got: %s\nwant: %s", tc.got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHumanInt(t *testing.T) {
+	cases := map[int]string{0: "0", 7: "7", 999: "999", 1000: "1,000", 12345: "12,345", 1234567: "1,234,567"}
+	for in, want := range cases {
+		if got := humanInt(in); got != want {
+			t.Errorf("humanInt(%d) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestWantsGroup pins the hop-selection predicate, including the one case that
+// looks like an exception and is not: device_is_primary_ip is a device_* column
+// and must keep the device hop alive on its own.
+func TestWantsGroup(t *testing.T) {
+	cases := []struct {
+		fields []string
+		group  string
+		want   bool
+	}{
+		{defaultIPEnrichFields, "prefix_", false}, // the finding: no prefix_* in the default selection
+		{defaultIPEnrichFields, "device_", true},
+		{[]string{"ip", "device_is_primary_ip"}, "device_", true},
+		{[]string{"ip", "match_count"}, "device_", false},
+		{[]string{"ip", "match_count"}, "prefix_", false},
+		{[]string{"ip", "address_dns_name", "interface_name"}, "device_", false},
+		{[]string{"ip", "prefix_cidr"}, "prefix_", true},
+		{nil, "prefix_", false},
+	}
+	for _, tc := range cases {
+		if got := wantsGroup(tc.fields, tc.group); got != tc.want {
+			t.Errorf("wantsGroup(%v, %q) = %v, want %v", tc.fields, tc.group, got, tc.want)
+		}
+	}
+}
+
+// TestResolveIPs_PrefixFallbackOnlyRunsWhenSelected is the regression test for
+// the most expensive waste in this path. The fallback is SERIAL — NetBox's
+// ?contains= takes one value, so it cannot be batched — and no prefix_* column
+// is in defaultIPEnrichFields at all, yet it ran for every IP with no address
+// record and project() then discarded every column it filled. A default flow
+// panel full of external addresses paid one round trip per IP for output the
+// user never saw.
+//
+// The assertion counts REQUESTS rather than checking the output shape on
+// purpose: the projected frame looks identical either way, which is exactly why
+// this survived so long.
+func TestResolveIPs_PrefixFallbackOnlyRunsWhenSelected(t *testing.T) {
+	prefixCalls := 0
+	mux := http.NewServeMux()
+	// No IP has an address record, so every one of them reaches the fallback arm.
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		prefixCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
+			{"id":7,"prefix":"10.0.0.0/24","scope":{"id":5,"name":"AMS1","slug":"ams1"}}
+		]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	unknown := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+
+	t.Run("the default field selection makes no prefix request at all", func(t *testing.T) {
+		prefixCalls = 0
+		res, err := p.ResolveIPs(context.Background(), unknown, nil, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if prefixCalls != 0 {
+			t.Errorf("prefix requests = %d, want 0: no prefix_* column is in the default selection, so every one of them is a serial round trip whose output project() throws away", prefixCalls)
+		}
+		if len(res.Rows) != len(unknown) {
+			t.Fatalf("got %d rows, want %d — skipping the hop must not drop rows", len(res.Rows), len(unknown))
+		}
+		// match_count comes from the address index, not the prefix hop, so
+		// skipping the hop must leave it exactly as it was: 0 means "NetBox
+		// genuinely holds no record for this IP", which is still true here.
+		for _, row := range res.Rows {
+			if row["match_count"] != float64(0) {
+				t.Errorf("match_count = %v (%T) for %v, want float64(0) — it is read off the address index and the prefix hop plays no part in it", row["match_count"], row["match_count"], row["ip"])
+			}
+		}
+	})
+
+	t.Run("a non-prefix explicit selection makes no prefix request either", func(t *testing.T) {
+		prefixCalls = 0
+		if _, err := p.ResolveIPs(context.Background(), unknown,
+			[]string{"ip", "match_count", "address_dns_name", "device_name"}, 0); err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if prefixCalls != 0 {
+			t.Errorf("prefix requests = %d, want 0", prefixCalls)
+		}
+	})
+
+	t.Run("selecting a prefix_* column restores the fallback exactly", func(t *testing.T) {
+		prefixCalls = 0
+		res, err := p.ResolveIPs(context.Background(), unknown, []string{"ip", "prefix_cidr", "prefix_scope"}, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if prefixCalls != len(unknown) {
+			t.Errorf("prefix requests = %d, want %d — one per IP with no address record", prefixCalls, len(unknown))
+		}
+		for _, row := range res.Rows {
+			if row["prefix_cidr"] != "10.0.0.0/24" || row["prefix_scope"] != "AMS1" {
+				t.Errorf("row %v = %v, want the containing prefix's columns", row["ip"], row)
+			}
+		}
+	})
+}
+
+// TestResolveIPs_SkippedPrefixHopCannotWarn is the other half of finding 1. A
+// hop that never ran has nothing to report, and a warning naming prefix_*
+// columns the frame does not even contain is the same noise this branch spent
+// several commits removing — worse here, because on an alerting path a Warning
+// is a hard failure (see provider.Result.Warnings), so a broken prefix endpoint
+// would break rules that never asked for a prefix column.
+func TestResolveIPs_SkippedPrefixHopCannotWarn(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	// Every prefix lookup fails. If the hop runs, this is a guaranteed warning.
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"detail":"boom"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.2"}, nil, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("Warnings = %#v, want none: no prefix_* column was requested, so no prefix_* column is blank", res.Warnings)
+	}
+
+	// Control: the same broken endpoint DOES warn once a prefix column is asked
+	// for, so the assertion above cannot pass because warnings stopped working.
+	res, err = p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.2"}, []string{"ip", "prefix_cidr"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "prefix_*") {
+		t.Errorf("Warnings = %#v, want one naming the prefix hop when prefix_cidr is selected", res.Warnings)
+	}
+}
+
+// TestResolveIPs_DeviceHopOnlyRunsWhenSelected is finding 2: the batched device
+// request was made whatever the caller selected. Wasted work for an address-only
+// or prefix-only query, and worse than wasted when the token lacks DCIM
+// permission or the endpoint is down — an otherwise complete result then carried
+// a warning about blank device_* columns that were not in the output.
+func TestResolveIPs_DeviceHopOnlyRunsWhenSelected(t *testing.T) {
+	deviceCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
+			{"id":1,"address":"10.0.0.1/32","dns_name":"leaf01.example.net","status":{"value":"active"},
+			 "assigned_object_type":"dcim.interface",
+			 "assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"}}}
+		]}`))
+	})
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		deviceCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
+			{"id":100,"name":"leaf-01","site":{"id":5,"name":"AMS1","slug":"ams1"},
+			 "status":{"value":"active","label":"Active"},"primary_ip4":{"id":1,"address":"10.0.0.1/32"}}
+		]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	t.Run("an address/interface-only selection makes no device request", func(t *testing.T) {
+		deviceCalls = 0
+		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"},
+			[]string{"ip", "match_count", "address_dns_name", "interface_name"}, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if deviceCalls != 0 {
+			t.Errorf("device requests = %d, want 0: no device_* column was selected, so the hop's whole output would be discarded", deviceCalls)
+		}
+		// The columns that were selected are unaffected by the skip.
+		if res.Rows[0]["interface_name"] != "Ethernet1" || res.Rows[0]["address_dns_name"] != "leaf01.example.net" {
+			t.Errorf("row = %v, want address_* and interface_* still populated", res.Rows[0])
+		}
+	})
+
+	t.Run("a prefix-only selection makes no device request", func(t *testing.T) {
+		deviceCalls = 0
+		if _, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"ip", "prefix_cidr"}, 0); err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if deviceCalls != 0 {
+			t.Errorf("device requests = %d, want 0", deviceCalls)
+		}
+	})
+
+	t.Run("selecting device_name restores the hop", func(t *testing.T) {
+		deviceCalls = 0
+		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"ip", "device_name", "device_site"}, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if deviceCalls != 1 {
+			t.Errorf("device requests = %d, want 1", deviceCalls)
+		}
+		if res.Rows[0]["device_name"] != "leaf-01" || res.Rows[0]["device_site"] != "AMS1" {
+			t.Errorf("row = %v, want device context", res.Rows[0])
+		}
+	})
+
+	// device_is_primary_ip is the trap: it is a device_* column that does not
+	// read like one, and it is in the default selection. Getting the prefix test
+	// wrong here would silently disable device context for every default query.
+	t.Run("device_is_primary_ip alone counts as a device column", func(t *testing.T) {
+		deviceCalls = 0
+		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"ip", "device_is_primary_ip"}, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if deviceCalls != 1 {
+			t.Fatalf("device requests = %d, want 1: device_is_primary_ip needs the device hop", deviceCalls)
+		}
+		if res.Rows[0]["device_is_primary_ip"] != true {
+			t.Errorf("device_is_primary_ip = %v, want true", res.Rows[0]["device_is_primary_ip"])
+		}
+	})
+
+	t.Run("the default selection still makes the device request", func(t *testing.T) {
+		deviceCalls = 0
+		if _, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, nil, 0); err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if deviceCalls != 1 {
+			t.Errorf("device requests = %d, want 1: the default selection contains device_* columns", deviceCalls)
+		}
+	})
+}
+
+// TestResolveIPs_SkippedDeviceHopCannotWarn is the device twin of the prefix
+// case: a broken (or forbidden) dcim/devices endpoint must not put a warning on
+// a result that has no device_* column to be blank — which on an alerting path
+// is the difference between a rule evaluating and a rule erroring out.
+func TestResolveIPs_SkippedDeviceHopCannotWarn(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
+			{"id":1,"address":"10.0.0.1/32","dns_name":"leaf01.example.net","status":{"value":"active"},
+			 "assigned_object_type":"dcim.interface",
+			 "assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"}}}
+		]}`))
+	})
+	// The token cannot read DCIM. If the hop runs, this is a guaranteed warning.
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail":"You do not have permission to perform this action."}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"},
+		[]string{"ip", "address_dns_name", "interface_name"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("Warnings = %#v, want none: no device_* column was requested, so no device_* column is blank", res.Warnings)
+	}
+
+	// Control: the same forbidden endpoint DOES warn once device_name is asked
+	// for, so the assertion above cannot pass for the wrong reason.
+	res, err = p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"ip", "device_name"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "device_*") {
+		t.Errorf("Warnings = %#v, want one naming the device hop when device_name is selected", res.Warnings)
+	}
+}
+
+// TestResolveIPs_DeclaresColumnTypes is the provider half of finding 3.
+// device_is_primary_ip is a boolean by schema, not by whatever this refresh's IP
+// set happened to resolve, and the frame layer cannot know that by scanning
+// values that are all null. The declaration is what carries it across the seam.
+func TestResolveIPs_DeclaresColumnTypes(t *testing.T) {
+	mux := http.NewServeMux()
+	// Nothing resolves: every device_* value in the result will be nil, which is
+	// the exact situation the declaration exists for.
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	res, err := p.ResolveIPs(context.Background(), []string{"8.8.8.8"}, nil, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if res.Rows[0]["device_is_primary_ip"] != nil {
+		t.Fatalf("fixture broken: device_is_primary_ip = %v, want nil for an unresolved IP", res.Rows[0]["device_is_primary_ip"])
+	}
+	if got := res.ColumnTypes["device_is_primary_ip"]; got != provider.FieldTypeBoolean {
+		t.Errorf("ColumnTypes[device_is_primary_ip] = %q, want %q", got, provider.FieldTypeBoolean)
+	}
+	if got := res.ColumnTypes["match_count"]; got != provider.FieldTypeNumber {
+		t.Errorf("ColumnTypes[match_count] = %q, want %q", got, provider.FieldTypeNumber)
+	}
+
+	// Declarations describe the columns the frame actually has: a field list
+	// without either of them declares nothing, so no consumer can be told about a
+	// column that is not there.
+	res, err = p.ResolveIPs(context.Background(), []string{"8.8.8.8"}, []string{"ip", "address_dns_name"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.ColumnTypes) != 0 {
+		t.Errorf("ColumnTypes = %v, want none when no declared column is selected", res.ColumnTypes)
+	}
+}
+
+// recordingAddressServer echoes an address record per requested ?address= and
+// keeps every raw query string it was sent, so a test can assert on the SHAPE of
+// the requests and not just their answers.
+func recordingAddressServer(t *testing.T) (*httptest.Server, *[]string) {
+	t.Helper()
+	var queries []string
+	ids := map[string]int{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			h := hostOf(a)
+			id, ok := ids[h]
+			if !ok {
+				id = len(ids) + 1
+				ids[h] = id
+			}
+			results = append(results, fmt.Sprintf(
+				`{"id":%d,"address":"%s/24","status":{"value":"active"},`+
+					`"assigned_object_type":"dcim.interface",`+
+					`"assigned_object":{"id":%d,"display":"Ethernet%d"}}`, id, h, id, id))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, &queries
+}
+
+// TestResolveIPs_MalformedValuesDoNotConsumeTheBatchBudget pins the reason
+// malformed values are filtered out of the batch, which is NOT error isolation:
+// NetBox answers an invalid ?address= with HTTP 200 and count 0, so nothing is
+// poisoned by sending one. What sending one costs is the 6144-byte chunk budget
+// — junk in an interpolated $flow_ips variable pushes legitimate addresses into
+// an extra request, and nearer the ~8 KB server ceiling, for a match that cannot
+// happen.
+//
+// The valid set here is sized to fill exactly one chunk, so the junk is the only
+// thing that can force a second. The rows must come out identical either way:
+// the malformed inputs still get a row, still report match_count 0, and still
+// carry blank context columns.
+func TestResolveIPs_MalformedValuesDoNotConsumeTheBatchBudget(t *testing.T) {
+	fields := []string{"ip", "match_count", "interface_name"}
+
+	// Fill one chunk to the brim with valid, distinct addresses.
+	var valid []string
+	used := 0
+	for a := 0; a < 256 && used >= 0; a++ {
+		for b := 0; b < 256; b++ {
+			ip := fmt.Sprintf("10.20.%d.%d", a, b)
+			cost := len("address") + len(url.QueryEscape(ip)) + 2
+			if used+cost > chunkBudgetBytes {
+				used = -1
+				break
+			}
+			used += cost
+			valid = append(valid, ip)
+		}
+	}
+	if n := len(chunkByBudget("address", valid, chunkBudgetBytes)); n != 1 {
+		t.Fatalf("fixture: the valid set needs exactly 1 chunk, got %d", n)
+	}
+
+	// Junk from the classes verified live against NetBox 4.4.10 — every one of
+	// them HTTP 200 with count 0. Spliced into the middle so the split, if it
+	// happened, would fall between valid addresses.
+	//
+	// A nonsense MASK ("10.0.0.1/99") is deliberately not in this list. The mask
+	// is not part of the identity NetBox matches on, so canonicalIP drops it and
+	// sends the host — which is a real address that can really match. Filtering on
+	// anything but the host would change an answer rather than save a byte.
+	junk := []string{"not-an-ip", "999.999.999.999", "2001:zzzz::1", "10.0.0.999", "no.such.host", "%%%"}
+	mid := len(valid) / 2
+	mixed := append(append(append([]string{}, valid[:mid]...), junk...), valid[mid:]...)
+	if n := len(chunkByBudget("address", mixed, chunkBudgetBytes)); n != 2 {
+		t.Fatalf("fixture: junk must overflow the chunk to prove anything, got %d chunk(s)", n)
+	}
+
+	srv, queries := recordingAddressServer(t)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
+	mixedRes, err := p.ResolveIPs(context.Background(), mixed, fields, MaxLimit)
+	if err != nil {
+		t.Fatalf("ResolveIPs(mixed): %v", err)
+	}
+
+	if len(*queries) != 1 {
+		t.Errorf("requests = %d, want 1 — malformed values must not consume chunk budget", len(*queries))
+	}
+	for i, q := range *queries {
+		for _, j := range junk {
+			if strings.Contains(q, url.QueryEscape(j)) {
+				t.Errorf("request %d carries the unmatchable value %q", i, j)
+			}
+		}
+	}
+
+	cleanSrv, cleanQueries := recordingAddressServer(t)
+	cleanRes, err := New(cleanSrv.URL, "test-token", &http.Client{Timeout: 10 * time.Second}).
+		ResolveIPs(context.Background(), valid, fields, MaxLimit)
+	if err != nil {
+		t.Fatalf("ResolveIPs(valid): %v", err)
+	}
+	if len(*queries) != len(*cleanQueries) {
+		t.Errorf("mixed sent %d request(s), junk-free sent %d — they must cost the same",
+			len(*queries), len(*cleanQueries))
+	}
+
+	// Byte-identical rows for every valid input, and a row for every input.
+	if len(mixedRes.Rows) != len(mixed) {
+		t.Fatalf("rows = %d, want %d — every input keeps its row", len(mixedRes.Rows), len(mixed))
+	}
+	byIP := map[string]map[string]interface{}{}
+	for _, row := range mixedRes.Rows {
+		byIP[fmt.Sprint(row["ip"])] = row
+	}
+	for _, row := range cleanRes.Rows {
+		ip := fmt.Sprint(row["ip"])
+		got, ok := byIP[ip]
+		if !ok {
+			t.Fatalf("%s lost its row when junk was present", ip)
+		}
+		for _, f := range fields {
+			if got[f] != row[f] {
+				t.Errorf("%s.%s = %v with junk, %v without", ip, f, got[f], row[f])
+			}
+		}
+	}
+	// The junk rows themselves are unchanged from what a sent-and-unmatched
+	// value produced: present, counted at zero, and blank. Not a warning, not a
+	// note — a malformed value is not an error condition.
+	for _, j := range junk {
+		row, ok := byIP[j]
+		if !ok {
+			t.Fatalf("%q lost its row", j)
+		}
+		if row["match_count"] != float64(0) {
+			t.Errorf("%q match_count = %v, want 0", j, row["match_count"])
+		}
+		if row["interface_name"] != nil {
+			t.Errorf("%q interface_name = %v, want nil", j, row["interface_name"])
+		}
+	}
+	if len(mixedRes.Warnings) != 0 || len(mixedRes.Notes) != 0 {
+		t.Errorf("malformed input must not raise a warning or note; got %v / %v",
+			mixedRes.Warnings, mixedRes.Notes)
+	}
+}

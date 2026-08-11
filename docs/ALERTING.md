@@ -96,7 +96,7 @@ Tips:
 ## Recipe B: "Who do I page?"
 
 Resolution order for the owner/contact of an alerting device, using NetBox
-primitives that exist across the supported range (NetBox ≥ 4.1):
+primitives that exist across the supported range (NetBox ≥ 4.2):
 
 1. **Device contacts**: query `tenancy/contact-assignments` filtered by the
    device (contacts are assigned with roles; prefer an "emergency" or
@@ -108,7 +108,7 @@ primitives that exist across the supported range (NetBox ≥ 4.1):
 On **NetBox 4.5+** the `Owner` model (sets of users/groups responsible for an
 object) is available as an `owner` field on most objects: prefer the explicit
 owner when present, then fall back to the contact chain above. Owner-based
-steps do nothing on 4.1 through 4.4.
+steps do nothing on 4.2 through 4.4.
 
 In dashboards, surface this as a table panel next to the alert list: a
 contact-assignments query filtered by `$device`, showing contact name, role,

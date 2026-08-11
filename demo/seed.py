@@ -202,6 +202,96 @@ for slug in sites:
         label = f"{slug.upper()}-{a_suffix} {a_ifname} <-> {slug.upper()}-{b_suffix} {b_ifname}"
         cable(a_id, b_id, label)
 
+print("== ip enrichment fixtures ==")
+# Each block is labelled with the resolver branch it feeds, so a failing test
+# points straight at the fixture behind it. Interfaces are reused via goc()
+# rather than POSTed: seed.py's LINKS table already creates Ethernet1 on the
+# spine and leaf devices, and NetBox enforces a unique (device, name).
+
+_ams = "ams1"
+_leaf1 = devices[(_ams, "leaf-01")]
+_leaf2 = devices[(_ams, "leaf-02")]
+_spine1 = devices[(_ams, "spine-01")]
+
+
+def _iface(dev_id, name, label):
+    return goc("dcim/interfaces", {"device_id": dev_id, "name": name},
+               {"device": dev_id, "name": name, "type": "1000base-t"}, label)
+
+
+_if_leaf1 = _iface(_leaf1, "Ethernet1", "AMS1-leaf-01 Ethernet1")
+_if_leaf2 = _iface(_leaf2, "Ethernet1", "AMS1-leaf-02 Ethernet1")
+_if_spine1 = _iface(_spine1, "Ethernet1", "AMS1-spine-01 Ethernet1")
+
+# Case: assigned IP that is also the device's primary IP.
+_ip_primary = goc("ipam/ip-addresses", {"address": "10.20.0.1/24"},
+                  {"address": "10.20.0.1/24", "dns_name": "leaf01.example.net",
+                   "assigned_object_type": "dcim.interface",
+                   "assigned_object_id": _if_leaf1}, "10.20.0.1/24 (primary)")
+_code, _data = req("PATCH", f"dcim/devices/{_leaf1}/", {"primary_ip4": _ip_primary})
+if _code not in (200, 201):
+    print(f"  ERROR setting primary_ip4 on device {_leaf1}: {_code} {_data}")
+    sys.exit(1)
+print(f"  ~ dcim/devices             AMS1-leaf-01 primary_ip4 -> {_ip_primary}")
+
+# Case: assigned but NOT primary (second address on the same interface).
+goc("ipam/ip-addresses", {"address": "10.20.0.2/24"},
+    {"address": "10.20.0.2/24", "assigned_object_type": "dcim.interface",
+     "assigned_object_id": _if_leaf1}, "10.20.0.2/24 (non-primary)")
+
+# Case: IPv6 — guards the byte-budget chunker.
+goc("ipam/ip-addresses", {"address": "2001:db8:85a3::8a2e:370:7334/64"},
+    {"address": "2001:db8:85a3::8a2e:370:7334/64",
+     "assigned_object_type": "dcim.interface",
+     "assigned_object_id": _if_leaf2}, "2001:db8:85a3::8a2e:370:7334/64")
+
+# Case: NAT pair.
+_nat_inside = goc("ipam/ip-addresses", {"address": "192.168.50.10/24"},
+                  {"address": "192.168.50.10/24"}, "192.168.50.10/24 (nat inside)")
+goc("ipam/ip-addresses", {"address": "203.0.113.10/32"},
+    {"address": "203.0.113.10/32", "dns_name": "www.example.net",
+     "nat_inside": _nat_inside}, "203.0.113.10/32 (nat outside)")
+
+# Cases: VIP (match_count 2) and anycast (match_count 3). goc() is deliberately
+# NOT used: it keys on address alone and would collapse these to one record,
+# silently turning match_count into 1 and making the ambiguity tests pass
+# vacuously. Idempotency is preserved by checking for this exact
+# (address, interface) pair first. NetBox exempts the anycast/vip/vrrp/hsrp/
+# glbp/carp roles from ENFORCE_GLOBAL_UNIQUE, so the duplicates are accepted.
+def _shared_ip(address, role, iface_id, label):
+    code, data = req("GET", f"ipam/ip-addresses/?address={address}&interface_id={iface_id}")
+    if code == 200 and data.get("count", 0) > 0:
+        print(f"  = ipam/ip-addresses        {label} -> id {data['results'][0]['id']}")
+        return data["results"][0]["id"]
+    code, data = req("POST", "ipam/ip-addresses/", {
+        "address": address, "role": role,
+        "assigned_object_type": "dcim.interface", "assigned_object_id": iface_id,
+    })
+    if code not in (200, 201):
+        print(f"  ERROR creating shared ip {label}: {code} {data}")
+        sys.exit(1)
+    print(f"  + ipam/ip-addresses        {label} -> id {data['id']}")
+    return data["id"]
+
+
+for _if, _n in ((_if_leaf1, "leaf-01"), (_if_leaf2, "leaf-02")):
+    _shared_ip("10.20.0.254/24", "vrrp", _if, f"10.20.0.254/24 vip on {_n}")
+for _if, _n in ((_if_leaf1, "leaf-01"), (_if_leaf2, "leaf-02"), (_if_spine1, "spine-01")):
+    _shared_ip("10.99.99.99/32", "anycast", _if, f"10.99.99.99/32 anycast on {_n}")
+
+# Case: VM interface — must degrade gracefully, never render as a device.
+_ct = goc("virtualization/cluster-types", {"slug": "demo"},
+          {"name": "Demo", "slug": "demo"}, "Demo cluster type")
+_cl = goc("virtualization/clusters", {"name": "demo-cluster"},
+          {"name": "demo-cluster", "type": _ct}, "demo-cluster")
+_vm = goc("virtualization/virtual-machines", {"name": "demo-vm-01"},
+          {"name": "demo-vm-01", "cluster": _cl}, "demo-vm-01")
+_vmif = goc("virtualization/interfaces", {"virtual_machine_id": _vm, "name": "eth0"},
+            {"virtual_machine": _vm, "name": "eth0"}, "demo-vm-01 eth0")
+goc("ipam/ip-addresses", {"address": "10.40.0.5/24"},
+    {"address": "10.40.0.5/24", "assigned_object_type": "virtualization.vminterface",
+     "assigned_object_id": _vmif}, "10.40.0.5/24 (vm)")
+
 print("== patch panel pass-through (AMS1) ==")
 # A dedicated leaf-02 <-> access-01 run through a patch panel — that pair has
 # no direct cable in LINKS, so the logical (path) edge across the panel is
@@ -284,10 +374,39 @@ for slug, site_id in sites.items():
     for suffix, octet in LOOPBACK_OCTET.items():
         addr = f"{base}.{octet}/24"
         dev_label = f"{slug.upper()}-{suffix}"
-        goc("ipam/ip-addresses", {"address": addr},
-            {"address": addr, "tenant": tenant, "status": "active",
-             "description": f"{dev_label} loopback"},
-            f"{addr} ({dev_label})")
+        dev_id = devices[(slug, suffix)]
+        loop_if = _iface(dev_id, "Loopback0", f"{dev_label} Loopback0")
+        ip_id = goc("ipam/ip-addresses", {"address": addr},
+                    {"address": addr, "tenant": tenant, "status": "active",
+                     "description": f"{dev_label} loopback",
+                     "assigned_object_type": "dcim.interface",
+                     "assigned_object_id": loop_if},
+                    f"{addr} ({dev_label})")
+        # goc() only writes assigned_object on the create path. These
+        # loopbacks pre-date this feature (created address-only, no
+        # assignment), so on reuse goc() would hand back that unassigned
+        # record untouched. PATCH the assignment unconditionally so a reseed
+        # of an old, already-unassigned loopback still ends up attached.
+        _code, _data = req("PATCH", f"ipam/ip-addresses/{ip_id}/",
+                            {"assigned_object_type": "dcim.interface", "assigned_object_id": loop_if})
+        if _code not in (200, 201):
+            print(f"  ERROR assigning loopback {addr} to {dev_label} Loopback0: {_code} {_data}")
+            sys.exit(1)
+        # Don't clobber a primary_ip4 a different fixture already gave this
+        # device (AMS1-leaf-01 gets 10.20.0.1/24 from the "ip enrichment
+        # fixtures" block above, precisely so it's both assigned AND primary —
+        # the resolver's central positive case). Only set the loopback as
+        # primary when the device has none yet, or already points here.
+        _code, _data = req("GET", f"dcim/devices/{dev_id}/")
+        _current = (_data.get("primary_ip4") or {}).get("id") if _code == 200 else None
+        if _current in (None, ip_id):
+            _code, _data = req("PATCH", f"dcim/devices/{dev_id}/", {"primary_ip4": ip_id})
+            if _code not in (200, 201):
+                print(f"  ERROR setting primary_ip4 on device {dev_id}: {_code} {_data}")
+                sys.exit(1)
+            print(f"  ~ dcim/devices             {dev_label} primary_ip4 -> {ip_id}")
+        else:
+            print(f"  = dcim/devices             {dev_label} primary_ip4 already {_current}, leaving it")
         seeded_ips.append(addr.split("/")[0])
 
     end_octet = RANGE_START_OCTET + cfg["range_size"] - 1

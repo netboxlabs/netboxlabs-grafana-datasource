@@ -10,10 +10,6 @@ import (
 	"github.com/netboxlabs/netbox/pkg/provider"
 )
 
-// defaultPrefixFields are the columns returned by ResolveIPs when the caller
-// does not specify any.
-var defaultPrefixFields = []string{"prefix", "site", "tenant", "role", "vrf", "vlan", "description"}
-
 // buildFilterValues turns provider filters into NetBox query params, expanding
 // CSV values (from multi-value variables) into repeated params (OR).
 func buildFilterValues(filters []provider.Filter) url.Values {
@@ -41,90 +37,6 @@ func buildFilterValues(filters []provider.Filter) url.Values {
 		}
 	}
 	return q
-}
-
-// ResolveIPs maps each input IP to the context of its longest-matching NetBox
-// prefix, returning a table keyed by "ip". Uses NetBox's `?contains=<ip>` filter,
-// which a value-equality join can't replicate.
-func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string, limit int) (*provider.Result, error) {
-	if limit <= 0 || limit > pageSize {
-		limit = 200
-	}
-	if len(fields) == 0 {
-		fields = defaultPrefixFields
-	}
-
-	columns := []string{"ip"}
-	colSeen := map[string]bool{"ip": true}
-	addCol := func(c string) {
-		if !colSeen[c] {
-			colSeen[c] = true
-			columns = append(columns, c)
-		}
-	}
-	for _, f := range fields {
-		addCol(f)
-	}
-
-	seen := map[string]bool{}
-	var rows []map[string]interface{}
-	for _, ip := range ips {
-		ip = strings.TrimSpace(ip)
-		if ip == "" || seen[ip] {
-			continue
-		}
-		seen[ip] = true
-		if len(rows) >= limit {
-			break
-		}
-
-		row := map[string]interface{}{"ip": ip}
-		q := url.Values{}
-		q.Set("contains", ip)
-		q.Set("limit", "100")
-		var page listPage
-		if err := p.client.getJSON(ctx, p.client.apiURL("ipam/prefixes", q), &page); err == nil {
-			if best := pickLongestPrefix(page.Results); best != nil {
-				if _, vals, err := flattenObject(best); err == nil {
-					for _, f := range fields {
-						if v, ok := vals[f]; ok {
-							row[f] = v
-						}
-					}
-				}
-			}
-		}
-		rows = append(rows, row)
-	}
-
-	return &provider.Result{Columns: columns, Rows: rows}, nil
-}
-
-// pickLongestPrefix returns the raw prefix object with the longest mask.
-func pickLongestPrefix(results []json.RawMessage) json.RawMessage {
-	var best json.RawMessage
-	bestLen := -1
-	for _, r := range results {
-		var o struct {
-			Prefix string `json:"prefix"`
-		}
-		if json.Unmarshal(r, &o) != nil {
-			continue
-		}
-		idx := strings.LastIndex(o.Prefix, "/")
-		if idx < 0 {
-			continue
-		}
-		l, err := strconv.Atoi(o.Prefix[idx+1:])
-		if err != nil {
-			continue
-		}
-		if l > bestLen {
-			bestLen = l
-			best = r
-		}
-	}
-	return best
 }
 
 // Topology returns devices as nodes and inter-device links as edges: logical

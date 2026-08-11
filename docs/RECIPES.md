@@ -117,33 +117,122 @@ firewall or DNS logs, …) and this plugin connected to your NetBox.
 | 10.112.128.1  | 10.113.1.7  | 48,200,113 | Dunder-Mifflin | rtr01 uplink |
 | 10.112.129.10 | 203.0.113.7 | 9,881,220  | Dunder-Mifflin |              |
 
-**3b: longest-prefix match (works for any IP)**
-
-![Longest-prefix result](../screenshots/recipes/flow-ip-lpm.png)
+**3b: IP enrichment (works for any IP)**
 
 Exact joins fail for IPs that aren't individually registered in IPAM. The
-**IP enrichment** query type instead finds each IP's longest containing prefix:
+**IP enrichment** query type resolves each IP to whatever NetBox does know about
+it — the address record, its interface and owning device, or failing that the
+longest containing prefix:
 
 1. Create a dashboard variable `flow_ips` (type **Query**, your flow datasource), e.g.
    Prometheus `label_values(flow_bytes_total, dst_ip)`. Enable **Multi-value** +
    **Include All**.
 2. Add a NetBox query: query type **IP enrichment**; in **IPs** enter
-   `${flow_ips:csv}`; pick context fields (`prefix`, `site`, `tenant`, `role`, `vlan`).
-   On **NetBox 4.2+** a prefix's site moved to a generic scope: pick `scope` instead of
-   `site` (it carries the site name).
+   `${flow_ips:csv}`; pick context fields. Which columns come back populated for a given
+   IP depends on what NetBox actually knows about that address — per row, it's always
+   exactly one of three outcomes, never a mix:
+   - **The IP is a registered address assigned to a device interface** (e.g. a loopback
+     or a routed interface): `address_*` (`address_dns_name`, …), `interface_name` and
+     `device_*` (`device_name`, `device_is_primary_ip`, …) populate. `prefix_*` stays
+     blank — the device hop already answered the question a prefix lookup would.
+   - **The IP is a registered address not assigned to any interface, or assigned to a VM
+     interface** (VMs have no NetBox device): `address_*` populates (plus `interface_name`
+     for the VM case), but `device_*` stays blank — there's no device to attach — and
+     `prefix_*` still stays blank; a matched address record never falls through to the
+     prefix lookup. NetBox also lets an address be assigned to something that is not an
+     interface at all — an **FHRP/VRRP group**, say — and `interface_*` stays blank for
+     those: there is no interface to name. `address_*` still populates, because the
+     address record itself is real.
+   - **The IP matches no address record at all**: only then does the query fall back to
+     the longest-**containing** prefix, populating `prefix_cidr`, `prefix_scope`,
+     `prefix_tenant`, `prefix_role`, `prefix_vlan`. `address_*`/`interface_*`/`device_*`
+     stay blank. There is no `prefix_site`: NetBox 4.2 replaced a prefix's `site` with a
+     generic **scope** (a site, a region or a location), surfaced here as `prefix_scope`
+     — it carries the site name for a site-scoped prefix. That replacement is also why
+     4.2 is the supported floor; see [Requirements](../README.md#requirements).
+
+   **Selecting fields is also a performance choice.** Each group of columns costs the
+   lookup that fills it, and a group you don't select is not looked up. That matters most
+   for `prefix_*`: NetBox's `?contains=` takes one address at a time, so the fallback is
+   one request per IP with no address record and cannot be batched — measured at ~20 ms
+   per IP, or ~20 s for a 1,000-IP panel of external addresses. The default field
+   selection contains no `prefix_*` column and therefore makes no prefix request at all;
+   add one only when you want prefix context. `device_*` (including
+   `device_is_primary_ip`) costs one extra batched request for the whole IP list.
 3. The result is a table keyed by `ip`. Use it standalone, or **Join by field** on `ip`
    against your flow table (rename the flow label to `ip` with an _organize fields_
    transform, or set a join key output accordingly).
+4. To carry the flow through to the **device's own metrics**, add a second target on the
+   same panel (set the panel datasource to **-- Mixed --**) and join on the device name.
+   The enrichment's `device_name` is NetBox's device name, and that is what
+   device/interface metrics are labelled with:
 
-**Expected result:**
+   - Add a Prometheus target, e.g. `device_cpu_percent` (format **Table**, **Instant**).
+     In the bundled demo it carries `device="AMS1-leaf-01"`, and so do `device_up`,
+     `interface_oper_up` and `interface_in_octets_total`.
+   - On the NetBox target, add a **Join key**: source `device_name`, output `device`
+     (transform **none**). That renames the column to match the metric's label.
+   - Add a **Join by field** transform on `device`, mode **outer**.
 
-| ip           | prefix          | site     | tenant         | role | vlan |
-| ------------ | --------------- | -------- | -------------- | ---- | ---- |
-| 10.112.128.9 | 10.112.128.0/24 | DM-Akron | Dunder-Mifflin | LAN  | 128  |
-| 203.0.113.7  |                 |          |                |      |      |
+   Verified against the bundled demo: all 10 `flow_bytes_total` `src_ip` values resolve to
+   a `device_name` that is present in Prometheus's `device` label — a 10/10 join.
 
-An empty row means NetBox has no containing prefix, which is signal too (unknown/external
-traffic).
+   **Your exporter may not label by NetBox's device name.** A real SNMP exporter typically
+   labels by `sysName`, an FQDN, or the polled management address, and none of those has to
+   equal the NetBox name. Check first with `label_values(<your metric>, device)` (or
+   `instance`). If the values differ only in form, bridge them with a join-key transform
+   rather than renaming anything in NetBox: **lowercase** for case differences, **strip
+   domain** for `leaf01.dc.example.com` → `leaf01`, or **regex** for anything else — see
+   [JOIN-KEYS.md](./JOIN-KEYS.md). If your exporter labels by management IP instead, join
+   on `ip` (see the note on `device_is_primary_ip` below).
+
+**Expected result** (real `ds/query` response against the bundled demo NetBox, contrasting
+all three outcomes):
+
+| ip           | address_dns_name    | device_name  | device_is_primary_ip | interface_name | prefix_cidr   | prefix_scope | prefix_tenant | prefix_role | prefix_vlan    |
+| ------------ | ------------------- | ------------ | --------------------- | --------------- | ------------- | ------------ | ------------- | ----------- | -------------- |
+| 10.20.0.1    | leaf01.example.net  | AMS1-leaf-01 | true                  | Ethernet1       |               |              |               |             |                |
+| 10.40.0.5    |                      |              |                       | eth0            |               |              |               |             |                |
+| 10.10.10.50  |                      |              |                       |                 | 10.10.10.0/24 | AMS1         | Grafana Demo  | LAN         | ams1-lan (110) |
+
+`10.20.0.1` is AMS1-leaf-01's primary IP on `Ethernet1` — a registered, interface-assigned
+address, so `address_*`/`interface_*`/`device_*` populate and `prefix_*` stays blank.
+`10.40.0.5` is a VM's `eth0` — a registered address with no owning NetBox device, so
+`interface_name` populates but `device_*` (and `prefix_*`) don't. `10.10.10.50` has no
+address record at all, so the query falls back to the containing prefix
+(`10.10.10.0/24`) and every address/device/interface column is blank. An IP matching
+neither an address record nor a containing prefix comes back with every context column
+blank — signal too (unknown/external traffic).
+
+**Two signals worth knowing about:**
+
+- **`device_is_primary_ip`** — whether this address is the device's primary IP: the one
+  NetBox designates as the device's management address, and therefore the one an SNMP
+  poller configured from NetBox would be pointed at. It tells you _which_ of a device's
+  several addresses this row is, which matters when a device appears more than once in a
+  flow table.
+
+  It is **not** itself a join key, and the useful join does not go through it. Whether you
+  can join on the IP at all depends on your exporter: only if it labels series with the
+  polled address (`instance="10.20.0.1"` or similar) is there anything for `ip` to match.
+  The bundled demo's exporter does not — no metric on any device or interface carries an
+  IP-shaped value on `device`, `instance`, `interface` or `job` — so on this stack the
+  device-name join in step 4 is the one that works. Check your own with
+  `label_values(<your metric>, instance)` before designing around either.
+- **`match_count`** — how many NetBox address records matched the IP, before the row you
+  see was picked. `1` is the normal case. `> 1` means either an anycast address shared by
+  several devices, or a VRRP/HSRP virtual IP shared across a redundant pair; the plugin
+  picks one match deterministically so the row is stable across queries, but a count above
+  1 is your cue that "the device" isn't unique for that address.
+
+  The pick, in order: a record **assigned to an interface** (device or VM) wins, then one
+  assigned to **anything else** (an FHRP/VRRP group, say), then a **non-deprecated**
+  status, then the **lowest NetBox id**. Interface assignment comes first because it is
+  the only kind that can fill `interface_*` and `device_*` at all — a VRRP group record
+  can describe the address but can never name a port or a device, so preferring it would
+  hand you a blank row while the answer sat in the other record. Assignment outranks
+  status for the same reason: a deprecated interface record still names the device, and
+  `address_status` shows you it's deprecated.
 
 **If it doesn't match:** exact join (3a) returning mostly empty context → your observed
 IPs aren't individually registered in IPAM; switch to 3b. Longest-prefix rows all empty →

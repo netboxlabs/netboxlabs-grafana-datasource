@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -51,7 +52,8 @@ type queryModel struct {
 	// IPs (for ip-enrichment) is a free-form list of IPs separated by commas,
 	// whitespace or newlines; supports interpolated $variables.
 	IPs string `json:"ips"`
-	// ContextFields (for ip-enrichment) selects which prefix columns to return.
+	// ContextFields (for ip-enrichment) selects which context columns to
+	// return (see IPEnrichColumns).
 	ContextFields []string `json:"contextFields"`
 	// ConnectedOnly (for topology) drops devices with no inter-device cable.
 	ConnectedOnly bool `json:"connectedOnly"`
@@ -65,7 +67,13 @@ type queryModel struct {
 }
 
 // query executes a single query and returns its data response.
-func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.DataResponse {
+//
+// fromAlert says this call is an alert-rule evaluation (see isAlertRequest). It
+// is an explicit parameter rather than something read back out of the context so
+// that every future call site is forced by the compiler to state which it is:
+// getting it wrong in the silent direction means alerting on data the query
+// itself knows is incomplete.
+func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert bool) backend.DataResponse {
 	var qm queryModel
 	if err := json.Unmarshal(q.JSON, &qm); err != nil {
 		return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err))
@@ -94,14 +102,44 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 		if len(ips) == 0 {
 			return backend.DataResponse{}
 		}
-		res, err := d.provider.ResolveIPs(ctx, ips, qm.ContextFields, qm.Limit)
+		// A join key's source has to be in the REQUEST, not just in the editor:
+		// ResolveIPs projects each row down to the fields asked for, so a source
+		// outside the context selection was gone before applyJoinKeys could read
+		// it and the output column came out empty for every row. joinOnly names
+		// the fields fetched only for that, dropped again below so the join does
+		// not silently add a column to the table. See ipEnrichFields.
+		fields, joinOnly := ipEnrichFields(qm.ContextFields, qm.JoinKeys)
+		res, err := d.provider.ResolveIPs(ctx, ips, fields, qm.Limit)
 		if err != nil {
 			return queryErrorResponse(err)
 		}
+		// Alert evaluation converts this frame to numeric-multi and drops
+		// meta.notices, so the truncation and degradation notices appended below
+		// are invisible to a rule — reproduced: 5 IPs at limit 2, reduce +
+		// threshold, HTTP 200 with no error and no notices key. A rule must
+		// therefore fail rather than evaluate on a partial or degraded answer,
+		// which is what the objects branch already does via its alertTable flag.
+		// Dashboards keep the opposite policy — partial beats none, with the gap
+		// stated in a notice — which is exactly why this is gated on fromAlert
+		// and not applied unconditionally.
+		if fromAlert {
+			if msg := truncationError(res, qm.Limit, nounIPs); msg != "" {
+				return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+			}
+			if msg := degradationError(res); msg != "" {
+				return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+			}
+		}
 		applyJoinKeys(res, qm.JoinKeys)
+		dropColumns(res, joinOnly)
 		rewriteLinks(res, d.provider.BaseURL(), d.cfg.PublicURL)
 		frame := buildFrame("ip-enrichment", res, d.provider.BaseURL())
 		frame.RefID = q.RefID
+		// Tell the user when this is only part of the answer. buildFrame always sets
+		// Meta, so appending here is safe. nounIPs, not nounObjects: an
+		// ip-enrichment Total counts the IPs that were asked about, not objects
+		// that matched — plenty of them match nothing.
+		frame.Meta.Notices = append(frame.Meta.Notices, resultNotices(res, qm.Limit, nounIPs)...)
 		return backend.DataResponse{Frames: data.Frames{frame}}
 
 	case queryTypeTopology:
@@ -159,7 +197,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 		}
 		// Grafana alert evaluation cannot see frame notices, so a truncated alert
 		// result must fail loudly instead of alerting on an arbitrary subset.
-		if msg := truncationError(res, qm.Limit); msg != "" {
+		if msg := truncationError(res, qm.Limit, nounObjects); msg != "" {
 			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 		}
 		applyJoinKeys(res, qm.JoinKeys)
@@ -185,7 +223,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery) backend.Dat
 	frame.RefID = q.RefID
 	// Tell the user when this is only part of the answer. buildFrame always sets
 	// Meta, so appending here is safe.
-	frame.Meta.Notices = append(frame.Meta.Notices, resultNotices(res, qm.Limit)...)
+	frame.Meta.Notices = append(frame.Meta.Notices, resultNotices(res, qm.Limit, nounObjects)...)
 	return backend.DataResponse{Frames: data.Frames{frame}}
 }
 
@@ -215,7 +253,46 @@ func healthErrorMessage(err error) string {
 		}
 		return fmt.Sprintf("NetBox returned HTTP %d", apiErr.Status)
 	}
-	return "Cannot reach NetBox: " + err.Error()
+	return "Cannot reach NetBox: " + upstreamDetail(err)
+}
+
+// maxUpstreamDetail bounds the free-form tail of a user-facing error. It matches
+// netbox.snippet()'s and truncateURL's cap for the same reason: these strings
+// land side by side in the same Grafana toast.
+const maxUpstreamDetail = 300
+
+// upstreamDetail renders a non-APIError upstream failure — a transport error, a
+// decode error — as a BOUNDED string that still names the actual cause.
+//
+// The APIError path was already sanitized; this one was not, and that is the
+// whole bug. A transport error is not an APIError, so it fell straight through
+// to err.Error() verbatim and netbox.truncateURL (added on this branch for
+// exactly this) never ran. Measured on the commonest failure there is — NetBox
+// unreachable, 400 IPs — the toast was 12,480 characters of repeated ?address=
+// parameters with "connection refused" at the very end.
+//
+// Head-truncating that string would have cut off the one part worth reading, so
+// a *url.Error is UNWRAPPED to its cause instead: url.Error.Error() is
+// `Get "<url>": <cause>`, and the cause ("dial tcp 172.20.0.6:9999: connect:
+// connection refused") is short, specific, and free of the request line. Errors
+// that are not url.Errors are truncated instead — they have no comparable
+// structure, and their URL, when they carry one, is already truncateURL'd at the
+// client layer.
+//
+// The raw error still reaches the operator log in full via queryErrorResponse.
+func upstreamDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		err = urlErr.Err
+	}
+	s := err.Error()
+	if len(s) > maxUpstreamDetail {
+		return s[:maxUpstreamDetail] + "…"
+	}
+	return s
 }
 
 // queryErrorMessage maps an upstream error to a concise, user-facing message so
@@ -250,7 +327,7 @@ func queryErrorMessage(err error) string {
 		}
 		return fmt.Sprintf("NetBox returned HTTP %d for this object type.", apiErr.Status)
 	}
-	return "Couldn't reach NetBox: " + err.Error()
+	return "Couldn't reach NetBox: " + upstreamDetail(err)
 }
 
 // queryErrorResponse logs the raw upstream error (sanitized) and returns a data

@@ -54,7 +54,8 @@ export interface NetBoxQuery extends DataQuery {
   objectTypes?: string[];
   /** For ip-enrichment: IPs (comma/space/newline separated; supports $variables). */
   ips?: string;
-  /** For ip-enrichment: which prefix columns to return. */
+  /** For ip-enrichment: which context columns to return — prefix, address,
+   * interface and device (see IP_CONTEXT_FIELD_GROUPS), not prefix alone. */
   contextFields?: string[];
   /** For topology: drop devices with no inter-device cable (default true). */
   connectedOnly?: boolean;
@@ -124,8 +125,95 @@ export const JOIN_KEY_TRANSFORMS: Array<{ label: string; value: string; descript
   { label: 'regex', value: 'regex', description: 'extract/replace with a regular expression' },
 ];
 
-/** Default prefix columns offered for IP enrichment. */
-export const IP_CONTEXT_FIELDS: string[] = ['prefix', 'site', 'tenant', 'role', 'vrf', 'vlan', 'description'];
+/** Context fields for the IP enrichment query, grouped by source object.
+ *  Mirrors IPEnrichColumns() in pkg/provider/netbox/ipenrich.go exactly — the
+ *  picker is a closed vocabulary, so any name offered here that the backend
+ *  cannot produce renders a permanently blank column. Keep the two in sync.
+ *  `ip` and `match_count` are not namespaced: `ip` is the documented Grafana
+ *  join key (docs/RECIPES.md) and `match_count` describes the row itself.
+ *  There is no `prefix_site` — NetBox exposes a prefix's site under `scope`.
+ *  Address has no `*_dns` NAT fields: NetBox 4.4's nested IP serializer has
+ *  no dns_name property, so nat_inside/nat_outside expose only the peer
+ *  address, not a hostname. Interface columns stop at name/description: the
+ *  embedded assigned_object is the brief serializer and carries nothing else. */
+export const IP_CONTEXT_FIELD_GROUPS: Array<{
+  label: string;
+  options: Array<{ label: string; value: string }>;
+}> = [
+  {
+    label: 'Identity',
+    options: [
+      { label: 'ip', value: 'ip' },
+      { label: 'match_count', value: 'match_count' },
+    ],
+  },
+  {
+    label: 'Prefix',
+    options: ['cidr', 'scope', 'tenant', 'role', 'vrf', 'vlan', 'description'].map((f) => ({
+      label: `prefix_${f}`,
+      value: `prefix_${f}`,
+    })),
+  },
+  {
+    label: 'Address',
+    options: ['dns_name', 'status', 'role', 'vrf', 'tenant', 'description', 'nat_inside', 'nat_outside'].map((f) => ({
+      label: `address_${f}`,
+      value: `address_${f}`,
+    })),
+  },
+  {
+    label: 'Interface',
+    options: ['name', 'description'].map((f) => ({ label: `interface_${f}`, value: `interface_${f}` })),
+  },
+  {
+    label: 'Device',
+    options: [
+      'name',
+      'role',
+      'platform',
+      'device_type',
+      'site',
+      'location',
+      'rack',
+      'tenant',
+      'status',
+      'is_primary_ip',
+    ].map((f) => ({ label: `device_${f}`, value: `device_${f}` })),
+  },
+];
+
+/** Every context field as a flat list, labelled by its full column name.
+ *
+ *  Labels are namespaced rather than group-local ("device_name", not "name")
+ *  because @grafana/ui resolves a MultiSelect's selected chips against the
+ *  option list: a bare label made the default selection render two adjacent
+ *  chips both reading "name" (device_name and interface_name), and a panel
+ *  asking for nine columns read "match_count cidr scope tenant role vlan name
+ *  is_primary_ip name". The group headings still carry the namespace, so
+ *  nothing is lost by repeating it.
+ *
+ *  This flat form is also what the join-key "source field" picker offers for an
+ *  IP-enrichment query. Those columns are a closed vocabulary this plugin
+ *  produces, NOT the fields of any NetBox object type, so populating that picker
+ *  from `resources/fields?type=ipam/prefixes` offered 29 names the frame never
+ *  contains — `scope` was suggested and yielded an empty key, while the two that
+ *  work, `prefix_scope` and `device_name`, were not offered at all. */
+export const IP_CONTEXT_FIELD_OPTIONS: Array<{ label: string; value: string }> = IP_CONTEXT_FIELD_GROUPS.flatMap(
+  (g) => g.options
+);
+
+/** What a new IP-enrichment query selects. match_count is included so an
+ *  ambiguous pick (anycast, VRRP VIPs) is visible out of the box. */
+export const DEFAULT_IP_CONTEXT_FIELDS: string[] = [
+  'ip',
+  'match_count',
+  'address_dns_name',
+  'device_name',
+  'interface_name',
+  'device_is_primary_ip',
+  'device_site',
+  'device_tenant',
+];
 
 /** NetBox filter lookup operators surfaced in the query editor. */
 // NetBox lookup operators. `value` is the lookup suffix sent to the API
@@ -203,7 +291,20 @@ export const CONJOINED_WIRE_KEYS = ['tag', 'tag_id'];
  * warning for that case (see filterWireKey, which maps 'exact' to the same
  * key as '').
  */
-export const OR_COMBINING_OPERATORS = ['', 'exact', 'ie', 'ic', 'isw', 'iew', 'regex', 'iregex', 'gt', 'gte', 'lt', 'lte'];
+export const OR_COMBINING_OPERATORS = [
+  '',
+  'exact',
+  'ie',
+  'ic',
+  'isw',
+  'iew',
+  'regex',
+  'iregex',
+  'gt',
+  'gte',
+  'lt',
+  'lte',
+];
 
 type OpOption = { label: string; value: string };
 
@@ -224,9 +325,17 @@ export function filterFieldOptionsFrom(
 export function filterOperatorsFor(filterFields: FilterField[], field: string, storedOperator: string): OpOption[] {
   const ff = filterFields.find((f) => f.name === field);
   let ops: OpOption[] =
-    filterFields.length === 0 || !ff ? FILTER_OPERATORS : FILTER_OPERATORS.filter((o) => ff.operators.includes(o.value));
+    filterFields.length === 0 || !ff
+      ? FILTER_OPERATORS
+      : FILTER_OPERATORS.filter((o) => ff.operators.includes(o.value));
   if (!ops.some((o) => o.value === storedOperator)) {
-    ops = [...ops, FILTER_OPERATORS.find((o) => o.value === storedOperator) ?? { label: storedOperator || '=', value: storedOperator }];
+    ops = [
+      ...ops,
+      FILTER_OPERATORS.find((o) => o.value === storedOperator) ?? {
+        label: storedOperator || '=',
+        value: storedOperator,
+      },
+    ];
   }
   return ops;
 }

@@ -2,25 +2,32 @@
 # NetBox-version compatibility matrix for the plugin (OBS-3516).
 #   ./demo/compat-check.sh                  -> default matrix (latest of each 4.x minor)
 #   ./demo/compat-check.sh v4.6.4-5.0.1     -> just one version
-#   COMPAT_VERSIONS="v4.1.11-3.0.2 v4.4-3.4.2" ./demo/compat-check.sh
+#   COMPAT_VERSIONS="v4.2.9-3.2.1 v4.4-3.4.2" ./demo/compat-check.sh
 # Per version: boot a minimal NetBox, provision an API token (username/password
 # via /api/users/tokens/provision/ — works on every 4.x and yields a v1 or v2
-# token as the version dictates), seed one site/device/prefix, start the
-# plugin-provisioned Grafana, then assert THROUGH GRAFANA: datasource health,
-# a devices query (with display_url), an annotations query, and ip-enrichment.
+# token as the version dictates), seed one site/device/interface/address/prefix,
+# start the plugin-provisioned Grafana, then assert THROUGH GRAFANA: datasource
+# health, a devices query (with display_url), an annotations query, and BOTH
+# ip-enrichment outcomes — the address → interface → device path and the
+# longest-prefix fallback.
 # Prints a matrix; exits non-zero if any version fails. Images are removed
-# after each run unless COMPAT_KEEP_IMAGES is set (the matrix is ~6 GB of images).
+# after each run unless COMPAT_KEEP_IMAGES is set (the matrix is ~5 GB of images).
 #
-# Known upstream caveat: NetBox v4.1.9 does not write change-log records at all
-# (netbox#18260, fixed in v4.1.10) — its annotations check fails through no
-# fault of the plugin. The default matrix uses v4.1.11.
+# The supported floor is NetBox 4.2, not 4.1, and the ip-enrichment probes are
+# what hold that line: 4.1's prefix serializer carries a `site` field and no
+# generic `scope`, so prefix_scope — the column the plugin fills from it — is
+# blank for every longest-prefix result on 4.1. Verified live: v4.1.11 has
+# `site` and no `scope`, v4.2.9 has `scope` and no `site`. The seed therefore
+# scopes its prefix to the site and the fallback probe asserts prefix_scope, so
+# dropping the floor back to 4.1 fails the matrix instead of silently shipping a
+# blank column.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NB=http://localhost:8001
 GF=http://localhost:3002
 COMPOSE=(docker compose -f demo/docker-compose.compat.yaml)
-DEFAULT_VERSIONS=(v4.1.11-3.0.2 v4.2.9-3.2.1 v4.3.7-3.3.0 v4.4-3.4.2 v4.5.9-4.0.2 v4.6.4-5.0.1)
+DEFAULT_VERSIONS=(v4.2.9-3.2.1 v4.3.7-3.3.0 v4.4-3.4.2 v4.5.9-4.0.2 v4.6.4-5.0.1)
 if [ "$#" -gt 0 ]; then
   VERSIONS=("$@")
 elif [ -n "${COMPAT_VERSIONS:-}" ]; then
@@ -75,14 +82,29 @@ wait_for() { # url tries
   return 1
 }
 
+# new_id reads the "id" out of a create response. A missing/!200 body makes
+# json.load raise, so the caller's `|| return 1` still fires: `x=$(a | b)` takes
+# the exit status of b, and b is this.
+new_id() { python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'; }
+
 seed() {
   # Explicit per-call returns for the same set -e-suspension reason as above.
-  nb_api -X POST "$NB/api/dcim/sites/" -d '{"name":"Compat Site","slug":"compat-site"}' >/dev/null || return 1
+  local site_id device_id iface_id ip_id
+  site_id=$(nb_api -X POST "$NB/api/dcim/sites/" -d '{"name":"Compat Site","slug":"compat-site"}' | new_id) || return 1
   nb_api -X POST "$NB/api/dcim/manufacturers/" -d '{"name":"Compat","slug":"compat"}' >/dev/null || return 1
   nb_api -X POST "$NB/api/dcim/device-types/" -d '{"manufacturer":{"slug":"compat"},"model":"CX-1","slug":"cx-1"}' >/dev/null || return 1
   nb_api -X POST "$NB/api/dcim/device-roles/" -d '{"name":"Router","slug":"router"}' >/dev/null || return 1
-  nb_api -X POST "$NB/api/dcim/devices/" -d '{"name":"compat-r1","site":{"slug":"compat-site"},"device_type":{"slug":"cx-1"},"role":{"slug":"router"},"status":"active"}' >/dev/null || return 1
-  nb_api -X POST "$NB/api/ipam/prefixes/" -d '{"prefix":"10.99.0.0/24","status":"active"}' >/dev/null || return 1
+  device_id=$(nb_api -X POST "$NB/api/dcim/devices/" -d '{"name":"compat-r1","site":{"slug":"compat-site"},"device_type":{"slug":"cx-1"},"role":{"slug":"router"},"status":"active"}' | new_id) || return 1
+  # Site-SCOPED prefix (scope_type/scope_id), not the 4.1 `site` field — see the
+  # floor note at the top. 10.99.0.200 has no address record, so the prefix
+  # probe below reaches it through the longest-prefix fallback.
+  nb_api -X POST "$NB/api/ipam/prefixes/" -d "{\"prefix\":\"10.99.0.0/24\",\"status\":\"active\",\"scope_type\":\"dcim.site\",\"scope_id\":$site_id}" >/dev/null || return 1
+  # An address on a real interface, made the device's primary IP: the other
+  # ip-enrichment outcome end to end (address → interface → device), including
+  # device_is_primary_ip, which reads the device's own primary_ip4.
+  iface_id=$(nb_api -X POST "$NB/api/dcim/interfaces/" -d "{\"device\":$device_id,\"name\":\"eth0\",\"type\":\"1000base-t\"}" | new_id) || return 1
+  ip_id=$(nb_api -X POST "$NB/api/ipam/ip-addresses/" -d "{\"address\":\"10.99.0.5/24\",\"status\":\"active\",\"dns_name\":\"compat-r1.example.net\",\"assigned_object_type\":\"dcim.interface\",\"assigned_object_id\":$iface_id}" | new_id) || return 1
+  nb_api -X PATCH "$NB/api/dcim/devices/$device_id/" -d "{\"primary_ip4\":$ip_id}" >/dev/null || return 1
   return 0
 }
 
@@ -131,10 +153,30 @@ for v in "${VERSIONS[@]}"; do
     check "annotations query" \
       'import json,sys; fr=json.load(sys.stdin)["results"]["A"]["frames"][0]; assert len(fr["data"]["values"][0])>0' \
       "{\"from\":\"$((now_ms - 3600000))\",\"to\":\"$now_ms\",\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"netboxlabs-netbox-datasource\",\"uid\":\"netboxlabs-netbox-alerting\"},\"queryType\":\"annotations\",\"limit\":100}]}" || ok=0
-    # d. ip-enrichment: longest-prefix match against the seeded prefix
-    check "ip-enrichment query" \
-      'import json,sys; fr=json.load(sys.stdin)["results"]["A"]["frames"][0]; n=[f["name"] for f in fr["schema"]["fields"]]; assert fr["data"]["values"][n.index("prefix")][0]=="10.99.0.0/24"' \
-      '{"queries":[{"refId":"A","datasource":{"type":"netboxlabs-netbox-datasource","uid":"netboxlabs-netbox-alerting"},"queryType":"ip-enrichment","ips":"10.99.0.5"}]}' || ok=0
+    # d. ip-enrichment, address path: the seeded address resolves to its
+    #    interface and owning device, and is flagged as that device's primary IP.
+    #    contextFields is explicit — an empty selection means the DEFAULT
+    #    columns, which is a different (and moving) set from what is asserted.
+    check "ip-enrichment address→device" \
+      'import json,sys
+fr=json.load(sys.stdin)["results"]["A"]["frames"][0]
+n=[f["name"] for f in fr["schema"]["fields"]]
+g=lambda c: fr["data"]["values"][n.index(c)][0]
+assert g("address_dns_name")=="compat-r1.example.net", g("address_dns_name")
+assert g("interface_name")=="eth0", g("interface_name")
+assert g("device_name")=="compat-r1", g("device_name")
+assert g("device_is_primary_ip") is True, g("device_is_primary_ip")' \
+      '{"queries":[{"refId":"A","datasource":{"type":"netboxlabs-netbox-datasource","uid":"netboxlabs-netbox-alerting"},"queryType":"ip-enrichment","ips":"10.99.0.5","contextFields":["ip","match_count","address_dns_name","interface_name","device_name","device_is_primary_ip"]}]}' || ok=0
+    # e. ip-enrichment, prefix fallback: an IP with no address record resolves to
+    #    the longest containing prefix. prefix_scope is the 4.2 floor's field.
+    check "ip-enrichment prefix fallback" \
+      'import json,sys
+fr=json.load(sys.stdin)["results"]["A"]["frames"][0]
+n=[f["name"] for f in fr["schema"]["fields"]]
+g=lambda c: fr["data"]["values"][n.index(c)][0]
+assert g("prefix_cidr")=="10.99.0.0/24", g("prefix_cidr")
+assert g("prefix_scope")=="Compat Site", g("prefix_scope")' \
+      '{"queries":[{"refId":"A","datasource":{"type":"netboxlabs-netbox-datasource","uid":"netboxlabs-netbox-alerting"},"queryType":"ip-enrichment","ips":"10.99.0.200","contextFields":["ip","prefix_cidr","prefix_scope"]}]}' || ok=0
   fi
   if [ "$ok" = 1 ]; then RESULTS+=("$v PASS"); else RESULTS+=("$v FAIL"); overall=1; fi
   "${COMPOSE[@]}" down -v >/dev/null 2>&1 || true

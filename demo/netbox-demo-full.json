@@ -663,7 +663,7 @@
     {
       "id": 7,
       "type": "table",
-      "title": "Flow IP enrichment \u2014 longest-prefix match (no relabeling)",
+      "title": "Flow IP enrichment \u2014 device identity, with longest-prefix fallback",
       "gridPos": {
         "x": 0,
         "y": 27,
@@ -682,15 +682,20 @@
             "uid": "netboxlabs-netbox-alerting"
           },
           "queryType": "ip-enrichment",
-          "ips": "10.10.10.11, 10.10.10.12, 10.20.20.11, 10.30.30.5, 203.0.113.7",
+          "ips": "10.10.10.11, 10.10.10.12, 10.20.20.11, 10.20.0.1, 10.99.99.99, 10.40.0.5, 10.10.10.50",
           "contextFields": [
-            "prefix",
-            "scope",
-            "tenant",
-            "role",
-            "vlan",
-            "description"
+            "match_count",
+            "prefix_cidr",
+            "prefix_scope",
+            "prefix_tenant",
+            "prefix_role",
+            "prefix_vlan",
+            "device_name",
+            "device_is_primary_ip",
+            "interface_name",
+            "device_site"
           ],
+          "limit": 200,
           "branch": "$branch"
         }
       ],
@@ -700,7 +705,19 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "scope"
+              "options": "prefix_scope"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Prefix site"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "device_site"
             },
             "properties": [
               {
@@ -1005,7 +1022,7 @@
     {
       "id": 11,
       "type": "table",
-      "title": "Recipe 3b \u2014 Flow IPs, longest-prefix NetBox context",
+      "title": "Recipe 3b \u2014 Flow IPs \u2192 NetBox device identity \u2192 device CPU",
       "gridPos": {
         "x": 0,
         "y": 43,
@@ -1013,8 +1030,8 @@
         "h": 8
       },
       "datasource": {
-        "type": "netboxlabs-netbox-datasource",
-        "uid": "netboxlabs-netbox-alerting"
+        "type": "datasource",
+        "uid": "-- Mixed --"
       },
       "targets": [
         {
@@ -1026,13 +1043,55 @@
           "queryType": "ip-enrichment",
           "ips": "$flow_ips",
           "contextFields": [
-            "prefix",
-            "scope",
-            "tenant",
-            "role",
-            "vlan"
+            "match_count",
+            "address_description",
+            "interface_name",
+            "device_name",
+            "device_is_primary_ip",
+            "device_site"
           ],
+          "joinKeys": [
+            {
+              "source": "device_name",
+              "output": "device",
+              "transform": "none"
+            }
+          ],
+          "limit": 200,
           "branch": "$branch"
+        },
+        {
+          "refId": "P",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "format": "table",
+          "instant": true,
+          "expr": "device_cpu_percent"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "device",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "Value": "CPU %"
+            },
+            "indexByName": {}
+          }
         }
       ],
       "fieldConfig": {
@@ -1041,12 +1100,24 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "scope"
+              "options": "device_site"
             },
             "properties": [
               {
                 "id": "displayName",
                 "value": "Site"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CPU %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
               }
             ]
           }

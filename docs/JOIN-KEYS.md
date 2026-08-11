@@ -27,6 +27,14 @@ The point is to **name the output column exactly like the label on your metric**
 (e.g. `instance`) and shape the value to match. This happens server-side, so you
 don't need extra Grafana transforms.
 
+On an **IP enrichment** query the source may be any context field, whether or not
+it is in the query's **Context fields** selection: joining on `device_name` while
+displaying only `ip` and `prefix_cidr` works. The field is fetched so the key can
+be derived and is then dropped, so the table gains the output column and nothing
+else. Note that a source only a lookup hop can supply still costs that hop —
+joining on `prefix_*` runs the (serial) prefix fallback, see
+[RECIPES.md](./RECIPES.md#recipe-3-enrich-flows-or-logs-by-ip).
+
 ### 2. Multiple mappings on one query
 
 You can add several mappings to a single query, so the **same NetBox result can
@@ -43,14 +51,22 @@ Whenever a query returns an `address` column (IPAM), the plugin also emits a
 host-only `ip` column (mask stripped). Join flow/host metrics that carry a bare
 IP directly against `ip`.
 
-### 4. IP enrichment query type (longest-prefix match)
+### 4. IP enrichment query type (address, device and longest-prefix match)
 
 Value-equality can't map an arbitrary observed IP to its **containing** NetBox
-prefix. The **IP enrichment** query type does: give it a list of IPs (literally,
-or from a `$variable` sourced from your flow data) and it returns, per IP, the
-longest-matching prefix's `site` / `tenant` / `role` / `vrf` / `vlan`. Join your
-flow metrics to the result on `ip`. This is the one enrichment that genuinely
-needs NetBox at query time; no relabeling pipeline required.
+prefix, let alone the device it belongs to. The **IP enrichment** query type does
+both, but not both at once for the same IP: give it a list of IPs (literally, or
+from a `$variable` sourced from your flow data) and, per IP, it either finds a
+registered address record — returning the owning device and interface
+(`device_name`, `interface_name`, `device_is_primary_ip`, …) when that address is
+assigned to one — or, only when no address record matches at all, falls back to
+the longest-matching prefix's context (`prefix_tenant`, `prefix_role`,
+`prefix_vrf`, `prefix_vlan`, `prefix_scope`, …). `prefix_*` and
+`address_*`/`interface_*`/`device_*` are mutually exclusive per row. See
+[RECIPES.md](./RECIPES.md#recipe-3-enrich-flows-or-logs-by-ip) for the full
+field list and worked examples of each outcome. Join your flow metrics to the
+result on `ip`. This is the one enrichment that genuinely needs NetBox at query
+time; no relabeling pipeline required.
 
 ## Recipes by source
 

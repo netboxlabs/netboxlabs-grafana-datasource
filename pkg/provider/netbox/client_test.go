@@ -281,3 +281,31 @@ func TestGetListPage_ShapeTolerant(t *testing.T) {
 		}
 	})
 }
+
+// TestAPIErrorTruncatesURL guards the user-facing side of a batched failure.
+// Grafana surfaces this message in an error toast, and ip-enrichment builds
+// ~6 KB request lines (hundreds of repeated ?address= / ?id= parameters), so an
+// untruncated URL buries the status and body under kilobytes of query string.
+func TestAPIErrorTruncatesURL(t *testing.T) {
+	long := "http://netbox.example/api/ipam/ip-addresses/?" +
+		strings.Repeat("address=10.0.0.1&", 400)
+	msg := (&APIError{Status: 500, URL: long, Body: "boom"}).Error()
+
+	if len(msg) > 600 {
+		t.Errorf("error message is %d bytes; a toast must not carry the whole batched URL", len(msg))
+	}
+	if !strings.Contains(msg, "500") || !strings.Contains(msg, "boom") {
+		t.Errorf("truncation must not cost the status or the body: %q", msg)
+	}
+	if !strings.Contains(msg, "ipam/ip-addresses") {
+		t.Errorf("the endpoint must survive truncation, it is what identifies the request: %q", msg)
+	}
+	if !strings.Contains(msg, "…") {
+		t.Errorf("a truncated URL must say so: %q", msg)
+	}
+
+	short := "http://netbox.example/api/dcim/devices/?limit=100"
+	if got := (&APIError{Status: 404, URL: short, Body: "nope"}).Error(); !strings.Contains(got, short) {
+		t.Errorf("a short URL must be left intact, got %q", got)
+	}
+}

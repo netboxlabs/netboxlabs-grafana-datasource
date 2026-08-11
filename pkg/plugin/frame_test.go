@@ -271,3 +271,99 @@ func TestBuildNodeGraphFrames_NodeURLLink(t *testing.T) {
 		t.Errorf("link = %+v, want {View in NetBox, ${__data.fields[\"url\"]}, TargetBlank}", link)
 	}
 }
+
+// TestBuildFrame_DeclaredColumnTypeSurvivesAnEmptyColumn covers the case value
+// scanning cannot decide. device_is_primary_ip is nil in every row whenever the
+// current IP set resolves no device at all — every address external, VM-assigned
+// or unassigned — and the column was then emitted as a STRING field, while the
+// same saved query emitted a BOOLEAN one on the refresh where one device
+// matched. Boolean value mappings, `filterByValue isTrue`, field overrides and
+// transformations are bound to the field type, so they silently stopped applying
+// on whichever refresh happened to resolve nothing.
+func TestBuildFrame_DeclaredColumnTypeSurvivesAnEmptyColumn(t *testing.T) {
+	// Two IPs NetBox holds no device for: the honest result, and the one that
+	// used to change the column's type.
+	rows := []map[string]interface{}{
+		{"ip": "8.8.8.8", "match_count": float64(0), "device_is_primary_ip": nil},
+		{"ip": "1.1.1.1", "match_count": float64(0), "device_is_primary_ip": nil},
+	}
+	cols := []string{"ip", "match_count", "device_is_primary_ip"}
+
+	t.Run("declared boolean stays a nullable bool field with no values at all", func(t *testing.T) {
+		frame := buildFrame("ip-enrichment", &provider.Result{
+			Columns: cols, Rows: rows,
+			ColumnTypes: map[string]provider.FieldType{
+				"match_count":          provider.FieldTypeNumber,
+				"device_is_primary_ip": provider.FieldTypeBoolean,
+			},
+		}, "http://nb")
+
+		byName := map[string]*data.Field{}
+		for _, f := range frame.Fields {
+			byName[f.Name] = f
+		}
+		if got := byName["device_is_primary_ip"].Type(); got != data.FieldTypeNullableBool {
+			t.Errorf("device_is_primary_ip type = %v, want %v — the column is a boolean by schema even on a refresh where no IP resolves a device", got, data.FieldTypeNullableBool)
+		}
+		if got := byName["device_is_primary_ip"].Len(); got != len(rows) {
+			t.Errorf("device_is_primary_ip len = %d, want %d", got, len(rows))
+		}
+		if v, ok := byName["device_is_primary_ip"].ConcreteAt(0); ok {
+			t.Errorf("value at 0 = %v, want no concrete value: null means \"this IP has no device\", which is not the same claim as false", v)
+		}
+	})
+
+	t.Run("an undeclared all-null column keeps the string fallback", func(t *testing.T) {
+		// The objects path: columns are discovered from NetBox at runtime and
+		// declare nothing, so nothing about their typing may change.
+		frame := buildFrame("dcim/devices", &provider.Result{
+			Columns: []string{"name", "comments"},
+			Rows: []map[string]interface{}{
+				{"name": "leaf1", "comments": nil},
+				{"name": "leaf2", "comments": nil},
+			},
+		}, "http://nb")
+		for _, f := range frame.Fields {
+			if f.Name == "comments" && f.Type() != data.FieldTypeString {
+				t.Errorf("comments type = %v, want %v", f.Type(), data.FieldTypeString)
+			}
+		}
+	})
+
+	t.Run("observed values win over a declaration that contradicts them", func(t *testing.T) {
+		// A declaration must never be able to delete data: building a bool field
+		// out of string values would drop every one of them.
+		frame := buildFrame("ip-enrichment", &provider.Result{
+			Columns: []string{"device_is_primary_ip"},
+			Rows: []map[string]interface{}{
+				{"device_is_primary_ip": "yes"},
+			},
+			ColumnTypes: map[string]provider.FieldType{"device_is_primary_ip": provider.FieldTypeBoolean},
+		}, "http://nb")
+		if got := frame.Fields[0].Type(); got != data.FieldTypeString {
+			t.Errorf("type = %v, want %v: values decide whenever there are any", got, data.FieldTypeString)
+		}
+	})
+
+	t.Run("a resolved device still yields a nullable bool", func(t *testing.T) {
+		// The other end of the same saved query: whichever way the data falls,
+		// the field type is the same one.
+		yes := true
+		frame := buildFrame("ip-enrichment", &provider.Result{
+			Columns: cols,
+			Rows: []map[string]interface{}{
+				{"ip": "10.20.0.1", "match_count": float64(1), "device_is_primary_ip": yes},
+				{"ip": "8.8.8.8", "match_count": float64(0), "device_is_primary_ip": nil},
+			},
+			ColumnTypes: map[string]provider.FieldType{
+				"match_count":          provider.FieldTypeNumber,
+				"device_is_primary_ip": provider.FieldTypeBoolean,
+			},
+		}, "http://nb")
+		for _, f := range frame.Fields {
+			if f.Name == "device_is_primary_ip" && f.Type() != data.FieldTypeNullableBool {
+				t.Errorf("device_is_primary_ip type = %v, want %v", f.Type(), data.FieldTypeNullableBool)
+			}
+		}
+	})
+}

@@ -25,6 +25,8 @@ type fakeProvider struct {
 	result            *provider.Result
 	changes           []provider.Change
 	ipResult          *provider.Result
+	ipRow             map[string]interface{} // when set, ResolveIPs projects it onto the requested fields
+	ipFields          []string               // captured by ResolveIPs for passthrough asserts
 	graph             *provider.Graph
 	topoSpec          provider.TopologySpec // captured by Topology for passthrough asserts
 	querySpec         provider.QuerySpec    // captured by Query for passthrough asserts
@@ -68,8 +70,22 @@ func (f *fakeProvider) FieldValues(ctx context.Context, _, _, _ string, _ int) (
 func (f *fakeProvider) Changes(context.Context, provider.ChangeSpec) ([]provider.Change, error) {
 	return f.changes, nil
 }
-func (f *fakeProvider) ResolveIPs(context.Context, []string, []string, int) (*provider.Result, error) {
-	return f.ipResult, nil
+
+// ResolveIPs records the field list it was asked for and, when ipRow is set,
+// PROJECTS that row onto it — the same narrowing the real implementation does
+// (netbox.project). Returning a fixed result regardless of the fields would make
+// any test about which fields were requested pass for the wrong reason: the
+// column would be there because the fake always supplies it.
+func (f *fakeProvider) ResolveIPs(_ context.Context, _ []string, fields []string, _ int) (*provider.Result, error) {
+	f.ipFields = slices.Clone(fields)
+	if f.ipRow == nil {
+		return f.ipResult, nil
+	}
+	row := make(map[string]interface{}, len(fields))
+	for _, c := range fields {
+		row[c] = f.ipRow[c]
+	}
+	return &provider.Result{Columns: slices.Clone(fields), Rows: []map[string]interface{}{row}, Total: 1}, nil
 }
 func (f *fakeProvider) Topology(_ context.Context, spec provider.TopologySpec) (*provider.Graph, error) {
 	f.topoSpec = spec

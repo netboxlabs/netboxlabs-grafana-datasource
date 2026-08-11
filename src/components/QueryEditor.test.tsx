@@ -1,6 +1,7 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { QueryEditor } from './QueryEditor';
+import { IP_CONTEXT_FIELD_GROUPS, IP_CONTEXT_FIELD_OPTIONS, DEFAULT_IP_CONTEXT_FIELDS } from '../types';
 
 jest.mock('@grafana/runtime', () => ({
   ...jest.requireActual('@grafana/runtime'),
@@ -262,5 +263,125 @@ describe('QueryEditor — filter validation messages', () => {
 
     expect(within(row0).getByText(/isn't applied/i)).toBeInTheDocument();
     expect(within(row1).queryByText(/isn't applied/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('IP context field groups', () => {
+  it('groups every field under a namespace heading', () => {
+    expect(IP_CONTEXT_FIELD_GROUPS.map((g) => g.label)).toEqual([
+      'Identity',
+      'Prefix',
+      'Address',
+      'Interface',
+      'Device',
+    ]);
+  });
+
+  it('offers no bare legacy names and no unfillable columns', () => {
+    const all = IP_CONTEXT_FIELD_GROUPS.flatMap((g) => g.options.map((o) => o.value));
+    for (const banned of ['site', 'tenant', 'role', 'vrf', 'vlan', 'prefix', 'prefix_site']) {
+      expect(all).not.toContain(banned);
+    }
+    // The full unfillable set the Go guard (TestIPEnrichColumnsAreNamespaced)
+    // checks. The interface_* five are cut because assigned_object is the brief
+    // interface serializer; the *_dns pair because NetBox 4.4's NestedIPAddress
+    // serializer has no dns_name property at all. Either one offered here would
+    // render a permanently blank column.
+    for (const unfillable of [
+      'interface_enabled',
+      'interface_type',
+      'interface_mtu',
+      'interface_mac_address',
+      'interface_lag',
+      'address_nat_inside_dns',
+      'address_nat_outside_dns',
+    ]) {
+      expect(all).not.toContain(unfillable);
+    }
+  });
+
+  // The mechanical half of this guard — asserting the picker's vocabulary is
+  // exactly IPEnrichColumns() — lives in Go, in
+  // TestIPContextFieldsMatchFrontend (pkg/provider/netbox/ipenrich_test.go),
+  // which reads this file. It is on that side because reading a file from a
+  // Jest test needs Node's fs typings, and this project's tsconfig does not
+  // include @types/node; a build-config change would be a steep price for a
+  // guard Go can run for free.
+
+  it('defaults to a useful handful including match_count', () => {
+    const all = IP_CONTEXT_FIELD_GROUPS.flatMap((g) => g.options);
+    expect(DEFAULT_IP_CONTEXT_FIELDS.length).toBeLessThan(all.length / 2);
+    expect(DEFAULT_IP_CONTEXT_FIELDS).toContain('match_count');
+    expect(DEFAULT_IP_CONTEXT_FIELDS).toContain('device_is_primary_ip');
+  });
+
+  it('labels every option by its full column name, so chips are unambiguous', () => {
+    // @grafana/ui resolves a MultiSelect's selected chips against the option
+    // list. With group-local labels the default selection rendered two adjacent
+    // chips both reading "name" (device_name and interface_name), and a
+    // nine-column panel read "match_count cidr scope tenant role vlan name
+    // is_primary_ip name" — unreadable, and wrong about which columns are shown.
+    for (const o of IP_CONTEXT_FIELD_OPTIONS) {
+      expect(o.label).toBe(o.value);
+    }
+    const labels = IP_CONTEXT_FIELD_OPTIONS.map((o) => o.label);
+    expect(new Set(labels).size).toBe(labels.length);
+  });
+});
+
+describe('IP-enrichment join keys', () => {
+  it("offers the enrichment columns, not a NetBox object type's fields", async () => {
+    // getFields would answer with ipam/prefixes' schema; the join-key picker
+    // must not be built from it. Live, that offered `scope` (which yields an
+    // empty key) while omitting `prefix_scope` and `device_name`, which work.
+    const ds = {
+      ...datasource,
+      getFields: jest.fn().mockResolvedValue([{ name: 'scope' }, { name: 'prefix' }, { name: 'vlan' }]),
+      getFilterFields: jest.fn().mockResolvedValue([]),
+    } as any;
+    // The row is seeded rather than added by clicking: onChange is a spy, so the
+    // component never re-renders with the new joinKeys.
+    setup(
+      { queryType: 'ip-enrichment', ips: '10.20.0.1', joinKeys: [{ source: '', output: '', transform: 'none' }] },
+      ds
+    );
+
+    const picker = await screen.findByLabelText('join-key-source-0');
+    fireEvent.focus(picker);
+    fireEvent.keyDown(picker, { key: 'ArrowDown', keyCode: 40, code: 'ArrowDown' });
+
+    // Scoped to the open menu: several of these names also appear as context-field
+    // chips elsewhere on the form, so an unscoped query would match those instead
+    // and pass without the dropdown offering anything at all.
+    const menu = within(await screen.findByRole('listbox'));
+
+    // The two columns verified live to produce a working join key.
+    expect(menu.getByText('device_name')).toBeInTheDocument();
+    expect(menu.getByText('prefix_scope')).toBeInTheDocument();
+    // And nothing from the object-type schema, every one of which derived an
+    // empty key. `scope` is the one the editor used to suggest by default.
+    for (const fromSchema of ['scope', 'prefix', 'vlan']) {
+      expect(menu.queryByText(fromSchema)).not.toBeInTheDocument();
+    }
+  });
+
+  it('renders selected context fields as full, distinguishable chip names', async () => {
+    setup({ queryType: 'ip-enrichment', ips: '10.20.0.1' });
+    // The default selection contains device_name AND interface_name. With
+    // group-local labels both chips read "name".
+    expect(await screen.findByText('device_name')).toBeInTheDocument();
+    expect(screen.getByText('interface_name')).toBeInTheDocument();
+    expect(screen.queryByText('name')).not.toBeInTheDocument();
+  });
+
+  it('does not fetch object-type fields for an ip-enrichment query at all', async () => {
+    const ds = {
+      ...datasource,
+      getFields: jest.fn().mockResolvedValue([{ name: 'scope' }]),
+      getFilterFields: jest.fn().mockResolvedValue([]),
+    } as any;
+    setup({ queryType: 'ip-enrichment', ips: '10.20.0.1' }, ds);
+    await screen.findByText('Add join key');
+    expect(ds.getFields).not.toHaveBeenCalled();
   });
 });

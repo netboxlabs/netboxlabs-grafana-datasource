@@ -87,7 +87,7 @@ func (c *Client) getJSON(ctx context.Context, rawURL string, out interface{}) er
 		return err
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("decode %s: %w", rawURL, err)
+		return fmt.Errorf("decode %s: %w", truncateURL(rawURL), err)
 	}
 	return nil
 }
@@ -113,7 +113,7 @@ func (c *Client) getListPage(ctx context.Context, rawURL string) (listPage, erro
 	if json.Unmarshal(body, &arr) == nil {
 		return listPage{Count: len(arr), Results: arr}, nil
 	}
-	return listPage{}, fmt.Errorf("decode %s: %w", rawURL, envErr)
+	return listPage{}, fmt.Errorf("decode %s: %w", truncateURL(rawURL), envErr)
 }
 
 // getBytes performs an authenticated GET and returns the raw response body.
@@ -135,13 +135,24 @@ func (c *Client) getBytes(ctx context.Context, rawURL string) ([]byte, error) {
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request %s: %w", rawURL, err)
+		// No rawURL in the format string. http.Client.Do returns a *url.Error,
+		// whose own Error() already renders `Get "<rawURL>": <cause>` — adding it
+		// here embedded the URL TWICE. On a batched ip-enrichment hop that is two
+		// copies of a ~6 KB request line, measured at 12,480 characters with
+		// "address=" appearing 632 times and the actual cause ("connection
+		// refused") at the very tail, and it reached the user as a Grafana toast.
+		// Bounding the user-facing string is pkg/plugin.upstreamDetail's job; not
+		// doubling it first is this one's.
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read body %s: %w", rawURL, err)
+		// io.ReadAll's error carries no URL of its own, so unlike the Do path
+		// above this one has to name the request — but through truncateURL, for
+		// the same reason APIError does.
+		return nil, fmt.Errorf("read body %s: %w", truncateURL(rawURL), err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &APIError{Status: resp.StatusCode, URL: rawURL, Body: snippet(body)}
@@ -285,7 +296,21 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
-	return fmt.Sprintf("netbox API %d for %s: %s", e.Status, e.URL, e.Body)
+	return fmt.Sprintf("netbox API %d for %s: %s", e.Status, truncateURL(e.URL), e.Body)
+}
+
+// truncateURL keeps the error message readable when the failed request was a
+// batched one. IP enrichment builds ~6 KB request lines (hundreds of repeated
+// ?address= / ?id= parameters), and this message reaches the user as a Grafana
+// error toast; the endpoint and the first parameters identify the request, the
+// remaining kilobytes only bury it. The kept length matches snippet()'s cap on
+// the body for the same reason.
+func truncateURL(u string) string {
+	const max = 300
+	if len(u) <= max {
+		return u
+	}
+	return u[:max] + "…"
 }
 
 func snippet(b []byte) string {

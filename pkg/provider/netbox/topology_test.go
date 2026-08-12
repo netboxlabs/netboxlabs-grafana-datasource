@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // mockTopologyNetBox emulates the topology slice of the API: five devices

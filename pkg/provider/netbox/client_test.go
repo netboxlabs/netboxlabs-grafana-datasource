@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // branchResolveServer serves a branch list at the branching endpoint and echoes

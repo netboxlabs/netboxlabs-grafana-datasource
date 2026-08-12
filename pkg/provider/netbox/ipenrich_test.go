@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 func TestChunkByBudget(t *testing.T) {

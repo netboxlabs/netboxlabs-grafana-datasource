@@ -5,7 +5,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 	"go4.org/netipx"
 )
 

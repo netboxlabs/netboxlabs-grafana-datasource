@@ -2,7 +2,7 @@ apiVersion: 1
 
 datasources:
   - name: NetBox
-    type: netboxlabs-netbox-datasource
+    type: netboxlabs-datasource
     uid: netboxlabs-netbox-alerting
     access: proxy
     isDefault: false

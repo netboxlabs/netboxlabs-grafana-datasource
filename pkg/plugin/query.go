@@ -13,8 +13,8 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
-	"github.com/netboxlabs/netbox/pkg/provider/netbox"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 // queryType discriminates the kinds of query the editor can issue.

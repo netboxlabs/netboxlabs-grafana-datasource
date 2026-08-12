@@ -6,8 +6,8 @@ import (
 
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
-	"github.com/netboxlabs/netbox/pkg/provider/netbox"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 // isTruncated reports whether a result holds fewer rows than the source says

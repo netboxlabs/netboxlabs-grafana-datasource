@@ -1,7 +1,7 @@
 services:
   grafana:
     user: root
-    container_name: 'netboxlabs-netbox-datasource'
+    container_name: 'netboxlabs-datasource'
 
     build:
       context: .
@@ -19,13 +19,13 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - ../dist:/var/lib/grafana/plugins/netboxlabs-netbox-datasource
+      - ../dist:/var/lib/grafana/plugins/netboxlabs-datasource
       - ../provisioning:/etc/grafana/provisioning
-      - ..:/root/netboxlabs-netbox-datasource
+      - ..:/root/netboxlabs-datasource
 
     environment:
       NODE_ENV: development
-      GF_LOG_FILTERS: plugin.netboxlabs-netbox-datasource:debug
+      GF_LOG_FILTERS: plugin.netboxlabs-datasource:debug
       GF_LOG_LEVEL: debug
       GF_DATAPROXY_LOGGING: 1
-      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: netboxlabs-netbox-datasource
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: netboxlabs-datasource

@@ -13,7 +13,7 @@
         "label": "Branch",
         "type": "query",
         "datasource": {
-          "type": "netboxlabs-netbox-datasource",
+          "type": "netboxlabs-datasource",
           "uid": "netboxlabs-netbox-alerting"
         },
         "query": {
@@ -36,7 +36,7 @@
         "label": "Site",
         "type": "query",
         "datasource": {
-          "type": "netboxlabs-netbox-datasource",
+          "type": "netboxlabs-datasource",
           "uid": "netboxlabs-netbox-alerting"
         },
         "query": {
@@ -64,7 +64,7 @@
         "label": "Role",
         "type": "query",
         "datasource": {
-          "type": "netboxlabs-netbox-datasource",
+          "type": "netboxlabs-datasource",
           "uid": "netboxlabs-netbox-alerting"
         },
         "query": {
@@ -132,7 +132,7 @@
         "enable": true,
         "iconColor": "purple",
         "datasource": {
-          "type": "netboxlabs-netbox-datasource",
+          "type": "netboxlabs-datasource",
           "uid": "netboxlabs-netbox-alerting"
         },
         "target": {
@@ -158,14 +158,14 @@
         "h": 8
       },
       "datasource": {
-        "type": "netboxlabs-netbox-datasource",
+        "type": "netboxlabs-datasource",
         "uid": "netboxlabs-netbox-alerting"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "objectType": "dcim/devices",
@@ -227,7 +227,7 @@
         {
           "refId": "NB",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "objectType": "dcim/devices",
@@ -381,7 +381,7 @@
         {
           "refId": "NB",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "objectType": "dcim/devices",
@@ -573,14 +573,14 @@
         "h": 10
       },
       "datasource": {
-        "type": "netboxlabs-netbox-datasource",
+        "type": "netboxlabs-datasource",
         "uid": "netboxlabs-netbox-alerting"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "queryType": "topology",
@@ -601,14 +601,14 @@
         "h": 10
       },
       "datasource": {
-        "type": "netboxlabs-netbox-datasource",
+        "type": "netboxlabs-datasource",
         "uid": "netboxlabs-netbox-alerting"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "objectType": "dcim/sites",
@@ -671,14 +671,14 @@
         "h": 8
       },
       "datasource": {
-        "type": "netboxlabs-netbox-datasource",
+        "type": "netboxlabs-datasource",
         "uid": "netboxlabs-netbox-alerting"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "queryType": "ip-enrichment",
@@ -740,14 +740,14 @@
         "h": 8
       },
       "datasource": {
-        "type": "netboxlabs-netbox-datasource",
+        "type": "netboxlabs-datasource",
         "uid": "netboxlabs-netbox-alerting"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "objectType": "dcim/devices",
@@ -821,7 +821,7 @@
         {
           "refId": "NB",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "objectType": "dcim/devices",
@@ -927,7 +927,7 @@
         {
           "refId": "NB",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "objectType": "ipam/ip-addresses",
@@ -1037,7 +1037,7 @@
         {
           "refId": "A",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "queryType": "ip-enrichment",
@@ -1152,7 +1152,7 @@
         {
           "refId": "NB",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "objectType": "dcim/devices",
@@ -1228,14 +1228,14 @@
         "h": 9
       },
       "datasource": {
-        "type": "netboxlabs-netbox-datasource",
+        "type": "netboxlabs-datasource",
         "uid": "netboxlabs-netbox-alerting"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "netboxlabs-netbox-datasource",
+            "type": "netboxlabs-datasource",
             "uid": "netboxlabs-netbox-alerting"
           },
           "objectType": "ipam/prefixes",

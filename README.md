@@ -83,7 +83,7 @@ Click **Save & test**. A healthy data source reports the connected NetBox versio
 apiVersion: 1
 datasources:
   - name: NetBox
-    type: netboxlabs-netbox-datasource
+    type: netboxlabs-datasource
     access: proxy
     jsonData:
       url: ${NETBOX_URL}

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // mockNetBox returns an httptest server emulating the relevant slice of the

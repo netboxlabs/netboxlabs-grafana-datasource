@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // suffixToken maps a NetBox lookup suffix to our operator token (token == suffix).

@@ -42,7 +42,7 @@ any change to `dist/`. See [sign a plugin](https://grafana.com/developers/plugin
 
 ## Build artifacts in the packaged zip
 
-The zip's top-level dir must be the plugin id (`netboxlabs-netbox-datasource/`) and contain:
+The zip's top-level dir must be the plugin id (`netboxlabs-datasource/`) and contain:
 
 ```
 plugin.json  module.js  module.js.map  README.md  CHANGELOG.md  LICENSE
@@ -62,7 +62,7 @@ Run before every submission; the catalog runs it automatically.
 ```bash
 npx -y @grafana/plugin-validator@latest \
   -sourceCodeUri https://github.com/<org>/<repo>/tree/<tag> \
-  ./netboxlabs-netbox-datasource-<version>.zip
+  ./netboxlabs-datasource-<version>.zip
 ```
 
 It checks archive structure, `plugin.json`, `module.js`, **backend binary presence/consistency**,
@@ -74,7 +74,7 @@ README, **CHANGELOG (required)**, LICENSE (must be an OSI license, Apache-2.0 �
 
 | Requirement                                                 | Status                                                                                             |
 | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Plugin id matches `<org>-<name>-datasource`                 | ✅ `netboxlabs-netbox-datasource`                                                                  |
+| Plugin id matches `<org>-[<name>-]datasource`               | ✅ `netboxlabs-datasource`                                                                          |
 | `backend: true` + `executable: gpx_netbox`                  | ✅                                                                                                 |
 | `secureJsonData` for the API token (no secrets in jsonData) | ✅                                                                                                 |
 | SDK HTTP client (PDC-compatible)                            | ✅ (uses `backend/httpclient`)                                                                     |

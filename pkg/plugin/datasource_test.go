@@ -12,9 +12,9 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/resource/httpadapter"
 
-	"github.com/netboxlabs/netbox/pkg/models"
-	"github.com/netboxlabs/netbox/pkg/provider"
-	"github.com/netboxlabs/netbox/pkg/provider/netbox"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/models"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 // fakeProvider is a controllable provider.Provider for unit tests.

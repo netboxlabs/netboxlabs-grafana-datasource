@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // Client is a thin authenticated HTTP client for the NetBox REST API. The

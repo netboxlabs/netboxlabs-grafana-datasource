@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // cacheTTL bounds how long discovery and field metadata are cached.

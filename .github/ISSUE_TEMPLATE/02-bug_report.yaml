@@ -62,4 +62,4 @@ body:
       label: Observed behavior
       description: >
         What happened instead? Include any error messages shown in the panel or query editor, and relevant
-        Grafana server log lines (the plugin logs under the `netboxlabs-netbox-datasource` plugin id) if available.
+        Grafana server log lines (the plugin logs under the `netboxlabs-datasource` plugin id) if available.

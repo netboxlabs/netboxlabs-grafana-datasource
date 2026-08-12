@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
-	"github.com/netboxlabs/netbox/pkg/provider/netbox"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 // joinKey is one source→output key mapping with an optional value transform.

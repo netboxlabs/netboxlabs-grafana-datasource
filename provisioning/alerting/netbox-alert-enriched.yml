@@ -28,7 +28,7 @@ groups:
             model:
               refId: A
               datasource:
-                type: netboxlabs-netbox-datasource
+                type: netboxlabs-datasource
                 uid: netboxlabs-netbox-alerting
               queryType: objects
               objectType: dcim/devices

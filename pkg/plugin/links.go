@@ -3,7 +3,7 @@ package plugin
 import (
 	"strings"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // rewriteLinks rewrites NetBox URLs in URL-bearing columns (url, display_url,

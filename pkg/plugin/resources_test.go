@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
-	"github.com/netboxlabs/netbox/pkg/provider/netbox"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 func TestResource_Fields_Branch(t *testing.T) {

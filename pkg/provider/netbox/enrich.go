@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // buildFilterValues turns provider filters into NetBox query params, expanding

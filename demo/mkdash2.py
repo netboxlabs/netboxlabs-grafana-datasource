@@ -33,7 +33,7 @@ PROM = os.environ.get("PROM_UID", "bfqenuth8fapsc")
 LOKI = os.environ.get("LOKI_UID", "")
 INCIDENT = os.environ.get("INCIDENT_DEVICE", "AMS1-leaf-01")
 
-nb = {"type": "netboxlabs-netbox-datasource", "uid": NB}
+nb = {"type": "netboxlabs-datasource", "uid": NB}
 prom = {"type": "prometheus", "uid": PROM}
 loki = {"type": "loki", "uid": LOKI or "loki"}
 mixed = {"type": "datasource", "uid": "-- Mixed --"}
@@ -354,18 +354,18 @@ if WITH_BRANCHING:
     # base-level concept), and flow_ips is a Prometheus variable (untouched).
     for _v in dash["templating"]["list"]:
         _vds = _v.get("datasource") or {}
-        if isinstance(_vds, dict) and _vds.get("type") == "netboxlabs-netbox-datasource" and _v["name"] != "branch":
+        if isinstance(_vds, dict) and _vds.get("type") == "netboxlabs-datasource" and _v["name"] != "branch":
             _v.setdefault("query", {})["branch"] = "$branch"
     # Make the branch global: every NetBox panel target (and the change-log
     # annotation) honors $branch.
     for _panel in dash["panels"]:
         for _t in _panel.get("targets", []):
             _ds = _t.get("datasource") or {}
-            if isinstance(_ds, dict) and _ds.get("type") == "netboxlabs-netbox-datasource":
+            if isinstance(_ds, dict) and _ds.get("type") == "netboxlabs-datasource":
                 _t["branch"] = "$branch"
     for _anno in dash["annotations"]["list"]:
         _ads = _anno.get("datasource") or {}
-        if isinstance(_ads, dict) and _ads.get("type") == "netboxlabs-netbox-datasource" and "target" in _anno:
+        if isinstance(_ads, dict) and _ads.get("type") == "netboxlabs-datasource" and "target" in _anno:
             _anno["target"]["branch"] = "$branch"
 
 
@@ -378,20 +378,20 @@ if WITH_BRANCHING:
 # just `panels`.
 
 FIXED_UIDS = {
-    "netboxlabs-netbox-datasource": "netboxlabs-netbox-alerting",
+    "netboxlabs-datasource": "netboxlabs-netbox-alerting",
     "prometheus": "prometheus",
     "loki": "loki",
 }
 
 DS_VARS = {
-    "netboxlabs-netbox-datasource": "${DS_NETBOX}",
+    "netboxlabs-datasource": "${DS_NETBOX}",
     "prometheus": "${DS_PROMETHEUS}",
     "loki": "${DS_LOKI}",
 }
 
 INPUTS = [
     {"name": "DS_NETBOX", "label": "NetBox", "description": "", "type": "datasource",
-     "pluginId": "netboxlabs-netbox-datasource", "pluginName": "NetBox"},
+     "pluginId": "netboxlabs-datasource", "pluginName": "NetBox"},
     {"name": "DS_PROMETHEUS", "label": "Prometheus", "description": "", "type": "datasource",
      "pluginId": "prometheus", "pluginName": "Prometheus"},
     {"name": "DS_LOKI", "label": "Loki", "description": "", "type": "datasource",
@@ -438,7 +438,7 @@ def _dump(d, path):
 def write_provisioned(path):
     d = copy.deepcopy(dash)
     rewrite_datasources(d, FIXED_UIDS)
-    rewrite_link_uids(d, FIXED_UIDS["netboxlabs-netbox-datasource"])
+    rewrite_link_uids(d, FIXED_UIDS["netboxlabs-datasource"])
     d.pop("__inputs", None)
     _dump(d, path)
 
@@ -447,7 +447,7 @@ def write_importable(path):
     d = copy.deepcopy(dash)
     rewrite_datasources(d, DS_VARS)
     # The import wizard interpolates ${DS_NETBOX} in plain strings too.
-    rewrite_link_uids(d, DS_VARS["netboxlabs-netbox-datasource"])
+    rewrite_link_uids(d, DS_VARS["netboxlabs-datasource"])
     d.pop("uid", None)
     d["__inputs"] = INPUTS
     d["__requires"] = []

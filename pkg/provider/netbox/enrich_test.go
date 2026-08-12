@@ -3,7 +3,7 @@ package netbox
 import (
 	"testing"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // Pins the existing contract: a filter key is the field, or field__operator, and

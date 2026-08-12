@@ -1,4 +1,4 @@
-module github.com/netboxlabs/netbox
+module github.com/netboxlabs/netboxlabs-grafana-datasource
 
 go 1.26.5
 

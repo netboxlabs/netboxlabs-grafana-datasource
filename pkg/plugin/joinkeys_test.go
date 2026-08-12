@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/netboxlabs/netbox/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 func compileRe(transform, pattern string) *regexp.Regexp {

@@ -135,7 +135,28 @@ export const JOIN_KEY_TRANSFORMS: Array<{ label: string; value: string; descript
  *  Address has no `*_dns` NAT fields: NetBox 4.4's nested IP serializer has
  *  no dns_name property, so nat_inside/nat_outside expose only the peer
  *  address, not a hostname. Interface columns stop at name/description: the
- *  embedded assigned_object is the brief serializer and carries nothing else. */
+ *  embedded assigned_object is the brief serializer, which for a
+ *  `dcim.interface` carries nothing else — a `virtualization.vminterface`
+ *  carries one thing more, its nested virtual_machine, and that is `vm_name`.
+ *  `vm_name` is the only vm_* column: every other VM attribute (cluster, site,
+ *  role, platform, status) needs a second NetBox request, while the name is
+ *  already in the address payload. It is mutually exclusive with `device_name`
+ *  per row — an address is assigned to a device interface, to a VM interface,
+ *  or to neither (an FHRP group, or nothing at all), so the two are never both
+ *  set and may well both be blank — and it is deliberately not folded into
+ *  `device_name`, because a VM and a device may share a name and the documented
+ *  `device_name` → metric `device` join would then match the wrong thing.
+ *  `address_assigned_object_type` is the raw NetBox relation string
+ *  (`dcim.interface`, `virtualization.vminterface`, `ipam.fhrpgroup`), never a
+ *  friendly label — unlike `address_status`, the field has no separate label
+ *  to show. It is offered but not in DEFAULT_IP_CONTEXT_FIELDS, and blankness
+ *  is not what decides that: `vm_name` IS defaulted and is blank on more rows
+ *  still (in the bundled demo, 22 of 23 addresses). What decides it is whether
+ *  the column helps the default query answer "who owns this IP" — `vm_name` is
+ *  the answer itself for a VM-assigned address, and without it that row's owner
+ *  has no column at all, whereas `address_assigned_object_type` answers a
+ *  narrower follow-up question ("is this blank row an FHRP group or nothing at
+ *  all?") that only matters once VRRP/HSRP is actually in play. */
 export const IP_CONTEXT_FIELD_GROUPS: Array<{
   label: string;
   options: Array<{ label: string; value: string }>;
@@ -156,7 +177,17 @@ export const IP_CONTEXT_FIELD_GROUPS: Array<{
   },
   {
     label: 'Address',
-    options: ['dns_name', 'status', 'role', 'vrf', 'tenant', 'description', 'nat_inside', 'nat_outside'].map((f) => ({
+    options: [
+      'dns_name',
+      'status',
+      'role',
+      'vrf',
+      'tenant',
+      'description',
+      'assigned_object_type',
+      'nat_inside',
+      'nat_outside',
+    ].map((f) => ({
       label: `address_${f}`,
       value: `address_${f}`,
     })),
@@ -179,6 +210,10 @@ export const IP_CONTEXT_FIELD_GROUPS: Array<{
       'status',
       'is_primary_ip',
     ].map((f) => ({ label: `device_${f}`, value: `device_${f}` })),
+  },
+  {
+    label: 'Virtual machine',
+    options: ['name'].map((f) => ({ label: `vm_${f}`, value: `vm_${f}` })),
   },
 ];
 
@@ -209,6 +244,7 @@ export const DEFAULT_IP_CONTEXT_FIELDS: string[] = [
   'match_count',
   'address_dns_name',
   'device_name',
+  'vm_name',
   'interface_name',
   'device_is_primary_ip',
   'device_site',

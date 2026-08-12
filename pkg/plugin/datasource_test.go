@@ -36,7 +36,7 @@ type fakeProvider struct {
 	queryErr          error
 
 	filterFields       []provider.FilterField
-	filterFieldsBranch string                // captured from the context by FilterFields
+	filterFieldsBranch string // captured from the context by FilterFields
 	filterFieldsErr    error
 
 	branchingInstalled bool // returned by BranchingInstalled

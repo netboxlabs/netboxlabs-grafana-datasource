@@ -189,3 +189,15 @@ Initial release of the NetBox data source for Grafana.
 - `demo/compat-check.sh` covers 4.2 → 4.6 and asserts both IP-enrichment outcomes —
   address → interface → device, and the longest-prefix fallback — so the compatibility
   statement is checked rather than asserted.
+- IP enrichment: a new optional context field, `address_assigned_object_type`, exposes
+  NetBox's raw `dcim.interface` / `virtualization.vminterface` / `ipam.fhrpgroup` value.
+  It is the only way to tell an FHRP/VRRP-assigned address apart from a wholly unassigned
+  one — both otherwise leave `interface_*` and `device_*` equally blank. Not selected by
+  default.
+- IP enrichment: a new context field, `vm_name`, names the virtual machine an address is
+  assigned to, so a VM-assigned IP is no longer an unowned row. It is selected by default
+  and costs no extra request — NetBox already embeds the nested `virtual_machine` in the
+  address record. It is a separate column from `device_name`, not a value merged into it:
+  NetBox permits a device and a virtual machine with the same name, so merging would make
+  the documented `device_name` → metric `device` join match the wrong host. The two are
+  mutually exclusive per row, and `device_*` still correctly stays blank for a VM.

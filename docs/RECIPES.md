@@ -137,12 +137,30 @@ longest containing prefix:
      blank — the device hop already answered the question a prefix lookup would.
    - **The IP is a registered address not assigned to any interface, or assigned to a VM
      interface** (VMs have no NetBox device): `address_*` populates (plus `interface_name`
-     for the VM case), but `device_*` stays blank — there's no device to attach — and
-     `prefix_*` still stays blank; a matched address record never falls through to the
-     prefix lookup. NetBox also lets an address be assigned to something that is not an
+     and `vm_name` for the VM case), but `device_*` stays blank — there's no device to
+     attach — and `prefix_*` still stays blank; a matched address record never falls
+     through to the prefix lookup. The virtual machine itself **is** named, in `vm_name`,
+     which is in the default field selection for exactly that reason: without it a
+     VM-assigned row would have no owner column at all. It is a column of its own rather
+     than a value folded into `device_name` on purpose — NetBox lets a device and a
+     virtual machine share a name, so folding the two together would make the
+     `device_name` → metric `device` join in step 4 match the wrong host. `vm_name` and
+     `device_name` are mutually exclusive per row. There is no other `vm_*` column: a
+     VM's cluster, site, role, platform and status each cost a second NetBox request,
+     whereas the name is already inside the address record and so is free.
+     NetBox also lets an address be assigned to something that is not an
      interface at all — an **FHRP/VRRP group**, say — and `interface_*` stays blank for
      those: there is no interface to name. `address_*` still populates, because the
-     address record itself is real.
+     address record itself is real. That leaves an FHRP-assigned address and a wholly
+     unassigned one looking identical (`interface_*` and `device_*` both blank on
+     either) — add `address_assigned_object_type` to tell them apart: it carries
+     NetBox's raw relation string (`dcim.interface`, `virtualization.vminterface`,
+     `ipam.fhrpgroup`), blank meaning unassigned. Read that blank **only against a row
+     that matched an address record** — a row in the third outcome below matched none,
+     so every `address_*` column is blank there too, this one included. `address_status`
+     is the discriminator: populated ⇒ a record matched ⇒ blank really does mean
+     "assigned to nothing". See `address_assigned_object_type` below for why this is the
+     only signal that finds a VRRP/HSRP virtual address — `match_count` does not.
    - **The IP matches no address record at all**: only then does the query fall back to
      the longest-**containing** prefix, populating `prefix_cidr`, `prefix_scope`,
      `prefix_tenant`, `prefix_role`, `prefix_vlan`. `address_*`/`interface_*`/`device_*`
@@ -189,22 +207,24 @@ longest containing prefix:
 **Expected result** (real `ds/query` response against the bundled demo NetBox, contrasting
 all three outcomes):
 
-| ip           | address_dns_name    | device_name  | device_is_primary_ip | interface_name | prefix_cidr   | prefix_scope | prefix_tenant | prefix_role | prefix_vlan    |
-| ------------ | ------------------- | ------------ | --------------------- | --------------- | ------------- | ------------ | ------------- | ----------- | -------------- |
-| 10.20.0.1    | leaf01.example.net  | AMS1-leaf-01 | true                  | Ethernet1       |               |              |               |             |                |
-| 10.40.0.5    |                      |              |                       | eth0            |               |              |               |             |                |
-| 10.10.10.50  |                      |              |                       |                 | 10.10.10.0/24 | AMS1         | Grafana Demo  | LAN         | ams1-lan (110) |
+| ip          | address_dns_name   | device_name  | vm_name    | device_is_primary_ip | interface_name | prefix_cidr   | prefix_scope | prefix_tenant | prefix_role | prefix_vlan    |
+| ----------- | ------------------ | ------------ | ---------- | -------------------- | -------------- | ------------- | ------------ | ------------- | ----------- | -------------- |
+| 10.20.0.1   | leaf01.example.net | AMS1-leaf-01 |            | true                 | Ethernet1      |               |              |               |             |                |
+| 10.40.0.5   |                    |              | demo-vm-01 |                      | eth0           |               |              |               |             |                |
+| 10.10.10.50 |                    |              |            |                      |                | 10.10.10.0/24 | AMS1         | Grafana Demo  | LAN         | ams1-lan (110) |
 
 `10.20.0.1` is AMS1-leaf-01's primary IP on `Ethernet1` — a registered, interface-assigned
-address, so `address_*`/`interface_*`/`device_*` populate and `prefix_*` stays blank.
-`10.40.0.5` is a VM's `eth0` — a registered address with no owning NetBox device, so
-`interface_name` populates but `device_*` (and `prefix_*`) don't. `10.10.10.50` has no
-address record at all, so the query falls back to the containing prefix
-(`10.10.10.0/24`) and every address/device/interface column is blank. An IP matching
-neither an address record nor a containing prefix comes back with every context column
-blank — signal too (unknown/external traffic).
+address, so `address_*`/`interface_*`/`device_*` populate and `prefix_*` stays blank;
+`vm_name` is blank because a device is not a virtual machine. `10.40.0.5` is a VM's `eth0`
+— a registered address with no owning NetBox device, so `interface_name` and `vm_name`
+populate but `device_*` (and `prefix_*`) don't. The two name columns are exactly the
+contrast: each row is named, and which column names it tells you which model NetBox holds
+it in. `10.10.10.50` has no address record at all, so the query falls back to the
+containing prefix (`10.10.10.0/24`) and every address/device/interface column is blank.
+An IP matching neither an address record nor a containing prefix comes back with every
+context column blank — signal too (unknown/external traffic).
 
-**Two signals worth knowing about:**
+**Three signals worth knowing about:**
 
 - **`device_is_primary_ip`** — whether this address is the device's primary IP: the one
   NetBox designates as the device's management address, and therefore the one an SNMP
@@ -220,10 +240,17 @@ blank — signal too (unknown/external traffic).
   device-name join in step 4 is the one that works. Check your own with
   `label_values(<your metric>, instance)` before designing around either.
 - **`match_count`** — how many NetBox address records matched the IP, before the row you
-  see was picked. `1` is the normal case. `> 1` means either an anycast address shared by
-  several devices, or a VRRP/HSRP virtual IP shared across a redundant pair; the plugin
-  picks one match deterministically so the row is stable across queries, but a count above
-  1 is your cue that "the device" isn't unique for that address.
+  see was picked. `1` is the normal case. `> 1` means NetBox genuinely holds several
+  address records for that host — an anycast address registered once per device, or a
+  virtual IP recorded separately on each member interface; the plugin picks one match
+  deterministically so the row is stable across queries, but a count above 1 is your cue
+  that "the device" isn't unique for that address.
+
+  It is **not** a VRRP/HSRP detector. When a virtual address is modelled the way modern
+  NetBox intends — one address record assigned to an **FHRP group**, with the redundant
+  interfaces as members of that group — there is only ever one record, so `match_count` is
+  `1` and nothing here distinguishes it. Use `address_assigned_object_type` for that; see
+  below.
 
   The pick, in order: a record **assigned to an interface** (device or VM) wins, then one
   assigned to **anything else** (an FHRP/VRRP group, say), then a **non-deprecated**
@@ -233,6 +260,31 @@ blank — signal too (unknown/external traffic).
   hand you a blank row while the answer sat in the other record. Assignment outranks
   status for the same reason: a deprecated interface record still names the device, and
   `address_status` shows you it's deprecated.
+
+- **`address_assigned_object_type`** — what the address record is assigned to, as
+  NetBox's own raw relation string: `dcim.interface`, `virtualization.vminterface`, or
+  `ipam.fhrpgroup`. Blank means unassigned — but blank is not *self*-evidence of that, and
+  the difference matters when you build an alert on it. Three different situations all
+  leave it empty: an address record that really is assigned to nothing; an IP that matched
+  no address record at all, which never reaches this column; and an IP whose address lookup
+  partially failed, which degrades and raises a WARNING notice on the frame. Only the first
+  is "NetBox says nothing owns this". Pair it with `address_status` — populated ⇒ a record
+  matched — and heed the frame notices, which for a degraded query say exactly which
+  columns are blank for a reason the data cannot show. This column, **not** `match_count`,
+  is the signal for a **VRRP/HSRP virtual address**. The two look like they should overlap
+  and don't: a virtual address is shared across a redundant pair much as an anycast address
+  is shared across several devices, but NetBox models it as a single address record
+  assigned to an FHRP group — the redundant interfaces are members of the *group*, not
+  separate address records — so `match_count` is **1**, exactly like an ordinary address.
+  (Verified: an FHRP-assigned address returns `match_count = 1`.) `match_count` rises only
+  when NetBox genuinely holds several address records for the same host, which is the
+  anycast/duplicate case. Meanwhile the FHRP row leaves `interface_*` and `device_*` blank —
+  there is no port or device to name a virtual-group address with — so on its own it looks
+  exactly like an address NetBox has no record of. `address_assigned_object_type` reading
+  `ipam.fhrpgroup` is the only thing that tells those apart; an alert or dashboard that
+  keys on `match_count > 1` to find virtual addresses will miss every one of them.
+  It's offered rather than defaulted: most rows are blank or `dcim.interface`, so it
+  earns a column only when the VRRP/HSRP case is actually in play.
 
 **If it doesn't match:** exact join (3a) returning mostly empty context → your observed
 IPs aren't individually registered in IPAM; switch to 3b. Longest-prefix rows all empty →

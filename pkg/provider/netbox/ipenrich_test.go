@@ -977,7 +977,8 @@ func TestIPEnrichColumnsAreNamespaced(t *testing.T) {
 	for _, c := range cols[2:] {
 		switch {
 		case strings.HasPrefix(c, "prefix_"), strings.HasPrefix(c, "address_"),
-			strings.HasPrefix(c, "interface_"), strings.HasPrefix(c, "device_"):
+			strings.HasPrefix(c, "interface_"), strings.HasPrefix(c, "device_"),
+			strings.HasPrefix(c, "vm_"):
 		default:
 			t.Errorf("column %q is not namespaced", c)
 		}
@@ -1235,12 +1236,19 @@ func TestApplyAddressColumns_HandlesEmptyNATAndNoAssignment(t *testing.T) {
 // one table states the whole rule. A gate that excluded FHRP by excluding
 // everything would pass an FHRP-only test and silently blank the VM case, which
 // docs/RECIPES.md documents as populating interface_name.
+// wantAssignedType is also checked in every case below: address_assigned_object_type
+// is the one column that tells an FHRP-assigned address apart from a wholly
+// unassigned one, since both leave interface_* and device_* blank. It carries the
+// raw assigned_object_type string (never a friendly label — the field has none) and
+// must be unset, not the empty string, for an address with no assignment at all.
 func TestApplyAddressColumns_InterfaceColumnsRequireAnInterface(t *testing.T) {
 	cases := []struct {
-		name     string
-		raw      string
-		wantName interface{} // nil = the column must be unset
-		wantDesc interface{}
+		name             string
+		raw              string
+		wantName         interface{} // nil = the column must be unset
+		wantDesc         interface{}
+		wantAssignedType interface{}
+		wantVMName       interface{}
 	}{
 		{
 			name: "a dcim.interface assignment fills interface_*",
@@ -1248,8 +1256,9 @@ func TestApplyAddressColumns_InterfaceColumnsRequireAnInterface(t *testing.T) {
 				"assigned_object_type":"dcim.interface",
 				"assigned_object":{"id":9,"display":"Ethernet1","name":"Ethernet1",
 					"description":"uplink to AMS1-spine-01","device":{"id":100,"name":"AMS1-leaf-01"}}}`,
-			wantName: "Ethernet1",
-			wantDesc: "uplink to AMS1-spine-01",
+			wantName:         "Ethernet1",
+			wantDesc:         "uplink to AMS1-spine-01",
+			wantAssignedType: "dcim.interface",
 		},
 		{
 			name: "a virtualization.vminterface assignment fills interface_* too",
@@ -1260,11 +1269,16 @@ func TestApplyAddressColumns_InterfaceColumnsRequireAnInterface(t *testing.T) {
 				"assigned_object_type":"virtualization.vminterface",
 				"assigned_object":{"id":55,"display":"eth0","name":"eth0",
 					"description":"vm nic","virtual_machine":{"id":5,"name":"vm-01"}}}`,
-			wantName: "eth0",
-			wantDesc: "vm nic",
+			wantName:         "eth0",
+			wantDesc:         "vm nic",
+			wantAssignedType: "virtualization.vminterface",
+			// The VM row IS named — just not in device_name. vm_name is the only
+			// column that can carry it, so if this stops being set the row loses
+			// its owner entirely.
+			wantVMName: "vm-01",
 		},
 		{
-			name: "an ipam.fhrpgroup assignment fills neither",
+			name: "an ipam.fhrpgroup assignment fills neither interface_* column, but is distinguishable via address_assigned_object_type",
 			raw: `{"id":53,"display":"10.77.77.78/24","address":"10.77.77.78/24",
 				"vrf":null,"tenant":null,"status":{"value":"active","label":"Active"},"role":null,
 				"assigned_object_type":"ipam.fhrpgroup","assigned_object_id":2,
@@ -1273,9 +1287,10 @@ func TestApplyAddressColumns_InterfaceColumnsRequireAnInterface(t *testing.T) {
 					"description":"temp fixture for codex round2 finding 3"},
 				"nat_inside":null,"nat_outside":[],"dns_name":"zz-codex2-vip.example.net",
 				"description":"temp fixture codex round2"}`,
+			wantAssignedType: "ipam.fhrpgroup",
 		},
 		{
-			name: "an unassigned address fills neither",
+			name: "an unassigned address fills neither, and address_assigned_object_type is blank too",
 			raw: `{"id":21,"address":"10.0.0.2/32","status":{"value":"active"},
 				"assigned_object_type":null,"assigned_object":null}`,
 		},
@@ -1300,6 +1315,16 @@ func TestApplyAddressColumns_InterfaceColumnsRequireAnInterface(t *testing.T) {
 			}
 			if got := row["interface_description"]; got != tc.wantDesc {
 				t.Errorf("interface_description = %#v, want %#v", got, tc.wantDesc)
+			}
+			if got := row["address_assigned_object_type"]; got != tc.wantAssignedType {
+				t.Errorf("address_assigned_object_type = %#v, want %#v", got, tc.wantAssignedType)
+			}
+			// Asserted in EVERY case, not just the VM one: vm_name is the
+			// counterpart of device_name and the two are mutually exclusive per
+			// row, so a dcim.interface, an FHRP group and an unassigned address
+			// must each leave it unset.
+			if got := row["vm_name"]; got != tc.wantVMName {
+				t.Errorf("vm_name = %#v, want %#v", got, tc.wantVMName)
 			}
 			// The address record itself is real whatever it is assigned to, so
 			// withholding interface_* must not withhold address_*. Only the
@@ -1369,6 +1394,86 @@ func TestDeviceIDFromAddress(t *testing.T) {
 			id, ok := deviceIDFromAddress(json.RawMessage(tc.raw))
 			if ok != tc.wantOK || id != tc.wantID {
 				t.Errorf("deviceIDFromAddress = (%d, %t), want (%d, %t)", id, ok, tc.wantID, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestVMNameFromAddress mirrors TestDeviceIDFromAddress, and exists for the same
+// reason: vmNameFromAddress has two independent ways to say no — the
+// assigned_object_type gate and the "no assigned_object.virtual_machine.name"
+// fallback — and real NetBox dcim.interface JSON (which carries device, never
+// virtual_machine) trips the second one, so an end-to-end test could never show
+// whether the type gate is still there.
+//
+// The third case is the mirror image of that test's third case, and is the whole
+// point of keeping this a standalone function: a dcim.interface payload that
+// hypothetically also carried a virtual_machine key must yield NO vm_name. That
+// proves the gate is on the TYPE CONSTANT rather than on the payload's shape,
+// which is what keeps vm_name and device_name mutually exclusive per row no
+// matter what NetBox's serializer grows later.
+func TestVMNameFromAddress(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      string
+		wantName string
+		wantOK   bool
+	}{
+		{
+			name: "a virtualization.vminterface assignment yields its VM name",
+			// display deliberately DIFFERS from name. Real NetBox happens to send
+			// them equal for a VM today, but a fixture that mirrors that cannot
+			// tell the two keys apart — and telling them apart is the entire point
+			// of this case, since sourcing the column from display is the exact
+			// regression that produced the FHRP mislabelling fixed in #96.
+			raw:      `{"id":31,"assigned_object_type":"virtualization.vminterface","assigned_object":{"id":55,"name":"eth0","virtual_machine":{"id":2,"display":"demo-vm-01 (AMS1 cluster)","name":"demo-vm-01"}}}`,
+			wantName: "demo-vm-01",
+			wantOK:   true,
+		},
+		{
+			name:   "a dcim.interface assignment is excluded",
+			raw:    `{"id":1,"assigned_object_type":"dcim.interface","assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"}}}`,
+			wantOK: false,
+		},
+		{
+			name: "the type gate excludes a dcim.interface even when a virtual_machine is present",
+			// Not a shape NetBox sends today — that is the point, and it is the
+			// exact reverse of TestDeviceIDFromAddress' third case. Rejecting on
+			// the type constant, not on "did the payload happen to carry a
+			// virtual_machine", is what stops a device row acquiring a vm_name.
+			raw:    `{"id":1,"assigned_object_type":"dcim.interface","assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"},"virtual_machine":{"id":2,"name":"demo-vm-01"}}}`,
+			wantOK: false,
+		},
+		{
+			name:   "an ipam.fhrpgroup assignment is excluded",
+			raw:    `{"id":53,"assigned_object_type":"ipam.fhrpgroup","assigned_object":{"id":2,"display":"zz-probe-fhrp VRRPv3: 991 (10.77.77.77/24)"}}`,
+			wantOK: false,
+		},
+		{
+			name:   "an unassigned address is excluded",
+			raw:    `{"id":21,"assigned_object_type":null,"assigned_object":null}`,
+			wantOK: false,
+		},
+		{
+			name: "a vminterface with no nested virtual_machine name is excluded",
+			// Blank is not a name. Setting vm_name to "" would put an empty
+			// string where "this row has no VM" belongs, and the two read
+			// differently in a table.
+			raw:    `{"id":32,"assigned_object_type":"virtualization.vminterface","assigned_object":{"id":56,"name":"eth1"}}`,
+			wantOK: false,
+		},
+		{
+			name:   "malformed JSON is excluded rather than panicking",
+			raw:    `{"id":`,
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name, ok := vmNameFromAddress(json.RawMessage(tc.raw))
+			if ok != tc.wantOK || name != tc.wantName {
+				t.Errorf("vmNameFromAddress = (%q, %t), want (%q, %t)", name, ok, tc.wantName, tc.wantOK)
 			}
 		})
 	}
@@ -2379,7 +2484,7 @@ func TestHopWarningTexts(t *testing.T) {
 			// 0 asserts "NetBox holds no record" and a prefix_cidr looks like a
 			// successful longest-match fallback, on an IP NetBox knows.
 			want: "Address lookup failed for 330 of 1,200 IPs — NetBox returned HTTP 503. " +
-				"The match_count, address_*, interface_*, device_* and prefix_* columns on the affected rows are empty " +
+				"The match_count, address_*, interface_*, device_*, vm_name and prefix_* columns on the affected rows are empty " +
 				"because the lookup failed, not because NetBox has no record for those IPs.",
 		},
 		{

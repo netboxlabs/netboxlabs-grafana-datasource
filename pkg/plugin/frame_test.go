@@ -227,7 +227,7 @@ func TestBuildAlertFrame_ValueField(t *testing.T) {
 		Columns: []string{"prefix", "site", "utilization"},
 		Rows: []map[string]interface{}{
 			{"prefix": "10.0.0.0/24", "site": "dc1", "utilization": 87.5},
-			{"prefix": "10.0.1.0/24", "site": "dc1", "utilization": "42"},   // numeric string parses
+			{"prefix": "10.0.1.0/24", "site": "dc1", "utilization": "42"},  // numeric string parses
 			{"prefix": "10.0.2.0/24", "site": "dc2", "utilization": "n/a"}, // unparseable -> 0
 		},
 	}

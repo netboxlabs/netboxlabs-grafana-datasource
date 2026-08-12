@@ -100,10 +100,10 @@ func TestNestedDisplay(t *testing.T) {
 
 func TestAuthHeader(t *testing.T) {
 	cases := map[string]string{
-		"nbt_abc.def":                              "Bearer nbt_abc.def",
+		"nbt_abc.def": "Bearer nbt_abc.def",
 		"0123456789abcdef0123456789abcdef01234567": "Token 0123456789abcdef0123456789abcdef01234567",
-		"Bearer already":                           "Bearer already",
-		"Token already":                            "Token already",
+		"Bearer already": "Bearer already",
+		"Token already":  "Token already",
 	}
 	for in, want := range cases {
 		if got := authHeader(in); got != want {

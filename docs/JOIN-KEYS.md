@@ -57,12 +57,23 @@ Value-equality can't map an arbitrary observed IP to its **containing** NetBox
 prefix, let alone the device it belongs to. The **IP enrichment** query type does
 both, but not both at once for the same IP: give it a list of IPs (literally, or
 from a `$variable` sourced from your flow data) and, per IP, it either finds a
-registered address record — returning the owning device and interface
-(`device_name`, `interface_name`, `device_is_primary_ip`, …) when that address is
-assigned to one — or, only when no address record matches at all, falls back to
+registered address record — returning whatever owns it: a device and its
+interface (`device_name`, `interface_name`, `device_is_primary_ip`, …), or
+`vm_name` when the address sits on a virtual machine's interface instead — or,
+only when no address record matches at all, falls back to
 the longest-matching prefix's context (`prefix_tenant`, `prefix_role`,
 `prefix_vrf`, `prefix_vlan`, `prefix_scope`, …). `prefix_*` and
-`address_*`/`interface_*`/`device_*` are mutually exclusive per row. See
+`address_*`/`interface_*`/`device_*`/`vm_name` are mutually exclusive per row,
+and `device_name` and `vm_name` are never both set on the same row either — but
+neither is guaranteed to be set. An address is assigned to a device interface,
+to a VM interface, or to neither (an FHRP/VRRP group, or nothing at all), and in
+that last case both names stay blank, as they do on every prefix-fallback row.
+So don't read a blank `device_name` as "therefore a VM":
+`address_assigned_object_type` is the column that tells those cases apart, and
+it only means anything on a row that matched an address record in the first
+place. Join on whichever name your metrics are labelled by — they are separate
+columns because NetBox permits a device and a VM with the same name, and merging
+them would silently join the wrong host. See
 [RECIPES.md](./RECIPES.md#recipe-3-enrich-flows-or-logs-by-ip) for the full
 field list and worked examples of each outcome. Join your flow metrics to the
 result on `ip`. This is the one enrichment that genuinely needs NetBox at query

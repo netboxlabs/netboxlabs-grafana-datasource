@@ -195,7 +195,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             label="Context fields"
             labelWidth={20}
             grow
-            tooltip="Columns to return alongside each IP: identity, longest-matching prefix, the address record, the interface it's assigned to, and the owning device"
+            tooltip="Columns to return alongside each IP: identity, longest-matching prefix, the address record, the interface it's assigned to, and the owning device or virtual machine"
           >
             <MultiSelect
               options={IP_CONTEXT_FIELD_GROUPS}

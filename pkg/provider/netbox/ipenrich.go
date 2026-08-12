@@ -192,6 +192,10 @@ func causeText(err error) string {
 }
 
 // The three degradation messages below each name the missing COLUMNS and end by
+// stating what the blank does NOT mean. vm_name is spelled out individually
+// because it is the one column with no group prefix to hide behind: a reader
+// scanning for "vm_*" would not find it, and it is in the default selection, so
+// a degraded default panel blanks it.
 // ruling out the reading a blank column would otherwise invite. "Degraded" on
 // its own would tell a dashboard author nothing actionable; which namespace went
 // blank, and whether blank means "absent" or "unknown", is the whole point.
@@ -206,7 +210,7 @@ func causeText(err error) string {
 // the lookup never answered.
 func addressHopWarning(d degradation) string {
 	return fmt.Sprintf(
-		"Address lookup failed for %s — %s. The match_count, address_*, interface_*, device_* and prefix_* columns on the affected rows are empty because the lookup failed, not because NetBox has no record for those IPs.",
+		"Address lookup failed for %s — %s. The match_count, address_*, interface_*, device_*, vm_name and prefix_* columns on the affected rows are empty because the lookup failed, not because NetBox has no record for those IPs.",
 		d.scope("IP", "IPs"), causeText(d.cause))
 }
 
@@ -244,7 +248,7 @@ func addressTruncationWarning(hosts []string) string {
 		subject = "1 IP"
 	}
 	return fmt.Sprintf(
-		"NetBox holds more than %s address records for %s (%s) — only the first %s were read. match_count is a floor rather than a count for the affected rows, and their address_*, interface_* and device_* columns describe a record picked from the part that was read.",
+		"NetBox holds more than %s address records for %s (%s) — only the first %s were read. match_count is a floor rather than a count for the affected rows, and their address_*, interface_*, device_* and vm_name columns describe a record picked from the part that was read.",
 		humanInt(MaxLimit), subject, list, humanInt(MaxLimit))
 }
 
@@ -645,34 +649,58 @@ func (p *Provider) fetchDevices(ctx context.Context, ids []int) (map[int]map[str
 // generic `scope` (site, region or location), which is why 4.2 and not 4.1 is
 // the supported floor (README Requirements); 4.1 has no `scope` at all, so this
 // column would be blank there for every result.
-// Only interface_name and interface_description are present: assigned_object
-// is the brief interface form and carries nothing else worth surfacing.
+// Only interface_name and interface_description are present, and the reason
+// differs by assignment kind. For a dcim.interface, assigned_object is the brief
+// interface form and carries nothing else worth surfacing. A
+// virtualization.vminterface carries one thing more — a nested virtual_machine
+// object — and that is where vm_name comes from; it costs nothing, because the
+// address hop already has the payload.
+// vm_name is the ONLY vm_* column. It is deliberately not device_name: a VM id
+// and a device id live in different NetBox models, so reusing the device
+// keyspace would collide, and NetBox permits a device and a VM with the same
+// name, which would make the documented device_name → Prometheus `device` join
+// match the wrong thing. Per row at most one of vm_name and device_name is set,
+// never both — and both are blank whenever the address is assigned to neither
+// (an ipam.fhrpgroup, or nothing at all), as they are on a prefix-fallback row;
+// see deviceIDFromAddress and vmNameFromAddress.
+// address_assigned_object_type carries the raw NetBox relation string
+// (dcim.interface, virtualization.vminterface, ipam.fhrpgroup), never a
+// friendly label: unlike address_status, assigned_object_type is a plain
+// string with no separate label field, so raw is the only representation
+// there is. It is what lets a caller tell an FHRP-assigned address apart from
+// a wholly unassigned one — both otherwise leave interface_* and device_*
+// equally blank.
 // There is no address_nat_inside_dns/address_nat_outside_dns: NetBox 4.4's
 // nested NestedIPAddress serializer (used for both nat_inside and every
 // nat_outside element) has no dns_name property at all — verified against the
 // OpenAPI schema and live, including a patch-and-refetch that ruled out the
 // field being merely omitted when empty. Filling it would need a second API
 // call per referenced NAT partner; ruled: not worth the extra request, same
-// as VM device support and the dropped interface_* columns.
+// as VM DEVICE-GRADE enrichment (a VM's cluster, site, role, platform or
+// status — each of which needs a virtualization/virtual-machines hop this
+// package does not make) and the dropped interface_* columns. The VM's NAME is
+// not in that ruling: it is embedded in the address payload already, so it
+// costs nothing and is shipped as vm_name.
 func IPEnrichColumns() []string {
 	return []string{
 		"ip", "match_count",
 		"prefix_cidr", "prefix_scope", "prefix_tenant", "prefix_role",
 		"prefix_vrf", "prefix_vlan", "prefix_description",
 		"address_dns_name", "address_status", "address_role", "address_vrf",
-		"address_tenant", "address_description",
+		"address_tenant", "address_description", "address_assigned_object_type",
 		"address_nat_inside", "address_nat_outside",
 		"interface_name", "interface_description",
 		"device_name", "device_role", "device_platform", "device_device_type",
 		"device_site", "device_location", "device_rack", "device_tenant",
 		"device_status", "device_is_primary_ip",
+		"vm_name",
 	}
 }
 
 // defaultIPEnrichFields is what a new query selects. match_count is included
 // on purpose: an ambiguous pick must be visible out of the box.
 var defaultIPEnrichFields = []string{
-	"ip", "match_count", "address_dns_name", "device_name", "interface_name",
+	"ip", "match_count", "address_dns_name", "device_name", "vm_name", "interface_name",
 	"device_is_primary_ip", "device_site", "device_tenant",
 }
 
@@ -732,6 +760,12 @@ func declaredColumnTypes(fields []string) map[string]provider.FieldType {
 // Prefix matching is exact-by-construction: every column in IPEnrichColumns
 // beginning with "device_" or "prefix_" comes from that group's hop, and the two
 // non-namespaced columns ("ip", "match_count") belong to neither.
+//
+// "vm_" is NOT a group here, alongside "address_" and "interface_": vm_name is
+// read off the address payload this query already holds, so there is no hop to
+// skip. If VM device-grade columns are ever added, gate their hop on those
+// specific non-free vm_* names — never on the whole "vm_" prefix, which would
+// make the free column start paying for a request.
 func wantsGroup(fields []string, group string) bool {
 	for _, f := range fields {
 		if strings.HasPrefix(f, group) {
@@ -801,13 +835,18 @@ const (
 // alone: a VM interface is a real interface (interface_name populates) but has
 // no NetBox device (device_* stays blank), and that asymmetry is the documented
 // contract in docs/RECIPES.md. Two different questions, one set of constants.
+//
+// A VM-assigned row is still named, just not in device_name: its identity lands
+// in vm_name, filled by vmNameFromAddress off the same payload.
 func isInterfaceAssignment(objectType string) bool {
 	return objectType == assignedTypeInterface || objectType == assignedTypeVMInterface
 }
 
 // deviceIDFromAddress returns the owning device id for an address assigned to
 // a dcim.interface. VM interfaces return false: device_* stays blank rather
-// than mislabelling a virtual machine as a device.
+// than mislabelling a virtual machine as a device — see vmNameFromAddress,
+// which is where a VM-assigned row is named instead, so this exclusion is a
+// rule rather than an omission.
 func deviceIDFromAddress(raw json.RawMessage) (int, bool) {
 	var o struct {
 		Type           string `json:"assigned_object_type"`
@@ -824,6 +863,44 @@ func deviceIDFromAddress(raw json.RawMessage) (int, bool) {
 		return 0, false
 	}
 	return o.AssignedObject.Device.ID, true
+}
+
+// vmNameFromAddress returns the owning virtual machine's name for an address
+// assigned to a virtualization.vminterface. It is deviceIDFromAddress' mirror
+// image: the same generic-relation payload, read through the OTHER type
+// constant, and it is what fills vm_name.
+//
+// It costs no request. NetBox's address serializer embeds the whole nested
+// virtual_machine object ({id,url,display,name,description}) inside
+// assigned_object, and the address hop already fetched it — flattenObject merely
+// collapses a nested object to its display/id/slug and drops what is inside,
+// which is the same reason interface_description is read off the raw JSON here.
+//
+// Standalone rather than inlined at the one call site, for the reason
+// TestDeviceIDFromAddress states about its twin: the TYPE GATE has to be
+// assertable on its own, independently of whether the payload happens to carry
+// the field. A dcim.interface payload that grew a virtual_machine key must still
+// yield nothing here.
+//
+// The NAME, never .display. They are equal today for a virtual machine, but
+// display is a rendering — the FHRP mislabelling this file documents came from
+// trusting one — and only name is the value the rest of NetBox joins on.
+func vmNameFromAddress(raw json.RawMessage) (string, bool) {
+	var o struct {
+		Type           string `json:"assigned_object_type"`
+		AssignedObject struct {
+			VirtualMachine struct {
+				Name string `json:"name"`
+			} `json:"virtual_machine"`
+		} `json:"assigned_object"`
+	}
+	if json.Unmarshal(raw, &o) != nil || o.Type != assignedTypeVMInterface {
+		return "", false
+	}
+	if o.AssignedObject.VirtualMachine.Name == "" {
+		return "", false
+	}
+	return o.AssignedObject.VirtualMachine.Name, true
 }
 
 // applyAddressColumns fills address_* from one address record, and interface_*
@@ -860,6 +937,18 @@ func applyAddressColumns(row map[string]interface{}, raw json.RawMessage) {
 			row[dst] = v
 		}
 	}
+
+	// address_assigned_object_type is set only when the address is actually
+	// assigned to something: assignedType returns "" for a null/absent field
+	// (an unassigned address), and "" is not a value worth putting in the row —
+	// omitted here reads the same as omitted everywhere else (project() below
+	// leaves an absent key nil). This is the raw relation string, not a label:
+	// see the reasoning on IPEnrichColumns.
+	objectType := assignedType(vals)
+	if objectType != "" {
+		row["address_assigned_object_type"] = objectType
+	}
+
 	// interface_* is filled ONLY for an actual interface. assigned_object is a
 	// generic relation (see isInterfaceAssignment): NetBox also assigns
 	// addresses to FHRP groups, and their display string is a VRRP/HSRP group,
@@ -869,7 +958,7 @@ func applyAddressColumns(row map[string]interface{}, raw json.RawMessage) {
 	// The address_* columns above still populate, on purpose: the address record
 	// is real and everything in it is true. Only the ASSIGNMENT is something
 	// interface_* cannot describe, so that is all that is withheld.
-	if !isInterfaceAssignment(assignedType(vals)) {
+	if !isInterfaceAssignment(objectType) {
 		return
 	}
 
@@ -892,6 +981,15 @@ func applyAddressColumns(row map[string]interface{}, raw json.RawMessage) {
 	}
 	if nested.AssignedObject.Description != "" {
 		row["interface_description"] = nested.AssignedObject.Description
+	}
+
+	// vm_name, for the VM half of this arm only — vmNameFromAddress gates on
+	// virtualization.vminterface itself, so a dcim.interface row leaves it unset
+	// and device_name is what names that row. Same move as
+	// interface_description above: the value is already in the payload and only
+	// flattenObject's collapse to display/id/slug hid it.
+	if n, ok := vmNameFromAddress(raw); ok {
+		row["vm_name"] = n
 	}
 }
 

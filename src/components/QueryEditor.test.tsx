@@ -274,6 +274,7 @@ describe('IP context field groups', () => {
       'Address',
       'Interface',
       'Device',
+      'Virtual machine',
     ]);
   });
 

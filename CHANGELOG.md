@@ -6,6 +6,86 @@ Initial release of the NetBox data source for Grafana.
 
 - Compatibility statement: NetBox ≥ 4.2 (validated 4.2 → 4.6 via `demo/compat-check.sh`),
   Grafana ≥ 12.3.
+- Object queries now ask NetBox to serialize only the properties the query
+  actually reads (`?fields=`), instead of fetching whole objects and discarding
+  most of them client-side. The result is unchanged — same columns, rows,
+  values, deep links, join keys, variable lists and totals — but NetBox builds
+  and sends far less: on a large instance a 500-object page shrinks by roughly
+  five-fold, and end-to-end query time falls appreciably, more so the wider the
+  object type. Queries
+  that return **all** columns are unaffected, as is a query whose own filters
+  use a NetBox filter named `fields`.
+- Field-value suggestions for a column — the value dropdown in a filter row, and
+  a variable query's list — now come from the column's own source
+  once the object type is too large to read in one page: a foreign key is
+  enumerated from its related endpoint and a choice field from the OpenAPI
+  schema, instead of collecting whatever values happened to appear in an
+  arbitrary page of objects. On a large instance that turned an arbitrary
+  fraction of the sites — whichever ones device ordering happened to surface —
+  into the sites themselves, and typing now narrows upstream so values past the
+  first page are
+  reachable at all. Object types small enough to read in one page are unchanged.
+- **Fast paging** — a new data source setting, **off by default**, for NetBox
+  instances holding millions of objects. Most of the time in a large list
+  request goes on counting the matches; with this on, table panels page by
+  object ID and NetBox skips the count entirely. Leave it off unless you have
+  that problem, because what it costs applies at every instance size: rows come
+  back in **ID order** rather than the object type's natural order (a truncated
+  device table shows the lowest IDs, not the alphabetically first names), and
+  **totals are unavailable**, so a truncated panel can only say "showing the
+  first 100" instead of naming how many objects matched. Alert rules never take
+  this path, whatever the setting says — every alert evaluation asks NetBox for
+  the real total and the model's natural order, because a rule must not evaluate
+  an arbitrary subset, and a missing total decodes as "nothing matched".
+- An unfiltered query against an object type holding **more than a million
+  objects** now returns an informational notice naming the count and asking you
+  to add a filter. The largest page this data source will ever return is 10,000
+  rows, so above that line no panel is showing you your data, and previously
+  nothing said so. It cannot fire on a filtered query, or on anything smaller.
+- **Prefix/IP utilization is now bounded by time.** `utilization`, `used` and
+  `available` are measured per row, so a wide page of them can take longer than
+  the panel is allowed — previously the query simply ran until Grafana's own
+  timeout fired, leaving an error toast, an empty panel, and the upstream
+  requests spent anyway. The measurement now stops once it has spent two thirds
+  of the data source's **Timeout** setting (at most a minute). A fast NetBox
+  measures every row, however many: the bundled demo does its whole prefix table
+  in a fraction of a second. On a slow one, the rows not reached keep their
+  place in the order and every other column, with only those three cells blank,
+  and the panel reports how many of how many were measured. **An alert rule over
+  these columns now fails on a capped result** instead of evaluating it, and
+  names the row limit to lower to — an unmeasured prefix would otherwise
+  evaluate as 0% used, which a "utilization above 90%" rule reads as healthy.
+- **Utilization now states what it costs**, as an informational notice on the
+  panel. NetBox publishes utilization on no list endpoint, so each of these
+  three columns is worked out from that row's own child lookups: on the bundled
+  demo stack, selecting them turns a four-prefix table from one NetBox request
+  into eight, and a ten-prefix page on a large instance from one request into
+  34. That was invisible, and the conclusion a user reached was that the plugin
+  is slow. **This is the one change here that a small instance will notice** —
+  a prefix panel with these columns selected gains a notice it did not have
+  before. Its rows, columns, values and request count are unchanged, and a table
+  of `mark_utilized` ranges (which costs no requests) is charged nothing and
+  told nothing.
+- A utilization cell left blank because a **lookup failed** now says so in a
+  warning notice, naming how many rows and why. Blank rendered exactly like a
+  genuine zero, and the two are opposite conclusions: a prefix at 0% is free, a
+  prefix that could not be measured might be full. The child lookups are also
+  retried now, so the most common cause of a blank cell is no longer a blank
+  cell.
+- **Topology: edges are now fetched for the devices actually in the graph.** The
+  cable and interface fetches ignored the query's own filters and read a fixed
+  prefix of the whole database instead, so on a large NetBox a scoped topology
+  could return all of its nodes and **no edges at all**, however densely cabled
+  those devices are, with nothing to say why. A topology whose devices happened
+  to fall inside that prefix — any small instance — was already correct and is
+  unchanged; on a large one the edges now arrive from a scoped request rather
+  than a truncated read of every cable in the database.
+- A list page that fails **transiently** (502/503/504, or a dropped connection)
+  is now retried twice with a short backoff instead of failing the whole query.
+  Paging is where a blip is most expensive: a walk of twenty pages was lost
+  entirely if any one of them failed, so the risk grew with the size of the
+  result. A 4xx, a rate limit, a decode failure and a cancelled query are not
+  retried — those are answers, not blips.
 - Unqueryable NetBox endpoints (e.g. action endpoints returning 405, or plugin
   models whose list 500s on pagination) now show a clear message instead of the
   raw API error/exception; the raw detail is logged for operators.

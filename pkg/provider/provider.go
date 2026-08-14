@@ -66,8 +66,45 @@ type QuerySpec struct {
 	// Fields optionally restricts the returned columns (and their order). Empty
 	// means "all discovered columns".
 	Fields []string `json:"fields"`
+	// KeyFields names columns the caller READS out of each returned row but does
+	// NOT want as output columns — join-key sources, today (pkg/plugin.joinKeys).
+	//
+	// It exists because a provider is allowed to fetch only what it was asked
+	// for: the NetBox provider projects the upstream request onto Fields, and a
+	// join whose source is outside the selection would then derive its output
+	// from a value that was never fetched — an empty column on every row, with
+	// no error to say so. Naming the source here fetches it without displaying
+	// it, because asking to join on a column is not asking to see it.
+	//
+	// Result.Columns is unaffected; only Result.Rows is guaranteed to carry
+	// these values.
+	KeyFields []string `json:"keyFields"`
 	// Limit caps the number of rows returned (0 = provider default).
 	Limit int `json:"limit"`
+	// AllowUncounted says this caller can present its answer WITHOUT a reliable
+	// Result.Total, and therefore permits a provider to use a faster access path
+	// that does not produce one (the NetBox backend's cursor pagination, which
+	// is itself off unless the datasource opts in).
+	//
+	// The polarity is the safety property, not a style choice. Total is
+	// load-bearing: a count-only alerting query IS Result.Total, and the
+	// truncation guard that stops a rule evaluating on an arbitrary subset is a
+	// comparison against it. An uncounted result decodes to Total 0, which reads
+	// as "nothing matched" — the same shape as a healthy answer. Defaulting to
+	// false means a query path written later, by someone who has never read this
+	// comment, gets the counted behaviour by omission: forgetting this field
+	// costs speed, never correctness.
+	AllowUncounted bool `json:"allowUncounted"`
+	// CountOnly says this caller reads Result.Total and nothing else, so the
+	// provider may return a minimal Columns/Rows (it still returns at least the
+	// object identity). It exists so the count query can skip the expensive
+	// parts of building a row — NetBox's per-device config-context annotation
+	// dominates the count on a multi-million-row instance — without the caller
+	// having to pretend it wants a column it will never read.
+	//
+	// Mutually exclusive with AllowUncounted, which the provider rejects: a
+	// caller that reads only the total cannot also be able to do without it.
+	CountOnly bool `json:"countOnly"`
 }
 
 // Result is a flattened, table-shaped query result. Columns is the ordered set
@@ -99,11 +136,12 @@ type Result struct {
 	//
 	// Grafana alert evaluation cannot see frame notices (the same limitation
 	// truncationError exists for), so a query path that feeds alerting must treat
-	// a non-empty Warnings as a hard failure rather than warn. The ip-enrichment
-	// branch does: it fails on both truncation and non-empty Warnings. The
-	// objects/alertTable branch currently fails on truncation only, keying off
-	// its explicit alertTable flag. A future producer that sets Warnings on
-	// alertTable must also wire degradationError there, as ip-enrichment does.
+	// a non-empty Warnings as a hard failure rather than warn. All three do: the
+	// ip-enrichment, alert-table and plain objects branches reject a degraded
+	// result when the call is an alert evaluation (pkg/plugin/query.go, keyed off
+	// fromAlert — not off the alertTable flag, which is the rule author's choice
+	// of frame shape and says nothing about who is asking). A future alert-facing
+	// branch must wire degradationError the same way.
 	// A rule querying ip-enrichment and reducing over match_count was observed
 	// to keep evaluating silently on a degraded result — health ok, lastError
 	// nil, no notice surfaced — before that check existed. Any new alert-facing
@@ -124,6 +162,24 @@ type Result struct {
 	// a column is empty for a reason the data cannot show, so a rule may evaluate
 	// on a result that carries them.
 	Notes []string `json:"notes,omitempty"`
+	// Capped, when non-nil, reports that an expensive per-row enrichment
+	// deliberately measured only the first Cap.Measured rows and left its columns
+	// blank on the rest.
+	//
+	// This is NOT a Warning, and keeping the two apart is the whole point of the
+	// field. A warning means a lookup FAILED: the number exists upstream, we could
+	// not fetch it, a retry may well produce it, and an alert rule must refuse to
+	// evaluate because the gap is invisible in the numbers. A cap means the
+	// opposite — nothing failed, every value present is correct, there is simply
+	// less of it, and the user's own row limit is the dial that fixes it. Sharing
+	// one channel made an alert rule over a result that was merely large report
+	// "degraded data" and go to Error state, with the only suggested remedy being
+	// the one thing that could not help.
+	//
+	// The plugin layer renders it as a frame notice for dashboards and, for
+	// alerting, as the same shape of error truncation produces: state the two
+	// counts and say to lower the limit (see pkg/plugin/notices.go).
+	Capped *Cap `json:"capped,omitempty"`
 	// ColumnTypes declares the logical type of a column whose name the producer
 	// knows the type of up front, independent of what this particular result
 	// happens to contain. It exists because the plugin layer otherwise infers a
@@ -149,6 +205,27 @@ type Result struct {
 	// not []data.Notice: this package is the seam a second, non-NetBox backend
 	// plugs into, so it stays free of Grafana SDK frame types.
 	ColumnTypes map[string]FieldType `json:"columnTypes,omitempty"`
+}
+
+// Cap describes a deliberate bound on how many rows an expensive per-row
+// enrichment measured (see Result.Capped).
+//
+// It carries counts rather than a finished sentence — unlike Warnings and Notes,
+// which the producer writes in full — because the two consumers need to say
+// different things about the same fact: a dashboard states it and moves on,
+// while an alert has to name the number to lower the limit TO. That number is
+// Measured, and only the producer knows it.
+type Cap struct {
+	// Columns names the columns left blank past the bound, in the order the
+	// producer wants them read back to the user (e.g. utilization, used,
+	// available). Never empty when Cap is set.
+	Columns []string
+	// Measured is how many leading rows carry those columns.
+	Measured int
+	// Rows is how many rows the result holds in total; Rows-Measured are blank.
+	// Always greater than Measured — a producer that measured everything must
+	// leave Result.Capped nil rather than report a cap that did not bite.
+	Rows int
 }
 
 // Change is a single change-log/audit event, used to render annotations.

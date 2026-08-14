@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
@@ -55,6 +57,11 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 
 	nodes := make([]provider.GraphNode, 0, len(devRows))
 	inSet := map[string]bool{}
+	// nodeIDs is inSet in device order. The edge fetches are scoped to it (see
+	// fetchEdgeRows), and keeping NetBox's own device ordering means the scoped
+	// responses arrive in the same relative order the unscoped fetch delivered
+	// them, so the emitted edge order is unchanged.
+	nodeIDs := make([]string, 0, len(devRows))
 	for _, raw := range devRows {
 		var d struct {
 			ID   int    `json:"id"`
@@ -74,7 +81,10 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 			continue
 		}
 		id := strconv.Itoa(d.ID)
-		inSet[id] = true
+		if !inSet[id] {
+			inSet[id] = true
+			nodeIDs = append(nodeIDs, id)
+		}
 		nodes = append(nodes, provider.GraphNode{
 			ID:       id,
 			Title:    d.Name,
@@ -96,13 +106,13 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 	seen := map[string]bool{}
 	edges := p.wirelessEdges(ctx, inSet, seen)
 	if spec.Connections == "physical" {
-		physical, err := p.physicalEdges(ctx, inSet)
+		physical, err := p.physicalEdges(ctx, inSet, nodeIDs)
 		if err != nil {
 			return nil, err
 		}
 		edges = append(edges, physical...)
 	} else {
-		logical, err := p.logicalEdges(ctx, inSet, seen)
+		logical, err := p.logicalEdges(ctx, inSet, nodeIDs, seen)
 		if err != nil {
 			return nil, err
 		}
@@ -126,6 +136,99 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 	}
 
 	return &provider.Graph{Nodes: nodes, Edges: edges}, nil
+}
+
+// deviceScopeParam is the query parameter that restricts an edge endpoint to a
+// device set. dcim/interfaces and dcim/cables both accept it, repeated values
+// OR together, and both were verified honored by comparing the list envelope's
+// count against the unfiltered one — NetBox answers an unknown filter with HTTP
+// 200 and the FULL result set, so a no-op filter is otherwise indistinguishable
+// from a working one.
+const deviceScopeParam = "device_id"
+
+// fetchEdgeRows reads an edge endpoint restricted to the topology's own device
+// set, in device order.
+//
+// The scoping is a correctness fix, not an optimisation. Both edge endpoints
+// used to be fetched UNSCOPED and capped at MaxLimit rows, which made the edge
+// source a fixed prefix of the whole database — on a multi-million-device instance,
+// dcim/interfaces?connected=true ordered by device name yielded interfaces for
+// ~390 devices (0.006%), and dcim/cables 10,000 of 1,197,300 (0.84%). An edge is
+// only emitted when its NEAR end came from that fetch, so any node set outside
+// that window produced ZERO edges no matter how densely cabled it was: a
+// site-filtered topology rendered 200 nodes and 0 edges in 476s where the true
+// answer was 6 edges in one request. Silent, and indistinguishable from "these
+// devices are not connected".
+//
+// Batching reuses ipenrich.go's byte budget rather than a second mechanism,
+// because the ceiling is the same one (a server URL-length limit, measured at
+// ~8 KB) and a count-based cap tuned on short ids would break on long ones.
+//
+// A batch that overflows the row cap is SPLIT IN HALF and both halves
+// re-queried, exactly as fetchAddressRecords does, because the cap is what this
+// function exists to stop hitting: ~340 device ids fit one batch, and at the
+// measured ~51 cables per device that is 17,000 cables against a 10,000-row cap.
+// Nothing is kept from an overflowing batch — the halves re-read all of it — so
+// no row can be counted twice, and every split strictly shrinks the batch, so
+// this terminates at a single device. A single device with more rows than one
+// request can carry is the one case left; it is logged, since there is nothing
+// to split.
+//
+// An overflowing batch is only discovered after its pages have been walked, so
+// a split costs the pages already read. That is deliberate: the alternative is a
+// count probe before every batch, which would add a request to every topology
+// query — including the small ones that never overflow — to save requests on the
+// rare large one. Overflow needs a physical view of several hundred densely
+// cabled devices to happen at all, and the answer is right either way.
+//
+// Order is preserved: batches are seeded on a stack in reverse and a split
+// pushes its halves so the first half pops first, so rows come back in the same
+// relative order the unscoped fetch delivered them. That is what keeps the
+// emitted edge order — which is observable in the node graph — unchanged on an
+// instance small enough for one batch, i.e. every instance the old code was
+// already right about.
+func (p *Provider) fetchEdgeRows(ctx context.Context, objectType string, base url.Values, deviceIDs []string) ([]json.RawMessage, error) {
+	if len(deviceIDs) == 0 {
+		return nil, nil
+	}
+
+	chunks := chunkByBudget(deviceScopeParam, deviceIDs, chunkBudgetBytes)
+	work := make([][]string, 0, len(chunks))
+	for i := len(chunks) - 1; i >= 0; i-- {
+		work = append(work, chunks[i])
+	}
+
+	var out []json.RawMessage
+	for len(work) > 0 {
+		ids := work[len(work)-1]
+		work = work[:len(work)-1]
+
+		q := url.Values{}
+		for k, vs := range base {
+			q[k] = vs
+		}
+		for _, id := range ids {
+			q.Add(deviceScopeParam, id)
+		}
+
+		rows, total, err := p.fetchRows(ctx, objectType, q, MaxLimit)
+		if err != nil {
+			return nil, err
+		}
+		if total > len(rows) {
+			if len(ids) > 1 {
+				mid := len(ids) / 2
+				work = append(work, ids[mid:], ids[:mid])
+				continue
+			}
+			log.DefaultLogger.Warn(
+				"topology: edge lookup hit the row cap for a single device; some links are missing",
+				"endpoint", logSafe(objectType), "device_id", ids[0], "read", len(rows), "reported", total, "cap", MaxLimit,
+			)
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
 }
 
 // termination is a cable termination; interface and panel-port (front/rear)
@@ -166,8 +269,12 @@ func linkKey(a, b int) string {
 // paths (interface connected_endpoints): patch panels and circuits resolve to
 // the far device. Each path is seen from both end interfaces — dedup by link
 // identity, so parallel paths between the same device pair all render.
-func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, seen map[string]bool) ([]provider.GraphEdge, error) {
-	rows, _, err := p.fetchRows(ctx, "dcim/interfaces", url.Values{"connected": {"true"}}, MaxLimit)
+// The fetch is scoped to deviceIDs (the node set) because only an interface on
+// an IN-SET device can start an edge — the `!inSet[a]` test below already threw
+// every other row away, so scoping loses nothing and is what stops the row cap
+// truncating the fetch to an unrelated slice of the database.
+func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, deviceIDs []string, seen map[string]bool) ([]provider.GraphEdge, error) {
+	rows, err := p.fetchEdgeRows(ctx, "dcim/interfaces", url.Values{"connected": {"true"}}, deviceIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -217,12 +324,20 @@ func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, seen
 // same device pair all render. Front/rear-port terminations resolve to their
 // device (the patch panel), so panel-cabled fabrics render device—panel—device
 // instead of dropping the link.
-func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool) ([]provider.GraphEdge, error) {
-	rows, _, err := p.fetchRows(ctx, "dcim/cables", url.Values{}, MaxLimit)
+//
+// The fetch is scoped to deviceIDs (the node set): a cable both of whose ends
+// are in the set is matched by either end, so nothing is lost. Because a cable
+// spanning two BATCHES is returned by both, cables are deduped by their own
+// NetBox id — which is the identity of a cable, so this can never merge two
+// distinct parallel cables, and on a node set small enough for one batch (where
+// NetBox returns each cable once) it removes nothing at all.
+func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool, deviceIDs []string) ([]provider.GraphEdge, error) {
+	rows, err := p.fetchEdgeRows(ctx, "dcim/cables", url.Values{}, deviceIDs)
 	if err != nil {
 		return nil, err
 	}
 	var edges []provider.GraphEdge
+	seenCable := map[int]bool{}
 	for _, raw := range rows {
 		var c struct {
 			ID int           `json:"id"`
@@ -237,6 +352,10 @@ func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool) ([]
 		if a == "" || b == "" || a == b || !inSet[a] || !inSet[b] {
 			continue
 		}
+		if seenCable[c.ID] {
+			continue
+		}
+		seenCable[c.ID] = true
 		edges = append(edges, provider.GraphEdge{ID: strconv.Itoa(c.ID), Source: a, Target: b, Kind: "cable"})
 	}
 	return edges, nil
@@ -246,6 +365,17 @@ func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool) ([]
 // link identity (interface pair) as seen so the logical view doesn't repeat
 // the same link as a computed path. Fetch failures are non-fatal: wired
 // topology still renders.
+//
+// This is the ONE edge fetch that stays unscoped, and not by choice:
+// wireless/wireless-links has no device filter at all — its OpenAPI parameter
+// list (NetBox 4.4) offers only interface_a_id/interface_b_id, and this view
+// holds device ids, not interface ids. Scoping by interface would need an extra
+// interface fetch that the physical view does not otherwise make, to filter a
+// table that is orders of magnitude smaller than the two that were actually
+// truncating (0 rows on the multi-million-device instance measured, against 1,197,300
+// cables), so it is left as it was rather than paid for speculatively. The
+// residual is the same in kind: an instance with more than MaxLimit wireless
+// links can lose wireless edges outside the first 10,000.
 func (p *Provider) wirelessEdges(ctx context.Context, inSet map[string]bool, seen map[string]bool) []provider.GraphEdge {
 	rows, _, err := p.fetchRows(ctx, "wireless/wireless-links", url.Values{}, MaxLimit)
 	if err != nil {

@@ -1,8 +1,12 @@
 package plugin
 
 import (
+	"context"
 	"regexp"
+	"slices"
 	"testing"
+
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -158,5 +162,55 @@ func TestApplyJoinKeys_IfShortAndIfIndex(t *testing.T) {
 		if !containsCol(res.Columns, c) {
 			t.Errorf("missing derived column %q in %v", c, res.Columns)
 		}
+	}
+}
+
+func TestJoinKeySources(t *testing.T) {
+	got := joinKeySources([]joinKey{
+		{Source: "name", Output: "device"},
+		{Source: "site", Output: "loc", Transform: "lower"},
+		{Source: "name", Output: "instance", Transform: "host"}, // same source twice
+		{Source: "", Output: "x"},                               // no source to read
+		{Source: "serial", Output: ""},                          // applyJoinKeys skips it
+	})
+	want := []string{"name", "site"}
+	if !slices.Equal(got, want) {
+		t.Errorf("joinKeySources = %v, want %v", got, want)
+	}
+}
+
+// TestQuery_Objects_RequestsJoinKeySources pins that a join key's source reaches
+// the provider even when it is outside "Return fields". Without it the provider
+// is free to fetch only the selected fields, and applyJoinKeys then reads a key
+// that was never fetched — an output column that is empty on every row, with no
+// error to say why (the same failure ipEnrichFields fixed on the other path).
+func TestQuery_Objects_RequestsJoinKeySources(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		json string
+	}{
+		{"table", `{"queryType":"objects","objectType":"dcim/devices","fields":["name"],"joinKeys":[{"source":"site_slug","output":"loc"}],"limit":10}`},
+		{"alertTable", `{"queryType":"objects","objectType":"dcim/devices","alertTable":true,"fields":["name"],"joinKeys":[{"source":"site_slug","output":"loc"}],"limit":10}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProvider{result: &provider.Result{
+				Columns: []string{"name"},
+				Rows:    []map[string]interface{}{{"name": "a", "site_slug": "dc1"}},
+				Total:   1,
+			}}
+			d := newTestDatasource(fp)
+			resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, false)
+			if resp.Error != nil {
+				t.Fatalf("unexpected error: %v", resp.Error)
+			}
+			if !slices.Contains(fp.querySpec.KeyFields, "site_slug") {
+				t.Errorf("KeyFields = %v, want the join-key source site_slug", fp.querySpec.KeyFields)
+			}
+			// The source must not have been smuggled into the selection: that would
+			// add a column the user never asked for.
+			if slices.Contains(fp.querySpec.Fields, "site_slug") {
+				t.Errorf("Fields = %v: a join-key source must not become a column", fp.querySpec.Fields)
+			}
+		})
 	}
 }

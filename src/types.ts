@@ -89,6 +89,13 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
   mode?: ProviderMode;
   tlsSkipVerify?: boolean;
   timeoutSeconds?: number;
+  /** Opt-in for very large NetBox instances: table queries page by ID and skip
+   * counting the matches. Faster where counting is the expensive part (a
+   * 12.9M-interface list measured 7.29s -> 0.42s), at the price of row order
+   * (ID, not name) and totals (unavailable). OFF by default — below a few
+   * hundred thousand objects it buys nothing and the costs apply at every size.
+   * Alerting is unaffected: count and alert-table queries never use it. */
+  fastPagingNoTotals?: boolean;
 }
 
 /** Secret values — never returned to the frontend after being set. */

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 
@@ -121,7 +122,7 @@ func logChunkFailure(what string, chunkIdx, chunks, ips int, err error) {
 		"ip-enrichment: "+what+" batch failed; the IPs it covers degrade to blank columns",
 		"batch", fmt.Sprintf("%d/%d", chunkIdx, chunks),
 		"values", ips,
-		"error", strings.NewReplacer("\n", " ", "\r", " ").Replace(err.Error()),
+		"error", logSafe(err.Error()),
 	)
 }
 
@@ -463,7 +464,7 @@ func (p *Provider) fetchAddressRecords(ctx context.Context, ips []string) (addre
 			out.truncated = append(out.truncated, host)
 			log.DefaultLogger.Warn(
 				"ip-enrichment: address lookup hit the row cap for a single address; match_count undercounts it",
-				"address", host, "read", len(raws), "reported", total, "cap", MaxLimit,
+				"address", logSafe(host), "read", len(raws), "reported", total, "cap", MaxLimit,
 			)
 		}
 	}
@@ -1064,6 +1065,94 @@ func (p *Provider) applyPrefixColumns(ctx context.Context, row map[string]interf
 	return nil
 }
 
+// prefixFallbackWorkers bounds how many ?contains= requests the prefix fallback
+// has in flight at once. It mirrors enrichUtilization's pool deliberately: the
+// two hops make the same shape of call (many small, independent GETs against one
+// NetBox), so a reader tuning upstream pressure has one number to reason about
+// rather than two that happen to differ.
+//
+// 8 rather than "one per IP": the fallback runs at up to the 1,000-IP default
+// limit (MaxLimit 10,000 if the caller asks), and an unbounded fan-out would
+// point ten thousand simultaneous requests at an instance that answers a single
+// one in ~0.35 s. NetBox Cloud sheds that load with 502/503 — which this hop
+// does not retry — so the "faster" version would degrade rows that the serial
+// version returned correctly. That is the opposite of the trade being made here.
+const prefixFallbackWorkers = 8
+
+// prefixJob is one IP's prefix fallback: the row to fill, the IP to ask NetBox
+// about, and where the outcome lands. The error is a FIELD rather than a channel
+// send because the caller folds the failures back in INPUT order — see
+// runPrefixFallback.
+type prefixJob struct {
+	row map[string]interface{}
+	ip  string
+	err error
+}
+
+// runPrefixFallback fills prefix_* on every job's row, up to
+// prefixFallbackWorkers requests at a time.
+//
+// NetBox's ?contains= takes a single value, so this hop cannot be batched the
+// way the address and device hops are — but the requests are INDEPENDENT of one
+// another, and running them one at a time was costing a request's full latency
+// per unmatched IP. Measured against NetBox Cloud staging (25 unmatched IPs, all
+// of them inside a real prefix): 8.87 s serial, and the same instance answers a
+// single ?contains= in ~0.35 s. At the 1,000-IP default limit the serial form is
+// ~6 minutes, which no dashboard waits for.
+//
+// Nothing observable moves. Three properties do the work:
+//
+//   - Each job owns its own row map — ResolveIPs dedupes the input, so one IP
+//     means one row and no two goroutines ever touch the same map — and writes
+//     its outcome to its own struct field. The jobs slice is complete before the
+//     pool starts and is never appended to while it runs.
+//   - The rows are built and projected by the caller's loops, in input order,
+//     with this hop only FILLING columns in between. Completion order therefore
+//     cannot reorder anything.
+//   - The failures are folded into the degradation tally afterwards, walking the
+//     jobs in input order, so "first cause wins" (degradation.noteCause) picks
+//     the same error the serial version picked: the earliest failing IP in the
+//     caller's own order, not whichever request happened to lose the race.
+//
+// Cancellation behaves as it did. Each job carries the caller's ctx into
+// getJSON; on a cancelled context the outstanding requests fail immediately and
+// the queued ones fail without touching the network, exactly as the serial loop
+// did when its ctx expired mid-walk. The pool always drains, so no goroutine
+// outlives the call.
+//
+// # Why not fetch the prefix table once and match locally
+//
+// Considered and rejected on measurement. The obvious alternative to N requests
+// is ONE walk of ipam/prefixes with longest-match done in memory, and it loses
+// on every axis that matters here. Sized against the same instance: 36,041
+// prefixes at pageSize 500 is 73 pages of ~412 KB, ~0.92 s each — and paging is
+// cursor-based, so those 73 requests are unavoidably sequential. That is ~67 s
+// and ~30 MB to answer what is usually a handful of unmatched IPs, against
+// ~2 s for the pool. It only overtakes the pool somewhere past a thousand
+// unmatched IPs on one refresh, which is the case the limit already bounds.
+//
+// It would also put the longest-match RULE in this package, where ?contains=
+// currently puts it in NetBox: VRF-duplicated prefixes, and the tie-break
+// between two containing prefixes of equal length, would then be ours to
+// reproduce exactly — a correctness risk taken on for a slower common case.
+func (p *Provider) runPrefixFallback(ctx context.Context, jobs []prefixJob) {
+	if len(jobs) == 0 {
+		return
+	}
+	sem := make(chan struct{}, prefixFallbackWorkers)
+	var wg sync.WaitGroup
+	for i := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j *prefixJob) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			j.err = p.applyPrefixColumns(ctx, j.row, j.ip)
+		}(&jobs[i])
+	}
+	wg.Wait()
+}
+
 // project narrows a row to the requested fields, in the requested order.
 func project(row map[string]interface{}, fields []string) map[string]interface{} {
 	out := make(map[string]interface{}, len(fields))
@@ -1108,24 +1197,27 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 	// other: a hop that never ran must not report a gap in columns the frame does
 	// not contain, which would be a warning about nothing the reader can see.
 	//
-	// The prefix one is the expensive skip. That fallback is SERIAL — NetBox's
-	// ?contains= takes a single value, so it cannot be batched — and measures
-	// ~20 ms per IP against the demo NetBox (100 unknown IPs: 100 requests,
-	// 2.0 s; after this gate, 0 requests and 0.09 s). No prefix_* column is in
-	// defaultIPEnrichFields at all, so the default panel over external/unknown
-	// addresses paid the whole of it for nothing: ~20 s at the 1,000-IP default
-	// limit, enough to time the panel out.
+	// The prefix one is the expensive skip, and remains so after
+	// runPrefixFallback made it concurrent. NetBox's ?contains= takes a single
+	// value, so the hop is one REQUEST per unmatched IP however it is scheduled —
+	// ~20 ms each against the demo NetBox, ~0.35 s each against NetBox Cloud —
+	// and concurrency divides the wall clock without removing a single request.
+	// No prefix_* column is in defaultIPEnrichFields at all, so the default panel
+	// over external/unknown addresses paid the whole of it for nothing: measured
+	// on the demo, 100 unknown IPs cost 100 requests and 2.0 s; after this gate,
+	// 0 requests and 0.09 s.
 	wantDevice := wantsGroup(fields, "device_")
 	wantPrefix := wantsGroup(fields, "prefix_")
 
 	// An unset limit falls back to defaultLimit, exactly as Query() does — not
 	// to MaxLimit. When a prefix_* column is selected the fallback below issues
-	// one SERIAL ?contains= request per unmatched IP and cannot be batched
-	// (contains takes a single value), so the limit is a wall-clock ceiling here
-	// in a way it is not for a batched object query: measured against the demo
-	// NetBox, 400 unmatched IPs take ~9s, which puts MaxLimit at minutes and far
-	// worse over a WAN. A caller that really wants more still gets it, up to
-	// MaxLimit.
+	// one ?contains= request per unmatched IP and cannot be batched (contains
+	// takes a single value), so the limit is a request-count ceiling here in a
+	// way it is not for a batched object query. runPrefixFallback runs those
+	// requests prefixFallbackWorkers at a time rather than one at a time, which
+	// cuts the wall clock by that factor but leaves the count — and the load
+	// NetBox sees — proportional to the limit. A caller that really wants more
+	// still gets it, up to MaxLimit.
 	if limit <= 0 {
 		limit = defaultLimit
 	}
@@ -1193,16 +1285,24 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 	// TestResolveIPs.
 	devices, devDeg := p.fetchDevices(ctx, deviceIDs)
 
-	// The prefix fallback is per-IP and serial, so its degradation is tallied
-	// here rather than inside a batching helper.
+	// The prefix fallback is per-IP — ?contains= takes a single value, so it
+	// cannot be batched — so its degradation is tallied here rather than inside a
+	// batching helper.
 	prefixDeg := degradation{}
+
+	// The fallback requests are collected during the row pass and run together
+	// afterwards, on a bounded pool (runPrefixFallback), rather than one at a
+	// time inside the loop. Splitting the pass in two is what keeps the output
+	// byte-identical: rows are BUILT here in input order, FILLED by the pool in
+	// whatever order the requests complete, and PROJECTED below in input order.
+	var prefixJobs []prefixJob
 
 	// ambiguous counts the rows whose pick came from more than one candidate
 	// record, so the ambiguity is still reported when the user has deselected the
 	// match_count column — the only place it would otherwise be visible.
 	ambiguous := 0
 
-	rows := make([]map[string]interface{}, 0, len(wanted))
+	built := make([]map[string]interface{}, 0, len(wanted))
 	for _, ip := range wanted {
 		row := map[string]interface{}{"ip": ip}
 		cands := addrs.byHost[canonicalIP(ip)]
@@ -1252,16 +1352,39 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 			// the three: a plausible-looking prefix beside match_count 0, on an
 			// IP NetBox knows perfectly well.
 		case wantPrefix:
+			// Queued, not requested: the request itself is made below. The tally
+			// of what was ASKED is still taken here, in input order, because it
+			// counts rows rather than outcomes.
 			prefixDeg.total++
-			if err := p.applyPrefixColumns(ctx, row, ip); err != nil {
-				prefixDeg.record(1, err)
-			}
+			prefixJobs = append(prefixJobs, prefixJob{row: row, ip: ip})
 		default:
 			// This IP has no address record and no prefix_* column was selected,
 			// so there is nothing left to fill. The row is complete: match_count
 			// is already set from the address index, which the prefix hop plays no
 			// part in.
 		}
+		built = append(built, row)
+	}
+
+	// Every queued fallback runs here, concurrently and bounded. It fills columns
+	// on rows that already exist and never adds, drops or reorders one.
+	p.runPrefixFallback(ctx, prefixJobs)
+
+	// Folded in INPUT order, not completion order: degradation.noteCause keeps
+	// the FIRST cause, and "first" has to mean the same thing it meant when the
+	// requests ran one after another — the earliest failing IP in the caller's
+	// own order — or the warning's rendered reason would vary between two
+	// identical queries over identical data.
+	for i := range prefixJobs {
+		if err := prefixJobs[i].err; err != nil {
+			prefixDeg.record(1, err)
+		}
+	}
+
+	// Projected after the fill, in input order, so the frame's rows are the ones
+	// the loop above built and in the order it built them.
+	rows := make([]map[string]interface{}, 0, len(built))
+	for _, row := range built {
 		rows = append(rows, project(row, fields))
 	}
 
@@ -1272,7 +1395,7 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 			"ip-enrichment: prefix fallback failed; the IPs it covers degrade to blank prefix_* columns",
 			"failed", prefixDeg.failed,
 			"of", prefixDeg.total,
-			"error", strings.NewReplacer("\n", " ", "\r", " ").Replace(prefixDeg.cause.Error()),
+			"error", logSafe(prefixDeg.cause.Error()),
 		)
 	}
 

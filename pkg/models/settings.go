@@ -33,6 +33,23 @@ type PluginSettings struct {
 	TLSSkipVerify bool `json:"tlsSkipVerify"`
 	// TimeoutSeconds bounds individual upstream HTTP requests. Defaults to 30.
 	TimeoutSeconds int `json:"timeoutSeconds"`
+	// FastPagingNoTotals opts this datasource into NetBox cursor pagination for
+	// table queries: NetBox pages by primary key and skips counting the matches,
+	// which is where the time goes on a model holding millions of rows.
+	//
+	// It is OFF by default and must stay that way. What it buys is not worth
+	// measuring below a few hundred thousand objects, while what it costs is
+	// visible at every size: rows come back in ID order rather than the model's
+	// natural order, and the match count is gone, so a panel cannot say
+	// "showing 100 of N".
+	//
+	// Query paths that need the count never use it (provider.QuerySpec's
+	// AllowUncounted is opt-in per query), and no alert evaluation ever asks for
+	// it: pkg/plugin.query gates AllowUncounted on the FromAlert header, so
+	// alerting's count, truncation and ordering keep their real values
+	// regardless of this setting — for every rule, not only the ones whose query
+	// uses the Alert table shape.
+	FastPagingNoTotals bool `json:"fastPagingNoTotals"`
 
 	Secrets *SecretPluginSettings `json:"-"`
 }

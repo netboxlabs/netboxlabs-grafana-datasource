@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -366,7 +368,10 @@ func TestFetchAddressRecords_OverflowingBatchIsExhausted(t *testing.T) {
 // docs/RECIPES.md teaches that shape as "unknown/external traffic" — the precise
 // opposite of the truth for an address NetBox has a record for.
 func TestResolveIPs_CappedAddressBatchDoesNotFakeAnAbsentRecord(t *testing.T) {
-	var prefixCalls int
+	// Atomic because the prefix fallback runs its requests concurrently
+	// (runPrefixFallback): a plain counter here would be a data race on the day
+	// this assertion starts failing, which is the day it has to be readable.
+	var prefixCalls atomic.Int64
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
 		addrs := r.URL.Query()["address"]
@@ -387,7 +392,7 @@ func TestResolveIPs_CappedAddressBatchDoesNotFakeAnAbsentRecord(t *testing.T) {
 		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(addrs), strings.Join(results, ","))
 	})
 	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
-		prefixCalls++
+		prefixCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
 			{"id":7,"prefix":"10.0.0.0/24","description":"should never reach a registered IP"}
@@ -418,8 +423,8 @@ func TestResolveIPs_CappedAddressBatchDoesNotFakeAnAbsentRecord(t *testing.T) {
 	if row["prefix_cidr"] != nil {
 		t.Errorf("prefix_cidr = %v, want nil — a matched address must never fall through to the prefix fallback", row["prefix_cidr"])
 	}
-	if prefixCalls != 0 {
-		t.Errorf("the prefix fallback ran %d time(s); both IPs have address records", prefixCalls)
+	if n := prefixCalls.Load(); n != 0 {
+		t.Errorf("the prefix fallback ran %d time(s); both IPs have address records", n)
 	}
 	if len(res.Warnings) != 0 {
 		t.Errorf("Warnings = %v, want none — the overflow was resolved by splitting, not merely reported", res.Warnings)
@@ -2057,12 +2062,21 @@ func TestResolveIPs_FailedChunkIsNotFallbackFodder(t *testing.T) {
 	failedIP, okIP := chunks[0][0], chunks[1][0]
 
 	call := 0
+	// Guarded: the prefix fallback issues its requests concurrently
+	// (runPrefixFallback), so the handler that records them is called from
+	// several goroutines at once.
+	var prefixMu sync.Mutex
 	var prefixAsked []string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
 		call++
 		if call == 1 {
-			w.WriteHeader(http.StatusServiceUnavailable)
+			// 500, not 503. The subject here is what a chunk that could not be
+			// answered does to the ROWS, so the failure has to be terminal:
+			// fetchRows retries 502/503/504 (see getListPageRetry), and a
+			// fail-the-first-call mock returning one of those would now be
+			// answered on the retry and quietly stop testing anything.
+			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"detail":"boom"}`))
 			return
 		}
@@ -2079,7 +2093,9 @@ func TestResolveIPs_FailedChunkIsNotFallbackFodder(t *testing.T) {
 	// a populated prefix_cidr rather than silently indistinguishable from one
 	// that correctly did not.
 	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		prefixMu.Lock()
 		prefixAsked = append(prefixAsked, r.URL.Query().Get("contains"))
+		prefixMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"id":1,"prefix":"10.0.0.0/8"}]}`))
 	})
@@ -2108,7 +2124,10 @@ func TestResolveIPs_FailedChunkIsNotFallbackFodder(t *testing.T) {
 	if got["prefix_cidr"] != nil {
 		t.Errorf("prefix_cidr for an IP whose lookup failed = %v, want nil — the fallback's precondition (no address record) was never established", got["prefix_cidr"])
 	}
-	for _, asked := range prefixAsked {
+	prefixMu.Lock()
+	askedIPs := append([]string(nil), prefixAsked...)
+	prefixMu.Unlock()
+	for _, asked := range askedIPs {
 		if asked == failedIP {
 			t.Errorf("the prefix fallback was queried for %s, whose address lookup failed", failedIP)
 		}
@@ -2312,10 +2331,14 @@ func TestResolveIPs_PrefixFallbackFailureIsStated(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
 	})
-	prefixCalls := 0
+	// Keyed on the IP, not on arrival order: runPrefixFallback issues these
+	// requests concurrently, so "the first call" names whichever one won a race
+	// and would make this test assert a different row on different runs. The
+	// subject is per-ROW attribution — the IP whose lookup failed loses its
+	// prefix columns and no other one does — which needs a fixed IP → outcome
+	// mapping to be stated at all.
 	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
-		prefixCalls++
-		if prefixCalls == 1 { // one IP's fallback fails, the other's answers
+		if r.URL.Query().Get("contains") == "10.0.0.1" {
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"detail":"boom"}`))
 			return
@@ -2557,7 +2580,9 @@ func TestWantsGroup(t *testing.T) {
 // purpose: the projected frame looks identical either way, which is exactly why
 // this survived so long.
 func TestResolveIPs_PrefixFallbackOnlyRunsWhenSelected(t *testing.T) {
-	prefixCalls := 0
+	// Atomic: the fallback's requests run concurrently (runPrefixFallback), so
+	// the counter this test is built on is written from several goroutines.
+	var prefixCalls atomic.Int64
 	mux := http.NewServeMux()
 	// No IP has an address record, so every one of them reaches the fallback arm.
 	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
@@ -2565,7 +2590,7 @@ func TestResolveIPs_PrefixFallbackOnlyRunsWhenSelected(t *testing.T) {
 		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
 	})
 	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
-		prefixCalls++
+		prefixCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
 			{"id":7,"prefix":"10.0.0.0/24","scope":{"id":5,"name":"AMS1","slug":"ams1"}}
@@ -2578,13 +2603,13 @@ func TestResolveIPs_PrefixFallbackOnlyRunsWhenSelected(t *testing.T) {
 	unknown := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
 
 	t.Run("the default field selection makes no prefix request at all", func(t *testing.T) {
-		prefixCalls = 0
+		prefixCalls.Store(0)
 		res, err := p.ResolveIPs(context.Background(), unknown, nil, 0)
 		if err != nil {
 			t.Fatalf("ResolveIPs: %v", err)
 		}
-		if prefixCalls != 0 {
-			t.Errorf("prefix requests = %d, want 0: no prefix_* column is in the default selection, so every one of them is a serial round trip whose output project() throws away", prefixCalls)
+		if n := prefixCalls.Load(); n != 0 {
+			t.Errorf("prefix requests = %d, want 0: no prefix_* column is in the default selection, so every one of them is a round trip whose output project() throws away", n)
 		}
 		if len(res.Rows) != len(unknown) {
 			t.Fatalf("got %d rows, want %d — skipping the hop must not drop rows", len(res.Rows), len(unknown))
@@ -2600,24 +2625,24 @@ func TestResolveIPs_PrefixFallbackOnlyRunsWhenSelected(t *testing.T) {
 	})
 
 	t.Run("a non-prefix explicit selection makes no prefix request either", func(t *testing.T) {
-		prefixCalls = 0
+		prefixCalls.Store(0)
 		if _, err := p.ResolveIPs(context.Background(), unknown,
 			[]string{"ip", "match_count", "address_dns_name", "device_name"}, 0); err != nil {
 			t.Fatalf("ResolveIPs: %v", err)
 		}
-		if prefixCalls != 0 {
-			t.Errorf("prefix requests = %d, want 0", prefixCalls)
+		if n := prefixCalls.Load(); n != 0 {
+			t.Errorf("prefix requests = %d, want 0", n)
 		}
 	})
 
 	t.Run("selecting a prefix_* column restores the fallback exactly", func(t *testing.T) {
-		prefixCalls = 0
+		prefixCalls.Store(0)
 		res, err := p.ResolveIPs(context.Background(), unknown, []string{"ip", "prefix_cidr", "prefix_scope"}, 0)
 		if err != nil {
 			t.Fatalf("ResolveIPs: %v", err)
 		}
-		if prefixCalls != len(unknown) {
-			t.Errorf("prefix requests = %d, want %d — one per IP with no address record", prefixCalls, len(unknown))
+		if n := prefixCalls.Load(); n != int64(len(unknown)) {
+			t.Errorf("prefix requests = %d, want %d — one per IP with no address record", n, len(unknown))
 		}
 		for _, row := range res.Rows {
 			if row["prefix_cidr"] != "10.0.0.0/24" || row["prefix_scope"] != "AMS1" {
@@ -2995,5 +3020,180 @@ func TestResolveIPs_MalformedValuesDoNotConsumeTheBatchBudget(t *testing.T) {
 	if len(mixedRes.Warnings) != 0 || len(mixedRes.Notes) != 0 {
 		t.Errorf("malformed input must not raise a warning or note; got %v / %v",
 			mixedRes.Warnings, mixedRes.Notes)
+	}
+}
+
+// TestResolveIPs_PrefixFallbackIsConcurrentAndBounded is the reason the hop was
+// changed at all. NetBox's ?contains= takes ONE value, so the fallback is one
+// request per unmatched IP however it is scheduled; running them one after
+// another made the wall clock the sum of every round trip — 8.87 s for 25 IPs
+// against NetBox Cloud staging, ~6 minutes at the 1,000-IP default limit, which
+// no dashboard waits for.
+//
+// The server side proves it directly rather than timing it: every handler blocks
+// until prefixFallbackWorkers requests are in flight AT ONCE, which a serial
+// caller can never satisfy (it would sit out the timeout on each one in turn).
+// The same barrier proves the other half — the pool is BOUNDED. There are three
+// times as many IPs as workers and the gate opens at the worker count, so an
+// unbounded fan-out would show a peak of len(ips) here; the semaphore is what
+// keeps it at 8, and 8 is deliberate: an unbounded 1,000-request burst is what
+// makes NetBox Cloud answer 502/503, and this hop does not retry.
+func TestResolveIPs_PrefixFallbackIsConcurrentAndBounded(t *testing.T) {
+	var ips []string
+	for i := 0; i < prefixFallbackWorkers*3; i++ {
+		ips = append(ips, fmt.Sprintf("10.0.0.%d", i+1))
+	}
+
+	var mu sync.Mutex
+	inflight, peak := 0, 0
+	gate := make(chan struct{})
+	var once sync.Once
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		inflight++
+		if inflight > peak {
+			peak = inflight
+		}
+		n := inflight
+		mu.Unlock()
+		if n >= prefixFallbackWorkers {
+			once.Do(func() { close(gate) })
+		}
+		// The timeout is the serial escape hatch: without it a serial caller
+		// would deadlock here instead of failing with a readable peak.
+		select {
+		case <-gate:
+		case <-time.After(2 * time.Second):
+		}
+		mu.Lock()
+		inflight--
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"id":7,"prefix":"10.0.0.0/24"}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), ips, []string{"ip", "prefix_cidr"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Rows) != len(ips) {
+		t.Fatalf("got %d rows, want %d", len(res.Rows), len(ips))
+	}
+	mu.Lock()
+	got := peak
+	mu.Unlock()
+	// The literal 1 is deliberate and is NOT prefixFallbackWorkers: the barrier
+	// above opens at the worker count, so an assertion written only against the
+	// constant still passes when the constant is 1 — i.e. it would not notice the
+	// hop going back to serial, which is the whole subject of this test.
+	if got <= 1 {
+		t.Errorf("peak concurrent prefix requests = %d: the hop is serial again, so its wall clock is the sum of one round trip per unmatched IP", got)
+	}
+	if got != prefixFallbackWorkers {
+		t.Errorf("peak concurrent prefix requests = %d, want exactly %d: above it the pool is unbounded and a 1,000-IP query becomes a 1,000-request burst NetBox Cloud answers with 502/503",
+			got, prefixFallbackWorkers)
+	}
+}
+
+// TestResolveIPs_PrefixFallbackOrderIsInputOrder is the regression guard for the
+// property the concurrency had to preserve: WHICH row gets WHICH prefix, and in
+// what order the rows come back. Completion order is now arbitrary — the mock
+// inverts it deliberately, answering the first IP slowest — and the frame must
+// not notice. A row that took its neighbour's prefix would be silently, plausibly
+// wrong: prefix_cidr is a real-looking value either way.
+func TestResolveIPs_PrefixFallbackOrderIsInputOrder(t *testing.T) {
+	ips := []string{"10.0.1.1", "10.0.2.1", "10.0.3.1", "10.0.4.1", "10.0.5.1"}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		ip := r.URL.Query().Get("contains")
+		// Delay inversely proportional to input position, so the completion
+		// order is the exact reverse of the order the rows must come back in.
+		for i, in := range ips {
+			if in == ip {
+				time.Sleep(time.Duration(len(ips)-i) * 20 * time.Millisecond)
+			}
+		}
+		octet := strings.Split(ip, ".")[2]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":1,"next":null,"results":[{"id":1,"prefix":"10.0.%s.0/24","description":"pfx-%s"}]}`, octet, octet)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), ips, []string{"ip", "prefix_cidr", "prefix_description"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Rows) != len(ips) {
+		t.Fatalf("got %d rows, want %d", len(res.Rows), len(ips))
+	}
+	for i, ip := range ips {
+		octet := strings.Split(ip, ".")[2]
+		if res.Rows[i]["ip"] != ip {
+			t.Fatalf("row %d ip = %v, want %s — rows must stay in input order", i, res.Rows[i]["ip"], ip)
+		}
+		if want := "10.0." + octet + ".0/24"; res.Rows[i]["prefix_cidr"] != want {
+			t.Errorf("row %d prefix_cidr = %v, want %s — each row must keep its OWN lookup's answer", i, res.Rows[i]["prefix_cidr"], want)
+		}
+		if want := "pfx-" + octet; res.Rows[i]["prefix_description"] != want {
+			t.Errorf("row %d prefix_description = %v, want %s", i, res.Rows[i]["prefix_description"], want)
+		}
+	}
+}
+
+// TestResolveIPs_PrefixFallbackCauseFollowsInputOrder pins the one part of the
+// degradation report that concurrency could have made non-deterministic. The
+// warning states ONE reason (degradation.noteCause keeps the first), and when
+// the requests ran in sequence "first" meant the earliest failing IP in the
+// caller's order. Folding the outcomes in completion order instead would make
+// two identical queries over identical data render two different reasons — the
+// mock here answers the earliest IP LAST, so a completion-order fold reports
+// 502 where the serial code reported 500.
+func TestResolveIPs_PrefixFallbackCauseFollowsInputOrder(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("contains") == "10.0.0.1" {
+			time.Sleep(150 * time.Millisecond) // the first IP finishes last
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.2"},
+		[]string{"ip", "prefix_cidr"}, 0)
+	if err != nil {
+		t.Fatalf("a prefix-fallback failure must not fail the query: %v", err)
+	}
+	if len(res.Warnings) != 1 {
+		t.Fatalf("Warnings = %#v, want exactly one", res.Warnings)
+	}
+	if !strings.Contains(res.Warnings[0], "HTTP 500") {
+		t.Errorf("warning %q must name HTTP 500 — the cause of the FIRST failing IP in input order, not of whichever request finished first", res.Warnings[0])
+	}
+	if !strings.Contains(res.Warnings[0], "all 2 IPs") {
+		t.Errorf("warning %q must count both failures", res.Warnings[0])
 	}
 }

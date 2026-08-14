@@ -74,8 +74,69 @@ Add the data source (**Connections → Data sources → NetBox**) and set:
 | **API Token**       | A NetBox API token. Both classic 40-character (v1) tokens and `nbt_…` (v2) tokens are auto-detected. Stored encrypted.                                                                                          |
 | **Skip TLS verify** | Accept self-signed certificates.                                                                                                                                                                                |
 | **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                      |
+| **Fast paging**     | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                |
 
 Click **Save & test**. A healthy data source reports the connected NetBox version.
+
+### Large NetBox instances
+
+Most of what a broad, unfiltered table query costs is NetBox **counting the
+matches**, not returning the rows. That cost scales with the size of the table
+being counted, so it is invisible on a typical instance and becomes the dominant
+term once an object type holds millions of records — `dcim/interfaces` on a
+large network being the usual first example.
+
+How much it costs you depends heavily on how NetBox itself is hosted: database
+sizing, connection latency and whether the instance is under concurrent load all
+move it more than anything this plugin can do from the outside.
+[NetBox Cloud](https://netboxlabs.com/products/netbox-cloud/) is tuned for this
+and is the simplest way to get predictable query performance at that scale.
+
+**Recommendations, roughly in order of effect:**
+
+1. **Filter.** A filtered query counts only matching rows, so a site or role
+   filter usually costs less than the same query unfiltered — often
+   dramatically so. Dashboard template variables are the ergonomic way to do
+   this. An unfiltered query against an object type holding more than a million
+   objects returns an informational notice saying as much, because the largest
+   page this data source returns is 10,000 rows: at that size a panel can only
+   ever show a corner of the table.
+2. **Select only the fields you use.** *Return fields* is not just presentation
+   — the plugin asks NetBox to serialize only those properties, so a narrow
+   selection moves considerably less data.
+3. **Keep limits realistic.** A panel nobody scrolls past the first screen of
+   does not need a 10,000-row limit.
+4. **Treat `utilization` as expensive.** On prefixes and IP ranges it is
+   computed from child objects rather than read from a column, so it costs extra
+   upstream requests per row. The frame notice tells you how many. Select it
+   when you want it, not by default.
+5. **Prefer the enrichment query types over huge object dumps.** IP enrichment
+   resolves a specific list of addresses; it does not scan the address table.
+
+**Two things the plugin does for you:**
+
+- **Always on, nothing to configure.** Column-projected queries also send
+  NetBox's `?exclude=config_context`, keeping its per-device config-context
+  annotation out of the counted query set. It is only sent where the response
+  already omits that column, so no query loses one.
+- **Fast paging (opt-in, off by default).** Table panels page by object ID
+  (NetBox 4.6 cursor pagination), and NetBox skips counting altogether.
+
+  What you give up is real, and it applies at every instance size, which is why
+  it is off unless you turn it on:
+
+  - Rows come back in **ID order**, not the model's natural order. A truncated
+    device list shows the lowest IDs, not the alphabetically first names.
+  - **Total match counts are unavailable.** A panel says "showing the first 100"
+    rather than "showing 100 of N".
+
+  Alert rules are unaffected. Every alert evaluation — count query, alert table,
+  or a plain object query used as a rule — asks NetBox for the real total and
+  gets the model's natural order, whatever this setting says. An alert must
+  never evaluate a silent zero or an arbitrary subset.
+
+  Below a few hundred thousand objects it buys nothing measurable, so leave it
+  off unless an object type genuinely holds millions of records.
 
 ### Provisioning
 
@@ -89,6 +150,9 @@ datasources:
       url: ${NETBOX_URL}
       # Browser-facing base for deep links, if url is not browser-reachable.
       publicUrl: ${NETBOX_PUBLIC_URL}
+      # Very large instances only: page by ID and skip match counts.
+      # Costs row order and totals — see "Large NetBox instances".
+      # fastPagingNoTotals: true
     secureJsonData:
       apiToken: ${NETBOX_API_TOKEN}
 ```

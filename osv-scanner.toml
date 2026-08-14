@@ -43,3 +43,21 @@ reason = "react-router 6.30.4 pinned transitively by @grafana/ui@13.1.0; fix is 
 id = "GHSA-mh99-v99m-4gvg"
 ignoreUntil = 2026-10-01
 reason = "OSV models only the 5.0.8 fix branch; the flagged 1.1.18/2.1.4 already carry the backported EXPANSION_MAX_LENGTH guard. Forcing v5 breaks minimatch 3.x/9.x (CJS export changed to named `expand`) on brace patterns. Build-tooling only, not shipped."
+
+# nanoid 3.3.17 is reached transitively (css-loader -> postcss -> nanoid) and is
+# build tooling only — it never reaches the shipped artifact. The advisory IS
+# fixed, in 3.3.18, and we would normally just pin it. We cannot yet: 3.3.18 was
+# published 2026-08-07 and .npmrc sets `min-release-age=7`, so npm refuses to
+# resolve it — verified, `npm install` fails with
+#   ETARGET No matching version found for nanoid@3.3.18 with a date before 8/7/2026
+# This is our own supply-chain cooldown working as intended, not an upstream
+# problem, and circumventing it to satisfy a scanner would invert the trade the
+# cooldown exists to make.
+#
+# So this entry is DELIBERATELY SHORT-DATED. The action when it expires is to
+# PIN nanoid in package.json's overrides and DELETE this entry — exactly as was
+# done for fast-uri 3.1.4 — not to extend the date.
+[[IgnoredVulns]]
+id = "GHSA-2v37-7h3g-55p8"
+ignoreUntil = 2026-08-22
+reason = "Fixed in nanoid 3.3.18, which is younger than the .npmrc min-release-age=7 cooldown (published 2026-08-07); npm refuses to resolve it. Build tooling only, reached via css-loader/postcss, not shipped. Pin it and drop this entry once it ages past the cooldown."

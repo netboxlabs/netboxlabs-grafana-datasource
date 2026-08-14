@@ -3,8 +3,10 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -415,4 +417,72 @@ func TestQueryData_MapsAPIError(t *testing.T) {
 	if !strings.Contains(msg, "HTTP 405") || strings.Contains(msg, "not allowed") {
 		t.Errorf("response error = %q; want mapped 405 message without raw body", msg)
 	}
+}
+
+// TestQueryData_FastPaging_AlertRulesAreUnaffected drives the whole real path —
+// the FromAlert header Grafana sends, QueryData, the NetBox provider with the
+// datasource's fast-paging opt-in ON — and looks at what actually goes on the
+// wire.
+//
+// A stub provider can only show which flag the plugin set; the parameter NetBox
+// receives is the thing the claim on the config switch is about. `start` is
+// NetBox 4.6 cursor pagination: it is what returns `"count": null`, which
+// decodes to Total 0 and reads exactly like "nothing matched".
+func TestQueryData_FastPaging_AlertRulesAreUnaffected(t *testing.T) {
+	const objectsQuery = `{"queryType":"objects","objectType":"dcim/devices","limit":100}`
+
+	run := func(t *testing.T, headers map[string]string) (url.Values, *backend.QueryDataResponse) {
+		t.Helper()
+		var got url.Values
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.URL.Query()
+			// Self-consistent: one row and a count of one. An earlier version
+			// claimed count 7 while returning a single row, which no real NetBox
+			// does at limit=100 — and once the alert path started rejecting a
+			// truncated result, that inconsistency failed the test for a reason
+			// unrelated to what it checks.
+			count := "1"
+			if got.Has("start") {
+				// What a cursor-paged NetBox answers with.
+				count = "null"
+			}
+			_, _ = fmt.Fprintf(w, `{"count":%s,"next":null,"results":[{"id":1,"name":"leaf1"}]}`, count)
+		}))
+		defer srv.Close()
+
+		d := newTestDatasource(netbox.New(srv.URL, "t", srv.Client(), netbox.WithCursorPaging(true)))
+		resp, err := d.QueryData(context.Background(), &backend.QueryDataRequest{
+			Headers: headers,
+			Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(objectsQuery)}},
+		})
+		if err != nil {
+			t.Fatalf("QueryData: %v", err)
+		}
+		if dr := resp.Responses["A"]; dr.Error != nil {
+			t.Fatalf("query error: %v", dr.Error)
+		}
+		return got, resp
+	}
+
+	t.Run("an alert evaluation keeps the counted path", func(t *testing.T) {
+		got, resp := run(t, map[string]string{backend.FromAlertHeaderName: "true"})
+		if got.Has("start") {
+			t.Errorf("alert evaluation sent cursor paging (%v): the rule would evaluate the lowest-ID page against a null count", got)
+		}
+		// The count survived, so the frame carries no "the total is unavailable"
+		// note — the state in which an alert rule can be trusted at all.
+		notices := resp.Responses["A"].Frames[0].Meta.Notices
+		for _, n := range notices {
+			if strings.Contains(n.Text, "total") {
+				t.Errorf("alert frame reports a missing total: %q", n.Text)
+			}
+		}
+	})
+
+	t.Run("a dashboard table still uses it", func(t *testing.T) {
+		got, _ := run(t, nil)
+		if !got.Has("start") {
+			t.Errorf("dashboard query did not use cursor paging (%v): the setting now does nothing", got)
+		}
+	})
 }

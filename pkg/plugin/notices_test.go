@@ -174,3 +174,174 @@ func TestTruncationError(t *testing.T) {
 		}
 	}
 }
+
+// capped returns a result of `rows` rows whose expensive columns were measured
+// for only the first `measured` of them.
+func capped(rows, measured int) *provider.Result {
+	r := res(rows, rows)
+	r.Capped = &provider.Cap{
+		Columns:  []string{"utilization", "used", "available"},
+		Measured: measured,
+		Rows:     rows,
+	}
+	return r
+}
+
+func TestCapNotice(t *testing.T) {
+	n := resultNotices(capped(200, 150), 1000, nounObjects)
+	if len(n) != 1 {
+		t.Fatalf("notices = %#v, want exactly one", n)
+	}
+	if n[0].Severity != data.NoticeSeverityWarning {
+		t.Errorf("severity = %v, want warning: the selected columns are blank on 50 rows "+
+			"and a blank utilization cell renders exactly like a measured 0%%", n[0].Severity)
+	}
+	for _, want := range []string{"utilization, used and available", "150", "200", "50", "row limit"} {
+		if !strings.Contains(n[0].Text, want) {
+			t.Errorf("notice %q missing %q", n[0].Text, want)
+		}
+	}
+}
+
+// TestCapIsNotADegradation is the separation this fix is about. A cap and a
+// failed lookup both leave cells blank, and before this they shared Warnings —
+// so an alert over a merely large result was told its data was degraded and the
+// only remedy offered ("re-run the query") could never work.
+func TestCapIsNotADegradation(t *testing.T) {
+	r := capped(200, 150)
+	if msg := degradationError(r); msg != "" {
+		t.Errorf("a capped result is not degraded, got %q", msg)
+	}
+	msg := capError(r)
+	if msg == "" {
+		t.Fatal("a capped alert result must produce an error message")
+	}
+	// It must name the number to lower the limit TO — that is the whole
+	// difference from the degradation message.
+	for _, want := range []string{"utilization, used and available", "150", "200", "50", "Lower the row limit"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q missing %q", msg, want)
+		}
+	}
+}
+
+// TestCapError_NothingMeasured covers the end of the same scale. An upstream too
+// slow to measure even one row inside the query's budget caps at zero, and the
+// usual sentence would then tell the user to lower the row limit to zero — an
+// instruction that cannot be followed, on the one result where they most need a
+// usable next step. The error still fires; only the impossible number goes.
+func TestCapError_NothingMeasured(t *testing.T) {
+	msg := capError(capped(200, 0))
+	if msg == "" {
+		t.Fatal("a result with nothing measured must still fail an alert query")
+	}
+	if strings.Contains(msg, " to 0 ") || strings.Contains(msg, "0 or fewer") {
+		t.Errorf("message %q tells the user to lower the row limit to zero", msg)
+	}
+	// Lowering the limit is not the remedy here either: the first row already got
+	// the whole budget and still did not fit, so the message must send the reader
+	// somewhere that can actually work.
+	for _, want := range []string{"utilization, used and available", "200", "timeout"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q missing %q", msg, want)
+		}
+	}
+}
+
+func TestCapError_NothingToReport(t *testing.T) {
+	cases := map[string]*provider.Result{
+		"nil result":            nil,
+		"no cap":                res(4, 4),
+		"cap that did not bite": capped(200, 200),
+		"cap naming no columns": func() *provider.Result {
+			r := capped(200, 150)
+			r.Capped.Columns = nil
+			return r
+		}(),
+	}
+	for name, r := range cases {
+		t.Run(name, func(t *testing.T) {
+			if msg := capError(r); msg != "" {
+				t.Errorf("capError = %q, want empty", msg)
+			}
+			for _, n := range resultNotices(r, 100, nounObjects) {
+				if strings.Contains(n.Text, "Measured") {
+					t.Errorf("unexpected cap notice %q", n.Text)
+				}
+			}
+		})
+	}
+}
+
+func TestAndList(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{"utilization"}, "utilization"},
+		{[]string{"used", "available"}, "used and available"},
+		{[]string{"utilization", "used", "available"}, "utilization, used and available"},
+	}
+	for _, tc := range cases {
+		if got := andList(tc.in); got != tc.want {
+			t.Errorf("andList(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The dashboard wording must split on Measured == 0 the way capError does.
+// The budget can now cut the very first row, so "the first 0 of 200 rows" is
+// reachable — it reads as a plugin bug, and "lower the row limit" is the one
+// remedy that cannot help when one row already had the whole budget.
+func TestCapNotice_NothingMeasured(t *testing.T) {
+	res := &provider.Result{
+		Columns: []string{"prefix"},
+		Rows:    []map[string]interface{}{{"prefix": "10.0.0.0/8"}},
+		Capped:  &provider.Cap{Columns: []string{"utilization"}, Measured: 0, Rows: 200},
+	}
+	notices := resultNotices(res, 200, nounObjects)
+	if len(notices) == 0 {
+		t.Fatal("a cap must be stated on the dashboard")
+	}
+	got := notices[0].Text
+	if strings.Contains(got, "the first 0") {
+		t.Errorf("notice reads as a plugin bug: %q", got)
+	}
+	if strings.Contains(got, "Lower the row limit") {
+		t.Errorf("notice offers a remedy that cannot help when nothing was measured: %q", got)
+	}
+	if !strings.Contains(got, "raise the datasource timeout") {
+		t.Errorf("notice does not name a remedy that can help: %q", got)
+	}
+}
+
+// The order of the three alert guards is load-bearing and was pinned by nothing:
+// no fixture anywhere carried BOTH a cap and a warning, so swapping the checks
+// left the suite green. enrichUtilization can produce both from one page — some
+// rows cut by the budget, others lost to a 502 — and the rule author must be
+// given the row-limit number that fixes it rather than told their NetBox is
+// degraded.
+func TestCapErrorIsPreferredOverDegradation(t *testing.T) {
+	res := &provider.Result{
+		Columns:  []string{"prefix"},
+		Rows:     []map[string]interface{}{{"prefix": "10.0.0.0/8"}},
+		Capped:   &provider.Cap{Columns: []string{"utilization"}, Measured: 150, Rows: 200},
+		Warnings: []string{"Utilization is blank for 9 rows because the extra NetBox lookups failed."},
+	}
+	cap, deg := capError(res), degradationError(res)
+	if cap == "" {
+		t.Fatal("capError must report a cap that is present")
+	}
+	if deg == "" {
+		t.Fatal("degradationError must report a warning that is present")
+	}
+	// Both fire; the caller must choose the cap. This asserts the messages are
+	// distinguishable so the ordering test in query_test.go means something.
+	if !strings.Contains(cap, "150") {
+		t.Errorf("cap message does not name the number to lower to: %q", cap)
+	}
+	if strings.Contains(cap, "degraded") {
+		t.Errorf("cap message calls a deliberate bound degraded: %q", cap)
+	}
+}

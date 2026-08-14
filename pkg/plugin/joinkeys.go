@@ -96,6 +96,43 @@ func ipEnrichFields(selected []string, keys []joinKey) (fields, joinOnly []strin
 	return fields, joinOnly
 }
 
+// joinKeySources returns the row columns the join mappings READ, so an object
+// query can fetch them even when they are outside "Return fields".
+//
+// This is the objects-path counterpart of ipEnrichFields, and it exists for the
+// same failure, which that comment describes in full: a join key derives its
+// output from row[Source], so a source the provider was never asked to fetch
+// produces an output column that is EMPTY on every row — no error, no notice,
+// just a join that silently matches nothing. On the objects path that failure is
+// latent rather than live: the NetBox provider used to fetch whole objects, so
+// every source happened to be in the row. The moment it fetches only what was
+// asked for, "happened to be" stops being true.
+//
+// Unlike ipEnrichFields this returns the sources SEPARATELY instead of appending
+// them to the field list, because the two paths narrow at different points.
+// ResolveIPs projects the rows themselves, so a source has to be requested as a
+// field and dropped again afterwards; an object query narrows only Columns, so
+// naming a source as KeyFields fetches it without ever making it a column — no
+// drop needed, and no risk of deleting a column that is also some key's output.
+//
+// A source that is not a real column costs nothing here: NetBox ignores a name
+// it does not recognize, and the key derives nothing either way. That is why
+// there is no known-column guard — the one on ipEnrichFields exists to stop a
+// typo triggering an expensive per-IP prefix lookup, which has no analogue here.
+func joinKeySources(keys []joinKey) []string {
+	var out []string
+	seen := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		// k.Output == "" is skipped by applyJoinKeys, so its source is not read.
+		if k.Source == "" || k.Output == "" || seen[k.Source] {
+			continue
+		}
+		seen[k.Source] = true
+		out = append(out, k.Source)
+	}
+	return out
+}
+
 // dropColumns removes columns from a result: the values, the column list, and
 // any declared type. Used for fields fetched solely so a join key could read
 // them — present for applyJoinKeys, gone by the time a frame is built.

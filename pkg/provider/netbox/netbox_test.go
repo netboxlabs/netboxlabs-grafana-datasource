@@ -2,14 +2,22 @@ package netbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"crypto/tls"
+	"crypto/x509"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"strconv"
 )
 
 // mockNetBox returns an httptest server emulating the relevant slice of the
@@ -67,16 +75,25 @@ func mockNetBox(t *testing.T) *httptest.Server {
 	})
 	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		parents := r.URL.Query()["parent"]
 		// 10.5.0.0/24 models a prefix with no individual IPs (only a utilized range).
-		if r.URL.Query().Get("parent") == "10.5.0.0/24" {
+		if len(parents) == 1 && parents[0] == "10.5.0.0/24" {
 			_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
 			return
 		}
-		// Default: 3 distinct host addresses. `count` (=3) feeds IP-range utilization
-		// (raw count per CIDR block); `results` feed leaf-prefix IPSet computation.
-		_, _ = w.Write([]byte(`{"count":3,"next":null,"results":[
+		// Default: 3 distinct host addresses PER named block. `count` feeds IP-range
+		// utilization (a raw child count), `results` feed leaf-prefix IPSet
+		// computation — which only ever names one parent.
+		//
+		// The scaling by len(parents) is the point of this handler, not decoration.
+		// NetBox's `parent` filter is MULTI-VALUE and ORs its values, so one request
+		// naming N pairwise-disjoint blocks reports the sum of their counts. A mock
+		// that answered a flat 3 however many blocks were named would make batching
+		// look like it changed the number when on a real NetBox it cannot.
+		count := 3 * max(len(parents), 1)
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[
 			{"address":"10.0.0.11/24"},{"address":"10.0.0.12/24"},{"address":"10.0.0.21/24"}
-		]}`))
+		]}`, count)
 	})
 	mux.HandleFunc("/api/ipam/ip-ranges/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -457,5 +474,380 @@ func TestFields_InstalledPlugins_BareArray(t *testing.T) {
 	}
 	if !containsStr(names, "name") || !containsStr(names, "package") || !containsStr(names, "version") {
 		t.Errorf("Fields missing plugin columns: %v", names)
+	}
+}
+
+// withFastRetries shrinks the retry backoff so a test can exhaust it without
+// spending the production 2s. It keeps the SHAPE (two retries) so attempt counts
+// stay meaningful.
+func withFastRetries(t *testing.T) {
+	t.Helper()
+	saved := retryBackoff
+	retryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { retryBackoff = saved })
+}
+
+// retryingServer answers with status for the first `fail` requests, then serves
+// a one-row page. It counts every request so a test can assert how many times a
+// page was actually asked for.
+func retryingServer(t *testing.T, status, fail int) (*Provider, *int) {
+	t.Helper()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls <= fail {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"detail":"upstream unavailable"}`))
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"id":1,"name":"a"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	return New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second}), &calls
+}
+
+// TestFetchRows_RetriesTransientUpstream: NetBox Cloud answers 502/503 under
+// load, and a paged walk fails if ANY of its pages does — so the chance of
+// losing a whole query grows with the result size, which is precisely the case
+// this provider has to support. Measured before this retry existed: 3 of 4 real
+// topology runs against the staging instance aborted on a 5xx mid-walk, and the
+// user got an error toast and an empty panel for a query that worked next try.
+func TestFetchRows_RetriesTransientUpstream(t *testing.T) {
+	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			withFastRetries(t)
+			p, calls := retryingServer(t, status, 1)
+			rows, total, err := p.fetchRows(context.Background(), "dcim/devices", nil, 10)
+			if err != nil {
+				t.Fatalf("a single %d must not fail the query: %v", status, err)
+			}
+			if len(rows) != 1 || total != 1 {
+				t.Errorf("rows=%d total=%d, want the page the retry fetched", len(rows), total)
+			}
+			if *calls != 2 {
+				t.Errorf("requests = %d, want 2 (the failure and one retry)", *calls)
+			}
+		})
+	}
+}
+
+// TestFetchRows_GivesUpAfterBoundedRetries: "fail properly" means a fast, clear
+// error, not an unbounded retry loop that hangs the panel. The user still gets
+// the upstream status, so the message is actionable.
+func TestFetchRows_GivesUpAfterBoundedRetries(t *testing.T) {
+	withFastRetries(t)
+	p, calls := retryingServer(t, http.StatusServiceUnavailable, 99)
+	_, _, err := p.fetchRows(context.Background(), "dcim/devices", nil, 10)
+	if err == nil {
+		t.Fatal("a persistently failing upstream must surface an error")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("error %q must carry the upstream status", err)
+	}
+	if want := len(retryBackoff) + 1; *calls != want {
+		t.Errorf("requests = %d, want %d (one attempt plus each bounded retry)", *calls, want)
+	}
+}
+
+// TestFetchRows_DoesNotRetryClientErrors: a 4xx is the user's answer, not a
+// blip. Repeating it only delays the real error — and on the ip-enrichment
+// hops, which fan out into hundreds of batched requests, it would multiply that
+// delay by the batch count.
+func TestFetchRows_DoesNotRetryClientErrors(t *testing.T) {
+	withFastRetries(t)
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			p, calls := retryingServer(t, status, 99)
+			if _, _, err := p.fetchRows(context.Background(), "dcim/devices", nil, 10); err == nil {
+				t.Fatalf("HTTP %d must surface as an error", status)
+			}
+			if *calls != 1 {
+				t.Errorf("requests = %d for HTTP %d, want 1 (no retry)", *calls, status)
+			}
+		})
+	}
+}
+
+// TestFetchRows_RetryStopsOnContextCancel: a closed dashboard or an expired
+// query deadline must not be held open by a backoff sleep. The original error
+// is returned rather than a context one, because the upstream failure is what
+// the operator needs to see.
+func TestFetchRows_RetryStopsOnContextCancel(t *testing.T) {
+	saved := retryBackoff
+	retryBackoff = []time.Duration{time.Hour}
+	t.Cleanup(func() { retryBackoff = saved })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"detail":"upstream unavailable"}`))
+		cancel() // the caller goes away while the retry is waiting
+	}))
+	t.Cleanup(srv.Close)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	start := time.Now()
+	_, _, err := p.fetchRows(ctx, "dcim/devices", nil, 10)
+	if err == nil {
+		t.Fatal("want the upstream error")
+	}
+	if el := time.Since(start); el > 5*time.Second {
+		t.Errorf("cancelled query waited %s; the backoff must abort on ctx.Done", el)
+	}
+	if calls != 1 {
+		t.Errorf("requests = %d, want 1 (cancelled before the retry)", calls)
+	}
+}
+
+// TestFetchRows_RetriesTransportFailure is the case a status-only rule misses.
+// The run that motivated this retry died with "read: connection reset by peer"
+// on page 18 of a 20-page walk — the connection dropped mid-response, so there
+// is no HTTP status to classify, and the whole query was lost. Hijacking and
+// closing the connection reproduces exactly that.
+func TestFetchRows_RetriesTransportFailure(t *testing.T) {
+	withFastRetries(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			_ = conn.Close()
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"id":1,"name":"a"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	rows, _, err := p.fetchRows(context.Background(), "dcim/devices", nil, 10)
+	if err != nil {
+		t.Fatalf("a dropped connection must not fail the query: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("rows = %d, want the page the retry fetched", len(rows))
+	}
+	if calls != 2 {
+		t.Errorf("requests = %d, want 2 (the dropped connection and one retry)", calls)
+	}
+}
+
+// TestRetryable_ClassifiesEachShapeOfFailure pins the classification itself, so
+// the deliberate exclusions cannot be widened by accident later: the transport
+// rule is stated as "the connection failed", and every entry below is an
+// argument about whether a repeat could possibly help.
+func TestRetryable_ClassifiesEachShapeOfFailure(t *testing.T) {
+	// The two wrappers client.getBytes actually applies, so the table tests the
+	// errors as they really arrive rather than bare.
+	readBody := func(err error) error { return fmt.Errorf("read body http://nb/api/x/: %w", err) }
+	requestFailed := func(err error) error {
+		return fmt.Errorf("request failed: %w", &url.Error{Op: "Get", URL: "http://nb/api/x/", Err: err})
+	}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		// Retryable: the connection failed, wherever it surfaced.
+		{"reset mid-body", readBody(&net.OpError{Op: "read", Err: syscall.ECONNRESET}), true},
+		{"bare ECONNRESET mid-body", readBody(syscall.ECONNRESET), true},
+		{"broken pipe", readBody(syscall.EPIPE), true},
+		{"body short of its Content-Length", readBody(io.ErrUnexpectedEOF), true},
+		{"connection refused before the headers", requestFailed(syscall.ECONNREFUSED), true},
+		{"load shedding", &APIError{Status: http.StatusServiceUnavailable}, true},
+
+		// Not retryable: the server answered, and this is the answer.
+		{"bad request", &APIError{Status: http.StatusBadRequest}, false},
+		{"forbidden", &APIError{Status: http.StatusForbidden}, false},
+		{"rate limited (Retry-After is the protocol, not our backoff)", &APIError{Status: http.StatusTooManyRequests}, false},
+		{"application error", &APIError{Status: http.StatusInternalServerError}, false},
+
+		// Not retryable: nothing about the connection went wrong.
+		{"empty document", readBody(io.EOF), false},
+		{"body was not JSON", fmt.Errorf("decode http://nb/api/x/: %w", errors.New("invalid character 'x'")), false},
+
+		// Not retryable: the caller went away. It arrives looking exactly like a
+		// transport failure, which is why it is checked before anything else.
+		{"cancelled", requestFailed(context.Canceled), false},
+		{"deadline exceeded", requestFailed(context.DeadlineExceeded), false},
+		// The datasource's own Timeout expiring mid-body. It reads as a net.Error
+		// like every reset above, so only the deadline guard keeps the user's
+		// stated budget from being spent three times over.
+		{"datasource timeout while reading the body", readBody(fmt.Errorf(
+			"context deadline exceeded (Client.Timeout or context cancellation while reading body): %w",
+			context.DeadlineExceeded)), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryable(context.Background(), tc.err); got != tc.want {
+				t.Errorf("retryable(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFetchRows_RetriesMidBodyFailureOnALaterPage is the failure this retry was
+// BUILT for, and the one a url.Error-only rule lets through.
+//
+// getListPageRetry's own reason for existing is "a connection reset on page 18
+// of 20". A reset that late in a page does not land on http.Client.Do — the
+// headers were served long before — it lands in io.ReadAll on the response body,
+// where client.getBytes wraps it as "read body <url>: <cause>". That cause is
+// neither an *APIError (there is a 200 in the headers) nor a *url.Error (the
+// url.Error wrapper only exists on the Do path), so the walk aborted on the very
+// event the retry was added for.
+//
+// The server here serves page 1 whole, then kills page 2 mid-body: headers
+// promising a Content-Length the body never reaches, so the client's read fails
+// after Do has already returned. Two shapes of the same event, because which one
+// the kernel delivers is not ours to choose — an orderly close truncates the
+// body (io.ErrUnexpectedEOF), an RST surfaces as ECONNRESET inside a
+// *net.OpError.
+func TestFetchRows_RetriesMidBodyFailureOnALaterPage(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reset bool
+	}{
+		{name: "truncated body", reset: false},
+		{name: "connection reset", reset: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFastRetries(t)
+			var base string
+			calls := 0
+			page2Calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if !r.URL.Query().Has("page2") {
+					_, _ = fmt.Fprintf(w, `{"count":2,"next":"%s/api/dcim/devices/?page2=1","results":[{"id":1,"name":"a"}]}`, base)
+					return
+				}
+				page2Calls++
+				if page2Calls > 1 {
+					_, _ = fmt.Fprint(w, `{"count":2,"next":null,"results":[{"id":2,"name":"b"}]}`)
+					return
+				}
+				conn, bufrw, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Errorf("hijack: %v", err)
+					return
+				}
+				// A 200 and a Content-Length the body never reaches: the client
+				// gets its headers, returns from Do, and dies inside io.ReadAll.
+				_, _ = bufrw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n")
+				_, _ = bufrw.WriteString(`{"count":2,"next":null,"results":[{"id":2,"na`)
+				_ = bufrw.Flush()
+				if tc.reset {
+					// Close with an RST rather than a FIN, so the read fails with
+					// ECONNRESET instead of a short body. The pause keeps the
+					// reset strictly after the headers are consumed — before them
+					// it would be an ordinary Do failure and would prove nothing.
+					time.Sleep(100 * time.Millisecond)
+					if tcp, ok := conn.(*net.TCPConn); ok {
+						_ = tcp.SetLinger(0)
+					}
+				}
+				_ = conn.Close()
+			}))
+			t.Cleanup(srv.Close)
+			base = srv.URL
+			p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+			rows, total, err := p.fetchRows(context.Background(), "dcim/devices", nil, 10)
+			if err != nil {
+				t.Fatalf("a page that died mid-body must not lose the walk: %v", err)
+			}
+			if len(rows) != 2 || total != 2 {
+				t.Errorf("rows=%d total=%d, want both pages (the retry refetched page 2)", len(rows), total)
+			}
+			if page2Calls != 2 {
+				t.Errorf("page 2 requests = %d, want 2 (the mid-body failure and one retry)", page2Calls)
+			}
+			if calls != 3 {
+				t.Errorf("requests = %d, want 3 (page 1, page 2 failing, page 2 retried)", calls)
+			}
+		})
+	}
+}
+
+// A certificate failure reaches retryable inside a *url.Error, which satisfies
+// net.Error — so without an explicit exclusion the widened predicate calls an
+// expired certificate "transient" and spends three attempts and two seconds of
+// backoff discovering what the first attempt already knew.
+func TestRetryable_DoesNotRetryACertificateFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{
+			"untrusted authority",
+			fmt.Errorf("request failed: %w", &url.Error{
+				Op: "Get", URL: "https://netbox.example.com/api/dcim/devices/",
+				Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}},
+			}),
+		},
+		{
+			"wrong hostname",
+			fmt.Errorf("request failed: %w", &url.Error{
+				Op: "Get", URL: "https://netbox.example.com/api/dcim/devices/",
+				Err: x509.HostnameError{Host: "netbox.example.com"},
+			}),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if retryable(context.Background(), tc.err) {
+				t.Error("a certificate does not become valid 2s later; this must not be retried")
+			}
+		})
+	}
+}
+
+// The local-filter path widens its fetch to a whole page so the pass has the
+// most rows to work with. Without the widening it fetches only the caller's cap
+// and the fallback loses rows it could have seen in the same single request.
+func TestFieldValues_LocalFilterFetchesAWholePage(t *testing.T) {
+	var fetched []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/schema") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(dimSchemaFixture))
+			return
+		}
+		// Record ONLY the dimension request. FieldValues probes the OBJECT TYPE
+		// first, at pageSize, to decide whether one page is the whole story — so
+		// keying on the first request of any kind would assert on that probe and
+		// pass no matter what the dimension fetch does. (It did, until a mutation
+		// test caught it.)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/devices") {
+			// The object type must NOT fit in one page, or FieldValues answers
+			// from the sample and never consults the dimension at all — which is
+			// how the first version of this test passed against every mutant.
+			_, _ = w.Write([]byte(`{"count":99999,"results":[]}`))
+			return
+		}
+		fetched = append(fetched, r.URL.Query().Get("limit"))
+		_, _ = w.Write([]byte(`{"count":0,"results":[]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", srv.Client())
+	// site_id has no upstream substring lookup, so this takes the local path.
+	if _, err := p.FieldValues(context.Background(), "dcim/devices", "site_id", "12", 5); err != nil {
+		t.Fatalf("FieldValues: %v", err)
+	}
+	if len(fetched) == 0 {
+		t.Fatal("no dimension request was made — the test never reached the path it means to cover")
+	}
+	t.Logf("requests: %v", fetched)
+	if got := fetched[0]; got != strconv.Itoa(pageSize) {
+		t.Errorf("local-filter path fetched limit=%s, want the full page size %d — a narrow fetch "+
+			"throws away rows the same single request would have returned", got, pageSize)
 	}
 }

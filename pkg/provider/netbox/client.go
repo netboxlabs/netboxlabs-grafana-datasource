@@ -111,7 +111,8 @@ func (c *Client) getListPage(ctx context.Context, rawURL string) (listPage, erro
 	// result set (true for known array endpoints, which ignore ?limit).
 	var arr []json.RawMessage
 	if json.Unmarshal(body, &arr) == nil {
-		return listPage{Count: len(arr), Results: arr}, nil
+		n := len(arr)
+		return listPage{Count: &n, Results: arr}, nil
 	}
 	return listPage{}, fmt.Errorf("decode %s: %w", truncateURL(rawURL), envErr)
 }
@@ -325,7 +326,27 @@ func snippet(b []byte) string {
 // listPage is one page of a paginated NetBox list response. Results are kept as
 // raw JSON so object key order is preserved for flattening.
 type listPage struct {
-	Count   int               `json:"count"`
+	// Count is the number of objects matching the query, from the envelope.
+	//
+	// It is a POINTER because NetBox has two pagination modes and only one of
+	// them answers the question. In the default offset mode the envelope always
+	// carries a number. In cursor mode (?start=<pk>, NetBox 4.6+) NetBoxPagination
+	// never calls .count() and serializes `"count": null` — "not answered", which
+	// is a different statement from "nothing matched". Decoding both into a plain
+	// int would collapse them into 0 and turn "how many devices are offline" into
+	// zero with no error anywhere, so the two shapes are kept distinguishable at
+	// the only place that can still tell them apart. Read it through total().
+	Count   *int              `json:"count"`
 	Next    *string           `json:"next"`
 	Results []json.RawMessage `json:"results"`
+}
+
+// total returns the envelope's match count and whether the envelope reported one
+// at all. known == false means the source declined to count (cursor mode); it is
+// never the same as a reported zero.
+func (p listPage) total() (int, bool) {
+	if p.Count == nil {
+		return 0, false
+	}
+	return *p.Count, true
 }

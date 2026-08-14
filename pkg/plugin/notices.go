@@ -85,6 +85,17 @@ func resultNotices(res *provider.Result, requestedLimit int, noun string) []data
 				thousands(len(res.Rows)), thousands(res.Total), noun),
 		})
 	}
+	if c := capInfo(res); c != nil {
+		notices = append(notices, data.Notice{
+			// Warning, not info: the columns the user explicitly selected are blank
+			// on those rows, and a blank utilization cell renders exactly like a
+			// measured 0%. Truncation can be info because the rows it drops are
+			// visibly absent; this is worse, because the rows are right there
+			// looking answered.
+			Severity: data.NoticeSeverityWarning,
+			Text:     capNoticeText(c),
+		})
+	}
 	if requestedLimit > netbox.MaxLimit {
 		notices = append(notices, data.Notice{
 			Severity: data.NoticeSeverityWarning,
@@ -112,6 +123,89 @@ func truncationError(res *provider.Result, requestedLimit int, noun string) stri
 		"Alert query returned %s of %s %s, so it would alert on an incomplete result. "+
 			"Raise the row limit (max %s) or add filters so every match fits.",
 		thousands(len(res.Rows)), thousands(res.Total), noun, thousands(netbox.MaxLimit))
+}
+
+// capInfo returns the result's row cap, or nil when there is nothing to report.
+//
+// It re-checks the invariant provider.Cap documents (Measured < Rows, at least
+// one column named) instead of trusting it, because every consumer of the value
+// either warns the user or fails an alert rule: a producer that set a cap which
+// did not actually bite would otherwise turn a complete result into an error.
+func capInfo(res *provider.Result) *provider.Cap {
+	if res == nil || res.Capped == nil {
+		return nil
+	}
+	c := res.Capped
+	if len(c.Columns) == 0 || c.Measured >= c.Rows {
+		return nil
+	}
+	return c
+}
+
+// capNoticeText is the dashboard wording for a cap. It mirrors capError's split
+// on Measured == 0, which became reachable once the measurement budget started
+// bounding rows already in flight: the first row can now be cut too. Without the
+// split a panel reads "for the first 0 of 200 rows", which looks like a bug in
+// the plugin, and offers the one remedy that cannot help — a lower row limit
+// does nothing when a single row already had the whole budget.
+func capNoticeText(c *provider.Cap) string {
+	if c.Measured == 0 {
+		return fmt.Sprintf(
+			"%s could not be measured for any of the %s rows: NetBox answered too slowly for even one row in the time this datasource allows. Add filters, raise the datasource timeout, or deselect those columns.",
+			andList(c.Columns), thousands(c.Rows))
+	}
+	return fmt.Sprintf(
+		"Measured %s for the first %s of %s rows; the other %s are blank because each row costs its own NetBox lookups and measuring them all would take longer than this query allows. Lower the row limit, add filters, or deselect those columns.",
+		andList(c.Columns), thousands(c.Measured), thousands(c.Rows),
+		thousands(c.Rows-c.Measured))
+}
+
+// capError is the message for an alerting query whose expensive columns were
+// measured for only part of the result (provider.Result.Capped).
+//
+// It is deliberately NOT degradationError, even though both end in an error and
+// both describe blank cells. The difference is what the user must do next, and
+// getting it wrong is what broke a working rule: a degraded result asks them to
+// re-run or narrow because a lookup failed, while a capped one is telling them,
+// with exact numbers, that they asked for more rows than can be measured — so
+// the remedy is to LOWER THE LIMIT, and the message names the number to lower it
+// to. That is the same shape truncationError uses, for the same reason.
+//
+// The error is not optional. buildAlertFrame coerces a missing value to 0, so an
+// unmeasured prefix does not merely drop out of the rule, it evaluates as 0%
+// utilized: a threshold rule watching for >90% would report those rows as fine.
+// Returns "" when nothing was capped.
+func capError(res *provider.Result) string {
+	c := capInfo(res)
+	if c == nil {
+		return ""
+	}
+	// Nothing measured at all: the upstream could not answer even one row's
+	// lookups inside the query's budget. The rule must still fail, but the number
+	// to lower the limit to would be zero — advice that cannot be followed, on the
+	// result whose reader most needs a next step. Say what is left to try instead.
+	if c.Measured == 0 {
+		return fmt.Sprintf(
+			"Alert query measured %s for none of its %s rows, so every row would evaluate as zero rather than as the values it holds. "+
+				"NetBox answered too slowly for even one row to be measured in the time this datasource allows: add filters, raise the datasource timeout, or deselect those columns.",
+			andList(c.Columns), thousands(c.Rows))
+	}
+	return fmt.Sprintf(
+		"Alert query measured %s for %s of its %s rows, so the other %s would evaluate as zero rather than as the values they hold. "+
+			"Lower the row limit to %s or fewer, or add filters so every row is measured.",
+		andList(c.Columns), thousands(c.Measured), thousands(c.Rows),
+		thousands(c.Rows-c.Measured), thousands(c.Measured))
+}
+
+// andList renders a column list as prose: "utilization, used and available".
+func andList(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	}
+	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }
 
 // degradationError is the message for an alerting query whose result carried

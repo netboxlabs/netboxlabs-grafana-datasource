@@ -9,6 +9,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
+	"fmt"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
@@ -561,6 +562,335 @@ func TestIPEnrichFields(t *testing.T) {
 		ipEnrichFields(selected, []joinKey{{Source: "device_name", Output: "d"}})
 		if !slices.Equal(selected, []string{"ip"}) {
 			t.Errorf("selected = %v, want [ip]", selected)
+		}
+	})
+}
+
+// Which query paths may be answered without a match count is a correctness
+// property, not a performance one: Result.Total IS the count frame, and it is
+// what the alert-table truncation guard compares against. The provider decides
+// how to fetch, but only after this layer has said what it can live without.
+func TestQuery_TotalRequirementIsStatedPerPath(t *testing.T) {
+	cases := []struct {
+		name               string
+		json               string
+		wantAllowUncounted bool
+		wantCountOnly      bool
+	}{
+		{
+			name:               "a dashboard table can present rows without a total",
+			json:               `{"queryType":"objects","objectType":"dcim/devices","limit":100}`,
+			wantAllowUncounted: true,
+		},
+		{
+			// The frame is the total. Answering it without one would report
+			// "how many devices are offline" as zero.
+			name:          "a count query is the total",
+			json:          `{"queryType":"objects","objectType":"dcim/devices","count":true}`,
+			wantCountOnly: true,
+		},
+		{
+			// truncationError compares len(Rows) against Total. Without a real
+			// total a truncated alert result would evaluate silently.
+			name: "an alert table needs the total to refuse a partial result",
+			json: `{"queryType":"objects","objectType":"dcim/devices","alertTable":true,"limit":100}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProvider{result: &provider.Result{
+				Columns: []string{"name"},
+				Rows:    []map[string]interface{}{{"name": "a"}},
+				Total:   1,
+			}}
+			d := newTestDatasource(fp)
+			resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, false)
+			if resp.Error != nil {
+				t.Fatalf("unexpected error: %v", resp.Error)
+			}
+			if got := fp.querySpec.AllowUncounted; got != tc.wantAllowUncounted {
+				t.Errorf("AllowUncounted = %v, want %v", got, tc.wantAllowUncounted)
+			}
+			if got := fp.querySpec.CountOnly; got != tc.wantCountOnly {
+				t.Errorf("CountOnly = %v, want %v", got, tc.wantCountOnly)
+			}
+			if fp.querySpec.CountOnly && fp.querySpec.AllowUncounted {
+				t.Error("CountOnly and AllowUncounted are contradictory; the provider rejects the pair")
+			}
+		})
+	}
+}
+
+// TestQuery_AlertTable_CapSaysLowerTheLimit covers the alert path for a result
+// that really was capped: it must still fail — an unmeasured row lands in the
+// alert frame as 0 and would read as "0% utilized" — but with the message that
+// names the dial the rule author can actually turn.
+func TestQuery_AlertTable_CapSaysLowerTheLimit(t *testing.T) {
+	rows := make([]map[string]interface{}, 200)
+	for i := range rows {
+		rows[i] = map[string]interface{}{"prefix": "10.0.0.0/24"}
+		if i < 150 {
+			rows[i]["utilization"] = float64(10)
+		}
+	}
+	fp := &fakeProvider{result: &provider.Result{
+		Columns: []string{"prefix", "utilization"},
+		Rows:    rows,
+		Total:   len(rows),
+		Capped:  &provider.Cap{Columns: []string{"utilization", "used", "available"}, Measured: 150, Rows: len(rows)},
+	}}
+	d := newTestDatasource(fp)
+	resp := d.query(context.Background(), backend.DataQuery{
+		RefID: "A",
+		JSON:  []byte(`{"queryType":"objects","objectType":"ipam/prefixes","alertTable":true,"valueField":"utilization","limit":1000}`),
+	}, true)
+	if resp.Error == nil {
+		t.Fatal("a capped alertTable query must error: the blank rows evaluate as 0, not as absent")
+	}
+	if !strings.Contains(resp.Error.Error(), "Lower the row limit to 150") {
+		t.Errorf("error %q must tell the user which limit to use", resp.Error.Error())
+	}
+	if strings.Contains(resp.Error.Error(), "degraded") {
+		t.Errorf("error %q calls a deliberate cap a degradation", resp.Error.Error())
+	}
+}
+
+// Every alert-rule evaluation keeps the real match count, whatever shape the
+// rule's query has.
+//
+// "Alert rules are unaffected by fast paging" is a claim the README, the config
+// switch, the settings doc and this file all make, and until fromAlert was read
+// on the table path it was false: the editor defaults alertTable to false, so an
+// ordinary objects query is the shape an alert rule most easily ends up with,
+// and that shape asked for AllowUncounted unconditionally. With cursor paging on
+// it then evaluated the 100 lowest-ID rows against Total 0 — an arbitrary subset
+// reported as "nothing matched", the truncation guard blind because it compares
+// against that same zero, and the only trace a frame notice alert evaluation
+// drops.
+func TestQuery_AlertEvaluationNeverGivesUpTheTotal(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+	}{
+		{
+			// The shape the QueryEditor produces by default: neither switch on.
+			name: "a plain objects query is a valid alert query",
+			json: `{"queryType":"objects","objectType":"dcim/devices","limit":100}`,
+		},
+		{
+			name: "alert table",
+			json: `{"queryType":"objects","objectType":"dcim/devices","alertTable":true,"limit":100}`,
+		},
+		{
+			name: "count",
+			json: `{"queryType":"objects","objectType":"dcim/devices","count":true}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProvider{result: &provider.Result{
+				Columns: []string{"name"},
+				Rows:    []map[string]interface{}{{"name": "a"}},
+				Total:   1,
+			}}
+			d := newTestDatasource(fp)
+			resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, true)
+			if resp.Error != nil {
+				t.Fatalf("unexpected error: %v", resp.Error)
+			}
+			if fp.querySpec.AllowUncounted {
+				t.Error("AllowUncounted = true on an alert evaluation: the rule can be served an uncounted, ID-ordered subset that reads as no match at all")
+			}
+		})
+	}
+
+	// The dashboard side of the same query must keep the fast path, or the fix
+	// has quietly turned the setting off for everyone.
+	t.Run("a dashboard table still opts out of the count", func(t *testing.T) {
+		fp := &fakeProvider{result: &provider.Result{Columns: []string{"name"}, Rows: []map[string]interface{}{{"name": "a"}}}}
+		d := newTestDatasource(fp)
+		if resp := d.query(context.Background(), backend.DataQuery{
+			RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`),
+		}, false); resp.Error != nil {
+			t.Fatalf("unexpected error: %v", resp.Error)
+		}
+		if !fp.querySpec.AllowUncounted {
+			t.Error("AllowUncounted = false on a dashboard table: fast paging can no longer engage anywhere")
+		}
+	})
+}
+
+// TestQuery_Objects_AlertEvaluationFailsOnPartialResult is the plain-objects half
+// of the guard the alertTable and ip-enrichment branches already carry.
+//
+// The editor defaults alertTable to false, so a plain objects query is the shape
+// an alert rule most easily ends up with — the same argument that made the paging
+// gate read fromAlert here. It was not carried through to the result guards: this
+// branch built its frame from a capped or degraded result and shipped it, and
+// alert evaluation drops meta.notices, so the gap left no trace at all. A blank
+// utilization cell then reaches buildAlertFrame's 0 coercion downstream and a
+// "utilization > 90" rule reports an unmeasured prefix as fine — it stops firing,
+// which looks exactly like the prefixes being under threshold.
+//
+// Each case runs BOTH ways from one fixture: the dashboard direction is half the
+// point, because partial-beats-none is the deliberate policy there and failing
+// both ways would be a regression rather than a fix.
+func TestQuery_Objects_AlertEvaluationFailsOnPartialResult(t *testing.T) {
+	// 200 rows of which only the first 150 carry the expensive column — what a
+	// per-row utilization enrichment produces when its budget binds.
+	cappedRows := make([]map[string]interface{}, 200)
+	for i := range cappedRows {
+		cappedRows[i] = map[string]interface{}{"prefix": "10.0.0.0/24"}
+		if i < 150 {
+			cappedRows[i]["utilization"] = float64(10)
+		}
+	}
+
+	const warning = "Utilization was measured for 1 of the 2 rows — NetBox returned HTTP 503 for the rest. " +
+		"The utilization, used and available columns on the affected rows are blank because the " +
+		"lookup failed, not because those prefixes hold nothing."
+
+	cases := []struct {
+		name       string
+		result     *provider.Result
+		wantErr    []string // substrings the alert error must contain
+		notInErr   []string // substrings it must NOT contain
+		wantNotice string   // substring of the notice the dashboard path must still show
+	}{
+		{
+			name: "capped",
+			result: &provider.Result{
+				Columns: []string{"prefix", "utilization"},
+				Rows:    cappedRows,
+				Total:   len(cappedRows),
+				Capped:  &provider.Cap{Columns: []string{"utilization", "used", "available"}, Measured: 150, Rows: len(cappedRows)},
+			},
+			// Checked before the degradation branch so the message names the dial
+			// the rule author can actually turn, exactly as the alertTable branch
+			// orders it: nothing failed here, there are simply more rows than can
+			// be measured.
+			wantErr:    []string{"Lower the row limit to 150"},
+			notInErr:   []string{"degraded"},
+			wantNotice: "Lower the row limit",
+		},
+		{
+			name: "degraded",
+			result: &provider.Result{
+				Columns:  []string{"prefix", "utilization"},
+				Rows:     []map[string]interface{}{{"prefix": "10.0.0.0/24", "utilization": float64(10)}, {"prefix": "10.0.1.0/24", "utilization": nil}},
+				Total:    2,
+				Warnings: []string{warning},
+			},
+			// The provider's own sentence travels verbatim — only it knows which
+			// columns the failed hop fills.
+			wantErr:    []string{"degraded", "Utilization was measured for 1 of the 2 rows", "not because those prefixes hold nothing"},
+			wantNotice: "Utilization was measured for 1 of the 2 rows",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// alertTable deliberately absent: this is the default editor shape.
+			q := backend.DataQuery{
+				RefID: "A",
+				JSON:  []byte(`{"queryType":"objects","objectType":"ipam/prefixes","fields":["prefix","utilization"],"limit":1000}`),
+			}
+
+			t.Run("alert evaluation fails", func(t *testing.T) {
+				d := newTestDatasource(&fakeProvider{result: tc.result})
+				resp := d.query(context.Background(), q, true)
+				if resp.Error == nil {
+					t.Fatal("an alert query on an unmeasured or degraded result must fail, not evaluate blanks as zeroes")
+				}
+				for _, want := range tc.wantErr {
+					if !strings.Contains(resp.Error.Error(), want) {
+						t.Errorf("alert error %q must contain %q", resp.Error, want)
+					}
+				}
+				for _, unwanted := range tc.notInErr {
+					if strings.Contains(resp.Error.Error(), unwanted) {
+						t.Errorf("alert error %q must not contain %q", resp.Error, unwanted)
+					}
+				}
+				if len(resp.Frames) != 0 {
+					t.Errorf("a failed alert query must not also ship frames, got %d", len(resp.Frames))
+				}
+			})
+
+			t.Run("dashboard still gets the rows plus a notice", func(t *testing.T) {
+				d := newTestDatasource(&fakeProvider{result: tc.result})
+				resp := d.query(context.Background(), q, false)
+				if resp.Error != nil {
+					t.Fatalf("a dashboard query must keep partial-beats-none: %v", resp.Error)
+				}
+				if len(resp.Frames) != 1 || resp.Frames[0].Rows() != len(tc.result.Rows) {
+					t.Fatalf("dashboard query lost rows: %#v", resp.Frames)
+				}
+				notices := resp.Frames[0].Meta.Notices
+				if len(notices) == 0 {
+					t.Fatal("the dashboard path must still state the gap in a notice")
+				}
+				var found bool
+				for _, n := range notices {
+					if strings.Contains(n.Text, tc.wantNotice) {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("notices %#v must state %q", notices, tc.wantNotice)
+				}
+			})
+		})
+	}
+}
+
+// An alert rule on the editor's DEFAULT query shape (alertTable absent) must
+// refuse a truncated result. Measured live before this guard existed: limit 2
+// against 4 matching prefixes evaluated two instances and dropped an 86%-utilized
+// prefix, so a "utilization > 90" rule never fired and nothing said why.
+//
+// The dashboard direction must keep partial-beats-none: the rows plus a notice.
+func TestQuery_Objects_AlertEvaluationRejectsATruncatedResult(t *testing.T) {
+	rows := make([]map[string]interface{}, 100)
+	for i := range rows {
+		rows[i] = map[string]interface{}{"name": fmt.Sprintf("dev-%d", i)}
+	}
+	res := &provider.Result{Columns: []string{"name"}, Rows: rows, Total: 5000}
+
+	t.Run("alert evaluation fails", func(t *testing.T) {
+		d := newTestDatasource(&fakeProvider{result: res})
+		resp := d.query(context.Background(), backend.DataQuery{
+			RefID: "A",
+			JSON:  []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`),
+		}, true)
+		if resp.Error == nil {
+			t.Fatal("an alert query on 100 of 5,000 matches must fail, not evaluate an arbitrary subset")
+		}
+		if !strings.Contains(resp.Error.Error(), "5,000") {
+			t.Errorf("error does not name how much was missed: %v", resp.Error)
+		}
+	})
+
+	t.Run("dashboard still shows the partial answer", func(t *testing.T) {
+		d := newTestDatasource(&fakeProvider{result: res})
+		resp := d.query(context.Background(), backend.DataQuery{
+			RefID: "A",
+			JSON:  []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`),
+		}, false)
+		if resp.Error != nil {
+			t.Fatalf("dashboard must keep partial-beats-none: %v", resp.Error)
+		}
+		if n := resp.Frames[0].Rows(); n != 100 {
+			t.Errorf("dashboard returned %d rows, want 100", n)
+		}
+		var found bool
+		for _, n := range resp.Frames[0].Meta.Notices {
+			if strings.Contains(n.Text, "5,000") {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("dashboard dropped the truncation notice, so the gap is invisible")
 		}
 	})
 }

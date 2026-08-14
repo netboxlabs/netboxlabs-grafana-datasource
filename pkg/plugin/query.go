@@ -126,6 +126,14 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 			if msg := truncationError(res, qm.Limit, nounIPs); msg != "" {
 				return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 			}
+			// ResolveIPs caps nothing today, so this cannot fire from here. It is
+			// wired anyway because the alternative is the bug this fix exists for
+			// in reverse: an alert-facing path that silently ignores a new
+			// Result field is exactly how a deliberate cap ended up evaluating as
+			// a column of zeroes.
+			if msg := capError(res); msg != "" {
+				return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+			}
 			if msg := degradationError(res); msg != "" {
 				return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 			}
@@ -163,11 +171,15 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 	if qm.Count {
 		// Count returns the total number of matching objects (from the source's
 		// list envelope), independent of the row limit. Fetch minimally — we need
-		// the total, not a page of rows.
+		// the total, not a page of rows: CountOnly says so out loud, which lets
+		// the provider skip the per-row work NetBox would otherwise do to build a
+		// row nothing here reads. It also forbids any access path that cannot
+		// report a total, which is the whole content of this frame.
 		res, err := d.provider.Query(ctx, provider.QuerySpec{
 			ObjectType: qm.ObjectType,
 			Filters:    qm.Filters,
 			Limit:      1,
+			CountOnly:  true,
 		})
 		if err != nil {
 			return queryErrorResponse(err)
@@ -186,6 +198,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 			ObjectType: qm.ObjectType,
 			Filters:    qm.Filters,
 			Fields:     fields,
+			KeyFields:  joinKeySources(qm.JoinKeys),
 			Limit:      qm.Limit,
 		})
 		if err != nil {
@@ -200,6 +213,23 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 		if msg := truncationError(res, qm.Limit, nounObjects); msg != "" {
 			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 		}
+		// A capped result is not a degraded one and must not be reported as one:
+		// nothing failed, the values present are correct, and the fix is the row
+		// limit the rule author already controls. Checked before the degradation
+		// branch so the message the user gets names the dial that works — this is
+		// the whole content of the bug: a 200-row utilization rule on a healthy
+		// NetBox was told its data was degraded and sent to Error state.
+		if msg := capError(res); msg != "" {
+			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+		}
+		// Same reason, different gap: the objects query now degrades as well as
+		// truncates. A utilization column whose child lookups failed comes back
+		// blank, alert evaluation drops meta.notices, and a blank numeric field
+		// evaluates as absent — so a rule watching prefixes over 90% would simply
+		// stop firing, looking exactly like prefixes that came back under 90%.
+		if msg := degradationError(res); msg != "" {
+			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+		}
 		applyJoinKeys(res, qm.JoinKeys)
 		rewriteLinks(res, d.provider.BaseURL(), d.cfg.PublicURL)
 		frame := buildAlertFrame(qm.ObjectType, res, qm.ValueField)
@@ -211,10 +241,73 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 		ObjectType: qm.ObjectType,
 		Filters:    qm.Filters,
 		Fields:     qm.Fields,
-		Limit:      qm.Limit,
+		// A join key reads its source out of the row, which a provider that
+		// fetches only the selected fields would otherwise never have fetched.
+		// See joinKeySources.
+		KeyFields: joinKeySources(qm.JoinKeys),
+		Limit:     qm.Limit,
+		// A DASHBOARD table is the one thing that can present a result with no
+		// match count: a missing Total costs it the "showing 100 of N" notice and
+		// nothing else, and the provider replaces that with a note saying the
+		// count is unavailable. It is what lets a datasource opt into cursor
+		// paging for its panels without touching alerting, where Total decides
+		// whether the rule fires at all. Not set on the count or alert-table
+		// branches above, deliberately.
+		//
+		// And not set for an alert evaluation here either, which is why fromAlert
+		// is read. The alertTable flag is the rule author's choice of frame
+		// SHAPE, not a statement about who is asking: an ordinary objects query
+		// is a perfectly valid alert-rule query (the editor defaults alertTable
+		// to false), and with fast paging on it used to reach this line and
+		// evaluate the 100 lowest-ID rows with Total 0 — an arbitrary subset
+		// reported as "nothing matched", the truncation guard blind because it
+		// compares against that same zero, and the gap stated only in a frame
+		// notice, which alert evaluation drops. Gating on fromAlert is what makes
+		// "alert rules are unaffected by fast paging" — README, the config
+		// switch, models.PluginSettings — true of EVERY rule rather than only the
+		// two shapes above. It costs an alert rule on a multi-million-row model
+		// the count it was skipping; that is the same trade the count and
+		// alert-table paths already make, and correctness is the side it is made
+		// on.
+		AllowUncounted: !fromAlert,
 	})
 	if err != nil {
 		return queryErrorResponse(err)
+	}
+
+	// The same argument that gates the paging above applies to the RESULT: an
+	// ordinary objects query is a perfectly valid alert-rule query, so this branch
+	// serves alert evaluation too, and alert evaluation drops meta.notices — the
+	// notices appended below are invisible to a rule. A capped or degraded result
+	// therefore has to fail here exactly as it does on the alertTable branch, or a
+	// row whose utilization was never measured evaluates as 0% (buildAlertFrame
+	// coerces a missing value) and a "utilization > 90" rule silently stops firing.
+	//
+	// capError BEFORE degradationError, mirroring the alertTable branch: a cap is
+	// not a failure, and its message names the dial the rule author can actually
+	// turn — lower the row limit — rather than telling them their NetBox is
+	// degraded when nothing went wrong.
+	//
+	// Only for alerting. A dashboard keeps partial-beats-none: it shows the same
+	// gap as a frame notice below and a partial answer there is useful.
+	if fromAlert {
+		// Truncation first, for the same reason cap precedes degradation: it names
+		// the most actionable dial. This branch sets AllowUncounted false for an
+		// alert evaluation precisely so Total is a real count here — reading it is
+		// what makes that worth paying for. Without this, an alert on the editor's
+		// DEFAULT query shape evaluates whatever subset the row limit happened to
+		// return: measured live, limit 2 against 4 matching prefixes evaluated two
+		// instances and dropped an 86%-utilized prefix entirely, so a
+		// "utilization > 90" rule never fired and nothing anywhere said why.
+		if msg := truncationError(res, qm.Limit, nounObjects); msg != "" {
+			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+		}
+		if msg := capError(res); msg != "" {
+			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+		}
+		if msg := degradationError(res); msg != "" {
+			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+		}
 	}
 
 	applyJoinKeys(res, qm.JoinKeys)

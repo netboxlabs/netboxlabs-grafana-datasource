@@ -9,6 +9,13 @@ datasources:
     orgId: 1
     version: 1
     editable: true
+    # Grafana's data-sources LIST renders each row as
+    #   <instance name>
+    #   <plugin display name> | <url>
+    # so this top-level url is what makes the row say WHICH NetBox this points
+    # at. It is display-only for us: the backend reads jsonData.url below
+    # (models.PluginSettings unmarshals from jsonData), never this field.
+    url: ${NETBOX_URL}
     jsonData:
       # Base URL of the NetBox instance (no trailing /api). Interpolated from
       # the NETBOX_URL environment variable.

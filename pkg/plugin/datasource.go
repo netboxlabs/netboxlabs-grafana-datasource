@@ -81,7 +81,13 @@ func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings bac
 func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.Provider, error) {
 	switch cfg.Mode {
 	case models.ModeNetBox, "":
-		return netbox.New(cfg.URL, cfg.Secrets.APIToken, httpClient), nil
+		return netbox.New(cfg.URL, cfg.Secrets.APIToken, httpClient,
+			netbox.WithCursorPaging(cfg.FastPagingNoTotals),
+			// The same number newHTTPClient puts on the client. The provider cannot
+			// read it back off an http.Client it did not build, and it needs it to
+			// size the utilization measurement budget: raising the timeout is how a
+			// user says "I will wait", and it is the only such dial they have.
+			netbox.WithRequestTimeout(time.Duration(cfg.TimeoutSeconds)*time.Second)), nil
 	default:
 		return nil, fmt.Errorf("unknown provider mode %q", cfg.Mode)
 	}
@@ -106,9 +112,12 @@ func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataReques
 // matters because alerting and dashboards want opposite things from a partial
 // result: a dashboard shows what it has plus a notice, an alert must refuse.
 //
-// The objects query type does not need it — it has an explicit alertTable flag
-// the rule author sets. ip-enrichment has no such mode, so the header is the
-// discriminator.
+// The objects query type has an explicit alertTable flag as well, but that flag
+// says what SHAPE the rule wants its frame in, not who is asking: a rule can
+// perfectly well evaluate a plain objects query, and the editor defaults the
+// flag to false. So the header is the discriminator there too — it is what keeps
+// fast paging (uncounted, ID-ordered pages) off every alert evaluation rather
+// than only the ones that ticked the box. ip-enrichment has no such flag at all.
 
 // isAlertRequest reports whether this QueryData call is an alert evaluation.
 //

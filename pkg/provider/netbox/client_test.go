@@ -258,8 +258,9 @@ func TestGetListPage_ShapeTolerant(t *testing.T) {
 		if err != nil {
 			t.Fatalf("getListPage: %v", err)
 		}
-		if page.Count != 3 || len(page.Results) != 1 || page.Next != nil {
-			t.Errorf("envelope not parsed: count=%d results=%d next=%v", page.Count, len(page.Results), page.Next)
+		total, known := page.total()
+		if total != 3 || !known || len(page.Results) != 1 || page.Next != nil {
+			t.Errorf("envelope not parsed: count=%d known=%v results=%d next=%v", total, known, len(page.Results), page.Next)
 		}
 	})
 
@@ -269,8 +270,34 @@ func TestGetListPage_ShapeTolerant(t *testing.T) {
 		if err != nil {
 			t.Fatalf("getListPage: %v", err)
 		}
-		if page.Count != 2 || len(page.Results) != 2 || page.Next != nil {
-			t.Errorf("bare array not normalized: count=%d results=%d next=%v", page.Count, len(page.Results), page.Next)
+		total, known := page.total()
+		if total != 2 || !known || len(page.Results) != 2 || page.Next != nil {
+			t.Errorf("bare array not normalized: count=%d known=%v results=%d next=%v", total, known, len(page.Results), page.Next)
+		}
+	})
+
+	// A cursor-mode envelope: NetBox 4.6 omits the count when paging by primary
+	// key. "Not counted" must stay distinguishable from "counted zero" — the
+	// whole reason listPage.Count is a pointer.
+	t.Run("null count is not zero", func(t *testing.T) {
+		body = `{"count":null,"next":null,"results":[{"name":"a"},{"name":"b"}]}`
+		page, err := c.getListPage(context.Background(), srv.URL)
+		if err != nil {
+			t.Fatalf("getListPage: %v", err)
+		}
+		if total, known := page.total(); known || total != 0 {
+			t.Errorf("null count should be unknown: count=%d known=%v", total, known)
+		}
+	})
+
+	t.Run("zero count is counted zero", func(t *testing.T) {
+		body = `{"count":0,"next":null,"results":[]}`
+		page, err := c.getListPage(context.Background(), srv.URL)
+		if err != nil {
+			t.Fatalf("getListPage: %v", err)
+		}
+		if total, known := page.total(); !known || total != 0 {
+			t.Errorf("zero count should be known: count=%d known=%v", total, known)
 		}
 	})
 

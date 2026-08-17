@@ -52,14 +52,42 @@ if plugin_stale; then
     mage build:linux
     mage build:linuxARM64
   else
-    echo "== mage not found — building backend in a golang:1.26 container instead =="
+    # The image tag is READ FROM go.mod rather than pinned to a minor series.
+    # `golang:1.26` tracks the newest 1.26.x, which is not necessarily new
+    # enough: the official golang images set GOTOOLCHAIN=local, so when go.mod
+    # asks for a patch release the image has not caught up to, Go refuses to
+    # fetch one and the build dies with "go.mod requires go >= X (running Y)".
+    # That is exactly what a go.mod patch bump for a stdlib advisory did here.
+    # Reading the directive means a future bump moves this with it.
+    #
+    # GOTOOLCHAIN=auto is the belt to that braces: if the exact tag is ever
+    # missing (a bump landing before the image is published, or a go.mod that
+    # names only "1.26"), Go downloads the toolchain it needs instead of failing.
+    go_ver="$(awk '/^go /{print $2; exit}' go.mod)"
+    img="golang:${go_ver}"
+    if ! docker image inspect "$img" >/dev/null 2>&1 && ! docker manifest inspect "$img" >/dev/null 2>&1; then
+      echo "== no $img image published yet — using golang:${go_ver%.*} and letting Go fetch $go_ver =="
+      img="golang:${go_ver%.*}"
+    fi
+    echo "== mage not found — building backend in a $img container instead =="
     for arch in amd64 arm64; do
       # CGO_ENABLED=0: Grafana's own image is musl-based (Alpine), so a
       # dynamically-linked glibc binary fails fork/exec with a misleading
       # "no such file or directory" (the missing piece is the ELF interpreter,
       # not the binary). Static linking sidesteps libc entirely.
-      docker run --rm -v "$PWD":/src -w /src -e GOOS=linux -e GOARCH="$arch" -e CGO_ENABLED=0 \
-        golang:1.26 go build -o "dist/gpx_netbox_linux_$arch" ./pkg
+      # The host module cache is mounted when there is one. Without it every
+      # build downloads the whole dependency set from inside the container, and
+      # container egress is materially slower than the host's on Docker Desktop
+      # — slow enough that the fetch times out rather than merely dragging.
+      # With it the build is offline and quick. Absent (fresh clone, CI), the
+      # mount is skipped and Go fetches as before.
+      gomodcache="$(go env GOMODCACHE 2>/dev/null || true)"
+      cache_mount=""
+      [ -n "$gomodcache" ] && [ -d "$gomodcache" ] && cache_mount="-v $gomodcache:/go/pkg/mod"
+      # shellcheck disable=SC2086 # cache_mount is deliberately word-split
+      docker run --rm -v "$PWD":/src -w /src $cache_mount \
+        -e GOOS=linux -e GOARCH="$arch" -e CGO_ENABLED=0 -e GOTOOLCHAIN=auto \
+        "$img" go build -o "dist/gpx_netbox_linux_$arch" ./pkg
     done
   fi
 fi

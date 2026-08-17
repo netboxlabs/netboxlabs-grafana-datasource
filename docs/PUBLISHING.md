@@ -99,7 +99,7 @@ README, **CHANGELOG (required)**, LICENSE (must be an OSI license, Apache-2.0 âœ
    renders the packaged README on grafana.com, where relative paths don't resolve, and the
    validator's `brokenlinks` analyzer treats relative links as **errors**. While the repo
    is private we keep them relative so they render on github.com (absolute
-   `raw.githubusercontent.com` URLs 404 for a private repo). Once the repo is public (see
-   BIZ-108), rewrite image refs to
+   `raw.githubusercontent.com` URLs 404 for a private repo). Once the repo is public,
+   rewrite image refs to
    `https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/<path>`
    and doc links to `https://github.com/.../blob/main/<path>`, then re-run the validator.

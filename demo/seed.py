@@ -288,9 +288,48 @@ _vm = goc("virtualization/virtual-machines", {"name": "demo-vm-01"},
           {"name": "demo-vm-01", "cluster": _cl}, "demo-vm-01")
 _vmif = goc("virtualization/interfaces", {"virtual_machine_id": _vm, "name": "eth0"},
             {"virtual_machine": _vm, "name": "eth0"}, "demo-vm-01 eth0")
-goc("ipam/ip-addresses", {"address": "10.40.0.5/24"},
-    {"address": "10.40.0.5/24", "assigned_object_type": "virtualization.vminterface",
-     "assigned_object_id": _vmif}, "10.40.0.5/24 (vm)")
+_ip_vm_primary = goc("ipam/ip-addresses", {"address": "10.40.0.5/24"},
+                     {"address": "10.40.0.5/24",
+                      "assigned_object_type": "virtualization.vminterface",
+                      "assigned_object_id": _vmif}, "10.40.0.5/24 (vm)")
+
+# Case: is_primary_ip on a VIRTUAL MACHINE. A VM carries primary_ip4 /
+# primary_ip6 exactly as a device does, so the flag means the same thing on both
+# and the resolver has to read it from whichever kind the address is assigned to.
+# Without this PATCH the VM's only address would answer false, and a fixture that
+# can only ever produce one of the two values cannot tell "read the VM's primary"
+# apart from "returned false because nothing was read".
+_code, _data = req("PATCH", f"virtualization/virtual-machines/{_vm}/",
+                   {"primary_ip4": _ip_vm_primary})
+if _code not in (200, 201):
+    print(f"  ERROR setting primary_ip4 on VM {_vm}: {_code} {_data}")
+    sys.exit(1)
+print(f"  ~ virtualization/vms       demo-vm-01 primary_ip4 -> {_ip_vm_primary}")
+
+# Case: assigned to a VM but NOT its primary — the false arm of the same branch.
+goc("ipam/ip-addresses", {"address": "10.40.0.6/24"},
+    {"address": "10.40.0.6/24", "assigned_object_type": "virtualization.vminterface",
+     "assigned_object_id": _vmif}, "10.40.0.6/24 (vm, non-primary)")
+
+# Case: assigned to an FHRP GROUP, where is_primary_ip must be BLANK — not false.
+#
+# NetBox's FHRPGroup has no primary_ip4/primary_ip6 field at all; a group holds
+# addresses (ip_addresses) and does not elect one as primary. So "is this the
+# primary?" is not a question that has an answer here, and the column has to say
+# so by being empty. false would assert the model HAS a primary and this is not
+# it, which is a different and untrue claim.
+#
+# This fixture exists so that distinction is checked against a live NetBox rather
+# than only against a recorded payload: the flag was asked for on FHRP groups,
+# and the reason it is absent is a property of NetBox's data model that a unit
+# fixture could be written to agree with by accident.
+_fhrp = goc("ipam/fhrp-groups", {"group_id": 42},
+            {"protocol": "vrrp3", "group_id": 42, "name": "demo-vrrp-42"},
+            "demo-vrrp-42 (VRRPv3 group 42)")
+goc("ipam/ip-addresses", {"address": "10.50.0.1/24"},
+    {"address": "10.50.0.1/24", "role": "vrrp",
+     "assigned_object_type": "ipam.fhrpgroup",
+     "assigned_object_id": _fhrp}, "10.50.0.1/24 (fhrp group)")
 
 print("== patch panel pass-through (AMS1) ==")
 # A dedicated leaf-02 <-> access-01 run through a patch panel — that pair has

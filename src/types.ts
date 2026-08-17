@@ -147,8 +147,21 @@ export const JOIN_KEY_TRANSFORMS: Array<{ label: string; value: string; descript
  *  Mirrors IPEnrichColumns() in pkg/provider/netbox/ipenrich.go exactly — the
  *  picker is a closed vocabulary, so any name offered here that the backend
  *  cannot produce renders a permanently blank column. Keep the two in sync.
- *  `ip` and `match_count` are not namespaced: `ip` is the documented Grafana
- *  join key (docs/RECIPES.md) and `match_count` describes the row itself.
+ *  `ip`, `match_count` and `is_primary_ip` are not namespaced: `ip` is the
+ *  documented Grafana join key (docs/RECIPES.md), `match_count` describes the
+ *  row itself, and `is_primary_ip` describes the address's relationship to
+ *  whatever it is assigned to — a device on one row and a virtual machine on
+ *  the next, since `dcim.device` and `virtualization.virtualmachine` both
+ *  expose primary_ip4/primary_ip6, so no single namespace could name it
+ *  honestly (it was `device_is_primary_ip` until the flag gained a VM half).
+ *  For an address assigned to an `ipam.fhrpgroup` it is BLANK, never false:
+ *  FHRPGroup has no primary_* field of any kind — a group HOLDS addresses and
+ *  NetBox never elects one as primary — so blank there means "this kind of
+ *  owner has no primary-IP concept", not "it has one and this is not it".
+ *  Extending the flag to FHRP groups was asked for; it deliberately was not
+ *  done, and nobody should "finish" the job by emitting false. The
+ *  reasoning in full is on the backend, under "Why an FHRP-assigned address
+ *  gets NO value, not false" in pkg/provider/netbox/ipenrich.go.
  *  There is no `prefix_site` — NetBox exposes a prefix's site under `scope`.
  *  Address has no `*_dns` NAT fields: NetBox 4.4's nested IP serializer has
  *  no dns_name property, so nat_inside/nat_outside expose only the peer
@@ -184,6 +197,7 @@ export const IP_CONTEXT_FIELD_GROUPS: Array<{
     options: [
       { label: 'ip', value: 'ip' },
       { label: 'match_count', value: 'match_count' },
+      { label: 'is_primary_ip', value: 'is_primary_ip' },
     ],
   },
   {
@@ -226,7 +240,6 @@ export const IP_CONTEXT_FIELD_GROUPS: Array<{
       'rack',
       'tenant',
       'status',
-      'is_primary_ip',
     ].map((f) => ({ label: `device_${f}`, value: `device_${f}` })),
   },
   {
@@ -242,8 +255,10 @@ export const IP_CONTEXT_FIELD_GROUPS: Array<{
  *  option list: a bare label made the default selection render two adjacent
  *  chips both reading "name" (device_name and interface_name), and a panel
  *  asking for nine columns read "match_count cidr scope tenant role vlan name
- *  is_primary_ip name". The group headings still carry the namespace, so
- *  nothing is lost by repeating it.
+ *  is_primary_ip name". (That render predates the rename: the "is_primary_ip"
+ *  chip in it was `device_is_primary_ip` shown group-locally, which is now the
+ *  column's real, un-namespaced name.) The group headings still carry the
+ *  namespace, so nothing is lost by repeating it.
  *
  *  This flat form is also what the join-key "source field" picker offers for an
  *  IP-enrichment query. Those columns are a closed vocabulary this plugin
@@ -264,7 +279,7 @@ export const DEFAULT_IP_CONTEXT_FIELDS: string[] = [
   'device_name',
   'vm_name',
   'interface_name',
-  'device_is_primary_ip',
+  'is_primary_ip',
   'device_site',
   'device_tenant',
 ];

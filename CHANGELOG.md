@@ -236,7 +236,7 @@ Initial release of the NetBox data source for Grafana.
   the selected columns — an **info notice** states how many rows matched more than one
   address record and that one was picked deterministically.
 - Alerting: an ip-enrichment query used by a Grafana alert rule now **fails** when the
-  result is truncated or degraded, instead of evaluating on it (closes MON-303). Alert
+  result is truncated or degraded, instead of evaluating on it. Alert
   evaluation converts the frame to numeric-multi and drops `meta.notices` entirely, so
   every truthfulness notice above was invisible to a rule: a rule reducing over
   `match_count` kept evaluating on a partial answer with no error, no notice and healthy
@@ -260,7 +260,7 @@ Initial release of the NetBox data source for Grafana.
   `dcim/devices` endpoint no longer puts a warning about blank `device_*` columns on a
   result that has no `device_*` column (which on an alerting path was a rule failure).
   Selecting any column of a group restores that group's lookup exactly as before.
-- IP enrichment: `device_is_primary_ip` is always a **boolean** field. It was emitted as a
+- IP enrichment: `is_primary_ip` is always a **boolean** field. It was emitted as a
   string whenever the current IP set resolved no device at all (every address external,
   VM-assigned or unassigned) and as a boolean as soon as one matched, so the same saved
   panel changed field type with the data and boolean value mappings, `filterByValue
@@ -281,3 +281,19 @@ Initial release of the NetBox data source for Grafana.
   NetBox permits a device and a virtual machine with the same name, so merging would make
   the documented `device_name` → metric `device` join match the wrong host. The two are
   mutually exclusive per row, and `device_*` still correctly stays blank for a VM.
+- IP enrichment: `device_is_primary_ip` is renamed **`is_primary_ip`** and now answers for
+  **virtual machines** as well as devices. NetBox gives `dcim.device` and
+  `virtualization.virtualmachine` the same `primary_ip4`/`primary_ip6` pair, so the flag
+  means one thing for both — "is this the address a poller configured from NetBox would
+  be pointed at" — and the `device_` prefix was wrong on every VM row. Answering for a VM costs one extra
+  batched request and is gated on the column — a query that does not select
+  `is_primary_ip` asks NetBox about no virtual machine at all. The bundled demo
+  dashboards, `demo/compat-check.sh` and the recipes are updated.
+- IP enrichment: `is_primary_ip` is left **blank, never `false`**, for an address assigned
+  to an **FHRP/VRRP group**. `ipam.fhrpgroup` has no `primary_*` field of any kind — a
+  group *holds* addresses (`ip_addresses`) and NetBox never elects one of them as primary
+  — so `false` would be a confident answer to a question NetBox does not ask. Blank means
+  "this kind of owner has no primary-IP concept"; `false` means "this address is not its
+  owner's primary", which includes owners that have no primary recorded. A rule or panel looking for
+  "registered, and not the management address" should test `is_primary_ip == false`
+  rather than "is not true", which also matches every FHRP row and every unresolved IP.

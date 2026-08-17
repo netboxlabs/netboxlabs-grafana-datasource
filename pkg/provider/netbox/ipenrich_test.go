@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,39 @@ func TestChunkByBudget(t *testing.T) {
 		}
 	})
 
+	t.Run("leaves room for the paging parameter added downstream", func(t *testing.T) {
+		// The budget is for the whole query, and fetchList appends ?limit= after
+		// the chunker has handed the batch over — no caller can pass it in, so
+		// this function is the only place it can be reserved. enrich.go's
+		// topology batching depends on that too.
+		//
+		// The widths are swept rather than fixed, and that is the whole design of
+		// this test. A chunk fills to the widest batch that fits, so it lands
+		// within ONE VALUE of the ceiling — with 49-byte IPv6 values it stops ~49
+		// bytes short, and deleting the reservation moves it to exactly the budget
+		// rather than past it. The test then passes either way and pins nothing.
+		// Short values close that gap: at 1-3 bytes a chunk ends within a few bytes
+		// of the ceiling, so the missing 10 push it over and the assertion bites.
+		for _, width := range []int{1, 2, 3, 5, 8, 13, 21, 49} {
+			pad := strings.Repeat("x", width-1)
+			var vals []string
+			for i := 0; i < 4000; i++ {
+				vals = append(vals, fmt.Sprintf("%s%d", pad, i%10))
+			}
+			for _, c := range chunkByBudget("address", vals, chunkBudgetBytes) {
+				q := url.Values{}
+				for _, v := range c {
+					q.Add("address", v)
+				}
+				q.Set("limit", fmt.Sprintf("%d", min(MaxLimit, pageSize)))
+				if n := len(q.Encode()); n > chunkBudgetBytes {
+					t.Fatalf("value width %d: chunk plus the appended limit encodes to %d bytes, over budget %d",
+						width, n, chunkBudgetBytes)
+				}
+			}
+		}
+	})
+
 	t.Run("ipv6 chunks more aggressively than ipv4 at equal count", func(t *testing.T) {
 		var v4, v6 []string
 		for i := 0; i < 300; i++ {
@@ -95,6 +129,288 @@ func TestChunkByBudget(t *testing.T) {
 			t.Fatalf("oversized value should be alone in chunk, got %d values", len(chunks[1]))
 		}
 	})
+}
+
+// addressChunks is how the address hop batches a set of IPs: its own batcher,
+// not a second copy of the arithmetic. Every fixture that predicts which IP
+// lands in which request has to ask the object the request is built from — a
+// local recomputation drifts the moment anything changes what else the query
+// carries, and a fixture that names "the failing chunk" would then be naming a
+// batch the hop never sent.
+func addressChunks(ips []string) [][]string {
+	return newQueryBatcher("address", nil).chunk(ips)
+}
+
+// TestBatchedQueriesStayWithinTheByteBudget measures the thing that actually
+// goes on the wire — the full encoded query, fixed parameters and all — rather
+// than the repeated parameter the chunker splits on. That gap is the bug: the
+// budget was computed from the ids alone and ?fields=, ?exclude= and the ?limit=
+// fetchList appends were added afterwards, so every batch shipped over the
+// ceiling the constant exists to stay under.
+//
+// A batch that overflows does not return a shorter answer; it returns HTTP 431
+// from a proxy, which degrades the whole batch to blank is_primary_ip AND
+// raises a warning — and a warning is a hard failure on the alert path
+// (pkg/plugin.degradationError). So this is asserted per REQUEST, at the
+// boundary, for all three hops rather than the one the review happened to name.
+//
+// The assertions are two-sided on purpose. The upper bound is the requirement;
+// the lower bound proves the fixture still packs a batch up against the
+// boundary, without which a chunker that emitted one id per request would pass
+// this test while making 893 requests.
+func TestBatchedQueriesStayWithinTheByteBudget(t *testing.T) {
+	// The reported case: ids 1..893, which is what one chunk held when only the
+	// ids were counted.
+	ids := make([]int, 893)
+	for i := range ids {
+		ids[i] = i + 1
+	}
+
+	// assertWithinBudget takes the encoded query of every request an endpoint
+	// actually received and measures each one against the budget.
+	assertWithinBudget := func(t *testing.T, queries []string) {
+		t.Helper()
+		if len(queries) == 0 {
+			t.Fatal("no requests recorded; the assertion below would pass vacuously")
+		}
+		longest, over := 0, false
+		for i, q := range queries {
+			n := len(q)
+			if n > longest {
+				longest = n
+			}
+			if n > chunkBudgetBytes {
+				over = true
+				t.Errorf("request %d/%d encodes to %d bytes, over the %d-byte budget: %s…",
+					i+1, len(queries), n, chunkBudgetBytes, q[:64])
+			}
+		}
+		// Within 64 bytes of the ceiling: the budget is only meaningful if a
+		// batch is actually filled to it. Skipped when something already went
+		// over — the failure above is the whole story, and this one would only
+		// misdescribe it.
+		if !over && longest < chunkBudgetBytes-64 {
+			t.Errorf("longest request is %d bytes against a %d-byte budget — the fixture no longer fills a batch, so the upper bound above proves nothing",
+				longest, chunkBudgetBytes)
+		}
+	}
+
+	t.Run("the reported overflow, reconstructed", func(t *testing.T) {
+		// What the old accounting measured: the ids alone.
+		q := url.Values{}
+		for _, id := range ids {
+			q.Add("id", fmt.Sprintf("%d", id))
+		}
+		if n := len(q.Encode()); n != 6142 || n > chunkBudgetBytes {
+			t.Fatalf("893 ids encode to %d bytes of ?id=; the reported figure is 6142, inside the %d-byte budget", n, chunkBudgetBytes)
+		}
+		// What was sent: the same ids plus the parameters appended after the
+		// budget had been computed — the VM hop's projection and exclusion, and
+		// the limit fetchList adds to every batched query.
+		for k, vs := range primaryIPProjection() {
+			q[k] = vs
+		}
+		q.Set("limit", fmt.Sprintf("%d", min(MaxLimit, pageSize)))
+		if n := len(q.Encode()); n != 6213 || n <= chunkBudgetBytes {
+			t.Fatalf("the complete query for those ids is %d bytes; the reported figure is 6213, past the %d-byte budget. If primaryIPFields changed, these numbers move — the property under test is that the complete query, not the id list, is what the chunker must fit", n, chunkBudgetBytes)
+		}
+	})
+
+	t.Run("virtual machine hop", func(t *testing.T) {
+		var queries []string
+		srv := idEndpointServer(t, "/api/virtualization/virtual-machines/", &queries)
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
+
+		got, deg := p.fetchVMs(context.Background(), ids)
+		if deg.any() {
+			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
+		}
+		if len(got) != len(ids) {
+			t.Fatalf("got %d virtual machines, want %d — splitting must not lose ids", len(got), len(ids))
+		}
+		if len(queries) < 2 {
+			t.Fatalf("893 ids no longer fit one projected batch; got %d request(s)", len(queries))
+		}
+		assertWithinBudget(t, queries)
+	})
+
+	// The topology edge hop is the fourth batching surface, and it was found by
+	// asking which OTHER callers budget a repeated parameter and then append a
+	// fixed one — not by a report. It carries `base` (e.g. connected=true) into
+	// every request, so budgeting device_id alone measured short exactly as the
+	// three ip-enrichment hops did.
+	t.Run("topology edge hop carries its base parameters into the budget", func(t *testing.T) {
+		var queries []string
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/dcim/interfaces/", func(w http.ResponseWriter, r *http.Request) {
+			queries = append(queries, r.URL.RawQuery)
+			n := len(r.URL.Query()[deviceScopeParam])
+			rows := make([]string, 0, n)
+			for i := 0; i < n; i++ {
+				rows = append(rows, `{"id":1}`)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			// count == len(rows): fetchEdgeRows splits a batch whose total exceeds
+			// the rows it read, and that split would mask an over-budget request.
+			_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, n, strings.Join(rows, ","))
+		})
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+
+		devIDs := make([]string, 900)
+		for i := range devIDs {
+			devIDs[i] = fmt.Sprintf("%d", i+1)
+		}
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
+		if _, err := p.fetchEdgeRows(context.Background(), "dcim/interfaces",
+			url.Values{"connected": []string{"true"}}, devIDs); err != nil {
+			t.Fatalf("fetchEdgeRows: %v", err)
+		}
+		assertWithinBudget(t, queries)
+	})
+
+	// Page 2 is NetBox's URL, not ours. fetchList follows `next` verbatim, and DRF
+	// builds it by adding &offset= to the query it received — so a batch that fits
+	// on page 1 can still exceed the ceiling on the page after it, and nothing in
+	// ipenrich.go constructs that URL to notice. Reachable by construction: these
+	// hops filter by primary key, so a batch of more than pageSize ids spans more
+	// than one page.
+	t.Run("the continuation page NetBox builds stays within budget", func(t *testing.T) {
+		var queries []string
+		mux := http.NewServeMux()
+		var base string
+		mux.HandleFunc("/api/virtualization/virtual-machines/", func(w http.ResponseWriter, r *http.Request) {
+			queries = append(queries, r.URL.RawQuery)
+			q := r.URL.Query()
+			offset, _ := strconv.Atoi(q.Get("offset"))
+			ids := q["id"]
+			// One row per id, paged like DRF: at most pageSize per response, and a
+			// `next` that echoes this query with the offset advanced.
+			end := min(offset+pageSize, len(ids))
+			rows := make([]string, 0, max(0, end-offset))
+			for _, id := range ids[offset:end] {
+				rows = append(rows, fmt.Sprintf(
+					`{"id":%s,"primary_ip4":{"id":%s,"address":"10.0.0.1/32"},"primary_ip6":null}`, id, id))
+			}
+			next := "null"
+			if end < len(ids) {
+				nq := r.URL.Query()
+				nq.Set("offset", strconv.Itoa(end))
+				next = fmt.Sprintf("%q", base+"?"+nq.Encode())
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"count":%d,"next":%s,"results":[%s]}`, len(ids), next, strings.Join(rows, ","))
+		})
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		base = srv.URL + "/api/virtualization/virtual-machines/"
+
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
+		got, deg := p.fetchVMs(context.Background(), ids)
+		if deg.any() {
+			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
+		}
+		if len(got) != len(ids) {
+			t.Fatalf("got %d virtual machines, want %d — paging must not lose ids", len(got), len(ids))
+		}
+		var paged bool
+		for _, q := range queries {
+			if strings.Contains(q, "offset=") {
+				paged = true
+			}
+		}
+		if !paged {
+			t.Fatal("no continuation page was fetched, so this test proves nothing about offset")
+		}
+		assertWithinBudget(t, queries)
+	})
+
+	t.Run("device hop, projected for is_primary_ip alone", func(t *testing.T) {
+		var queries []string
+		srv := idEndpointServer(t, "/api/dcim/devices/", &queries)
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
+
+		// wantDeviceColumns false is the projected path, and it is the newer of
+		// the two: it appeared when the hop started running for is_primary_ip
+		// with no device_* column selected.
+		got, deg := p.fetchDevices(context.Background(), ids, false)
+		if deg.any() {
+			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
+		}
+		if len(got) != len(ids) {
+			t.Fatalf("got %d devices, want %d", len(got), len(ids))
+		}
+		assertWithinBudget(t, queries)
+	})
+
+	t.Run("device hop, unprojected", func(t *testing.T) {
+		var queries []string
+		srv := idEndpointServer(t, "/api/dcim/devices/", &queries)
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
+
+		// No fixed parameters of its own, and still not free: fetchList appends
+		// ?limit= to this batch exactly as it does to the projected one.
+		if _, deg := p.fetchDevices(context.Background(), ids, true); deg.any() {
+			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
+		}
+		assertWithinBudget(t, queries)
+	})
+
+	t.Run("address hop", func(t *testing.T) {
+		// Max-width IPv4 (15 bytes, no escaping), which is what fills an address
+		// batch fastest without reaching for IPv6.
+		var addrs []string
+		for a := 100; a < 256 && len(addrs) < 300; a++ {
+			for b := 100; b < 256 && len(addrs) < 300; b++ {
+				addrs = append(addrs, fmt.Sprintf("%d.%d.255.255", a, b))
+			}
+		}
+
+		var queries []string
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+			queries = append(queries, r.URL.RawQuery)
+			var results []string
+			for i, a := range r.URL.Query()["address"] {
+				results = append(results, fmt.Sprintf(`{"id":%d,"address":"%s/24"}`, len(queries)*10000+i, a))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
+		res, err := p.fetchAddressRecords(context.Background(), addrs)
+		if err != nil {
+			t.Fatalf("fetchAddressRecords: %v", err)
+		}
+		if len(res.byHost) != len(addrs) {
+			t.Fatalf("indexed %d hosts, want %d", len(res.byHost), len(addrs))
+		}
+		assertWithinBudget(t, queries)
+	})
+}
+
+// idEndpointServer answers an ?id=-batched endpoint the way NetBox does — one
+// object per requested id, carrying only the projected keys — and records the
+// encoded query of every request it received.
+func idEndpointServer(t *testing.T, path string, queries *[]string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		*queries = append(*queries, r.URL.RawQuery)
+		var results []string
+		for _, id := range r.URL.Query()["id"] {
+			results = append(results, fmt.Sprintf(
+				`{"id":%s,"primary_ip4":{"id":%s,"address":"10.0.0.1/32"},"primary_ip6":null}`, id, id))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 func TestHostOf(t *testing.T) {
@@ -161,7 +477,7 @@ func TestFetchAddressRecords_ChunkFailureDegrades(t *testing.T) {
 	for i := 0; i < 1200; i++ {
 		ips = append(ips, fmt.Sprintf("10.%d.%d.7", i/256, i%256))
 	}
-	chunks := chunkByBudget("address", ips, chunkBudgetBytes)
+	chunks := addressChunks(ips)
 	if len(chunks) < 3 {
 		t.Fatalf("test needs >=3 chunks to distinguish partial from total failure, got %d", len(chunks))
 	}
@@ -545,7 +861,7 @@ func TestFetchAddressRecords_HostAnsweredByAnotherChunkIsNotDegraded(t *testing.
 
 	t.Run("a host every one of whose spellings recovered is not counted as degraded", func(t *testing.T) {
 		ips := twinnedSpellings(800)
-		assertTwinsSplit(t, chunkByBudget("address", ips, chunkBudgetBytes), nil)
+		assertTwinsSplit(t, addressChunks(ips), nil)
 
 		srv, calls := failFirstBatchServer(t)
 		p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
@@ -579,7 +895,7 @@ func TestFetchAddressRecords_HostAnsweredByAnotherChunkIsNotDegraded(t *testing.
 		// really did lose it.
 		const orphan = "10.255.255.254"
 		ips := twinnedSpellings(800, orphan)
-		assertTwinsSplit(t, chunkByBudget("address", ips, chunkBudgetBytes), map[string]bool{orphan: true})
+		assertTwinsSplit(t, addressChunks(ips), map[string]bool{orphan: true})
 
 		srv, _ := failFirstBatchServer(t)
 		p := New(srv.URL, "test-token", &http.Client{Timeout: 30 * time.Second})
@@ -662,7 +978,7 @@ func TestFetchDevices_ChunkFailureDegrades(t *testing.T) {
 	defer srv.Close()
 
 	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
-	got, deg := p.fetchDevices(context.Background(), ids)
+	got, deg := p.fetchDevices(context.Background(), ids, true)
 	if len(got) == 0 {
 		t.Fatal("the surviving batches' devices must still come back")
 	}
@@ -926,7 +1242,7 @@ func TestFetchDevices(t *testing.T) {
 			ids[i] = i + 1
 		}
 
-		got, deg := p.fetchDevices(context.Background(), ids)
+		got, deg := p.fetchDevices(context.Background(), ids, true)
 		if deg.any() {
 			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
 		}
@@ -948,6 +1264,63 @@ func TestFetchDevices(t *testing.T) {
 		}
 	})
 
+	// The projection is conditional, and both halves have a failure mode worth a
+	// test. Sending it when device_* is selected would blank nine columns with a
+	// 200 and no warning (?fields= is silent about names it does not know, see
+	// fieldsParam); NOT sending it when the hop runs for is_primary_ip alone pays
+	// the whole device serializer for one boolean — 6,378 bytes against 731 for
+	// three ids on NetBox 4.4.10, measured, which is the whole reason the parameter
+	// exists.
+	//
+	// The server answers with only the projected keys when a projection arrives,
+	// exactly as NetBox does, so a hop that asked for the wrong names would fail
+	// here rather than quietly resolve nothing.
+	t.Run("projects to the flag's sources only when no device_* column is selected", func(t *testing.T) {
+		var fields, excludes []string
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+			f := r.URL.Query().Get("fields")
+			fields = append(fields, f)
+			excludes = append(excludes, r.URL.Query().Get("exclude"))
+			body := `{"id":100,"name":"leaf-01","site":{"id":5,"name":"AMS1","slug":"ams1"},"primary_ip4":{"id":1,"address":"10.0.0.1/32"},"primary_ip6":null}`
+			if f != "" {
+				body = `{"id":100,"primary_ip4":{"id":1,"address":"10.0.0.1/32"},"primary_ip6":null}`
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"count":1,"next":null,"results":[%s]}`, body)
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+		got, _ := p.fetchDevices(context.Background(), []int{100}, false)
+		if len(fields) != 1 || fields[0] != "id,primary_ip4,primary_ip6" {
+			t.Fatalf("projection = %q, want id,primary_ip4,primary_ip6: the hop is running for is_primary_ip alone, so the rest of the device serializer is fetched and thrown away", fields)
+		}
+		// Free in bytes and not free upstream: DeviceViewSet annotates config
+		// context onto the queryset, which the projection alone does not remove.
+		if excludes[0] != configContextField {
+			t.Errorf("exclude = %q, want %q alongside a projection that already drops it", excludes[0], configContextField)
+		}
+		// The projected response must still answer the question it was cut down
+		// for, which is the failure ?fields= makes invisible.
+		if !isPrimaryIP(got[100], 1) {
+			t.Errorf("device 100 primary_ip4_id = %v, want the projected response to still resolve the flag", got[100]["primary_ip4_id"])
+		}
+
+		fields, excludes = nil, nil
+		got, _ = p.fetchDevices(context.Background(), []int{100}, true)
+		if len(fields) != 1 || fields[0] != "" {
+			t.Fatalf("projection = %q, want none: device_* is nine columns spread across the serializer, and a name ?fields= does not recognize blanks one silently", fields)
+		}
+		if excludes[0] != "" {
+			t.Errorf("exclude = %q, want none: config_context is a real column an unprojected device query surfaces", excludes[0])
+		}
+		if got[100]["name"] != "leaf-01" || got[100]["site"] != "AMS1" {
+			t.Errorf("device 100 = %v, want the full serializer's device_* sources", got[100])
+		}
+	})
+
 	t.Run("empty ids returns an empty map without a request", func(t *testing.T) {
 		requests := 0
 		mux := http.NewServeMux()
@@ -959,7 +1332,7 @@ func TestFetchDevices(t *testing.T) {
 		defer srv.Close()
 
 		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
-		got, deg := p.fetchDevices(context.Background(), nil)
+		got, deg := p.fetchDevices(context.Background(), nil, true)
 		if deg.any() {
 			t.Fatalf("no ids means nothing to degrade, got %+v", deg)
 		}
@@ -972,12 +1345,143 @@ func TestFetchDevices(t *testing.T) {
 	})
 }
 
+// TestFetchVMs is TestFetchDevices' mirror, and covers the three properties the
+// VM hop inherits from it rather than reinvents: batching a large id set into
+// one id-keyed map, an empty id set costing no request at all (which is how
+// ResolveIPs skips the hop), and a failed batch reporting a degradation instead
+// of an error, because a VM-hop failure must never fail the query.
+//
+// It also pins the projection. The hop exists for one boolean, so asking NetBox
+// for the whole VM serializer would be a payload this package has no use for —
+// and ?fields= is SILENT about names it does not know (see fieldsParam), so a
+// projection that named the wrong things would fetch objects with no
+// primary_ip4 in them and answer false for every VM. That failure is invisible
+// in the response and looks exactly like "no VM has a primary IP".
+func TestFetchVMs(t *testing.T) {
+	t.Run("batches large id sets into a single id-keyed map, projected to the flag's sources", func(t *testing.T) {
+		requests := 0
+		var projections []string
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/virtualization/virtual-machines/", func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			projections = append(projections, r.URL.Query().Get("fields"))
+			ids := r.URL.Query()["id"]
+			var b strings.Builder
+			b.WriteString(`{"count":0,"next":null,"results":[`)
+			for i, id := range ids {
+				if i > 0 {
+					b.WriteString(",")
+				}
+				// Only the projected keys, exactly as NetBox answers a ?fields=
+				// query: no name, no cluster, no status.
+				fmt.Fprintf(&b, `{"id":%s,"primary_ip4":{"id":%s,"address":"10.0.0.1/32"},"primary_ip6":null}`, id, id)
+			}
+			b.WriteString("]}")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(b.String()))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+		const n = 2000 // comfortably over chunkBudgetBytes at "id=<n>" widths, forcing >1 chunk
+		ids := make([]int, n)
+		for i := range ids {
+			ids[i] = i + 1
+		}
+
+		got, deg := p.fetchVMs(context.Background(), ids)
+		if deg.any() {
+			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
+		}
+		if len(got) != n {
+			t.Fatalf("got %d virtual machines, want %d", len(got), n)
+		}
+		if requests < 2 {
+			t.Fatalf("expected batching to span multiple requests, got %d", requests)
+		}
+		for i, p := range projections {
+			if p != "id,primary_ip4,primary_ip6" {
+				t.Errorf("batch %d projection = %q, want %q — every batch, not just the first", i+1, p, "id,primary_ip4,primary_ip6")
+			}
+		}
+
+		vm, ok := got[1]
+		if !ok {
+			t.Fatal("missing virtual machine id 1 in result map")
+		}
+		// primary_ip4 is a nested reference; flattenObject must have derived
+		// primary_ip4_id from it as a float64 for isPrimaryIP to match on.
+		if !isPrimaryIP(vm, 1) {
+			t.Fatalf("expected VM 1's primary_ip4_id to equal its own id, got %v", vm["primary_ip4_id"])
+		}
+	})
+
+	t.Run("empty ids returns an empty map without a request", func(t *testing.T) {
+		requests := 0
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/virtualization/virtual-machines/", func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+		got, deg := p.fetchVMs(context.Background(), nil)
+		if deg.any() {
+			t.Fatalf("no ids means nothing to degrade, got %+v", deg)
+		}
+		if len(got) != 0 {
+			t.Fatalf("expected empty map, got %d entries", len(got))
+		}
+		if requests != 0 {
+			t.Fatalf("expected no requests for empty ids, got %d", requests)
+		}
+	})
+
+	t.Run("a failed batch degrades instead of erroring", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/virtualization/virtual-machines/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"detail":"You do not have permission to perform this action."}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+		// There is no error return to check: the signature itself is the
+		// guarantee, for the reason fetchDevices' comment gives — an error here
+		// would have no consumer, and discarding one is how a total failure came
+		// out looking like fact.
+		got, deg := p.fetchVMs(context.Background(), []int{5, 6})
+		if len(got) != 0 {
+			t.Fatalf("a forbidden endpoint cannot produce virtual machines, got %v", got)
+		}
+		if deg.failed != 2 || deg.total != 2 {
+			t.Fatalf("degradation = %+v, want 2 of 2 failed", deg)
+		}
+		if deg.cause == nil {
+			t.Fatal("degradation must carry the cause; the warning renders it")
+		}
+	})
+}
+
 func TestIPEnrichColumnsAreNamespaced(t *testing.T) {
 	cols := IPEnrichColumns()
-	if cols[0] != "ip" || cols[1] != "match_count" {
-		t.Fatalf("identity columns must lead un-namespaced, got %v", cols[:2])
+	// Three un-namespaced columns lead, not two. is_primary_ip joined them when
+	// it gained a virtual-machine half: it is answered by the device for one row
+	// and by the virtual machine for the next, so device_ would be a lie on half
+	// the rows it fills and vm_ a lie on the other half. Its position is
+	// asserted rather than
+	// merely tolerated — the frontend mirror groups by exactly these leading
+	// names (TestIPContextFieldsMatchFrontend).
+	if cols[0] != "ip" || cols[1] != "match_count" || cols[2] != isPrimaryIPColumn {
+		t.Fatalf("identity columns must lead un-namespaced, got %v", cols[:3])
 	}
-	for _, c := range cols[2:] {
+	for _, c := range cols[3:] {
 		switch {
 		case strings.HasPrefix(c, "prefix_"), strings.HasPrefix(c, "address_"),
 			strings.HasPrefix(c, "interface_"), strings.HasPrefix(c, "device_"),
@@ -1375,6 +1879,74 @@ func TestDeviceIDFromAddress(t *testing.T) {
 	}
 }
 
+// TestVMIDFromAddress is the third member of the family, and the one the VM hop
+// batches on. Same generic-relation payload, same standalone type gate, and the
+// same reason for asserting the gate on its own: a dcim.interface payload that
+// grew a virtual_machine key must yield nothing here, or a device row would be
+// looked up in the VM keyspace — different NetBox model, unrelated object, and
+// an is_primary_ip answered from it that is wrong rather than absent.
+func TestVMIDFromAddress(t *testing.T) {
+	cases := []struct {
+		name   string
+		raw    string
+		wantID int
+		wantOK bool
+	}{
+		{
+			name:   "a virtualization.vminterface assignment yields its VM id",
+			raw:    `{"id":31,"assigned_object_type":"virtualization.vminterface","assigned_object":{"id":55,"name":"eth0","virtual_machine":{"id":5,"name":"vm-01"}}}`,
+			wantID: 5,
+			wantOK: true,
+		},
+		{
+			name:   "a dcim.interface assignment is excluded",
+			raw:    `{"id":1,"assigned_object_type":"dcim.interface","assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"}}}`,
+			wantOK: false,
+		},
+		{
+			name: "the type gate excludes a dcim.interface even when a virtual_machine is present",
+			// Not a shape NetBox sends today, which is the point — the exclusion
+			// must hold on the type constant rather than on what the serializer
+			// happens to carry.
+			raw:    `{"id":1,"assigned_object_type":"dcim.interface","assigned_object":{"id":9,"name":"Ethernet1","virtual_machine":{"id":5,"name":"vm-01"}}}`,
+			wantOK: false,
+		},
+		{
+			name: "an ipam.fhrpgroup assignment is excluded",
+			// The FHRP case at its source: an FHRP group produces no owner to look
+			// up, which is what leaves is_primary_ip absent rather than false.
+			raw:    `{"id":53,"assigned_object_type":"ipam.fhrpgroup","assigned_object":{"id":2,"display":"web-vip VRRPv3: 993 (10.0.0.6/24)"}}`,
+			wantOK: false,
+		},
+		{
+			name:   "an unassigned address is excluded",
+			raw:    `{"id":21,"assigned_object_type":null,"assigned_object":null}`,
+			wantOK: false,
+		},
+		{
+			name: "a vminterface with no nested virtual_machine is excluded",
+			// id 0 is not a VM. Batching it would ask NetBox ?id=0 and index the
+			// answer under a key no row can match.
+			raw:    `{"id":32,"assigned_object_type":"virtualization.vminterface","assigned_object":{"id":56,"name":"eth1"}}`,
+			wantOK: false,
+		},
+		{
+			name:   "malformed JSON is excluded rather than panicking",
+			raw:    `{"id":`,
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, ok := vmIDFromAddress(json.RawMessage(tc.raw))
+			if ok != tc.wantOK || id != tc.wantID {
+				t.Errorf("vmIDFromAddress = (%d, %t), want (%d, %t)", id, ok, tc.wantID, tc.wantOK)
+			}
+		})
+	}
+}
+
 // TestVMNameFromAddress mirrors TestDeviceIDFromAddress, and exists for the same
 // reason: vmNameFromAddress has two independent ways to say no — the
 // assigned_object_type gate and the "no assigned_object.virtual_machine.name"
@@ -1500,7 +2072,7 @@ func TestResolveIPs_MatchCountCountsDistinctRecords(t *testing.T) {
 	}
 	ips = append(ips, "10.0.0.5/24")
 
-	chunks := chunkByBudget("address", ips, chunkBudgetBytes)
+	chunks := addressChunks(ips)
 	if len(chunks) < 2 {
 		t.Fatalf("test needs the two spellings in different chunks, got %d chunk(s)", len(chunks))
 	}
@@ -1680,10 +2252,17 @@ func TestResolveIPs(t *testing.T) {
 	defer srv.Close()
 	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
 
+	// The device_* group, and only it. is_primary_ip used to belong here and
+	// deliberately no longer does: a VM-assigned row is entitled to a value in
+	// it, so asserting it nil alongside device_name would pin the opposite of
+	// the intended behaviour — and would have kept passing here,
+	// since this mock serves no virtualization endpoint. The subtest below states
+	// what is true of it instead. Its VM half is covered end-to-end, against a
+	// mock that DOES answer, by TestResolveIPs_IsPrimaryIP.
 	deviceColumns := []string{
 		"device_name", "device_role", "device_platform", "device_device_type",
 		"device_site", "device_location", "device_rack", "device_tenant",
-		"device_status", "device_is_primary_ip",
+		"device_status",
 	}
 
 	t.Run("Total is the pre-clamp distinct count, not the post-clamp row count", func(t *testing.T) {
@@ -1744,7 +2323,7 @@ func TestResolveIPs(t *testing.T) {
 	})
 
 	t.Run("a device-assigned IP fills every device_* column while a VM-assigned IP in the same call leaves them all nil", func(t *testing.T) {
-		fields := append([]string{"ip", "interface_name"}, deviceColumns...)
+		fields := append([]string{"ip", "interface_name", "is_primary_ip"}, deviceColumns...)
 		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.3"}, fields, 0)
 		if err != nil {
 			t.Fatalf("ResolveIPs: %v", err)
@@ -1782,8 +2361,12 @@ func TestResolveIPs(t *testing.T) {
 		if devRow["device_site"] != "AMS1" {
 			t.Errorf("device_site = %v, want %q", devRow["device_site"], "AMS1")
 		}
-		if devRow["device_is_primary_ip"] != true {
-			t.Errorf("device_is_primary_ip = %v, want true (device 100's primary_ip4 is address id 1)", devRow["device_is_primary_ip"])
+		// This mock serves no virtualization endpoint, so selecting is_primary_ip
+		// puts the VM hop through a 404 in this very call — and the device row's
+		// flag must be true regardless. The two hops answer disjoint sets of rows,
+		// so neither can blank the other's.
+		if devRow["is_primary_ip"] != true {
+			t.Errorf("is_primary_ip = %v, want true (device 100's primary_ip4 is address id 1)", devRow["is_primary_ip"])
 		}
 
 		// The property under test: a virtualization.vminterface assignment
@@ -1947,7 +2530,7 @@ func TestResolveIPs_AddressChunkFailureIsStated(t *testing.T) {
 	for i := 0; i < 1200; i++ {
 		ips = append(ips, fmt.Sprintf("10.%d.%d.7", i/256, i%256))
 	}
-	chunks := chunkByBudget("address", ips, chunkBudgetBytes)
+	chunks := addressChunks(ips)
 	if len(chunks) < 3 {
 		t.Fatalf("test needs >=3 chunks to distinguish partial from total failure, got %d", len(chunks))
 	}
@@ -2026,7 +2609,7 @@ func TestResolveIPs_FailedChunkIsNotFallbackFodder(t *testing.T) {
 	for i := 0; i < 700; i++ {
 		ips = append(ips, fmt.Sprintf("10.%d.%d.7", i/256, i%256))
 	}
-	chunks := chunkByBudget("address", ips, chunkBudgetBytes)
+	chunks := addressChunks(ips)
 	if len(chunks) < 2 {
 		t.Fatalf("test needs >=2 chunks, got %d", len(chunks))
 	}
@@ -2457,11 +3040,22 @@ func TestDegradationScope(t *testing.T) {
 	}
 }
 
-// TestHopWarningTexts pins the three sentences verbatim. They are the whole
+// TestHopWarningTexts pins the four warnings' sentences verbatim. They are the whole
 // deliverable of the degradation mechanism — the only thing standing between a
 // blank device_* column and a dashboard author concluding the IP has no device —
 // so they get asserted as text rather than by keyword, where a rewrite that
 // dropped the "not because" clause would still pass.
+//
+// Each one names the columns that go blank, and is_primary_ip was added to two of
+// those lists when it stopped being a device_* column: it is filled by the device
+// hop for one row and by the VM hop for the next, so a device failure blanks it
+// just as surely as it blanks device_name, and the sentence has to say so.
+//
+// The device hop gets three cases rather than one because it is the only hop whose
+// list depends on the selection — widening its gate made it runnable for either of
+// two unrelated columns, so a fixed list names an absent column in one direction or
+// the other. See deviceHopWarning; the end-to-end half is
+// TestResolveIPs_DeviceHopWarningNamesOnlySelectedColumns.
 func TestHopWarningTexts(t *testing.T) {
 	apiErr := &APIError{Status: 503, URL: "http://nb/api/dcim/devices/?id=1", Body: `{"detail":"nope"}`}
 
@@ -2478,15 +3072,48 @@ func TestHopWarningTexts(t *testing.T) {
 			// 0 asserts "NetBox holds no record" and a prefix_cidr looks like a
 			// successful longest-match fallback, on an IP NetBox knows.
 			want: "Address lookup failed for 330 of 1,200 IPs — NetBox returned HTTP 503. " +
-				"The match_count, address_*, interface_*, device_*, vm_name and prefix_* columns on the affected rows are empty " +
+				"The match_count, address_*, interface_*, device_*, vm_name, is_primary_ip and prefix_* columns on the affected rows are empty " +
 				"because the lookup failed, not because NetBox has no record for those IPs.",
 		},
 		{
+			// Both selected, which is the default selection's shape.
 			name: "device hop, total",
-			got:  deviceHopWarning(degradation{failed: 12, total: 12, cause: apiErr}),
+			got:  deviceHopWarning(degradation{failed: 12, total: 12, cause: apiErr}, true, true),
+			want: "Device lookup failed for all 12 devices — NetBox returned HTTP 503. " +
+				"The device_* and is_primary_ip columns on the affected rows are blank because the lookup failed, " +
+				"not because those IPs have no device.",
+		},
+		{
+			// device_* without is_primary_ip. Naming is_primary_ip here would send
+			// the reader looking for a column the frame does not contain.
+			name: "device hop, device_* selected without is_primary_ip",
+			got:  deviceHopWarning(degradation{failed: 12, total: 12, cause: apiErr}, true, false),
 			want: "Device lookup failed for all 12 devices — NetBox returned HTTP 503. " +
 				"The device_* columns on the affected rows are blank because the lookup failed, " +
 				"not because those IPs have no device.",
+		},
+		{
+			// The mirror case, and the one the widened gate created: is_primary_ip
+			// keeps the device hop alive on its own, so the hop can fail for a
+			// selection with no device_* column in it at all. The "not because" clause moves too —
+			// with only this column in the frame, the misreading to rule out is "not
+			// primary", not "no device".
+			name: "device hop, is_primary_ip selected without device_*",
+			got:  deviceHopWarning(degradation{failed: 1, total: 1, cause: apiErr}, false, true),
+			want: "Device lookup failed for the only device — NetBox returned HTTP 503. " +
+				"The is_primary_ip column on the affected rows is blank because the lookup failed, " +
+				"not because those IPs are not their device's primary address.",
+		},
+		{
+			name: "virtual machine hop, partial",
+			got:  vmHopWarning(degradation{failed: 2, total: 9, cause: apiErr}),
+			// "not because those IPs are not their virtual machine's primary
+			// address" is the load-bearing half: a blank is_primary_ip is exactly
+			// what a correct FHRP-assigned or unassigned row looks like, so the
+			// column alone cannot distinguish a failed hop from an honest absence.
+			want: "Virtual machine lookup failed for 2 of 9 virtual machines — NetBox returned HTTP 503. " +
+				"The is_primary_ip column on the affected rows is blank because the lookup failed, " +
+				"not because those IPs are not their virtual machine's primary address.",
 		},
 		{
 			name: "prefix fallback, single IP",
@@ -2514,9 +3141,13 @@ func TestHumanInt(t *testing.T) {
 	}
 }
 
-// TestWantsGroup pins the hop-selection predicate, including the one case that
-// looks like an exception and is not: device_is_primary_ip is a device_* column
-// and must keep the device hop alive on its own.
+// TestWantsGroup pins the hop-selection predicate, including the case that used
+// to look like an exception and is now a genuine gap: is_primary_ip was
+// device_is_primary_ip, so the prefix test alone kept the device hop alive for
+// it. It no longer does — this test asserts that it does NOT, because a reader
+// who assumes otherwise would delete the explicit name test in ResolveIPs and
+// silently blank the column for the default selection. The end-to-end guard for
+// that is TestResolveIPs_DeviceHopOnlyRunsWhenSelected.
 func TestWantsGroup(t *testing.T) {
 	cases := []struct {
 		fields []string
@@ -2524,8 +3155,8 @@ func TestWantsGroup(t *testing.T) {
 		want   bool
 	}{
 		{defaultIPEnrichFields, "prefix_", false}, // the finding: no prefix_* in the default selection
-		{defaultIPEnrichFields, "device_", true},
-		{[]string{"ip", "device_is_primary_ip"}, "device_", true},
+		{defaultIPEnrichFields, "device_", true},  // device_site and device_tenant, not is_primary_ip
+		{[]string{"ip", "is_primary_ip"}, "device_", false},
 		{[]string{"ip", "match_count"}, "device_", false},
 		{[]string{"ip", "match_count"}, "prefix_", false},
 		{[]string{"ip", "address_dns_name", "interface_name"}, "device_", false},
@@ -2670,6 +3301,7 @@ func TestResolveIPs_SkippedPrefixHopCannotWarn(t *testing.T) {
 // a warning about blank device_* columns that were not in the output.
 func TestResolveIPs_DeviceHopOnlyRunsWhenSelected(t *testing.T) {
 	deviceCalls := 0
+	deviceFields := ""
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2681,7 +3313,17 @@ func TestResolveIPs_DeviceHopOnlyRunsWhenSelected(t *testing.T) {
 	})
 	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
 		deviceCalls++
+		deviceFields = r.URL.Query().Get("fields")
 		w.Header().Set("Content-Type", "application/json")
+		// Answered the way NetBox answers a ?fields= query — only the projected
+		// keys — so a hop that projects when device_* was selected shows up here as
+		// blank device columns rather than passing on a mock's generosity.
+		if deviceFields != "" {
+			_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
+				{"id":100,"primary_ip4":{"id":1,"address":"10.0.0.1/32"},"primary_ip6":null}
+			]}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[
 			{"id":100,"name":"leaf-01","site":{"id":5,"name":"AMS1","slug":"ams1"},
 			 "status":{"value":"active","label":"Active"},"primary_ip4":{"id":1,"address":"10.0.0.1/32"}}
@@ -2717,8 +3359,8 @@ func TestResolveIPs_DeviceHopOnlyRunsWhenSelected(t *testing.T) {
 		}
 	})
 
-	t.Run("selecting device_name restores the hop", func(t *testing.T) {
-		deviceCalls = 0
+	t.Run("selecting device_name restores the hop, unprojected", func(t *testing.T) {
+		deviceCalls, deviceFields = 0, ""
 		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"ip", "device_name", "device_site"}, 0)
 		if err != nil {
 			t.Fatalf("ResolveIPs: %v", err)
@@ -2726,35 +3368,62 @@ func TestResolveIPs_DeviceHopOnlyRunsWhenSelected(t *testing.T) {
 		if deviceCalls != 1 {
 			t.Errorf("device requests = %d, want 1", deviceCalls)
 		}
+		// device_* is nine columns spread across the serializer, so this query
+		// wants the whole of it — and ?fields= is silent about a name it does not
+		// recognize, so a projection here would blank a column with a 200.
+		if deviceFields != "" {
+			t.Errorf("device projection = %q, want none when device_* columns are selected", deviceFields)
+		}
 		if res.Rows[0]["device_name"] != "leaf-01" || res.Rows[0]["device_site"] != "AMS1" {
 			t.Errorf("row = %v, want device context", res.Rows[0])
 		}
 	})
 
-	// device_is_primary_ip is the trap: it is a device_* column that does not
-	// read like one, and it is in the default selection. Getting the prefix test
-	// wrong here would silently disable device context for every default query.
-	t.Run("device_is_primary_ip alone counts as a device column", func(t *testing.T) {
-		deviceCalls = 0
-		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"ip", "device_is_primary_ip"}, 0)
+	// is_primary_ip is the trap, and losing its device_ prefix sharpened it: the
+	// column keeps the device hop alive on its own while no longer carrying the
+	// prefix the gate used to find it by. It is also in the default selection, so
+	// a gate that tests prefixes alone blanks it on every default query — with no error, no
+	// warning, and a column that simply reads "not primary" for the entire fleet.
+	t.Run("is_primary_ip alone still keeps the device hop alive, projected", func(t *testing.T) {
+		deviceCalls, deviceFields = 0, ""
+		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"ip", "is_primary_ip"}, 0)
 		if err != nil {
 			t.Fatalf("ResolveIPs: %v", err)
 		}
 		if deviceCalls != 1 {
-			t.Fatalf("device requests = %d, want 1: device_is_primary_ip needs the device hop", deviceCalls)
+			t.Fatalf("device requests = %d, want 1: is_primary_ip needs the device hop", deviceCalls)
 		}
-		if res.Rows[0]["device_is_primary_ip"] != true {
-			t.Errorf("device_is_primary_ip = %v, want true", res.Rows[0]["device_is_primary_ip"])
+		// The hop is running for one boolean, so it asks for the two properties
+		// that produce it (plus the id that keys the map) rather than the whole
+		// device serializer: 6,378 bytes against 731 for three ids, measured
+		// against NetBox 4.4.10. Asserted through ResolveIPs and not only through
+		// fetchDevices because the value passed is the GATE's own boolean —
+		// handing it wantDevice instead of wantDeviceGroup would fetch everything
+		// again with every unit test still green.
+		if deviceFields != "id,primary_ip4,primary_ip6" {
+			t.Errorf("device projection = %q, want id,primary_ip4,primary_ip6: no device_* column was selected", deviceFields)
+		}
+		if res.Rows[0]["is_primary_ip"] != true {
+			t.Errorf("is_primary_ip = %v, want true", res.Rows[0]["is_primary_ip"])
 		}
 	})
 
-	t.Run("the default selection still makes the device request", func(t *testing.T) {
-		deviceCalls = 0
-		if _, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, nil, 0); err != nil {
+	t.Run("the default selection still makes the device request, unprojected", func(t *testing.T) {
+		deviceCalls, deviceFields = 0, ""
+		res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, nil, 0)
+		if err != nil {
 			t.Fatalf("ResolveIPs: %v", err)
 		}
 		if deviceCalls != 1 {
 			t.Errorf("device requests = %d, want 1: the default selection contains device_* columns", deviceCalls)
+		}
+		// The default selects both device_* columns and is_primary_ip, so the full
+		// serializer is the right ask and both kinds of column come back.
+		if deviceFields != "" {
+			t.Errorf("device projection = %q, want none: the default selection contains device_* columns", deviceFields)
+		}
+		if res.Rows[0]["device_site"] != "AMS1" || res.Rows[0]["is_primary_ip"] != true {
+			t.Errorf("row = %v, want both device_* context and the flag", res.Rows[0])
 		}
 	})
 }
@@ -2802,8 +3471,421 @@ func TestResolveIPs_SkippedDeviceHopCannotWarn(t *testing.T) {
 	}
 }
 
+// TestResolveIPs_DeviceHopWarningNamesOnlySelectedColumns is the end-to-end half
+// of the deviceHopWarning fix, and reproduces the mismatch as a user sees it: the
+// frame's columns and the warning's column list, side by side, from one call.
+//
+// It is asserted against the FRAME rather than against a string, because that is
+// the actual contract — every column the warning names must be one the reader can
+// find and see blank. The hop now runs for `device_* selected OR is_primary_ip
+// selected`, so it can fail for a selection holding only one of the two, and a
+// fixed list then names a column that is not in the frame at all. That
+// text is what an on-call reader meets first: a warning is a hard failure on the
+// alert path (pkg/plugin.degradationError), so the notice IS the incident.
+func TestResolveIPs_DeviceHopWarningNamesOnlySelectedColumns(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			if fx, ok := primaryIPFixtures[a]; ok {
+				results = append(results, fx)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	// The token cannot read DCIM, so every selection that runs the hop degrades.
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail":"You do not have permission to perform this action."}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	cases := []struct {
+		name    string
+		fields  []string
+		want    []string // substrings the warning must contain
+		absent  []string // column names it must NOT claim are blank
+		notWhat string   // the reading the "not because" clause has to rule out
+	}{
+		{
+			name:    "is_primary_ip alone",
+			fields:  []string{"ip", "is_primary_ip"},
+			want:    []string{"The is_primary_ip column", "is blank"},
+			absent:  []string{"device_*"},
+			notWhat: "not because those IPs are not their device's primary address",
+		},
+		{
+			name:    "device_* alone",
+			fields:  []string{"ip", "device_name", "device_site"},
+			want:    []string{"The device_* columns", "are blank"},
+			absent:  []string{"is_primary_ip"},
+			notWhat: "not because those IPs have no device",
+		},
+		{
+			name:    "both",
+			fields:  []string{"ip", "device_name", "is_primary_ip"},
+			want:    []string{"The device_* and is_primary_ip columns", "are blank"},
+			notWhat: "not because those IPs have no device",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 10.0.0.1 is device-assigned, so the device hop has an id to ask about
+			// and the VM hop has none — one warning, from the hop under test.
+			res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, tc.fields, 0)
+			if err != nil {
+				t.Fatalf("ResolveIPs: %v", err)
+			}
+			if len(res.Warnings) != 1 {
+				t.Fatalf("Warnings = %#v, want exactly one from the forbidden device hop", res.Warnings)
+			}
+			w := res.Warnings[0]
+			for _, want := range append(tc.want, tc.notWhat) {
+				if !strings.Contains(w, want) {
+					t.Errorf("warning %q must contain %q", w, want)
+				}
+			}
+			// The load-bearing assertion: a named column the frame does not have
+			// sends the reader hunting for a gap that is not there.
+			for _, col := range tc.absent {
+				if strings.Contains(w, col) {
+					t.Errorf("warning %q names %q, which this query did not select — columns are %v", w, col, res.Columns)
+				}
+			}
+			// And the columns it DOES name are in the frame, blank, which is the
+			// property the whole sentence exists to explain.
+			for _, f := range tc.fields {
+				if f == "ip" {
+					continue
+				}
+				if _, ok := res.Rows[0][f]; !ok {
+					t.Errorf("column %q is missing from the row entirely: %v", f, res.Rows[0])
+				}
+				if res.Rows[0][f] != nil {
+					t.Errorf("column %q = %v, want blank — the warning explains a blank", f, res.Rows[0][f])
+				}
+			}
+		})
+	}
+}
+
+// primaryIPFixtures is one address per assignment kind is_primary_ip has to
+// answer for, keyed by the bare host NetBox's ?address= filter matches on.
+// Shapes taken from live NetBox 4.4.10, including the FHRP one: assigned_object
+// is present and has a display string, and carries no primary_* field of any
+// kind because FHRPGroup has none.
+var primaryIPFixtures = map[string]string{
+	// Device-assigned, and device 100's primary_ip4 → true.
+	"10.0.0.1": `{"id":1,"address":"10.0.0.1/32","status":{"value":"active"},"assigned_object_type":"dcim.interface","assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"}}}`,
+	// Device-assigned on the SAME device, but not its primary → false.
+	"10.0.0.2": `{"id":2,"address":"10.0.0.2/24","status":{"value":"active"},"assigned_object_type":"dcim.interface","assigned_object":{"id":10,"name":"Ethernet2","device":{"id":100,"name":"leaf-01"}}}`,
+	// VM-assigned, and VM 5's primary_ip4 → true.
+	"10.0.0.3": `{"id":3,"address":"10.0.0.3/24","status":{"value":"active"},"assigned_object_type":"virtualization.vminterface","assigned_object":{"id":55,"name":"eth0","virtual_machine":{"id":5,"name":"vm-01"}}}`,
+	// VM-assigned on the SAME VM, but not its primary → false.
+	"10.0.0.4": `{"id":4,"address":"10.0.0.4/24","status":{"value":"active"},"assigned_object_type":"virtualization.vminterface","assigned_object":{"id":56,"name":"eth1","virtual_machine":{"id":5,"name":"vm-01"}}}`,
+	// FHRP-assigned → no value at all, which is the deliberate departure.
+	"10.0.0.5": `{"id":5,"address":"10.0.0.5/24","status":{"value":"active"},"assigned_object_type":"ipam.fhrpgroup","assigned_object_id":2,"assigned_object":{"id":2,"display":"web-vip VRRPv3: 993 (10.0.0.5/24)","protocol":"vrrp3","group_id":993}}`,
+	// Assigned to nothing → no value.
+	"10.0.0.6": `{"id":6,"address":"10.0.0.6/24","status":{"value":"active"},"assigned_object_type":null,"assigned_object":null}`,
+	// 10.0.0.7 is deliberately absent: an IP NetBox holds no record for.
+}
+
+// primaryIPHopCounts records how often each hop was asked, and what projection
+// the VM hop sent, so a test can assert on the SHAPE of the requests rather than
+// only on the row it got back.
+type primaryIPHopCounts struct {
+	device, vm int
+	vmFields   string
+	vmIDs      []string
+}
+
+// primaryIPServer serves all three hops is_primary_ip can reach: the address
+// hop, dcim/devices and virtualization/virtual-machines.
+//
+// Registering the VM endpoint is what makes the VM assertions falsifiable, for
+// the same reason the device endpoint is registered in TestResolveIPs: a VM-hop
+// failure degrades silently by design, so a mock that does not serve it returns
+// a nil is_primary_ip for every VM row no matter what the logic does — passing
+// the FHRP assertion and the "not primary" assertion for entirely the wrong
+// reason.
+func primaryIPServer(t *testing.T, calls *primaryIPHopCounts) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			if fx, ok := primaryIPFixtures[a]; ok {
+				results = append(results, fx)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		calls.device++
+		var results []string
+		for _, id := range r.URL.Query()["id"] {
+			if id == "100" {
+				results = append(results, `{"id":100,"name":"leaf-01","site":{"id":5,"name":"AMS1","slug":"ams1"},"status":{"value":"active","label":"Active"},"primary_ip4":{"id":1,"address":"10.0.0.1/32"}}`)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	mux.HandleFunc("/api/virtualization/virtual-machines/", func(w http.ResponseWriter, r *http.Request) {
+		calls.vm++
+		calls.vmFields = r.URL.Query().Get("fields")
+		calls.vmIDs = append(calls.vmIDs, r.URL.Query()["id"]...)
+		var results []string
+		for _, id := range r.URL.Query()["id"] {
+			if id == "5" {
+				// Exactly the projection the hop asks for: NetBox answers a
+				// ?fields= query with those keys and nothing else, so a hop that
+				// reads anything wider would break against the real API.
+				results = append(results, `{"id":5,"primary_ip4":{"id":3,"address":"10.0.0.3/24"},"primary_ip6":null}`)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestResolveIPs_IsPrimaryIP is the is_primary_ip matrix: one row per assignment
+// kind the column can meet, asserted in a single call so the four outcomes are
+// visibly produced by the same code path.
+//
+// The FHRP and unassigned rows are the reason this test exists. NetBox's
+// FHRPGroup has no primary_* field of any kind — its whole property set is
+// auth_key, auth_type, comments, created, custom_fields, description, display,
+// display_url, group_id, id, ip_addresses, last_updated, name, protocol, tags,
+// url (4.4.10 /api/schema/) — so there is no such thing as an FHRP group's
+// primary address, and false would be a confident answer to a question NetBox
+// does not ask. The flag was asked for on FHRP groups too; it is deliberately NOT
+// extended to them, and `!= false` is asserted separately from `== nil` so that
+// anyone who "completes" it gets a failure that says why.
+func TestResolveIPs_IsPrimaryIP(t *testing.T) {
+	var calls primaryIPHopCounts
+	srv := primaryIPServer(t, &calls)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	ips := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.7"}
+	fields := []string{"ip", "is_primary_ip", "device_name", "vm_name", "address_assigned_object_type"}
+	res, err := p.ResolveIPs(context.Background(), ips, fields, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Fatalf("Warnings = %#v, want none: every hop answered", res.Warnings)
+	}
+	byIP := make(map[string]map[string]interface{}, len(res.Rows))
+	for _, r := range res.Rows {
+		byIP[fmt.Sprint(r["ip"])] = r
+	}
+
+	cases := []struct {
+		ip   string
+		want interface{}
+		why  string
+	}{
+		{"10.0.0.1", true, "address 1 is device 100's primary_ip4"},
+		{"10.0.0.2", false, "address 2 is on device 100, whose primary_ip4 is address 1"},
+		{"10.0.0.3", true, "address 3 is VM 5's primary_ip4"},
+		{"10.0.0.4", false, "address 4 is on VM 5, whose primary_ip4 is address 3"},
+		{"10.0.0.5", nil, "an ipam.fhrpgroup has no primary address in NetBox at all — see isPrimaryIP"},
+		{"10.0.0.6", nil, "an unassigned address has nothing that could elect it"},
+		{"10.0.0.7", nil, "NetBox holds no record for this IP"},
+	}
+	for _, tc := range cases {
+		row, ok := byIP[tc.ip]
+		if !ok {
+			t.Fatalf("no row for %s, got %v", tc.ip, res.Rows)
+		}
+		if got := row["is_primary_ip"]; got != tc.want {
+			t.Errorf("is_primary_ip for %s = %v (%T), want %v — %s", tc.ip, got, got, tc.want, tc.why)
+		}
+	}
+
+	// Stated separately from the nil assertions above so the failure message can
+	// name the decision rather than a type mismatch. false says "this object has
+	// a primary address and this is not it"; for these three rows there is no
+	// such object, which is a different fact — and the one this implementation
+	// keeps true by departing from what was asked.
+	for _, ip := range []string{"10.0.0.5", "10.0.0.6", "10.0.0.7"} {
+		if byIP[ip]["is_primary_ip"] == false {
+			t.Errorf("is_primary_ip for %s = false; it must be ABSENT. false asserts that this address's owner has a primary IP and that this is not it, which is untrue for an FHRP group (NetBox has no such field), for an unassigned address and for an IP NetBox does not hold. Do not 'complete' the flag by filling this in", ip)
+		}
+	}
+
+	// Controls. Without these the matrix above would pass just as happily if the
+	// two hops had quietly stopped resolving anything: nil is the answer this
+	// test is most interested in, and a broken hop produces it everywhere.
+	if byIP["10.0.0.1"]["device_name"] != "leaf-01" {
+		t.Errorf("device_name = %v, want leaf-01 — device context must attach in this same call", byIP["10.0.0.1"]["device_name"])
+	}
+	if byIP["10.0.0.3"]["vm_name"] != "vm-01" {
+		t.Errorf("vm_name = %v, want vm-01 — VM identity must attach in this same call", byIP["10.0.0.3"]["vm_name"])
+	}
+	// The column that DOES answer for an FHRP-assigned row, and the reason a
+	// blank is_primary_ip is not a dead end for the reader.
+	if got := byIP["10.0.0.5"]["address_assigned_object_type"]; got != "ipam.fhrpgroup" {
+		t.Errorf("address_assigned_object_type = %v, want ipam.fhrpgroup", got)
+	}
+
+	// One batched request per hop, for the two owners that actually appear —
+	// not one per row, and not one per address.
+	if calls.device != 1 || calls.vm != 1 {
+		t.Errorf("hop requests: device=%d vm=%d, want 1 each (batched by id)", calls.device, calls.vm)
+	}
+	if len(calls.vmIDs) != 1 || calls.vmIDs[0] != "5" {
+		t.Errorf("VM hop asked for ids %v, want exactly [5]: two addresses share VM 5, and an id is looked up once", calls.vmIDs)
+	}
+	// The VM hop exists for one boolean, so it asks for the three properties
+	// that produce it and nothing else. flattenObject derives primary_ip4_id
+	// from the nested primary_ip4 object, which is what isPrimaryIP reads.
+	if calls.vmFields != "id,primary_ip4,primary_ip6" {
+		t.Errorf("VM hop projection = %q, want %q", calls.vmFields, "id,primary_ip4,primary_ip6")
+	}
+}
+
+// TestResolveIPs_VMHopOnlyRunsWhenSelected is the VM twin of
+// TestResolveIPs_DeviceHopOnlyRunsWhenSelected, and the reason the VM hop is
+// gated on one column name rather than on the "vm_" prefix: vm_name rides along
+// on the address payload for free, so making it imply a request would charge
+// every default query for something it already has.
+func TestResolveIPs_VMHopOnlyRunsWhenSelected(t *testing.T) {
+	var calls primaryIPHopCounts
+	srv := primaryIPServer(t, &calls)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	// A VM-assigned IP, so the hop has something to ask about whenever it runs.
+	ips := []string{"10.0.0.3"}
+
+	t.Run("vm_name alone makes no VM request", func(t *testing.T) {
+		calls = primaryIPHopCounts{}
+		res, err := p.ResolveIPs(context.Background(), ips, []string{"ip", "vm_name", "interface_name"}, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if calls.vm != 0 {
+			t.Errorf("VM requests = %d, want 0: vm_name is read off the address payload the query already holds", calls.vm)
+		}
+		if res.Rows[0]["vm_name"] != "vm-01" {
+			t.Errorf("vm_name = %v, want vm-01 — skipping the hop must not cost the free column", res.Rows[0]["vm_name"])
+		}
+	})
+
+	t.Run("a device-only selection makes no VM request", func(t *testing.T) {
+		calls = primaryIPHopCounts{}
+		if _, err := p.ResolveIPs(context.Background(), ips, []string{"ip", "device_name", "device_site"}, 0); err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if calls.vm != 0 {
+			t.Errorf("VM requests = %d, want 0: no selected column can be filled by a virtual machine", calls.vm)
+		}
+	})
+
+	t.Run("is_primary_ip runs both identity hops and nothing else does", func(t *testing.T) {
+		calls = primaryIPHopCounts{}
+		res, err := p.ResolveIPs(context.Background(), ips, []string{"ip", "is_primary_ip"}, 0)
+		if err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if calls.vm != 1 {
+			t.Fatalf("VM requests = %d, want 1: is_primary_ip is the only column the VM hop fills", calls.vm)
+		}
+		if res.Rows[0]["is_primary_ip"] != true {
+			t.Errorf("is_primary_ip = %v, want true", res.Rows[0]["is_primary_ip"])
+		}
+	})
+
+	t.Run("the default selection makes the VM request", func(t *testing.T) {
+		calls = primaryIPHopCounts{}
+		if _, err := p.ResolveIPs(context.Background(), ips, nil, 0); err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if calls.vm != 1 {
+			t.Errorf("VM requests = %d, want 1: is_primary_ip is in the default selection", calls.vm)
+		}
+	})
+
+	t.Run("a device-assigned IP costs no VM request even when is_primary_ip is selected", func(t *testing.T) {
+		calls = primaryIPHopCounts{}
+		if _, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"ip", "is_primary_ip"}, 0); err != nil {
+			t.Fatalf("ResolveIPs: %v", err)
+		}
+		if calls.vm != 0 {
+			t.Errorf("VM requests = %d, want 0: no address in this query is assigned to a VM, and an empty id set must not become a request", calls.vm)
+		}
+	})
+}
+
+// TestResolveIPs_VMHopFailureDegrades holds the VM hop to the rule the device
+// hop already follows: a failure — partial or total — never fails the query. The
+// affected rows lose the one column it fills and keep everything else, and the
+// gap is STATED, because a blank is_primary_ip is what a correct FHRP row looks
+// like and would otherwise be read as one.
+func TestResolveIPs_VMHopFailureDegrades(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			if fx, ok := primaryIPFixtures[a]; ok {
+				results = append(results, fx)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	// The token cannot read virtualization. If the hop runs, this is a guaranteed
+	// degradation.
+	mux.HandleFunc("/api/virtualization/virtual-machines/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail":"You do not have permission to perform this action."}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.3"},
+		[]string{"ip", "is_primary_ip", "vm_name", "interface_name"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v — a VM-hop failure must degrade, never fail the query", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(res.Rows))
+	}
+	if res.Rows[0]["vm_name"] != "vm-01" || res.Rows[0]["interface_name"] != "eth0" {
+		t.Errorf("row = %v, want the address payload's columns intact", res.Rows[0])
+	}
+	if res.Rows[0]["is_primary_ip"] != nil {
+		t.Errorf("is_primary_ip = %v, want nil: the hop that answers it failed", res.Rows[0]["is_primary_ip"])
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "is_primary_ip") {
+		t.Errorf("Warnings = %#v, want one naming is_primary_ip: a blank there is indistinguishable from a correct FHRP row", res.Warnings)
+	}
+
+	// The other half of the rule, and the one an alerting path depends on: a hop
+	// that never ran cannot warn, because a Warning is a hard failure for alert
+	// evaluation (see provider.Result.Warnings) and this endpoint is broken for
+	// every query, not just the ones that need it.
+	res, err = p.ResolveIPs(context.Background(), []string{"10.0.0.3"},
+		[]string{"ip", "vm_name", "interface_name"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("Warnings = %#v, want none: is_primary_ip was not selected, so no column of it is blank", res.Warnings)
+	}
+}
+
 // TestResolveIPs_DeclaresColumnTypes is the provider half of finding 3.
-// device_is_primary_ip is a boolean by schema, not by whatever this refresh's IP
+// is_primary_ip is a boolean by schema, not by whatever this refresh's IP
 // set happened to resolve, and the frame layer cannot know that by scanning
 // values that are all null. The declaration is what carries it across the seam.
 func TestResolveIPs_DeclaresColumnTypes(t *testing.T) {
@@ -2822,11 +3904,11 @@ func TestResolveIPs_DeclaresColumnTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveIPs: %v", err)
 	}
-	if res.Rows[0]["device_is_primary_ip"] != nil {
-		t.Fatalf("fixture broken: device_is_primary_ip = %v, want nil for an unresolved IP", res.Rows[0]["device_is_primary_ip"])
+	if res.Rows[0]["is_primary_ip"] != nil {
+		t.Fatalf("fixture broken: is_primary_ip = %v, want nil for an unresolved IP", res.Rows[0]["is_primary_ip"])
 	}
-	if got := res.ColumnTypes["device_is_primary_ip"]; got != provider.FieldTypeBoolean {
-		t.Errorf("ColumnTypes[device_is_primary_ip] = %q, want %q", got, provider.FieldTypeBoolean)
+	if got := res.ColumnTypes["is_primary_ip"]; got != provider.FieldTypeBoolean {
+		t.Errorf("ColumnTypes[is_primary_ip] = %q, want %q", got, provider.FieldTypeBoolean)
 	}
 	if got := res.ColumnTypes["match_count"]; got != provider.FieldTypeNumber {
 		t.Errorf("ColumnTypes[match_count] = %q, want %q", got, provider.FieldTypeNumber)
@@ -2890,14 +3972,17 @@ func recordingAddressServer(t *testing.T) (*httptest.Server, *[]string) {
 func TestResolveIPs_MalformedValuesDoNotConsumeTheBatchBudget(t *testing.T) {
 	fields := []string{"ip", "match_count", "interface_name"}
 
-	// Fill one chunk to the brim with valid, distinct addresses.
+	// Fill one chunk to the brim with valid, distinct addresses. The budget the
+	// ADDRESSES get is the whole-query budget less the ?limit= fetchList appends
+	// downstream; the address hop sends no fixed parameters of its own, so that
+	// is the only reservation between them and chunkBudgetBytes.
 	var valid []string
 	used := 0
 	for a := 0; a < 256 && used >= 0; a++ {
 		for b := 0; b < 256; b++ {
 			ip := fmt.Sprintf("10.20.%d.%d", a, b)
 			cost := len("address") + len(url.QueryEscape(ip)) + 2
-			if used+cost > chunkBudgetBytes {
+			if used+cost > chunkBudgetBytes-pagingParamBytes {
 				used = -1
 				break
 			}
@@ -2905,7 +3990,7 @@ func TestResolveIPs_MalformedValuesDoNotConsumeTheBatchBudget(t *testing.T) {
 			valid = append(valid, ip)
 		}
 	}
-	if n := len(chunkByBudget("address", valid, chunkBudgetBytes)); n != 1 {
+	if n := len(addressChunks(valid)); n != 1 {
 		t.Fatalf("fixture: the valid set needs exactly 1 chunk, got %d", n)
 	}
 
@@ -2920,7 +4005,7 @@ func TestResolveIPs_MalformedValuesDoNotConsumeTheBatchBudget(t *testing.T) {
 	junk := []string{"not-an-ip", "999.999.999.999", "2001:zzzz::1", "10.0.0.999", "no.such.host", "%%%"}
 	mid := len(valid) / 2
 	mixed := append(append(append([]string{}, valid[:mid]...), junk...), valid[mid:]...)
-	if n := len(chunkByBudget("address", mixed, chunkBudgetBytes)); n != 2 {
+	if n := len(addressChunks(mixed)); n != 2 {
 		t.Fatalf("fixture: junk must overflow the chunk to prove anything, got %d chunk(s)", n)
 	}
 

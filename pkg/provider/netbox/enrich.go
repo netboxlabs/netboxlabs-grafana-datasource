@@ -192,7 +192,15 @@ func (p *Provider) fetchEdgeRows(ctx context.Context, objectType string, base ur
 		return nil, nil
 	}
 
-	chunks := chunkByBudget(deviceScopeParam, deviceIDs, chunkBudgetBytes)
+	// Through queryBatcher, not chunkByBudget directly: base is a fixed parameter
+	// set appended to every request, and budgeting the device ids alone measured
+	// something shorter than what went on the wire. With base {"connected":"true"}
+	// and 900 devices that put the query 12 bytes past the ceiling — small, and
+	// still the accounting gap the batcher exists to close. Using it here also
+	// means a future caller adding to base cannot reintroduce the overflow, since
+	// the batcher builds the request from the same set it measured.
+	batcher := newQueryBatcher(deviceScopeParam, base)
+	chunks := batcher.chunk(deviceIDs)
 	work := make([][]string, 0, len(chunks))
 	for i := len(chunks) - 1; i >= 0; i-- {
 		work = append(work, chunks[i])
@@ -203,15 +211,7 @@ func (p *Provider) fetchEdgeRows(ctx context.Context, objectType string, base ur
 		ids := work[len(work)-1]
 		work = work[:len(work)-1]
 
-		q := url.Values{}
-		for k, vs := range base {
-			q[k] = vs
-		}
-		for _, id := range ids {
-			q.Add(deviceScopeParam, id)
-		}
-
-		rows, total, err := p.fetchRows(ctx, objectType, q, MaxLimit)
+		rows, total, err := p.fetchRows(ctx, objectType, batcher.query(ids), MaxLimit)
 		if err != nil {
 			return nil, err
 		}

@@ -17,18 +17,52 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
-// chunkBudgetBytes caps the encoded length of a batched query string. The
-// measured server ceiling is ~8 KB (450 IPv4 addresses returned HTTP 431, as
-// did 160 IPv6); 6 KB leaves headroom for other params and lower proxy limits.
+// chunkBudgetBytes caps the encoded length of a batched query string — the
+// WHOLE query, not just the repeated parameter it is split on. The measured
+// server ceiling is ~8 KB (450 IPv4 addresses returned HTTP 431, as did 160
+// IPv6); 6 KB leaves headroom for proxies that cap a URL lower than NetBox does.
 // The budget is in BYTES on purpose: an IPv6 address encodes to roughly three
 // times an IPv4 one, so a count-based limit tuned on IPv4 would pass every
 // IPv4-only test and then fail on the first IPv6-heavy panel.
 const chunkBudgetBytes = 6144
 
-// chunkByBudget splits values into batches whose encoded "param=value&..."
-// form stays within budget bytes. Order is preserved and no value is dropped;
-// a single value larger than the budget gets a chunk of its own.
+// pagingParamBytes reserves the paging parameters no caller can pass to the
+// chunker, because they are appended after the batch leaves this file.
+//
+// TWO of them, and the second is the one that is easy to miss. fetchList adds
+// "&limit=<min(limit, pageSize)>" to the first page, which is ours to measure.
+// Every page after that is fetched from NetBox's own `next` URL, followed
+// verbatim (netbox.go, `next = *page.Next`), and DRF builds that by adding
+// "&offset=<n>" to the query it received. So a batch that fits on page 1 can
+// still exceed the ceiling on page 2, and nothing in this file constructs that
+// URL to notice.
+//
+// It is reachable, not theoretical: these hops filter by primary key, so a batch
+// of more than pageSize ids matches more than one page by construction — a
+// projected id batch admits ~883 ids at 6,143 bytes, and page 2 arrives at 6,154.
+//
+// Both halves are upper bounds rather than guesses. min(limit, pageSize) is
+// never wider than pageSize however large a limit the hop asks for; offset never
+// exceeds MaxLimit, since fetchList stops walking at that many rows. Reading both
+// constants here means a change to either moves the reservation with it.
+//
+// ?start= is not covered and does not need to be: it is cursor mode, and every
+// batched hop goes through fetchRows, which passes cursor=false by design.
+var pagingParamBytes = len("&limit=") + len(strconv.Itoa(pageSize)) +
+	len("&offset=") + len(strconv.Itoa(MaxLimit))
+
+// chunkByBudget splits values into batches whose encoded "param=value&..." form
+// stays within budget bytes, less the paging parameter added downstream. Order
+// is preserved and no value is dropped; a single value larger than the budget
+// gets a chunk of its own.
+//
+// budget is the ceiling for the WHOLE query. A caller that sends fixed
+// parameters alongside each batch must therefore subtract them — which is what
+// queryBatcher does, and why the three ip-enrichment hops go through it instead
+// of calling this directly.
 func chunkByBudget(param string, values []string, budget int) [][]string {
+	budget -= pagingParamBytes
+
 	var out [][]string
 	var cur []string
 	curLen := 0
@@ -46,6 +80,70 @@ func chunkByBudget(param string, values []string, budget int) [][]string {
 		out = append(out, cur)
 	}
 	return out
+}
+
+// queryBatcher splits one hop's values into batches AND builds the query each
+// batch is sent as — both from the same fixed-parameter set.
+//
+// It is a type rather than two loose functions because the budget and the
+// request have to agree about what the request contains, and they did not. The
+// budget was computed from the repeated parameter alone while every fixed
+// parameter was appended afterwards, so the chunker measured something shorter
+// than what went on the wire. Measured on the virtual-machine hop, which always
+// projects: 893 ids encode to 6,142 bytes of ?id=, one byte inside the budget,
+// and to 6,213 once ?fields=, ?exclude= and ?limit= are on them — 69 bytes past
+// a ceiling whose entire purpose is headroom below the ~8 KB one NetBox
+// enforces. The device hop overflowed identically on the path where it projects.
+// The address hop overflowed too, by less: it sends no fixed parameters of its
+// own, but the appended ?limit= still put a full batch of 256 max-width IPv4
+// addresses 9 bytes over.
+//
+// Reserving the fixed parameters from the budget would have fixed those three
+// and left a fourth parameter free to reintroduce the overflow, because nothing
+// would tie the reservation to the request. Here the tie is structural: fixed is
+// what query() BUILDS the request from, so a parameter that is not in it is
+// never sent, and one that is in it is always measured. The remaining way to
+// exceed the budget is a batch of a single oversized value, as it has always
+// been, because there is nothing left to split.
+type queryBatcher struct {
+	param string
+	fixed url.Values
+}
+
+// newQueryBatcher takes the fixed parameters as an argument rather than leaving
+// them to be filled in later: a hop that sends none passes nil and says so at
+// the call site, which is where forgetting is visible.
+func newQueryBatcher(param string, fixed url.Values) queryBatcher {
+	return queryBatcher{param: param, fixed: fixed}
+}
+
+// chunk splits values into batches whose query() encodes within
+// chunkBudgetBytes.
+func (b queryBatcher) chunk(values []string) [][]string {
+	return chunkByBudget(b.param, values, chunkBudgetBytes-b.fixedBytes())
+}
+
+// query returns the query one batch is sent as: the fixed parameters, plus one
+// repeated param per value, in the order given. The fixed values are cloned so
+// no caller can append into the set the budget was computed from.
+func (b queryBatcher) query(values []string) url.Values {
+	q := make(url.Values, len(b.fixed)+1)
+	for k, vs := range b.fixed {
+		q[k] = slices.Clone(vs)
+	}
+	for _, v := range values {
+		q.Add(b.param, v)
+	}
+	return q
+}
+
+// fixedBytes is what the fixed parameters cost in the encoded query: their own
+// encoded length plus the "&" that joins them to the batch's values.
+func (b queryBatcher) fixedBytes() int {
+	if len(b.fixed) == 0 {
+		return 0
+	}
+	return len(b.fixed.Encode()) + 1
 }
 
 // hostOf strips a CIDR mask so a bare input IP ("10.0.0.5") indexes against a
@@ -192,11 +290,12 @@ func causeText(err error) string {
 	return "NetBox could not be reached"
 }
 
-// The three degradation messages below each name the missing COLUMNS and end by
-// stating what the blank does NOT mean. vm_name is spelled out individually
-// because it is the one column with no group prefix to hide behind: a reader
-// scanning for "vm_*" would not find it, and it is in the default selection, so
-// a degraded default panel blanks it.
+// The four degradation messages below each name the missing COLUMNS and end by
+// stating what the blank does NOT mean. vm_name and is_primary_ip are spelled
+// out individually because they are the columns with no group prefix to hide
+// behind: a reader scanning for "vm_*" would not find one, and since
+// is_primary_ip left the device_* group, "device_*" no longer covers the other.
+// Both are in the default selection, so a degraded default panel blanks them.
 // ruling out the reading a blank column would otherwise invite. "Degraded" on
 // its own would tell a dashboard author nothing actionable; which namespace went
 // blank, and whether blank means "absent" or "unknown", is the whole point.
@@ -211,19 +310,65 @@ func causeText(err error) string {
 // the lookup never answered.
 func addressHopWarning(d degradation) string {
 	return fmt.Sprintf(
-		"Address lookup failed for %s — %s. The match_count, address_*, interface_*, device_*, vm_name and prefix_* columns on the affected rows are empty because the lookup failed, not because NetBox has no record for those IPs.",
+		"Address lookup failed for %s — %s. The match_count, address_*, interface_*, device_*, vm_name, is_primary_ip and prefix_* columns on the affected rows are empty because the lookup failed, not because NetBox has no record for those IPs.",
 		d.scope("IP", "IPs"), causeText(d.cause))
 }
 
-func deviceHopWarning(d degradation) string {
+// deviceHopWarning names only the columns THIS query selected, which is a
+// deliberate departure from the three warnings around it — they enumerate their
+// groups unconditionally, and are right to: a hop that fills exactly one column
+// group runs only when that group is selected, so its list can never name a
+// column the frame lacks.
+//
+// The device hop stopped being one of those when is_primary_ip gained a
+// virtual-machine half and moved out of the device_* group. Its gate is now
+// `wantsGroup("device_") || is_primary_ip selected`, so it runs for a selection
+// containing only ONE of the two, and a fixed list then names an absent column in
+// both directions — proved with a 403 on dcim/devices: selecting [ip,
+// is_primary_ip] yielded a frame of exactly those columns under a warning about
+// blank device_* ones, and selecting [ip, device_name] the same warning about a
+// blank is_primary_ip. The "not because" clause moves with the columns for the
+// same reason: with only is_primary_ip in the frame, the misreading to rule out is
+// "this address is not its device's primary", not "this IP has no device".
+//
+// Worth diverging for because a warning is a HARD failure on the Grafana alert
+// path (pkg/plugin.degradationError turns any warning into an error, since alert
+// evaluation drops frame notices), so this sentence is the first thing an on-call
+// reader sees — and one that names a column the panel does not contain sends them
+// hunting for the wrong gap.
+//
+// The two booleans are ResolveIPs' own gate variables rather than a second test
+// of `fields` here, so the warning cannot describe a hop the gate did not run.
+func deviceHopWarning(d degradation, wantDeviceGroup, wantPrimaryIP bool) string {
+	blanked, verb, notBecause := "The device_* and "+isPrimaryIPColumn+" columns", "are", "those IPs have no device"
+	switch {
+	case !wantDeviceGroup:
+		// wantPrimaryIP is necessarily true here — with both false the hop never
+		// ran and there is no degradation to report.
+		blanked, verb = "The "+isPrimaryIPColumn+" column", "is"
+		notBecause = "those IPs are not their device's primary address"
+	case !wantPrimaryIP:
+		blanked = "The device_* columns"
+	}
 	return fmt.Sprintf(
-		"Device lookup failed for %s — %s. The device_* columns on the affected rows are blank because the lookup failed, not because those IPs have no device.",
-		d.scope("device", "devices"), causeText(d.cause))
+		"Device lookup failed for %s — %s. %s on the affected rows %s blank because the lookup failed, not because %s.",
+		d.scope("device", "devices"), causeText(d.cause), blanked, verb, notBecause)
+}
+
+// vmHopWarning is the VM half of the device warning, and names the one column
+// that hop fills. Its "not because" clause is the sharpest of the four: a blank
+// is_primary_ip is what a correct FHRP-assigned, unassigned or unknown row looks
+// like, so without this sentence a failed lookup is indistinguishable from an
+// address whose owner has no primary-IP concept at all.
+func vmHopWarning(d degradation) string {
+	return fmt.Sprintf(
+		"Virtual machine lookup failed for %s — %s. The is_primary_ip column on the affected rows is blank because the lookup failed, not because those IPs are not their virtual machine's primary address.",
+		d.scope("virtual machine", "virtual machines"), causeText(d.cause))
 }
 
 // addressTruncationWarning states the one gap batch splitting cannot close: a
 // SINGLE address with more records than one request can carry (see
-// fetchAddressRecords). It is unlike the three hop warnings around it, and says
+// fetchAddressRecords). It is unlike the hop warnings around it, and says
 // so — the data is present and true, just not complete. match_count is a floor
 // rather than a count, and the pick was made over the records that fit rather
 // than all of them, so the row is stable but not necessarily the same row a
@@ -249,7 +394,7 @@ func addressTruncationWarning(hosts []string) string {
 		subject = "1 IP"
 	}
 	return fmt.Sprintf(
-		"NetBox holds more than %s address records for %s (%s) — only the first %s were read. match_count is a floor rather than a count for the affected rows, and their address_*, interface_*, device_* and vm_name columns describe a record picked from the part that was read.",
+		"NetBox holds more than %s address records for %s (%s) — only the first %s were read. match_count is a floor rather than a count for the affected rows, and their address_*, interface_*, device_*, vm_name and is_primary_ip columns describe a record picked from the part that was read.",
 		humanInt(MaxLimit), subject, list, humanInt(MaxLimit))
 }
 
@@ -392,9 +537,17 @@ func (p *Provider) fetchAddressRecords(ctx context.Context, ips []string) (addre
 
 	// Chunked on the caller's spellings but SENT as canonical ones. Every
 	// canonical form is at most as long as the input it came from (a mask is
-	// dropped, an expanded IPv6 compresses, uppercase stays the same length), so
-	// the byte budget computed from the input remains a valid upper bound.
-	chunks := chunkByBudget("address", sendable, chunkBudgetBytes)
+	// dropped, an expanded IPv6 compresses, uppercase stays the same length, an
+	// IPv4-mapped literal folds onto the IPv4 address), and that survives escaping
+	// too — the dropped "/" and the dropped colons were the three-byte escapes —
+	// so the budget computed from the input is a valid upper bound FOR THE
+	// ADDRESSES. It was never an upper bound for the REQUEST: this hop sends no
+	// fixed parameters of its own, but fetchList still appends ?limit=, which put
+	// a full batch of 256 max-width IPv4 addresses 9 bytes past the budget.
+	// queryBatcher is what accounts for that, here and in the two id hops where
+	// the same gap was 69 bytes wide.
+	batcher := newQueryBatcher("address", nil)
+	chunks := batcher.chunk(sendable)
 
 	// A stack, not a range over chunks, so an overflowing batch can push its two
 	// halves back on. Seeded in reverse so the first chunk is requested first:
@@ -419,13 +572,16 @@ func (p *Provider) fetchAddressRecords(ctx context.Context, ips []string) (addre
 		b := work[len(work)-1]
 		work = work[:len(work)-1]
 
-		q := url.Values{}
+		// Canonicalised here rather than at chunk time because the bookkeeping
+		// above is per caller spelling; the query is built by the same batcher
+		// that measured the budget, so what is sent is what was measured.
+		canon := make([]string, 0, len(b.ips))
 		for _, ip := range b.ips {
-			q.Add("address", canonicalIP(ip))
+			canon = append(canon, canonicalIP(ip))
 		}
 		// MaxLimit, not len(b.ips): anycast means a batch can match more
 		// records than addresses requested. total is what NetBox says exists.
-		raws, total, err := p.fetchRows(ctx, "ipam/ip-addresses", q, MaxLimit)
+		raws, total, err := p.fetchRows(ctx, "ipam/ip-addresses", batcher.query(canon), MaxLimit)
 		if err != nil {
 			failedBatches++
 			out.deg.noteCause(err)
@@ -569,12 +725,46 @@ func hasAssignment(assigned json.RawMessage) bool {
 	return len(assigned) > 0 && string(assigned) != "null"
 }
 
-// isPrimaryIP reports whether ipID is the device's primary address. This is
-// the join key that lines a flow IP up with the device SNMP polls, so it is
-// an explicit column rather than something consumers infer.
-func isPrimaryIP(device map[string]interface{}, ipID int) bool {
+// isPrimaryIPColumn is the column both identity hops fill. It is a constant
+// rather than a literal because the SPELLING is shared by places that must
+// agree: the two setters, the type declaration, and the gate in ResolveIPs that
+// decides whether either hop runs at all. Carrying no namespace prefix, it is
+// outside the wantsGroup prefix test that switches the device_* and prefix_*
+// groups on, so the gate names this column explicitly — and a typo there would
+// turn the column off for every query while a test asserting on a setter's own
+// output still passed.
+const isPrimaryIPColumn = "is_primary_ip"
+
+// isPrimaryIP reports whether ipID is the primary address of the object the
+// address is assigned to — a dcim.device or a virtualization.virtualmachine.
+// This is the join key that lines a flow IP up with the SNMP polls of the thing
+// that owns it, so it is an explicit column rather than something consumers
+// infer. Both models expose primary_ip4/primary_ip6 with identical semantics, so
+// one function reads both (verified against NetBox 4.4.10's /api/schema/).
+//
+// # Why an FHRP-assigned address gets NO value, not false
+//
+// The third assignment kind this file knows, ipam.fhrpgroup, has no primary_*
+// field of any kind: FHRPGroup's entire property set is auth_key, auth_type,
+// comments, created, custom_fields, description, display, display_url, group_id,
+// id, ip_addresses, last_updated, name, protocol, tags, url (NetBox 4.4.10
+// /api/schema/). A group HOLDS addresses; NetBox never elects one as primary.
+//
+// So the column is left ABSENT for those rows, and for every other assignment
+// kind a later NetBox may add. Blank means "this kind of assignment has no
+// primary-IP concept"; false would mean "it has one, and this address is not
+// it". Emitting false for an FHRP address is a confidently wrong answer to a
+// question NetBox does not ask — the same failure class as the FHRP group that
+// once came back as an interface_name (see isInterfaceAssignment), and worse
+// than a blank column for the same reason.
+//
+// The flag was asked for on FHRP groups too. It is deliberately not extended to
+// them: do not "complete" it by adding a false here or an else-branch at the
+// call sites. address_assigned_object_type is the column that tells an
+// FHRP-assigned row apart from an unassigned one.
+func isPrimaryIP(owner map[string]interface{}, ipID int) bool {
 	for _, key := range []string{"primary_ip4_id", "primary_ip6_id"} {
-		if f, ok := device[key].(float64); ok && int(f) == ipID {
+		if f, ok := owner[key].(float64); ok && int(f) == ipID {
 			return true
 		}
 	}
@@ -590,6 +780,33 @@ func isPrimaryIP(device map[string]interface{}, ipID int) bool {
 // the failed batch are simply absent from the map, so their rows keep address
 // and interface context and lose only device_*.
 //
+// # What it asks NetBox for
+//
+// wantDeviceColumns says whether any device_* column is selected, and it is the
+// same boolean ResolveIPs gates the hop with, passed in rather than re-derived so
+// the request cannot disagree with the reason it was made.
+//
+// True means the whole device serializer, unprojected. device_* is nine columns
+// spread across most of it (name, role, platform, device_type, site, location,
+// rack, tenant, status), so a projection would save little and risk much:
+// ?fields= is SILENT about a name it does not recognize (see fieldsParam), so one
+// wrong name returns a 200 with that column quietly blank for every row.
+//
+// False means the hop is running for is_primary_ip alone — the case that
+// appeared when the flag stopped being a device_* column and the hop started
+// running for selections holding no device_* column at all, where the full
+// serializer was fetched, decoded and thrown away for one boolean. Then it asks
+// for just what that boolean is computed from. Measured against NetBox 4.4.10,
+// ?id=1&id=2&id=3 on dcim/devices: 6,378 bytes whole against 731 projected, an
+// 8.7x cut, with the envelope count identical either way.
+//
+// Safe because nothing else reads this map. ResolveIPs passes it to
+// applyDeviceColumns and to nobody else, and that function reads exactly the nine
+// device_* sources — which the projection is only ever dropped for — plus
+// isPrimaryIP's two derived keys, which it keeps. `id` is in it because the map is
+// keyed on it, and a device that lost its id would vanish from the result with no
+// error and no warning.
+//
 // There is no error return, and that is the point. By spec a device-hop failure
 // — partial OR total — never fails the query, so an error here would have no
 // consumer and the only honest thing the caller could do with it is discard it.
@@ -598,7 +815,7 @@ func isPrimaryIP(device map[string]interface{}, ipID int) bool {
 // The degradation return carries everything a caller needs, including the cause,
 // so nothing is left to swallow: deg.failed == deg.total means the hop failed
 // outright.
-func (p *Provider) fetchDevices(ctx context.Context, ids []int) (map[int]map[string]interface{}, degradation) {
+func (p *Provider) fetchDevices(ctx context.Context, ids []int, wantDeviceColumns bool) (map[int]map[string]interface{}, degradation) {
 	out := make(map[int]map[string]interface{}, len(ids))
 	deg := degradation{total: len(ids)}
 	if len(ids) == 0 {
@@ -610,21 +827,27 @@ func (p *Provider) fetchDevices(ctx context.Context, ids []int) (map[int]map[str
 		strs = append(strs, fmt.Sprintf("%d", id))
 	}
 
-	chunks := chunkByBudget("id", strs, chunkBudgetBytes)
+	// nil when device_* is selected, which is what leaves the request
+	// unprojected. Built ONCE and handed to the batcher, which measures it against
+	// the budget and builds every request from it, so the query that was costed
+	// and the query that is sent cannot be different queries.
+	var fixed url.Values
+	if !wantDeviceColumns {
+		fixed = primaryIPProjection()
+	}
+
+	batcher := newQueryBatcher("id", fixed)
+	chunks := batcher.chunk(strs)
 	for i, chunk := range chunks {
-		q := url.Values{}
-		for _, id := range chunk {
-			q.Add("id", id)
-		}
 		// The reported total is discarded here, and unlike the address hop that
 		// is safe rather than an oversight. ?id= is an exact-match filter on the
 		// primary key, so a batch matches at most one device per id it names —
 		// verified live against NetBox 4.4.10: ?id=1&id=1&id=2&id=3 returns
 		// count 3, so repeats collapse and an absent id contributes nothing. The
-		// byte budget caps a batch at ~893 ids (614 for six-digit ones), an
+		// byte budget caps a batch at ~870 ids (~610 for six-digit ones), an
 		// order of magnitude below MaxLimit, so this response cannot overflow
 		// the cap the way an anycast-heavy address batch can.
-		raws, _, err := p.fetchRows(ctx, "dcim/devices", q, MaxLimit)
+		raws, _, err := p.fetchRows(ctx, "dcim/devices", batcher.query(chunk), MaxLimit)
 		if err != nil {
 			deg.record(len(chunk), err)
 			logChunkFailure("device lookup", i+1, len(chunks), len(chunk), err)
@@ -643,9 +866,118 @@ func (p *Provider) fetchDevices(ctx context.Context, ids []int) (map[int]map[str
 	return out, deg
 }
 
+// primaryIPFields is the projection a hop sends when is_primary_ip is the only
+// thing it is being asked for. It names the three properties that produce the
+// flag and nothing else: id to key the map, primary_ip4 and primary_ip6 for
+// isPrimaryIP, which reads the primary_ip4_id/primary_ip6_id that flattenObject
+// derives from those nested objects.
+//
+// ONE list for both models, because isPrimaryIP is one function for both: a
+// device and a virtual machine expose primary_ip4/primary_ip6 with identical
+// semantics (NetBox 4.4.10 /api/schema/), so a per-hop copy could only ever drift
+// from the reader that consumes it. The VM hop always sends it — the flag is the
+// only reason that hop exists — while the device hop sends it only when no
+// device_* column was selected; see fetchDevices.
+//
+// Verified against NetBox 4.4.10 on both endpoints: ?fields=id,primary_ip4,
+// primary_ip6 answers with exactly those three keys and an unchanged envelope
+// count. A projection is SILENT about names it does not know (see fieldsParam),
+// so these three are named the way the flattener will read them rather than the
+// way the column is spelled.
+var primaryIPFields = []string{"id", "primary_ip4", "primary_ip6"}
+
+// primaryIPProjection is the FIXED parameter set a hop sends when is_primary_ip
+// is all it needs from the object: the ?fields= projection, and the
+// ?exclude=config_context that travels with it.
+//
+// The exclusion is free in bytes — the projection already leaves config_context
+// out of the response — and not free upstream: DeviceViewSet and
+// VirtualMachineViewSet both annotate config context onto the queryset, which a
+// projection alone does not remove. It is sent ONLY alongside the projection,
+// for the reason setExcludeConfigContext gives: config_context is a real column
+// an unprojected device query surfaces.
+//
+// One function for both hops rather than a copy each, for the same reason
+// primaryIPFields is one list — and one more: this is the set queryBatcher
+// charges against the byte budget, so a parameter added to one hop's copy and
+// not the other's would make one of the two budgets describe a request nobody
+// sends.
+func primaryIPProjection() url.Values {
+	q := url.Values{}
+	projection := projectionValue(nil, primaryIPFields)
+	if projection == "" {
+		return q
+	}
+	q.Set(fieldsParam, projection)
+	setExcludeConfigContext(q, projection)
+	return q
+}
+
+// fetchVMs batches virtual machine ids and returns the flattened objects by id,
+// for the one column a VM-assigned row cannot get for free: is_primary_ip.
+//
+// It is fetchDevices' mirror image and keeps every one of its properties, for
+// the reasons stated there — batching by id within the same byte budget, one
+// map for every batch, and NO error return, because a VM-hop failure (partial or
+// total) must never fail the query. The degradation it returns instead is what
+// lets ResolveIPs say the column is blank because the lookup failed rather than
+// because the address is not a primary.
+//
+// It exists at all because the address payload cannot answer the question. The
+// nested virtual_machine object inside a vminterface assignment is the BRIEF
+// serializer form — {id,url,display,name,description}, verified live on 4.4.10 —
+// so vm_name rides along free (see vmNameFromAddress) while primary_ip4 does
+// not appear in it at any depth. That asymmetry is the whole reason this hop is
+// gated separately from vm_name's.
+func (p *Provider) fetchVMs(ctx context.Context, ids []int) (map[int]map[string]interface{}, degradation) {
+	out := make(map[int]map[string]interface{}, len(ids))
+	deg := degradation{total: len(ids)}
+	if len(ids) == 0 {
+		return out, deg
+	}
+
+	strs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		strs = append(strs, fmt.Sprintf("%d", id))
+	}
+
+	// Always projected — the flag is the only reason this hop exists — so unlike
+	// fetchDevices there is no unprojected path. The batcher is given the same
+	// parameter set the request is built from; see queryBatcher for what used to
+	// go wrong when the budget and the request were computed separately.
+	batcher := newQueryBatcher("id", primaryIPProjection())
+	chunks := batcher.chunk(strs)
+	for i, chunk := range chunks {
+		// The reported total is discarded for the same reason fetchDevices
+		// discards it: ?id= is an exact-match filter on the primary key, so a
+		// batch matches at most one VM per id it names and the byte budget caps a
+		// batch far below MaxLimit.
+		raws, _, err := p.fetchRows(ctx, "virtualization/virtual-machines", batcher.query(chunk), MaxLimit)
+		if err != nil {
+			deg.record(len(chunk), err)
+			logChunkFailure("virtual machine lookup", i+1, len(chunks), len(chunk), err)
+			continue
+		}
+		for _, raw := range raws {
+			_, vals, err := flattenObject(raw)
+			if err != nil {
+				continue
+			}
+			if v, ok := vals["id"].(float64); ok {
+				out[int(v)] = vals
+			}
+		}
+	}
+	return out, deg
+}
+
 // IPEnrichColumns lists every column ip-enrichment can emit, in group order.
-// "ip" and "match_count" are deliberately not namespaced: "ip" is the
-// documented Grafana join key, and match_count describes the row itself.
+// "ip", "match_count" and "is_primary_ip" are deliberately not namespaced: "ip"
+// is the documented Grafana join key, match_count describes the row itself, and
+// is_primary_ip describes the address's relationship to whatever it is assigned
+// to — a device for one row and a virtual machine for the next, so no single
+// namespace could name it honestly (it was device_is_primary_ip until it gained
+// a virtual-machine half).
 // There is no prefix_site — NetBox 4.2 replaced a prefix's `site` with the
 // generic `scope` (site, region or location), which is why 4.2 and not 4.1 is
 // the supported floor (README Requirements); 4.1 has no `scope` at all, so this
@@ -678,13 +1010,20 @@ func (p *Provider) fetchDevices(ctx context.Context, ids []int) (map[int]map[str
 // field being merely omitted when empty. Filling it would need a second API
 // call per referenced NAT partner; ruled: not worth the extra request, same
 // as VM DEVICE-GRADE enrichment (a VM's cluster, site, role, platform or
-// status — each of which needs a virtualization/virtual-machines hop this
-// package does not make) and the dropped interface_* columns. The VM's NAME is
-// not in that ruling: it is embedded in the address payload already, so it
-// costs nothing and is shipped as vm_name.
+// status) and the dropped interface_* columns. The VM's NAME is not in that
+// ruling: it is embedded in the address payload already, so it costs nothing
+// and is shipped as vm_name.
+// is_primary_ip is the one VM attribute that IS worth a request, and the only
+// column here that costs one for a VM-assigned row: it is the SNMP/flow join
+// key ("is this the address the poller talks to"), it is in the default
+// selection, and NetBox's nested virtual_machine object is the brief serializer
+// form — {id,url,display,name,description}, verified live on 4.4.10 — so unlike
+// vm_name it cannot be read off the address payload. Its hop is gated on the
+// column itself (see ResolveIPs), so a query that does not select it pays
+// nothing.
 func IPEnrichColumns() []string {
 	return []string{
-		"ip", "match_count",
+		"ip", "match_count", "is_primary_ip",
 		"prefix_cidr", "prefix_scope", "prefix_tenant", "prefix_role",
 		"prefix_vrf", "prefix_vlan", "prefix_description",
 		"address_dns_name", "address_status", "address_role", "address_vrf",
@@ -693,7 +1032,7 @@ func IPEnrichColumns() []string {
 		"interface_name", "interface_description",
 		"device_name", "device_role", "device_platform", "device_device_type",
 		"device_site", "device_location", "device_rack", "device_tenant",
-		"device_status", "device_is_primary_ip",
+		"device_status",
 		"vm_name",
 	}
 }
@@ -702,7 +1041,7 @@ func IPEnrichColumns() []string {
 // on purpose: an ambiguous pick must be visible out of the box.
 var defaultIPEnrichFields = []string{
 	"ip", "match_count", "address_dns_name", "device_name", "vm_name", "interface_name",
-	"device_is_primary_ip", "device_site", "device_tenant",
+	"is_primary_ip", "device_site", "device_tenant",
 }
 
 // DefaultIPEnrichFields returns the selection ResolveIPs substitutes for an
@@ -723,15 +1062,21 @@ func DefaultIPEnrichFields() []string { return slices.Clone(defaultIPEnrichField
 // so only the values can say what they are — this schema is fixed here in code,
 // which means the type of a column is known even when the current IP set puts no
 // value in it. The plugin layer would otherwise scan the values and fall back to
-// string for an all-null column, so device_is_primary_ip alternated between a
-// boolean field and a string one depending on whether any IP in the refresh
-// happened to resolve a device. See provider.Result.ColumnTypes.
+// string for an all-null column, so is_primary_ip alternated between a boolean
+// field and a string one depending on whether any IP in the refresh happened to
+// resolve a device. See provider.Result.ColumnTypes.
+//
+// Answering the flag from either owner made that all-null column ordinary rather
+// than exceptional. The flag is emitted only for a device- or VM-assigned
+// address, so an FHRP-only, an unassigned-only or an external-address refresh
+// puts no value in it at all — the very shape whose type nothing but this
+// declaration can state.
 //
 // Every other column flattens to a string, which is also the inference fallback,
 // so listing them would change nothing and only invite drift.
 var ipEnrichColumnTypes = map[string]provider.FieldType{
-	"match_count":          provider.FieldTypeNumber,
-	"device_is_primary_ip": provider.FieldTypeBoolean,
+	"match_count":     provider.FieldTypeNumber,
+	isPrimaryIPColumn: provider.FieldTypeBoolean,
 }
 
 // declaredColumnTypes returns the type declarations for the fields this query
@@ -758,15 +1103,24 @@ func declaredColumnTypes(fields []string) map[string]provider.FieldType {
 // making at all: project() drops every column the caller did not ask for, and a
 // hop whose entire output is then discarded is pure latency.
 //
+// It is NOT the whole gate, and stopped being it once is_primary_ip existed
+// outside both groups. It has no namespace to test — it is answered by the
+// device for one row and by the VM for the next — so ResolveIPs ORs this against
+// an explicit test for that name.
+// A hop gate that reads wantsGroup alone would leave the default selection's
+// is_primary_ip permanently blank.
+//
 // Prefix matching is exact-by-construction: every column in IPEnrichColumns
-// beginning with "device_" or "prefix_" comes from that group's hop, and the two
-// non-namespaced columns ("ip", "match_count") belong to neither.
+// beginning with "device_" or "prefix_" comes from that group's hop, and the
+// three non-namespaced columns ("ip", "match_count", "is_primary_ip") belong to
+// neither group — the last of them needing the explicit test above.
 //
 // "vm_" is NOT a group here, alongside "address_" and "interface_": vm_name is
 // read off the address payload this query already holds, so there is no hop to
-// skip. If VM device-grade columns are ever added, gate their hop on those
-// specific non-free vm_* names — never on the whole "vm_" prefix, which would
-// make the free column start paying for a request.
+// skip. The VM hop is gated on is_primary_ip by name for exactly that reason —
+// gating it on the "vm_" prefix would make the free column start paying for a
+// request, and gating it on the whole selection would make every ip-enrichment
+// query pay for a column nobody asked for.
 func wantsGroup(fields []string, group string) bool {
 	for _, f := range fields {
 		if strings.HasPrefix(f, group) {
@@ -864,6 +1218,35 @@ func deviceIDFromAddress(raw json.RawMessage) (int, bool) {
 		return 0, false
 	}
 	return o.AssignedObject.Device.ID, true
+}
+
+// vmIDFromAddress returns the owning virtual machine id for an address assigned
+// to a virtualization.vminterface, and is what the VM hop batches on. Device
+// interfaces return false, exactly as deviceIDFromAddress excludes VM ones: the
+// two ids come from different NetBox models and index different maps, so a
+// device id reaching the VM hop would look up an unrelated object and answer
+// is_primary_ip from it.
+//
+// Separate from vmNameFromAddress, which reads the same nested object, because
+// the two have different failure conditions and neither should inherit the
+// other's. A VM with no name is still a VM whose primary IP can be looked up,
+// and an id of 0 is not a VM at all however well-named it is.
+func vmIDFromAddress(raw json.RawMessage) (int, bool) {
+	var o struct {
+		Type           string `json:"assigned_object_type"`
+		AssignedObject struct {
+			VirtualMachine struct {
+				ID int `json:"id"`
+			} `json:"virtual_machine"`
+		} `json:"assigned_object"`
+	}
+	if json.Unmarshal(raw, &o) != nil || o.Type != assignedTypeVMInterface {
+		return 0, false
+	}
+	if o.AssignedObject.VirtualMachine.ID == 0 {
+		return 0, false
+	}
+	return o.AssignedObject.VirtualMachine.ID, true
 }
 
 // vmNameFromAddress returns the owning virtual machine's name for an address
@@ -1003,8 +1386,9 @@ func assignedType(vals map[string]interface{}) string {
 	return s
 }
 
-// applyDeviceColumns fills device_* from a flattened device, including the
-// primary-IP flag.
+// applyDeviceColumns fills device_* from a flattened device, plus is_primary_ip
+// — which is no longer a device_* column, but is still the DEVICE's answer for a
+// dcim.interface-assigned row.
 func applyDeviceColumns(row map[string]interface{}, dev map[string]interface{}, ipID int) {
 	for src, dst := range map[string]string{
 		"name":        "device_name",
@@ -1021,7 +1405,21 @@ func applyDeviceColumns(row map[string]interface{}, dev map[string]interface{}, 
 			row[dst] = v
 		}
 	}
-	row["device_is_primary_ip"] = isPrimaryIP(dev, ipID)
+	row[isPrimaryIPColumn] = isPrimaryIP(dev, ipID)
+}
+
+// applyVMColumns fills what a fetched virtual machine can say about the address:
+// is_primary_ip, and nothing else.
+//
+// One column, and that is not an oversight. vm_name is already on the row by the
+// time this runs — the address payload carries it (see vmNameFromAddress) — and
+// every other VM attribute a dashboard might want (cluster, site, role,
+// platform, status) is ruled out on IPEnrichColumns as not worth the request.
+// This hop is made for the flag alone, so it reads the flag alone. Adding a
+// vm_* column here would also silently change what the hop's gate means, since
+// that gate names is_primary_ip rather than a namespace.
+func applyVMColumns(row map[string]interface{}, vm map[string]interface{}, ipID int) {
+	row[isPrimaryIPColumn] = isPrimaryIP(vm, ipID)
 }
 
 // applyPrefixColumns is the fallback for IPs with no address record: today's
@@ -1206,7 +1604,29 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 	// over external/unknown addresses paid the whole of it for nothing: measured
 	// on the demo, 100 unknown IPs cost 100 requests and 2.0 s; after this gate,
 	// 0 requests and 0.09 s.
-	wantDevice := wantsGroup(fields, "device_")
+	// is_primary_ip is the one column no prefix test can find, and it switches on
+	// BOTH identity hops rather than either group: it is the device's answer for a
+	// dcim.interface-assigned row and the VM's for a virtualization.vminterface
+	// one, and neither hop can supply the other's rows. It is also the only reason
+	// the VM hop exists at all — vm_name rides along on the address payload for
+	// free — so a query that leaves it unselected never asks NetBox about a
+	// virtual machine.
+	//
+	// Selecting it alone therefore costs two batched requests, not one. That is
+	// the honest price of a column whose value depends on which model owns the
+	// address, and it is still paid only by queries that ask for it.
+	//
+	// wantDeviceGroup is kept apart from the gate it feeds because it answers a
+	// second question the gate cannot: WHY the device hop is running. It is what
+	// tells fetchDevices whether the whole device serializer is needed or only the
+	// flag's two source properties, and what tells deviceHopWarning which columns a
+	// failure actually blanked in THIS frame. Deriving either of those from
+	// `fields` again, separately, is how a request or a warning drifts away from
+	// the gate that caused it.
+	wantPrimaryIP := slices.Contains(fields, isPrimaryIPColumn)
+	wantDeviceGroup := wantsGroup(fields, "device_")
+	wantDevice := wantDeviceGroup || wantPrimaryIP
+	wantVM := wantPrimaryIP
 	wantPrefix := wantsGroup(fields, "prefix_")
 
 	// An unset limit falls back to defaultLimit, exactly as Query() does — not
@@ -1249,24 +1669,34 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 	}
 
 	picked := make(map[string]json.RawMessage, len(wanted))
-	var deviceIDs []int
-	seenDev := map[int]bool{}
+	var deviceIDs, vmIDs []int
+	seenDev, seenVM := map[int]bool{}, map[int]bool{}
 	for _, ip := range wanted {
 		best := pickAddress(addrs.byHost[canonicalIP(ip)])
 		if best == nil {
 			continue
 		}
 		picked[ip] = best
-		// Collected only when a device_* column was asked for. Leaving deviceIDs
-		// empty is what skips the hop: fetchDevices returns immediately on an
-		// empty id set, with a zero degradation, so no request is made and no
+		// Collected only when a column that needs the hop was asked for. Leaving
+		// the id set empty is what skips it: both fetchers return immediately on
+		// an empty set, with a zero degradation, so no request is made and no
 		// warning can fire about columns this frame does not contain.
-		if !wantDevice {
-			continue
+		//
+		// The two gates are independent tests rather than one branch: an address
+		// is assigned to a device interface, to a VM interface, or to neither, so
+		// a query for is_primary_ip over a device-only IP list collects no VM ids
+		// at all and makes no VM request.
+		if wantDevice {
+			if id, ok := deviceIDFromAddress(best); ok && !seenDev[id] {
+				seenDev[id] = true
+				deviceIDs = append(deviceIDs, id)
+			}
 		}
-		if id, ok := deviceIDFromAddress(best); ok && !seenDev[id] {
-			seenDev[id] = true
-			deviceIDs = append(deviceIDs, id)
+		if wantVM {
+			if id, ok := vmIDFromAddress(best); ok && !seenVM[id] {
+				seenVM[id] = true
+				vmIDs = append(vmIDs, id)
+			}
 		}
 	}
 
@@ -1283,7 +1713,14 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 	// prove a row was excluded from device context must register dcim/devices and
 	// show device context attaching to some other row in the same call — see
 	// TestResolveIPs.
-	devices, devDeg := p.fetchDevices(ctx, deviceIDs)
+	devices, devDeg := p.fetchDevices(ctx, deviceIDs, wantDeviceGroup)
+
+	// The VM hop degrades on the same terms, and its blank is the more
+	// misleading of the two: a missing is_primary_ip is exactly what a correct
+	// FHRP-assigned or unassigned row looks like, so nothing in the frame would
+	// distinguish "we could not ask" from "there is nothing to ask". Hence a
+	// degradation here too, and a warning below.
+	vms, vmDeg := p.fetchVMs(ctx, vmIDs)
 
 	// The prefix fallback is per-IP — ?contains= takes a single value, so it
 	// cannot be batched — so its degradation is tallied here rather than inside a
@@ -1340,9 +1777,20 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 		switch {
 		case hasBest:
 			applyAddressColumns(row, best)
+			// Exactly one of these two can fire, and often neither: the type gates
+			// inside deviceIDFromAddress and vmIDFromAddress are mutually
+			// exclusive, and an address assigned to an FHRP group or to nothing at
+			// all satisfies neither. Those rows leave is_primary_ip ABSENT — not
+			// false — and that is a decision rather than a gap; isPrimaryIP states
+			// why, including why the FHRP case is left without a value on purpose.
 			if id, ok := deviceIDFromAddress(best); ok {
 				if dev, ok := devices[id]; ok {
 					applyDeviceColumns(row, dev, addressID(best))
+				}
+			}
+			if id, ok := vmIDFromAddress(best); ok {
+				if vm, ok := vms[id]; ok {
+					applyVMColumns(row, vm, addressID(best))
 				}
 			}
 		case unknown:
@@ -1413,7 +1861,10 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 		warnings = append(warnings, addressTruncationWarning(addrs.truncated))
 	}
 	if devDeg.any() {
-		warnings = append(warnings, deviceHopWarning(devDeg))
+		warnings = append(warnings, deviceHopWarning(devDeg, wantDeviceGroup, wantPrimaryIP))
+	}
+	if vmDeg.any() {
+		warnings = append(warnings, vmHopWarning(vmDeg))
 	}
 	if prefixDeg.any() {
 		warnings = append(warnings, prefixHopWarning(prefixDeg))

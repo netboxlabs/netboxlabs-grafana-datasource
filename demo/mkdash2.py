@@ -165,7 +165,10 @@ panels = [
     #   10.10.10.11/.12, 10.20.20.11  registered + assigned to a Loopback0, primary
     #   10.20.0.1                     registered + assigned, primary, on Ethernet1
     #   10.99.99.99                   anycast on three interfaces -> match_count 3
-    #   10.40.0.5                     on a VM interface -> interface only, no device
+    #   10.40.0.5                     on a VM interface -> interface only, no device;
+    #                                 is_primary_ip still answers on this row,
+    #                                 because a NetBox VM carries primary_ip4/6
+    #                                 exactly as a device does
     #   10.10.10.50                   NO address record -> the prefix fallback, the
     #                                 only branch that fills prefix_*
     # Without that last one every demo IP resolves through the address branch and
@@ -179,7 +182,12 @@ panels = [
                   "contextFields": ["match_count",
                                      "prefix_cidr", "prefix_scope", "prefix_tenant", "prefix_role",
                                      "prefix_vlan",
-                                     "device_name", "device_is_primary_ip", "interface_name",
+                                     # is_primary_ip is no longer a device_* column,
+                                     # but it stays next to device_name:
+                                     # contextFields order is the rendered column
+                                     # order, and "who owns this IP, and is this the
+                                     # address you poll" reads best side by side.
+                                     "device_name", "is_primary_ip", "interface_name",
                                      "device_site"],
                   "limit": IP_ENRICH_LIMIT}],
      # Two different sites, so they get two different labels. prefix_scope is the
@@ -260,7 +268,7 @@ panels = [
          {"refId": "A", "datasource": nb, "queryType": "ip-enrichment",
           "ips": "$flow_ips",
           "contextFields": ["match_count", "address_description", "interface_name",
-                             "device_name", "device_is_primary_ip", "device_site"],
+                             "device_name", "is_primary_ip", "device_site"],
           "joinKeys": [{"source": "device_name", "output": "device", "transform": "none"}],
           "limit": IP_ENRICH_LIMIT},
          {"refId": "P", "datasource": prom, "format": "table", "instant": True,

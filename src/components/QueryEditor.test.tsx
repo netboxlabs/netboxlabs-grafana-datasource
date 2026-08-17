@@ -137,7 +137,7 @@ describe('QueryEditor — Alert table', () => {
   });
 });
 
-describe('QueryEditor — Branch field gating (OBS-3651)', () => {
+describe('QueryEditor — Branch field gating', () => {
   it('disables the Branch field when branching is not installed', async () => {
     const ds = { ...datasource, uid: 'ds-absent', getBranchingInstalled: jest.fn().mockResolvedValue(false) };
     setup({}, ds);
@@ -317,7 +317,22 @@ describe('IP context field groups', () => {
     const all = IP_CONTEXT_FIELD_GROUPS.flatMap((g) => g.options);
     expect(DEFAULT_IP_CONTEXT_FIELDS.length).toBeLessThan(all.length / 2);
     expect(DEFAULT_IP_CONTEXT_FIELDS).toContain('match_count');
-    expect(DEFAULT_IP_CONTEXT_FIELDS).toContain('device_is_primary_ip');
+    expect(DEFAULT_IP_CONTEXT_FIELDS).toContain('is_primary_ip');
+  });
+
+  it('carries is_primary_ip in the un-namespaced Identity group, not under Device', () => {
+    // The flag answers "is this the address the poller talks to" for
+    // whatever owns the address, and NetBox gives two owners that can answer:
+    // dcim.device and virtualization.virtualmachine both expose
+    // primary_ip4/primary_ip6. A device_ prefix was a lie on every VM row, so
+    // the column lost the namespace along with the device-only reading.
+    // The rename is hard and aliasless — the plugin is unreleased — and this
+    // picker is a closed vocabulary, so still offering `device_is_primary_ip`
+    // would render a permanently blank column rather than the old behaviour.
+    const identity = IP_CONTEXT_FIELD_GROUPS.find((g) => g.label === 'Identity');
+    expect(identity?.options.map((o) => o.value)).toContain('is_primary_ip');
+    const all = IP_CONTEXT_FIELD_GROUPS.flatMap((g) => g.options.map((o) => o.value));
+    expect(all).not.toContain('device_is_primary_ip');
   });
 
   it('labels every option by its full column name, so chips are unambiguous', () => {
@@ -325,7 +340,9 @@ describe('IP context field groups', () => {
     // list. With group-local labels the default selection rendered two adjacent
     // chips both reading "name" (device_name and interface_name), and a
     // nine-column panel read "match_count cidr scope tenant role vlan name
-    // is_primary_ip name" — unreadable, and wrong about which columns are shown.
+    // is_primary_ip name" — unreadable, and wrong about which columns are
+    // shown. That render predates the rename: its "is_primary_ip" chip was
+    // device_is_primary_ip shown group-locally, and is now the real name.
     for (const o of IP_CONTEXT_FIELD_OPTIONS) {
       expect(o.label).toBe(o.value);
     }

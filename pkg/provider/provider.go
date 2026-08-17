@@ -209,7 +209,7 @@ type Result struct {
 	//
 	// That inference is right for a discovered object query, whose columns come
 	// from NetBox's schema at runtime and can hold anything. It is wrong for a
-	// FIXED schema like ip-enrichment's, where device_is_primary_ip is a boolean
+	// FIXED schema like ip-enrichment's, where is_primary_ip is a boolean
 	// by definition and merely happens to be null for every row of an IP set that
 	// resolves no device (all external, all VM-assigned, all unassigned). Without
 	// this hint the same saved query alternates between a boolean field and a

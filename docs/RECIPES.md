@@ -132,9 +132,10 @@ longest containing prefix:
    IP depends on what NetBox actually knows about that address — per row, it's always
    exactly one of three outcomes, never a mix:
    - **The IP is a registered address assigned to a device interface** (e.g. a loopback
-     or a routed interface): `address_*` (`address_dns_name`, …), `interface_name` and
-     `device_*` (`device_name`, `device_is_primary_ip`, …) populate. `prefix_*` stays
-     blank — the device hop already answered the question a prefix lookup would.
+     or a routed interface): `address_*` (`address_dns_name`, …), `interface_name`,
+     `is_primary_ip` and `device_*` (`device_name`, `device_site`, …) populate.
+     `prefix_*` stays blank — the device hop already answered the question a prefix
+     lookup would.
    - **The IP is a registered address not assigned to any interface, or assigned to a VM
      interface** (VMs have no NetBox device): `address_*` populates (plus `interface_name`
      and `vm_name` for the VM case), but `device_*` stays blank — there's no device to
@@ -148,6 +149,10 @@ longest containing prefix:
      `device_name` are mutually exclusive per row. There is no other `vm_*` column: a
      VM's cluster, site, role, platform and status each cost a second NetBox request,
      whereas the name is already inside the address record and so is free.
+     `is_primary_ip` is the one VM fact worth that second request, and it is not a
+     `vm_*` column because it is not a VM-only fact: NetBox gives a virtual machine
+     `primary_ip4`/`primary_ip6` exactly as it gives a device them, so the flag answers
+     on a VM row as readily as on a device row.
      NetBox also lets an address be assigned to something that is not an
      interface at all — an **FHRP/VRRP group**, say — and `interface_*` stays blank for
      those: there is no interface to name. `address_*` still populates, because the
@@ -175,8 +180,12 @@ longest containing prefix:
    one request per IP with no address record and cannot be batched — measured at ~20 ms
    per IP, or ~20 s for a 1,000-IP panel of external addresses. The default field
    selection contains no `prefix_*` column and therefore makes no prefix request at all;
-   add one only when you want prefix context. `device_*` (including
-   `device_is_primary_ip`) costs one extra batched request for the whole IP list.
+   add one only when you want prefix context. `device_*` costs one extra batched request
+   for the whole IP list. `is_primary_ip` costs up to two: the same device request (shared
+   if you selected `device_*` anyway) plus a batched virtual-machine request, because a
+   VM's primary address — unlike its name — is not carried inside the address record.
+   Both are gated on the column: a query that doesn't select it asks NetBox about no
+   virtual machine at all.
 3. The result is a table keyed by `ip`. Use it standalone, or **Join by field** on `ip`
    against your flow table (rename the flow label to `ip` with an _organize fields_
    transform, or set a join key output accordingly).
@@ -202,16 +211,16 @@ longest containing prefix:
    rather than renaming anything in NetBox: **lowercase** for case differences, **strip
    domain** for `leaf01.dc.example.com` → `leaf01`, or **regex** for anything else — see
    [JOIN-KEYS.md](./JOIN-KEYS.md). If your exporter labels by management IP instead, join
-   on `ip` (see the note on `device_is_primary_ip` below).
+   on `ip` (see the note on `is_primary_ip` below).
 
 **Expected result** (real `ds/query` response against the bundled demo NetBox, contrasting
 all three outcomes):
 
-| ip          | address_dns_name   | device_name  | vm_name    | device_is_primary_ip | interface_name | prefix_cidr   | prefix_scope | prefix_tenant | prefix_role | prefix_vlan    |
-| ----------- | ------------------ | ------------ | ---------- | -------------------- | -------------- | ------------- | ------------ | ------------- | ----------- | -------------- |
-| 10.20.0.1   | leaf01.example.net | AMS1-leaf-01 |            | true                 | Ethernet1      |               |              |               |             |                |
-| 10.40.0.5   |                    |              | demo-vm-01 |                      | eth0           |               |              |               |             |                |
-| 10.10.10.50 |                    |              |            |                      |                | 10.10.10.0/24 | AMS1         | Grafana Demo  | LAN         | ams1-lan (110) |
+| ip          | address_dns_name   | device_name  | vm_name    | is_primary_ip | interface_name | prefix_cidr   | prefix_scope | prefix_tenant | prefix_role | prefix_vlan    |
+| ----------- | ------------------ | ------------ | ---------- | ------------- | -------------- | ------------- | ------------ | ------------- | ----------- | -------------- |
+| 10.20.0.1   | leaf01.example.net | AMS1-leaf-01 |            | true          | Ethernet1      |               |              |               |             |                |
+| 10.40.0.5   |                    |              | demo-vm-01 | true          | eth0           |               |              |               |             |                |
+| 10.10.10.50 |                    |              |            |               |                | 10.10.10.0/24 | AMS1         | Grafana Demo  | LAN         | ams1-lan (110) |
 
 `10.20.0.1` is AMS1-leaf-01's primary IP on `Ethernet1` — a registered, interface-assigned
 address, so `address_*`/`interface_*`/`device_*` populate and `prefix_*` stays blank;
@@ -219,18 +228,57 @@ address, so `address_*`/`interface_*`/`device_*` populate and `prefix_*` stays b
 — a registered address with no owning NetBox device, so `interface_name` and `vm_name`
 populate but `device_*` (and `prefix_*`) don't. The two name columns are exactly the
 contrast: each row is named, and which column names it tells you which model NetBox holds
-it in. `10.10.10.50` has no address record at all, so the query falls back to the
-containing prefix (`10.10.10.0/24`) and every address/device/interface column is blank.
+it in. `is_primary_ip` is `true` on **both** of those rows, which is why it carries no
+`device_` prefix: 10.40.0.5 is `demo-vm-01`'s `primary_ip4` in NetBox in precisely the
+sense that 10.20.0.1 is AMS1-leaf-01's. `10.10.10.50` has no address record at all, so
+the query falls back to the containing prefix (`10.10.10.0/24`) and every
+address/device/interface column is blank — `is_primary_ip` included, since a row that
+found no owner has nothing to be the primary address of.
 An IP matching neither an address record nor a containing prefix comes back with every
 context column blank — signal too (unknown/external traffic).
 
 **Three signals worth knowing about:**
 
-- **`device_is_primary_ip`** — whether this address is the device's primary IP: the one
-  NetBox designates as the device's management address, and therefore the one an SNMP
-  poller configured from NetBox would be pointed at. It tells you _which_ of a device's
-  several addresses this row is, which matters when a device appears more than once in a
+- **`is_primary_ip`** — whether this address is the primary IP of whatever owns it: the
+  one NetBox designates as that host's management address, and therefore the one an SNMP
+  poller configured from NetBox would be pointed at. It tells you _which_ of a host's
+  several addresses this row is, which matters when a host appears more than once in a
   flow table.
+
+  It answers for **devices and virtual machines alike**, and that is why it carries no
+  namespace: NetBox gives `dcim.device` and `virtualization.virtualmachine` the same
+  `primary_ip4`/`primary_ip6` pair, so a `device_` prefix would be a lie on every VM row.
+
+  **Blank does not mean "not primary."** `false` means this address is not its owner's
+  primary — which includes the common case of an owner NetBox holds no primary for at all
+  (3 of the 15 devices in the bundled demo are in exactly that state). Blank means the
+  question does not apply to this row, and
+  there are three ways to get one: the IP matched no address record (the prefix-fallback
+  outcome — no owner was ever reached); the address is assigned to nothing; or the address
+  is assigned to an **FHRP/VRRP group**. That last one is the case worth knowing, because
+  it is blank for a reason the other columns don't share: NetBox has no primary-IP concept
+  for FHRP groups _at all_. An `ipam.fhrpgroup` **holds** addresses — `ip_addresses` is a
+  list — and never elects one of them as primary; the model has no `primary_*` field of
+  any kind (verified against NetBox 4.4.10's schema). So the column is left empty there
+  rather than answering `false` to a question NetBox never asks. Filter accordingly: to
+  find "registered, and not the management address", the test is `is_primary_ip == false`
+  — `is not true` sweeps in every FHRP row and every unresolved IP alongside it.
+
+  The whole value space, from one query against the bundled demo NetBox:
+
+  | ip          | owner                     | address_assigned_object_type | is_primary_ip |
+  | ----------- | ------------------------- | ---------------------------- | ------------- |
+  | 10.20.0.1   | AMS1-leaf-01 (device)     | dcim.interface               | true          |
+  | 10.40.0.5   | demo-vm-01 (VM)           | virtualization.vminterface   | true          |
+  | 10.40.0.6   | demo-vm-01 (VM)           | virtualization.vminterface   | false         |
+  | 10.50.0.1   | demo-vrrp-42 (FHRP group) | ipam.fhrpgroup               |               |
+  | 10.10.10.50 | none — prefix fallback    |                              |               |
+
+  The last two rows are the ones to read carefully: both are blank, and neither blank is a
+  failed lookup. `10.50.0.1` resolved perfectly — NetBox simply has no primary IP to report
+  for a VRRP group — while `10.10.10.50` never found an owner to ask. If a genuine failure
+  had blanked the column, the frame would carry a warning notice saying so; blank on its own
+  is never evidence of one.
 
   It is **not** itself a join key, and the useful join does not go through it. Whether you
   can join on the IP at all depends on your exporter: only if it labels series with the

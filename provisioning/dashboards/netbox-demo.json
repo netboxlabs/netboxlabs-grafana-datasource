@@ -660,7 +660,7 @@
             "prefix_role",
             "prefix_vlan",
             "device_name",
-            "device_is_primary_ip",
+            "is_primary_ip",
             "interface_name",
             "device_site"
           ],
@@ -1012,7 +1012,7 @@
             "address_description",
             "interface_name",
             "device_name",
-            "device_is_primary_ip",
+            "is_primary_ip",
             "device_site"
           ],
           "joinKeys": [

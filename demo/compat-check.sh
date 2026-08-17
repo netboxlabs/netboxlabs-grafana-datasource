@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NetBox-version compatibility matrix for the plugin (OBS-3516).
+# NetBox-version compatibility matrix for the plugin.
 #   ./demo/compat-check.sh                  -> default matrix (latest of each 4.x minor)
 #   ./demo/compat-check.sh v4.6.4-5.0.1     -> just one version
 #   COMPAT_VERSIONS="v4.2.9-3.2.1 v4.4-3.4.2" ./demo/compat-check.sh
@@ -101,7 +101,9 @@ seed() {
   nb_api -X POST "$NB/api/ipam/prefixes/" -d "{\"prefix\":\"10.99.0.0/24\",\"status\":\"active\",\"scope_type\":\"dcim.site\",\"scope_id\":$site_id}" >/dev/null || return 1
   # An address on a real interface, made the device's primary IP: the other
   # ip-enrichment outcome end to end (address → interface → device), including
-  # device_is_primary_ip, which reads the device's own primary_ip4.
+  # is_primary_ip, which on a device-assigned row reads the device's own
+  # primary_ip4. This seed covers only the device half, so the VM hop's
+  # cross-version behaviour is NOT probed here.
   iface_id=$(nb_api -X POST "$NB/api/dcim/interfaces/" -d "{\"device\":$device_id,\"name\":\"eth0\",\"type\":\"1000base-t\"}" | new_id) || return 1
   ip_id=$(nb_api -X POST "$NB/api/ipam/ip-addresses/" -d "{\"address\":\"10.99.0.5/24\",\"status\":\"active\",\"dns_name\":\"compat-r1.example.net\",\"assigned_object_type\":\"dcim.interface\",\"assigned_object_id\":$iface_id}" | new_id) || return 1
   nb_api -X PATCH "$NB/api/dcim/devices/$device_id/" -d "{\"primary_ip4\":$ip_id}" >/dev/null || return 1
@@ -165,8 +167,32 @@ g=lambda c: fr["data"]["values"][n.index(c)][0]
 assert g("address_dns_name")=="compat-r1.example.net", g("address_dns_name")
 assert g("interface_name")=="eth0", g("interface_name")
 assert g("device_name")=="compat-r1", g("device_name")
-assert g("device_is_primary_ip") is True, g("device_is_primary_ip")' \
-      '{"queries":[{"refId":"A","datasource":{"type":"netboxlabs-datasource","uid":"netboxlabs-netbox-alerting"},"queryType":"ip-enrichment","ips":"10.99.0.5","contextFields":["ip","match_count","address_dns_name","interface_name","device_name","device_is_primary_ip"]}]}' || ok=0
+assert g("is_primary_ip") is True, g("is_primary_ip")' \
+      '{"queries":[{"refId":"A","datasource":{"type":"netboxlabs-datasource","uid":"netboxlabs-netbox-alerting"},"queryType":"ip-enrichment","ips":"10.99.0.5","contextFields":["ip","match_count","address_dns_name","interface_name","device_name","is_primary_ip"]}]}' || ok=0
+
+    # d2. Same flag, PROJECTED path. Selecting is_primary_ip with no device_*
+    #     column beside it is what makes the device hop request
+    #     ?fields=id,primary_ip4,primary_ip6 instead of the whole serializer, and
+    #     that is a different request shape per NetBox version — which is the
+    #     only reason this near-duplicate of (d) exists. Probe (d) selects
+    #     device_name, so it always takes the unprojected branch and can never
+    #     fail on a version that rejects the projection.
+    #
+    #     The failure it guards is quiet: a rejected ?fields= yields a blank
+    #     column plus a warning, and a warning is a hard failure on the alert
+    #     path, so it would surface first as an alert rule that stopped
+    #     evaluating rather than as a missing column.
+    check "ip-enrichment is_primary_ip (projected device hop)" \
+      'import json,sys
+r=json.load(sys.stdin)["results"]["A"]
+fr=r["frames"][0]
+n=[f["name"] for f in fr["schema"]["fields"]]
+assert "device_name" not in n, n
+g=lambda c: fr["data"]["values"][n.index(c)][0]
+assert g("is_primary_ip") is True, g("is_primary_ip")
+w=(fr.get("schema",{}).get("meta",{}) or {}).get("notices") or []
+assert not [x for x in w if x.get("severity")=="warning"], w' \
+      '{"queries":[{"refId":"A","datasource":{"type":"netboxlabs-datasource","uid":"netboxlabs-netbox-alerting"},"queryType":"ip-enrichment","ips":"10.99.0.5","contextFields":["ip","is_primary_ip"]}]}' || ok=0
     # e. ip-enrichment, prefix fallback: an IP with no address record resolves to
     #    the longest containing prefix. prefix_scope is the 4.2 floor's field.
     check "ip-enrichment prefix fallback" \

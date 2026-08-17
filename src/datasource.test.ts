@@ -72,7 +72,7 @@ describe('metricFindQuery', () => {
 
   it('degrades to just "main" for the branch variable when branching is not installed', async () => {
     const ds = makeDS();
-    // Backend maps a NetBox 404 to a 502 with a "not found" message (OBS-3588).
+    // Backend maps a NetBox 404 to a 502 with a "not found" message.
     (ds as any).runResourceQuery = jest
       .fn()
       .mockRejectedValue({ status: 502, data: { error: 'This object type was not found in NetBox (HTTP 404).' } });

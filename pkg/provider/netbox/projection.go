@@ -90,8 +90,27 @@ var countOnlyFields = []string{"id"}
 // object contributes <key>_id and <key>_slug, a choice object <key>_value, and a
 // list <key>_count (see flatten.go). A derived column therefore names a
 // serializer property that does not exist, and asking NetBox for it yields
-// nothing at all.
-var derivedSuffixes = [...]string{"_id", "_slug", "_value", "_count"}
+// nothing at all — so a column ending in one of these suffixes derives from the
+// property named by the remaining prefix, which is the name that must be sent
+// and the name whose dimension applies.
+//
+// ONE declaration on purpose. This list had a second copy in dimension.go
+// (columnSuffixes) with the same four entries, and the two are not independent:
+// appendUpstreamNames uses it to decide which property to FETCH for a column and
+// dimIndex.resolve uses it to decide what that column MEANS. Let them disagree
+// and a column is either fetched under a name nothing resolves or resolved to a
+// property nothing fetched — both silent. Splitting it again reintroduces that.
+//
+// TestDerivedSuffixesMatchFlattenField pins the entries to what the FLATTENER
+// appends, on both paths that can name a column: through flattenObject, which
+// every result column comes out of and whose own key loop can derive a name
+// flattenField never sees, and through flattenField directly, the way
+// dimension.go's flattenValues calls it. Each probe carries its own object key,
+// so a branch selected by the key rather than the value — the custom_fields
+// hoist — is covered too, its columns matched against the cf_<name> they are
+// hoisted under. A suffix added to flatten.go and not here is invisible to every
+// other test in this package.
+var derivedSuffixes = []string{"_id", "_slug", "_value", "_count"}
 
 // computedColumns are result columns this provider CALCULATES from other
 // properties (see utilization.go). NetBox has no such serializer fields, so

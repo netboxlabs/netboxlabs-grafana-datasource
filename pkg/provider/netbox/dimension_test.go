@@ -109,6 +109,80 @@ func TestParseDimensions(t *testing.T) {
 	}
 }
 
+// dimSchema31Shaped is the base fixture with shapes a strict decoder cannot
+// read spliced into ONE object schema, plus an OpenAPI 3.1 union type on an
+// unrelated list wrapper's `results`:
+//
+//   - `"type": ["string","null"]` — how 3.1 spells what 3.0 writes as
+//     `"nullable": true`, so a 3.1 document carries thousands of them;
+//   - `true` in place of a property schema, and a non-array `allOf` — raw JSON
+//     Schema a plugin can inject;
+//   - a non-array `enum`, which would otherwise fail []interface{}.
+var dimSchema31Shaped = strings.NewReplacer(
+	`"name":   {"type": "string"},`, `"name":   {"type": ["string", "null"]},
+    "serial": true,
+    "asset_tag": {"allOf": {"$ref": "#/components/schemas/BriefSite"}},
+    "airflow": {"properties": {"value": {"enum": {"not": "a list"}}}},`,
+	`"PaginatedSiteList":   {"properties": {"results": {"type": "array",`,
+	`"PaginatedSiteList":   {"properties": {"results": {"type": ["array", "null"],`,
+).Replace(dimSchemaFixture)
+
+// TestParseDimensions_OddPropertySurvivesAsOneProperty pins the blast radius of
+// a component-schema property we cannot fully read.
+//
+// This is the SECOND independent decode of the same ~10 MB /api/schema/ (the
+// first is parseFilterFields; see openAPIParam in schema.go), and a strict
+// decoder fails the whole json.Unmarshal on the first odd property anywhere in
+// it. parseDimensions then returns an error and Provider.schema() caches a nil
+// index, so EVERY column's FieldValues loses its dimension and reverts to
+// sampling the fact table — the arbitrary answer dimension.go exists to avoid.
+// One odd property must cost only itself.
+//
+// Not reachable on the demo (NetBox 4.4.10, openapi 3.0.3), so this is defence
+// against a 3.1 document and against plugin-injected schemas.
+func TestParseDimensions_OddPropertySurvivesAsOneProperty(t *testing.T) {
+	idx, err := parseDimensions([]byte(dimSchema31Shaped))
+	if err != nil {
+		t.Fatalf("parseDimensions: %v", err)
+	}
+
+	// Every dimension the same object schema declares is still classified.
+	for _, c := range []struct {
+		field    string
+		wantKind dimensionKind
+		wantEnd  string
+	}{
+		{"site", dimRelated, "dcim/sites"},
+		{"tenant", dimRelated, "tenancy/tenants"},
+		{"status", dimChoice, ""},
+		{"tags", dimNone, ""},
+	} {
+		dim, _, ok := idx.resolve("dcim/devices", c.field)
+		if !ok || dim.kind != c.wantKind || dim.endpoint != c.wantEnd {
+			t.Errorf("resolve(dcim/devices, %s) = kind %v endpoint %q ok=%v, want kind %v endpoint %q",
+				c.field, dim.kind, dim.endpoint, ok, c.wantKind, c.wantEnd)
+		}
+	}
+
+	// The odd properties themselves stay IN the index as dimNone. That is the
+	// difference between degrading a property and dropping it: dimIndex is also
+	// the authority on which `?fields=` names are valid, so a property missing
+	// from it is a column FieldValues declines to project (see resolve).
+	for _, field := range []string{"name", "serial", "asset_tag", "airflow"} {
+		dim, base, ok := idx.resolve("dcim/devices", field)
+		if !ok || base != field || dim.kind != dimNone {
+			t.Errorf("resolve(dcim/devices, %s) = kind %v base %q ok=%v, want dimNone under its own name",
+				field, dim.kind, base, ok)
+		}
+	}
+
+	// A union type on a list wrapper's `results` must not cost that object type
+	// its whole entry — the ref the walk needs is on `items`, beside the type.
+	if _, ok := idx["dcim/sites"]; !ok {
+		t.Error("dcim/sites lost its properties to a union-typed results")
+	}
+}
+
 func TestDimIndexResolve_FlattenedColumnVariants(t *testing.T) {
 	idx, err := parseDimensions([]byte(dimSchemaFixture))
 	if err != nil {

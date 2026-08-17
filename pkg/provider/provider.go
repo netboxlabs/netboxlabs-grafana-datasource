@@ -79,6 +79,27 @@ type QuerySpec struct {
 	// Result.Columns is unaffected; only Result.Rows is guaranteed to carry
 	// these values.
 	KeyFields []string `json:"keyFields"`
+	// Ordering asks the SOURCE to sort, naming one field, optionally prefixed
+	// with "-" for descending (e.g. "name", "-last_updated"). Empty means the
+	// source's natural order, which is what every caller got before this field
+	// existed and what a caller that never sets it keeps getting.
+	//
+	// It exists because sorting and Limit are the same question. A panel showing
+	// 100 of 6.8 million devices sorted client-side sorts the arbitrary 100 it was
+	// given; the same query sorted upstream returns a DIFFERENT hundred — the
+	// first hundred by that field. Only the source can answer the second one, so
+	// the request has to travel through this seam rather than being applied to the
+	// rows on the way out.
+	//
+	// A provider is permitted to IGNORE it, and must say so on Result.Notes when
+	// it does. That is not a weakness of the contract but the honest shape of it:
+	// whether a given field can be sorted on is the remote's decision, it is not
+	// discoverable at runtime on NetBox (see the netbox backend's ordering.go),
+	// and the alternative — failing the query — would turn a saved dashboard into
+	// an error toast over a preference. Callers that CANNOT accept a different
+	// order must therefore not ask; nothing here promises the rows came back
+	// sorted.
+	Ordering string `json:"ordering"`
 	// Limit caps the number of rows returned (0 = provider default).
 	Limit int `json:"limit"`
 	// AllowUncounted says this caller can present its answer WITHOUT a reliable

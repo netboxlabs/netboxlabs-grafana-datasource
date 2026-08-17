@@ -30,6 +30,13 @@ func TestQueryErrorMessage(t *testing.T) {
 		{"403", &netbox.APIError{Status: 403, Body: "x"}, "Authentication failed", ""},
 		{"404", &netbox.APIError{Status: 404, Body: "x"}, "HTTP 404", ""},
 		{"non-api", errors.New("dial tcp: connection refused"), "Couldn't reach NetBox", ""},
+		// A mistyped annotation object type is the user's input, not an outage.
+		// Unclassified it fell through every case above into the transport
+		// message, so "dcim.devices" (the plural, which does not exist) was
+		// reported as "Couldn't reach NetBox: unknown NetBox object type …" —
+		// pointing the reader at the network instead of at the field to fix.
+		{"unknown object type", &netbox.UnknownObjectTypeError{Type: "dcim.devices", Known: 154},
+			"dcim.devices", "Couldn't reach NetBox"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -42,6 +49,28 @@ func TestQueryErrorMessage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An unknown object type must reach the user as an actionable message AND as a
+// bad request: it is a typo in the annotation editor, and StatusInternal says
+// "our side broke, try again", which is the opposite of what the reader has to
+// do. Everything else keeps StatusInternal — a NetBox 500 or an unreachable host
+// really is not the query's fault.
+func TestQueryErrorResponse_ClassifiesAnUnknownObjectType(t *testing.T) {
+	resp := queryErrorResponse(&netbox.UnknownObjectTypeError{Type: "dcim.devices", Known: 154})
+	if resp.Status != backend.StatusBadRequest {
+		t.Errorf("status = %v, want %v (a typo in the editor is not an internal failure)", resp.Status, backend.StatusBadRequest)
+	}
+	if resp.Error == nil || !strings.Contains(resp.Error.Error(), "dcim.devices") {
+		t.Errorf("error = %v, want it to name the offending type", resp.Error)
+	}
+
+	t.Run("an upstream failure stays internal", func(t *testing.T) {
+		resp := queryErrorResponse(&netbox.APIError{Status: 500, Body: "boom"})
+		if resp.Status != backend.StatusInternal {
+			t.Errorf("status = %v, want %v", resp.Status, backend.StatusInternal)
+		}
+	})
 }
 
 // TestQueryErrorMessage_BatchedTransportFailureIsBounded is the regression test

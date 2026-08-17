@@ -32,7 +32,12 @@ type queryModel struct {
 	ObjectType string            `json:"objectType"`
 	Filters    []provider.Filter `json:"filters"`
 	Fields     []string          `json:"fields"`
-	Limit      int               `json:"limit"`
+	// Ordering names the field NetBox should sort by, "-" prefixed for descending
+	// (e.g. "name", "-last_updated"). Empty is NetBox's natural order. The
+	// provider decides whether it can be honored (see netbox/ordering.go) and says
+	// so in a note when it cannot, so nothing here validates it.
+	Ordering string `json:"ordering"`
+	Limit    int    `json:"limit"`
 	// JoinKeys derive extra key columns so the result lines up with metric labels.
 	JoinKeys []joinKey `json:"joinKeys"`
 	// Count, when true on an objects query, returns a single-value numeric
@@ -199,6 +204,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 			Filters:    qm.Filters,
 			Fields:     fields,
 			KeyFields:  joinKeySources(qm.JoinKeys),
+			Ordering:   queryOrdering(qm.Ordering, fromAlert),
 			Limit:      qm.Limit,
 		})
 		if err != nil {
@@ -245,6 +251,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 		// fetches only the selected fields would otherwise never have fetched.
 		// See joinKeySources.
 		KeyFields: joinKeySources(qm.JoinKeys),
+		Ordering:  queryOrdering(qm.Ordering, fromAlert),
 		Limit:     qm.Limit,
 		// A DASHBOARD table is the one thing that can present a result with no
 		// match count: a missing Total costs it the "showing 100 of N" notice and
@@ -320,6 +327,28 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 	return backend.DataResponse{Frames: data.Frames{frame}}
 }
 
+// queryOrdering returns the sort to push down for this call: the query's own
+// choice for a dashboard, and none at all for an alert evaluation.
+//
+// An alert rule cannot see row order — evaluation reduces the frame to one
+// instance per row — so the sort could only change a rule's answer by changing
+// WHICH rows come back, and that can only happen when the result is truncated,
+// which every alert path here already refuses outright (truncationError, with the
+// count it compares against guaranteed by AllowUncounted being false for an
+// alert). What the sort would change instead is the evaluation's cost: ordering
+// 6.8M devices by role measured 27.6s against 0.9s natural, once per evaluation,
+// forever.
+//
+// It mirrors AllowUncounted's polarity for the same reason. A future row-returning
+// branch that forgets this helper sends the sort, which costs speed; one that
+// forgot to drop it in the other direction would have cost an alert its answer.
+func queryOrdering(ordering string, fromAlert bool) string {
+	if fromAlert {
+		return ""
+	}
+	return ordering
+}
+
 // splitList parses a free-form list separated by commas, whitespace or newlines.
 func splitList(s string) []string {
 	fields := strings.FieldsFunc(s, func(r rune) bool {
@@ -392,6 +421,25 @@ func upstreamDetail(err error) string {
 // raw NetBox API errors (500/405/etc.) and exception bodies aren't surfaced to
 // the user. The raw error is logged separately (sanitized) for operators.
 func queryErrorMessage(err error) string {
+	// An object type NetBox does not know is the USER's input, not an upstream
+	// failure, and it is the one error here the reader can actually act on. It is
+	// matched first, and by type, for the same reason *netbox.APIError is: an
+	// unclassified error falls through to the transport message below, which
+	// reported a typo in the annotation editor as "Couldn't reach NetBox: unknown
+	// NetBox object type …" — an accusation against the network for a misspelled
+	// field.
+	var unknownType *netbox.UnknownObjectTypeError
+	if errors.As(err, &unknownType) {
+		// Bounded like every other echoed string here: the type is free text from
+		// the annotation editor and lands in the same toast (see maxUpstreamDetail).
+		name := unknownType.Type
+		if len(name) > maxUpstreamDetail {
+			name = name[:maxUpstreamDetail] + "…"
+		}
+		return fmt.Sprintf("NetBox has no object type %q — it isn't one of the %d types this instance reports. Annotations filter by app_label.model, singular (e.g. dcim.device, ipam.ipaddress).",
+			name, unknownType.Known)
+	}
+
 	var apiErr *netbox.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.Status {
@@ -427,5 +475,18 @@ func queryErrorMessage(err error) string {
 // response carrying only the user-facing mapped message.
 func queryErrorResponse(err error) backend.DataResponse {
 	log.DefaultLogger.Warn("netbox query error", "detail", sanitizeLog(err.Error()))
-	return backend.ErrDataResponse(backend.StatusInternal, queryErrorMessage(err))
+	return backend.ErrDataResponse(queryErrorStatus(err), queryErrorMessage(err))
+}
+
+// queryErrorStatus says whose fault the failure is. Everything upstream —
+// a NetBox 500, an unreachable host — stays StatusInternal, which is the honest
+// "our side broke, try again". A query that could never have worked as written
+// is a bad request, and saying otherwise tells the reader to retry something
+// only they can fix.
+func queryErrorStatus(err error) backend.Status {
+	var unknownType *netbox.UnknownObjectTypeError
+	if errors.As(err, &unknownType) {
+		return backend.StatusBadRequest
+	}
+	return backend.StatusInternal
 }

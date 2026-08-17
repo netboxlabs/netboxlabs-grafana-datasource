@@ -582,6 +582,161 @@ func TestFetchableFields(t *testing.T) {
 	}
 }
 
+// flattenProbe is one input shape, the object key it arrives under, and the
+// column names it may legitimately emit UNSUFFIXED.
+//
+// key is per-probe because flattenField branches on the KEY as well as the
+// value: the custom_fields hoist is reachable under that one name and no other.
+// A probe set with a single hardcoded key can never enter it, so the branch
+// whose cf_ mechanism the failure message below cites as the thing this test
+// detects was precisely the branch this test could not see.
+//
+// bases defaults to {key}. custom_fields overrides it because the hoist renames
+// its columns wholesale — `custom_fields` emits `cf_<name>`, never
+// `custom_fields<suffix>` — and that rename is the second naming mechanism both
+// readers of derivedSuffixes special-case by hand.
+type flattenProbe struct {
+	key   string
+	value interface{}
+	bases []string
+}
+
+func (p flattenProbe) columnBases() []string {
+	if len(p.bases) > 0 {
+		return p.bases
+	}
+	return []string{p.key}
+}
+
+// TestDerivedSuffixesMatchFlattenField pins derivedSuffixes to the set of
+// suffixes the flattener actually appends.
+//
+// Nothing else in this package can catch a suffix being ADDED. Both readers of
+// the list — appendUpstreamNames here and dimIndex.resolve in dimension.go — are
+// covered only through their own call sites, which name the four suffixes that
+// exist today; teaching the flattener a fifth leaves every one of those tests
+// green while the new column is fetched under a name NetBox was never asked for
+// and resolved to no property at all. Deduplicating the list removed one of the
+// two ways to drift, not this one.
+//
+// What a missed suffix costs is silence, not an error. Verified on the bundled
+// demo (NetBox 4.4.10): dcim/devices/?limit=1&fields=site_url answers HTTP 200
+// with "results":[{}] — the name it does not know is dropped, and the column is
+// empty on every row with nothing anywhere to say why.
+//
+// Each probe is driven down BOTH paths that can name a column:
+//
+//   - flattenObject, which every result column in this provider comes out of,
+//     and whose own key loop can derive a column without flattenField ever
+//     seeing it. Probing flattenField alone left that loop unwatched: a
+//     `<key>_url` hoist added there kept this test green while projectionValue
+//     sent NetBox the derived name and NetBox answered with empty objects.
+//   - flattenField, which dimension.go's flattenValues calls directly, and which
+//     alone can reach the default branch — JSON decoding yields only the shapes
+//     the cases above it match, so flattenObject can never get there.
+//
+// ADD A PROBE when you add a branch: a suffix this input set never provokes is a
+// suffix this test cannot see. That includes a branch selected by the KEY rather
+// than by the value — which is what flattenProbe.key exists for.
+func TestDerivedSuffixesMatchFlattenField(t *testing.T) {
+	probes := []flattenProbe{
+		// Scalars and null pass through under the bare key: no suffix.
+		{key: "probe", value: nil},
+		{key: "probe", value: true},
+		{key: "probe", value: 4.2},
+		{key: "probe", value: "text"},
+		// A nested object reference. Carries every well-known subkey at once so a
+		// new branch reading any of them fires here rather than going unseen.
+		{key: "probe", value: map[string]interface{}{
+			"id": 1.0, "url": "http://nb/api/dcim/sites/1/", "display": "dc1 (DC1)",
+			"name": "dc1", "slug": "dc1", "description": "site", "label": "DC1",
+			"value": "dc1", "address": "10.0.0.0/24", "prefix": "10.0.0.0/24",
+			"cid": "C-1", "model": "M-1", "rgb": "ff0000", "depth": 2.0,
+		}},
+		// A choice object: no "id", so the raw value comes out beside the label.
+		// It needs its own probe because flattenField's id/value branches are
+		// exclusive — one object can never show both.
+		{key: "probe", value: map[string]interface{}{"value": "active", "label": "Active"}},
+		// A choice that also carries a slug: two derived columns from one object.
+		{key: "probe", value: map[string]interface{}{"value": "active", "label": "Active", "slug": "active"}},
+		// An object with none of the recognised subkeys.
+		{key: "probe", value: map[string]interface{}{"other": "x"}},
+		// Lists: of objects, of scalars, and the empty case, which takes a
+		// separate branch and still owes a count.
+		{key: "probe", value: []interface{}{map[string]interface{}{"id": 9.0, "name": "edge", "slug": "edge"}}},
+		{key: "probe", value: []interface{}{"a", "b"}},
+		{key: "probe", value: []interface{}{}},
+		// The default branch: a Go shape flattenField json-encodes whole.
+		{key: "probe", value: int(42)},
+		// The custom_fields hoist. The key is spelled out rather than taken from
+		// customFieldsKey so that this probe still enters the branch flatten.go
+		// actually guards, and the values cover both a plain custom field and an
+		// object one, whose nested flattenField call derives further columns
+		// under the hoisted name.
+		{key: "custom_fields", bases: []string{"cf_owner", "cf_ticket"}, value: map[string]interface{}{
+			"owner":  "neteng",
+			"ticket": map[string]interface{}{"id": 4.0, "name": "T-1", "slug": "t-1"},
+		}},
+	}
+
+	got := map[string]bool{}
+	// record classifies one emitted column: a base name, a base plus a derived
+	// suffix, or a naming mechanism nothing downstream knows how to undo.
+	record := func(via string, p flattenProbe, name string) {
+		t.Helper()
+		// The LONGEST matching base, not the first. Two bases sharing a prefix
+		// would otherwise be read against the wrong one: with bases `cf_owner`
+		// and `cf_owner_kind`, first-match-wins reads the column `cf_owner_kind`
+		// as `cf_owner` plus a suffix and records `_kind` — a suffix nothing
+		// appends, reported by the one test whose job is to notice new suffixes
+		// (verified: that probe pair fails the test under first-match and passes
+		// under longest). No probe has such a pair today; having the rule be
+		// unambiguous is what makes adding one safe.
+		base, matched := "", false
+		for _, b := range p.columnBases() {
+			if strings.HasPrefix(name, b) && (!matched || len(b) > len(base)) {
+				base, matched = b, true
+			}
+		}
+		if !matched {
+			t.Fatalf("%s(%q, %#v) emitted column %q, which is none of %v nor one of those plus a suffix — "+
+				"a new naming mechanism needs handling in appendUpstreamNames and dimIndex.resolve, not just here",
+				via, p.key, p.value, name, p.columnBases())
+		}
+		if suffix := strings.TrimPrefix(name, base); suffix != "" {
+			got[suffix] = true
+		}
+	}
+
+	for _, p := range probes {
+		raw, err := json.Marshal(map[string]interface{}{p.key: p.value})
+		if err != nil {
+			t.Fatalf("marshal probe %#v: %v", p.value, err)
+		}
+		cols, _, err := flattenObject(raw)
+		if err != nil {
+			t.Fatalf("flattenObject(%s): %v", raw, err)
+		}
+		for _, name := range cols {
+			record("flattenObject", p, name)
+		}
+		flattenField(p.key, p.value, func(name string, _ interface{}) {
+			record("flattenField", p, name)
+		})
+	}
+
+	want := append([]string(nil), derivedSuffixes...)
+	sort.Strings(want)
+	if have := sortedKeysOf(got); !reflect.DeepEqual(have, want) {
+		t.Errorf("the flattener appends %v, derivedSuffixes is %v.\n"+
+			"A suffix the flattener appends and this list omits: the projection asks NetBox for the derived name "+
+			"(which it silently ignores) instead of the property it came from, and dimIndex.resolve cannot map the "+
+			"column to a property, so it is neither filterable nor fetched. A suffix listed and never appended: "+
+			"appendUpstreamNames strips it off a real property name and requests something that does not exist.",
+			have, want)
+	}
+}
+
 func TestProjectionValue(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -715,6 +870,110 @@ func TestQueryRefetchesWhenProjectionIsRejected(t *testing.T) {
 	}
 }
 
+// filterRejectingNetBox answers 400 to any request carrying a FILTER it refuses,
+// projected or not, and names that filter in the body — django-filter's
+// validation error, rendered by DRF as {"<param>": ["<why>"]}.
+//
+// Measured on the bundled demo (NetBox 4.4.10), both spellings of the same query:
+//
+//	dcim/interfaces/?fields=id,name&speed__empty=true -> 400 {"speed__empty":["Enter a whole number."]}
+//	dcim/interfaces/?speed__empty=true               -> 400 {"speed__empty":["Enter a whole number."]}
+//
+// The projection is not what NetBox is refusing, so dropping it cannot help: the
+// second line IS the fallback's request, and it fails identically.
+type filterRejectingNetBox struct {
+	poison  string // the request parameter NetBox refuses
+	spy     *listSpy
+	objects []map[string]interface{}
+}
+
+func (f *filterRejectingNetBox) start(t *testing.T) *Provider {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/dcim/sites/", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if f.spy != nil {
+			rec := url.Values{}
+			for k, v := range q {
+				rec[k] = v
+			}
+			rec.Set("__path", "dcim/sites")
+			f.spy.record(rec)
+		}
+		if q.Has(f.poison) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"` + f.poison + `":["Enter a whole number."]}`))
+			return
+		}
+		results := make([]map[string]interface{}, 0, len(f.objects))
+		for _, o := range f.objects {
+			results = append(results, applyNetBoxFields(o, q.Get("fields")))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"count": len(f.objects), "next": nil, "results": results,
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return New(srv.URL, "token", &http.Client{Timeout: 5 * time.Second})
+}
+
+// A 400 the FILTERS caused must not be blamed on the projection. The fallback
+// would re-ask the same rejected filter, unprojected and at up to MaxLimit whole
+// objects, and get the same 400 back — a doubled round trip that cannot succeed.
+func TestQueryDoesNotRefetchWhenAFilterCausedThe400(t *testing.T) {
+	spy := &listSpy{}
+	p := (&filterRejectingNetBox{poison: "speed__empty", spy: spy, objects: siteFixtures()}).start(t)
+
+	_, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/sites",
+		Fields:     []string{"name", "id"},
+		Filters:    []provider.Filter{{Field: "speed", Operator: "empty"}},
+	})
+	if err == nil {
+		t.Fatal("query succeeded, want the upstream 400 to surface")
+	}
+	// The error must still carry what NetBox actually objected to, since that is
+	// the only thing that tells the user which filter to fix.
+	if !strings.Contains(err.Error(), "speed__empty") {
+		t.Errorf("error = %v, want it to name the filter NetBox refused", err)
+	}
+	if n := spy.topLevelLists("dcim/sites"); n != 1 {
+		t.Fatalf("requests = %d, want 1 — the refetch cannot fix a rejected filter", n)
+	}
+}
+
+// A NetBox model may have a filter literally named `fields`, and Query yields the
+// parameter to it (the user's filter is the answer they asked for; the projection
+// is only an optimisation). If that query then fails, the fallback must not fire:
+// there is no projection to drop, and deleting the parameter would delete the
+// USER'S FILTER and quietly answer a wider question than the one asked.
+func TestQueryDoesNotDropACallersOwnFieldsFilter(t *testing.T) {
+	spy := &listSpy{}
+	p := (&filterRejectingNetBox{poison: "fields", spy: spy, objects: siteFixtures()}).start(t)
+
+	_, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/sites",
+		Fields:     []string{"name", "id"},
+		Filters:    []provider.Filter{{Field: "fields", Value: "7"}},
+	})
+	if err == nil {
+		t.Fatal("query succeeded, want the upstream 400 to surface — a refetch here answers a question nobody asked")
+	}
+	if n := spy.topLevelLists("dcim/sites"); n != 1 {
+		t.Fatalf("requests = %d, want 1", n)
+	}
+	spy.mu.Lock()
+	defer spy.mu.Unlock()
+	for _, q := range spy.queries {
+		if q.Get("fields") != "7" {
+			t.Fatalf("request carried fields=%q, want the caller's own filter value", q.Get("fields"))
+		}
+	}
+}
+
 // The retry is for a request NetBox REFUSED, not for one it never answered: a
 // transport failure has nothing to do with the projection, and repeating it
 // costs another full timeout on a query that is already slow.
@@ -739,10 +998,78 @@ func TestProjectionRejected(t *testing.T) {
 		{"a decode failure is not an answer either", errors.New("decode"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := projectionRejected(tc.err); got != tc.want {
+			// A projected query that also carries a filter, so "the request had
+			// filters" cannot by itself be what suppresses the fallback: only a
+			// BODY naming one of them may.
+			sent := url.Values{"fields": {"name,status"}, "status": {"active"}}
+			if got := projectionRejected(tc.err, sent); got != tc.want {
 				t.Errorf("projectionRejected(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// A 400 says the request was refused; it does not say WHICH parameter was
+// refused. Reading it as "the projection was refused" made every rejected filter
+// cost a second, unprojected fetch of up to MaxLimit whole objects that carried
+// the same bad filter and failed the same way.
+//
+// The discriminator is the body, which django-filter/DRF key by the offending
+// parameter — verified live on NetBox 4.4.10, see blamesAnotherParam. It has to
+// stay biased towards firing: a body it cannot read must degrade to the old
+// behaviour, because the fallback is what keeps an over-projected query
+// answerable at all.
+func TestProjectionRejected_400IsAttributedFromTheBody(t *testing.T) {
+	projected := url.Values{"fields": {"name,speed"}, "exclude": {"config_context"}, "speed__empty": {"true"}}
+	for _, tc := range []struct {
+		name string
+		body string
+		sent url.Values
+		want bool
+	}{
+		// Fires — the projection is, or may be, the thing NetBox refused.
+		{"no body at all says nothing about the cause", "", projected, true},
+		{"a body that is not JSON says nothing either", "<html>400 Bad Request</html>", projected, true},
+		{"a shape we have not seen keeps the fallback", `{"detail":"Malformed request."}`, projected, true},
+		{"a body naming fields IS the projection", `{"fields":["Unknown field 'prefix_count'."]}`, projected, true},
+		{"so is one naming the exclusion that rides with it", `{"exclude":["Unknown field."]}`, projected, true},
+		{"a parameter we never sent is not our filter", `{"speed__empty":["Enter a whole number."]}`,
+			url.Values{"fields": {"name,speed"}}, true},
+
+		// Does not fire — NetBox already named a parameter that is not the
+		// projection, and the refetch would carry it unchanged.
+		{"the demonstrated case: a rejected filter", `{"speed__empty":["Enter a whole number."]}`, projected, false},
+		{"an invalid choice", `{"status":["Select a valid choice. nosuch is not one of the available choices."]}`,
+			url.Values{"fields": {"name"}, "status": {"nosuch"}}, false},
+		{"several bad filters at once",
+			`{"id":["Enter a whole number."],"status":["Select a valid choice."],"created__gte":["Enter a valid date/time."]}`,
+			url.Values{"fields": {"name"}, "id": {"abc"}, "status": {"nosuch"}, "created__gte": {"notadate"}}, false},
+		// Both blamed: the refetch still carries the filter, so it still 400s.
+		// Surfacing NetBox's answer, which names both, beats spending a request
+		// to rediscover half of it.
+		{"a filter blamed alongside the projection", `{"fields":["Unknown field."],"speed__empty":["Enter a whole number."]}`,
+			projected, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := fmt.Errorf("wrapped: %w", &APIError{Status: http.StatusBadRequest, URL: "http://x/api/dcim/sites/", Body: tc.body})
+			if got := projectionRejected(err, tc.sent); got != tc.want {
+				t.Errorf("projectionRejected(400, %q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+
+	// The 500 this fallback was BUILT for is not body-gated. NetBox renders it
+	// through Django's handler, not django-filter's, so it has no per-parameter
+	// key to read — and a 500 arriving with one must not disarm the one failure
+	// mode #110 actually observed.
+	for _, body := range []string{
+		`{"error": "Cannot find 'prefix' on Site object, 'prefix' is an invalid parameter to prefetch_related()"}`,
+		`{"speed__empty":["Enter a whole number."]}`,
+	} {
+		err := &APIError{Status: http.StatusInternalServerError, Body: body}
+		if !projectionRejected(err, projected) {
+			t.Errorf("a 500 with body %q did not trigger the fallback; the prefetch_related case must always fire", body)
+		}
 	}
 }
 
@@ -767,15 +1094,275 @@ func TestProjectionRejected_OnlyForStatusesAProjectionCanCause(t *testing.T) {
 		{http.StatusServiceUnavailable, false, "transient; getListPageRetry already owns it"},
 		{http.StatusGatewayTimeout, false, "transient; getListPageRetry already owns it"},
 	}
+	sent := url.Values{"fields": {"name,site"}, "status": {"active"}}
 	for _, tc := range cases {
 		t.Run(http.StatusText(tc.status), func(t *testing.T) {
 			err := fmt.Errorf("wrapped: %w", &APIError{Status: tc.status, URL: "http://x/api/dcim/devices/"})
-			if got := projectionRejected(err); got != tc.want {
+			if got := projectionRejected(err, sent); got != tc.want {
 				t.Errorf("projectionRejected(%d) = %v, want %v — %s", tc.status, got, tc.want, tc.why)
 			}
 		})
 	}
-	if projectionRejected(errors.New("not an API error")) {
+	if projectionRejected(errors.New("not an API error"), sent) {
 		t.Error("a transport failure is not a projection rejection")
+	}
+}
+
+// netboxFilterError400 is a REAL NetBox 400 body, copied byte for byte from the
+// bundled demo (4.4.10):
+//
+//	dcim/devices/?fields=id,name&status=nosuch&airflow=sideways&face=diagonal
+//	             &created__gte=notadate&id=abc  ->  400, 319 bytes
+//
+// It is here as a fixture because its LENGTH is the point. A synthetic body of
+// one short error passes every assertion below while the bug it guards is still
+// live: an invalid-choice error alone is 81 bytes, so a panel whose filter row
+// has a few stale values overruns snippet()'s 300-character cap easily — and a
+// truncated body is exactly the body this attribution has to read.
+const netboxFilterError400 = `{"id":["Enter a whole number."],"face":["Select a valid choice. diagonal is not one of the available choices."],"airflow":["Select a valid choice. sideways is not one of the available choices."],"status":["Select a valid choice. nosuch is not one of the available choices."],"created__gte":["Enter a valid date/time."]}`
+
+// The body that reaches projectionRejected is APIError.Body, which snippet()
+// has already cut to 300 characters for the log line. Attribution must survive
+// that cut: a whole-body json.Unmarshal does not, and its failure degrades to
+// "the projection was rejected" — so the misattributed second fetch of up to
+// MaxLimit whole objects came back for precisely the bodies that named enough
+// parameters to be worth reading.
+func TestProjectionRejected_400AttributedThroughTheSnippetCap(t *testing.T) {
+	body := snippet([]byte(netboxFilterError400))
+	if !strings.HasSuffix(body, "…") {
+		t.Fatalf("fixture no longer exceeds snippet()'s cap (%d bytes); this test would pass without testing anything", len(netboxFilterError400))
+	}
+	// Everything the panel actually sent: the projection, its config-context
+	// exclusion, and the five filters NetBox came back objecting to.
+	sent := url.Values{
+		"fields": {"id,name"}, "exclude": {"config_context"},
+		"id": {"abc"}, "face": {"diagonal"}, "airflow": {"sideways"},
+		"status": {"nosuch"}, "created__gte": {"notadate"},
+		"limit": {"1000"},
+	}
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"whole", netboxFilterError400},
+		{"cut by the log cap", body},
+		{"cut mid-key", netboxFilterError400[:130]},
+		{"cut mid-value", netboxFilterError400[:60]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := fmt.Errorf("wrapped: %w", &APIError{Status: http.StatusBadRequest, URL: "http://x/api/dcim/devices/", Body: tc.body})
+			if projectionRejected(err, sent) {
+				t.Errorf("projectionRejected(400, %q) = true; NetBox named five filters of ours, and the refetch carries every one of them unchanged", tc.body)
+			}
+		})
+	}
+
+	// The other direction still holds through the same parser: a prefix that
+	// spells out no key we sent leaves the fallback armed.
+	for _, body := range []string{
+		"",
+		"<html>400 Bad Request</html>",
+		`{"detail":"Malformed request."}`,
+		`{"fields":["Unknown field 'prefix_count'."]}`,
+		`{"created__gte":["Enter a valid`, // truncated, and not a parameter we sent
+	} {
+		err := &APIError{Status: http.StatusBadRequest, Body: body}
+		if !projectionRejected(err, url.Values{"fields": {"id,name"}, "exclude": {"config_context"}}) {
+			t.Errorf("body %q disarmed the fallback; only a parameter WE SENT may do that", body)
+		}
+	}
+}
+
+// scriptedReply is one canned answer from scriptedNetBox. A zero status means
+// "serve the fixtures", honouring ?fields= as a 4.x NetBox does.
+type scriptedReply struct {
+	status int
+	body   string
+}
+
+// scriptedNetBox answers dcim/sites from a script: request i gets reply i, and
+// the last reply repeats. It exists for the failures that depend on WHEN they
+// happen — a blip that clears on the second request, and a refusal that repeats.
+type scriptedNetBox struct {
+	spy     *listSpy
+	replies []scriptedReply
+	objects []map[string]interface{}
+
+	mu sync.Mutex
+	n  int
+}
+
+func (f *scriptedNetBox) start(t *testing.T) *Provider {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/dcim/sites/", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if f.spy != nil {
+			rec := url.Values{}
+			for k, v := range q {
+				rec[k] = v
+			}
+			rec.Set("__path", "dcim/sites")
+			f.spy.record(rec)
+		}
+		f.mu.Lock()
+		reply := f.replies[min(f.n, len(f.replies)-1)]
+		f.n++
+		f.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if reply.status != 0 {
+			w.WriteHeader(reply.status)
+			_, _ = w.Write([]byte(reply.body))
+			return
+		}
+		results := make([]map[string]interface{}, 0, len(f.objects))
+		for _, o := range f.objects {
+			results = append(results, applyNetBoxFields(o, q.Get("fields")))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"count": len(f.objects), "next": nil, "results": results,
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return New(srv.URL, "token", &http.Client{Timeout: 5 * time.Second})
+}
+
+// The same query, end to end, with the 400 body NetBox really sends. The unit
+// test above proves the attribution; this proves the request count the user
+// pays, which is what the truncation was costing: a second UNPROJECTED fetch of
+// up to MaxLimit whole objects, carrying the same rejected filters, for the same
+// 400.
+func TestQueryDoesNotRefetchWhenALongFilterErrorWasTruncated(t *testing.T) {
+	spy := &listSpy{}
+	p := (&scriptedNetBox{spy: spy, objects: siteFixtures(), replies: []scriptedReply{
+		{status: http.StatusBadRequest, body: netboxFilterError400},
+	}}).start(t)
+
+	_, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/sites",
+		Fields:     []string{"name", "id"},
+		Filters: []provider.Filter{
+			{Field: "id", Value: "abc"},
+			{Field: "face", Value: "diagonal"},
+			{Field: "airflow", Value: "sideways"},
+			{Field: "status", Value: "nosuch"},
+			{Field: "created", Operator: "gte", Value: "notadate"},
+		},
+	})
+	if err == nil {
+		t.Fatal("query succeeded, want the upstream 400 to surface")
+	}
+	if n := spy.topLevelLists("dcim/sites"); n != 1 {
+		t.Fatalf("requests = %d, want 1 — the refetch carries the same rejected filters and gets the same 400", n)
+	}
+}
+
+// One repeat rescues a transient 500, and WHICH COLUMNS a panel selects must not
+// decide whether it gets one. getListPageRetry does not cover 500 (it owns
+// 502/503/504 and transport failures), so this call site is the only place a 500
+// is ever tried twice — and before the projection precondition existed, the
+// all-columns query got that repeat for free, because "refetch without the
+// projection" was the identical request when there was no projection.
+func TestQueryRetriesATransient500(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields []string
+	}{
+		{"all columns — nothing to drop, so the repeat is the identical request", nil},
+		{"a column selection — the same repeat, minus the projection", []string{"name", "id"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &listSpy{}
+			p := (&scriptedNetBox{spy: spy, objects: siteFixtures(), replies: []scriptedReply{
+				{status: http.StatusInternalServerError, body: `{"error":"Internal Server Error"}`},
+				{}, // the blip has passed
+			}}).start(t)
+
+			res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/sites", Fields: tc.fields})
+			if err != nil {
+				t.Fatalf("query: %v — one 500 must not be the end of a query the retry would have rescued", err)
+			}
+			if len(res.Rows) != 2 {
+				t.Fatalf("rows = %v, want the two sites", res.Rows)
+			}
+			if n := spy.topLevelLists("dcim/sites"); n != 2 {
+				t.Fatalf("requests = %d, want 2 (the 500, then the repeat)", n)
+			}
+		})
+	}
+}
+
+// A NetBox model may have a filter named `exclude`, exactly as one may have a
+// filter named `fields`: setExcludeConfigContext already yields the parameter to
+// it, and Query yields `fields` to its own. The fallback has to yield the same
+// way — it may only delete what IT added. Deleting the caller's filter turns a
+// rescued query into a wider answer than the user asked for, silently.
+func TestQueryKeepsACallersOwnExcludeFilterAcrossTheRefetch(t *testing.T) {
+	spy := &listSpy{}
+	p := (&rejectingNetBox{poison: "prefix", spy: spy, objects: siteFixtures()}).start(t)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/sites",
+		Fields:     []string{"name", "prefix_count"},
+		Filters:    []provider.Filter{{Field: "exclude", Value: "7"}},
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("rows = %v, want the two sites", res.Rows)
+	}
+	if n := spy.topLevelLists("dcim/sites"); n != 2 {
+		t.Fatalf("requests = %d, want 2 (rejected projection, then the refetch)", n)
+	}
+	spy.mu.Lock()
+	last := spy.queries[len(spy.queries)-1]
+	spy.mu.Unlock()
+	if last.Has("fields") {
+		t.Errorf("refetch still carried fields=%q", last.Get("fields"))
+	}
+	if last.Get("exclude") != "7" {
+		t.Errorf("refetch carried exclude=%q, want the caller's own filter value — the fallback deleted a filter it never set", last.Get("exclude"))
+	}
+}
+
+// The OTHER refetch — the one for a projection NetBox answered 200 to and
+// ignored — deletes the same parameter for the same reason, and must yield it to
+// a caller's own filter the same way. It is worse here than above, because this
+// refetch SUCCEEDS: the panel fills with rows for a question nobody asked, and
+// nothing in the result says the filter went missing.
+//
+// The shape is the live one this branch exists for (see Query): a hand-rolled
+// serializer that ignores ?fields= and carries none of the requested properties.
+func TestQueryKeepsACallersOwnExcludeFilterWhenTheProjectionWasIgnored(t *testing.T) {
+	spy := &listSpy{}
+	// Neither object has `name` or `id`, so the projected response flattens to no
+	// requested column at all and the safety net fires.
+	p := (&scriptedNetBox{spy: spy, replies: []scriptedReply{{}}, objects: []map[string]interface{}{
+		{"queue": "default", "jobs": 3.0},
+		{"queue": "high", "jobs": 1.0},
+	}}).start(t)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/sites",
+		Fields:     []string{"name", "id"},
+		Filters:    []provider.Filter{{Field: "exclude", Value: "7"}},
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if n := spy.topLevelLists("dcim/sites"); n != 2 {
+		t.Fatalf("requests = %d, want 2 (ignored projection, then the refetch)", n)
+	}
+	spy.mu.Lock()
+	last := spy.queries[len(spy.queries)-1]
+	spy.mu.Unlock()
+	if last.Get("exclude") != "7" {
+		t.Errorf("refetch carried exclude=%q, want the caller's own filter value", last.Get("exclude"))
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("rows = %v, want the two objects the refetch returned", res.Rows)
 	}
 }

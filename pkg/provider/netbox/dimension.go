@@ -98,18 +98,42 @@ type dimDoc struct {
 	} `json:"components"`
 }
 
-// dimProp is one property of a component schema. `enum` members are decoded as
-// interface{} (not string): NetBox declares some choice values as integers, and
-// a []string target would fail the whole document.
+// dimProp is one property of a component schema — the unit this file classifies,
+// and the unit a decode failure has to be confined to.
+//
+// It decodes LENIENTLY, for the reason openAPIParam (schema.go) does and at the
+// same granularity: this is the SECOND independent decode of the same ~10 MB
+// /api/schema/ document, and with a strict decoder ONE property anywhere in it
+// whose shape we did not anticipate fails the entire json.Unmarshal.
+// parseDimensions then returns an error, the index is nil, and every column of
+// every object type loses its dimension — FieldValues reverts to sampling the
+// fact table, which is the arbitrary answer this file exists to avoid. One odd
+// property must cost only itself.
+//
+// Shapes to survive: an OpenAPI 3.1 union type (`"type": ["string","null"]`, how
+// 3.1 spells the `"nullable": true` of 3.0 — a 3.1 document would carry
+// thousands of them), and any raw JSON Schema a plugin injects, including `true`
+// in place of a property schema. Nothing here fires against the demo (NetBox
+// 4.4.10, openapi 3.0.3): parsing its document before and after this change
+// yields an identical index.
+//
+// `enum` members are decoded as interface{} (not string) for the same
+// all-or-nothing reason at smaller scale: NetBox declares some choice values as
+// integers, and a []string target would have failed the whole document.
+//
+// The property's declared `type` is deliberately NOT a field here. Nothing in
+// this file reads it — the walk goes by $ref, allOf and enum — and a field
+// nobody reads is decode hazard for nothing, which is precisely where the 3.1
+// union type lands. encoding/json skips keys the target does not declare, so
+// not declaring it is the strongest form of tolerating it.
 type dimProp struct {
-	Ref   string `json:"$ref"`
+	Ref   string
 	AllOf []struct {
 		Ref string `json:"$ref"`
-	} `json:"allOf"`
-	Type  string `json:"type"`
+	}
 	Items struct {
 		Ref string `json:"$ref"`
-	} `json:"items"`
+	}
 	Properties struct {
 		Value struct {
 			Enum []interface{} `json:"enum"`
@@ -117,7 +141,37 @@ type dimProp struct {
 		Label struct {
 			Enum []interface{} `json:"enum"`
 		} `json:"label"`
-	} `json:"properties"`
+	}
+}
+
+// UnmarshalJSON decodes a property without ever failing the document; see
+// dimProp. Each field is read on its own, so an unreadable one costs that field
+// alone, and a property that is not an object at all degrades to the zero
+// dimProp — which classify reports as dimNone, keeping the property in the index
+// under its own name. That distinction matters: dimIndex is also the authority
+// on which `?fields=` names are valid, so a property DROPPED from it is a column
+// the projection declines to ask NetBox for.
+func (p *dimProp) UnmarshalJSON(b []byte) error {
+	*p = dimProp{}
+	// Every field stays raw until it has been read on its own terms.
+	var raw struct {
+		Ref        json.RawMessage `json:"$ref"`
+		AllOf      json.RawMessage `json:"allOf"`
+		Items      json.RawMessage `json:"items"`
+		Properties json.RawMessage `json:"properties"`
+	}
+	if json.Unmarshal(b, &raw) != nil {
+		return nil
+	}
+	// The errors are dropped one field at a time. A field encoding/json could
+	// only partly read keeps whatever decoded, and classify judges that on its
+	// merits — a two-element allOf is not a single ref, an absent enum is not a
+	// choice — so a half-read property is classified, never trusted.
+	_ = json.Unmarshal(raw.Ref, &p.Ref)
+	_ = json.Unmarshal(raw.AllOf, &p.AllOf)
+	_ = json.Unmarshal(raw.Items, &p.Items)
+	_ = json.Unmarshal(raw.Properties, &p.Properties)
+	return nil
 }
 
 // ref returns the component schema this property points at, for a SINGLE-valued
@@ -141,7 +195,9 @@ func schemaName(ref string) string {
 	return ref
 }
 
-// parseDimensions builds the dimension index from a NetBox OpenAPI schema.
+// parseDimensions builds the dimension index from a NetBox OpenAPI schema. It
+// fails only when the document as a whole cannot be read: a property whose shape
+// we cannot decode degrades to dimNone rather than voiding the index (dimProp).
 func parseDimensions(schema []byte) (dimIndex, error) {
 	var doc dimDoc
 	if err := json.Unmarshal(schema, &doc); err != nil {
@@ -249,11 +305,6 @@ func classify(prop dimProp, ownerOf map[string]string) dimension {
 	return dimension{kind: dimChoice, choices: choices}
 }
 
-// columnSuffixes are the suffixes flattenObject appends when it expands a
-// nested object, a choice, or a list into extra columns. A column ending in one
-// of them derives from the property named by the remaining prefix.
-var columnSuffixes = []string{"_id", "_slug", "_value", "_count"}
-
 // resolve maps a FLATTENED COLUMN name back to the object-type property it came
 // from, and to that property's dimension.
 //
@@ -272,7 +323,10 @@ func (idx dimIndex) resolve(objectType, field string) (dim dimension, base strin
 	if d, ok := props[field]; ok {
 		return d, field, true
 	}
-	for _, suffix := range columnSuffixes {
+	// derivedSuffixes (projection.go) is deliberately the SAME list the
+	// projection strips to choose which property to fetch: what a column is
+	// fetched as and what it resolves to must be one decision, not two.
+	for _, suffix := range derivedSuffixes {
 		if !strings.HasSuffix(field, suffix) {
 			continue
 		}

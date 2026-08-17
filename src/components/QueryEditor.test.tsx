@@ -1,6 +1,7 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
-import { QueryEditor } from './QueryEditor';
+import { ORDERING_DISABLED_TOOLTIP, ORDERING_TOOLTIP, QueryEditor } from './QueryEditor';
+import { FAST_PAGING_TOOLTIP } from './ConfigEditor';
 import { IP_CONTEXT_FIELD_GROUPS, IP_CONTEXT_FIELD_OPTIONS, DEFAULT_IP_CONTEXT_FIELDS } from '../types';
 
 jest.mock('@grafana/runtime', () => ({
@@ -30,6 +31,9 @@ const datasource = {
     { name: 'status', operators: ['', 'ic', 'isw', 'n', 'empty'] },
   ]),
   getBranchingInstalled: jest.fn().mockResolvedValue(true),
+  // DataSourceWithBackend keeps the instance settings here (it assigns them in
+  // its constructor); the editor reads jsonData.fastPagingNoTotals from it.
+  datasourceInstanceSettings: { jsonData: {} },
 } as any;
 
 // The branching probe is cached per datasource INSTANCE (WeakMap); gating tests
@@ -384,5 +388,233 @@ describe('IP-enrichment join keys', () => {
     setup({ queryType: 'ip-enrichment', ips: '10.20.0.1' }, ds);
     await screen.findByText('Add join key');
     expect(ds.getFields).not.toHaveBeenCalled();
+  });
+});
+
+describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
+  // Opens a Select's menu and scopes the assertions to it. Unscoped queries
+  // would match the same names elsewhere on the form (filter pickers, the
+  // Return fields list) and pass without the menu offering anything.
+  async function openMenu(el: HTMLElement) {
+    fireEvent.focus(el);
+    fireEvent.keyDown(el, { key: 'ArrowDown', keyCode: 40, code: 'ArrowDown' });
+    return within(await screen.findByRole('listbox'));
+  }
+
+  it('offers only the fields NetBox is known to sort, not the object type’s columns', async () => {
+    // getFields answers with the object type's real columns, and dcim/sites'
+    // `device_count` is exactly the trap: NetBox sorts on it happily until a
+    // `?fields=` projection that omits it is present, and then it is a 500 —
+    // which of the two a query sends depends on the columns the panel selected,
+    // not on anything this picker can see. A picker built from the schema (or
+    // from a hand-extended list) hands the user that footgun.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-sites',
+      getFields: jest
+        .fn()
+        .mockResolvedValue([{ name: 'device_count' }, { name: 'name' }, { name: 'asn' }, { name: 'time_zone' }]),
+    } as any;
+    setup({ objectType: 'dcim/sites' }, ds);
+
+    const menu = await openMenu(await screen.findByLabelText('Sort by'));
+
+    for (const allowed of ['id', 'name', 'slug', 'region', 'facility']) {
+      expect(menu.getByText(allowed)).toBeInTheDocument();
+    }
+    for (const denied of ['device_count', 'asn', 'time_zone']) {
+      expect(menu.queryByText(denied)).not.toBeInTheDocument();
+    }
+  });
+
+  it('offers the list for the selected object type, not one fixed list', async () => {
+    const ds = { ...datasource, uid: 'ds-sort-prefixes' } as any;
+    setup({ objectType: 'ipam/prefixes' }, ds);
+
+    const menu = await openMenu(await screen.findByLabelText('Sort by'));
+
+    for (const allowed of ['prefix', 'vrf', 'tenant']) {
+      expect(menu.getByText(allowed)).toBeInTheDocument();
+    }
+    // dcim/devices' list, which a picker ignoring objectType would show here.
+    for (const otherType of ['name', 'role', 'device_type', 'last_updated']) {
+      expect(menu.queryByText(otherType)).not.toBeInTheDocument();
+    }
+  });
+
+  it('renders no sort control at all for an object type NetBox will not sort', async () => {
+    const ds = { ...datasource, uid: 'ds-sort-none' } as any;
+    setup({ objectType: 'plugins/bgp/bgp-sessions' }, ds);
+    await screen.findByText('Add filter'); // mount effects settled
+
+    expect(screen.queryByLabelText('Sort by')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('ordering-direction')).not.toBeInTheDocument();
+  });
+
+  it('stores the picked field bare — no ,id tiebreaker, no direction', async () => {
+    const { onChange, onRunQuery } = setup({}, { ...datasource, uid: 'ds-sort-pick' } as any);
+
+    const menu = await openMenu(await screen.findByLabelText('Sort by'));
+    fireEvent.click(menu.getByText('name'));
+
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ ordering: 'name' }));
+    expect(onRunQuery).toHaveBeenCalled();
+  });
+
+  it('asks for descending with a leading -', async () => {
+    const { onChange, onRunQuery } = setup({ ordering: 'last_updated' }, { ...datasource, uid: 'ds-sort-desc' } as any);
+
+    const menu = await openMenu(await screen.findByLabelText('ordering-direction'));
+    fireEvent.click(menu.getByText('descending'));
+
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ ordering: '-last_updated' }));
+    expect(onRunQuery).toHaveBeenCalled();
+  });
+
+  it('shows a stored descending sort as its field plus a direction', async () => {
+    setup({ ordering: '-last_updated' }, { ...datasource, uid: 'ds-sort-stored' } as any);
+
+    // Query only after the mount effects have settled: react-select replaces
+    // its rendered value node when options change mid-mount, so an element
+    // captured before that is detached by the time it is asserted on (the same
+    // hazard the filter-row test above documents).
+    await screen.findByLabelText('Sort by');
+    expect(screen.getByText('last_updated')).toBeInTheDocument();
+    expect(screen.getByText('descending')).toBeInTheDocument();
+  });
+
+  it('offers no direction until a field is chosen', async () => {
+    setup({}, { ...datasource, uid: 'ds-sort-nodir' } as any);
+    await screen.findByLabelText('Sort by');
+
+    expect(screen.queryByLabelText('ordering-direction')).not.toBeInTheDocument();
+  });
+
+  it('clears back to NetBox’s own order', async () => {
+    const { onChange } = setup({ ordering: 'name' }, { ...datasource, uid: 'ds-sort-clear' } as any);
+
+    // Backspace on an empty input, rather than the clear icon: the scaffolded
+    // react-inlinesvg mock (.config/jest/mocks) renders every Icon as a bare
+    // <svg data-testid>, dropping the role and aria-label the real one carries,
+    // so the icon is unreachable by role in jsdom. Backspace is the same
+    // clearing gesture and goes through the same isClearable path.
+    fireEvent.keyDown(await screen.findByLabelText('Sort by'), { key: 'Backspace', keyCode: 8, code: 'Backspace' });
+
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ ordering: undefined }));
+  });
+
+  it('drops a stale sort when the object type changes', async () => {
+    // `role` is sortable on devices and not on prefixes. Carrying it over would
+    // be dropped upstream, so the panel would silently show unsorted rows.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-switch',
+      getObjectTypes: jest.fn().mockResolvedValue([
+        { value: 'dcim/devices', label: 'Devices', app: 'dcim', model: 'devices' },
+        { value: 'ipam/prefixes', label: 'Prefixes', app: 'ipam', model: 'prefixes' },
+      ]),
+    } as any;
+    const { onChange } = setup({ ordering: 'role' }, ds);
+
+    const menu = await openMenu(await screen.findByLabelText('Object type'));
+    fireEvent.click(menu.getByText('Prefixes'));
+
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ objectType: 'ipam/prefixes', ordering: undefined })
+    );
+  });
+
+  it('hides the sort control for a count query — a single number has no order', async () => {
+    setup({ count: true }, { ...datasource, uid: 'ds-sort-count' } as any);
+    await screen.findByText('Add filter');
+
+    expect(screen.queryByLabelText('Sort by')).not.toBeInTheDocument();
+  });
+
+  it('hides the sort control for non-objects query types', async () => {
+    setup({ queryType: 'topology' }, { ...datasource, uid: 'ds-sort-topology' } as any);
+    await screen.findByText(/node graph/i);
+
+    expect(screen.queryByLabelText('Sort by')).not.toBeInTheDocument();
+  });
+
+  it('disables the sort control when the data source pages by cursor', async () => {
+    // NetBox 400s on ?ordering= together with ?start= ("Ordering cannot be
+    // specified in conjunction with cursor pagination"), so with fast paging on
+    // the sort can never reach NetBox. Offering it live would be a dead control.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-fastpaging',
+      datasourceInstanceSettings: { jsonData: { fastPagingNoTotals: true } },
+    } as any;
+    setup({ ordering: 'name' }, ds);
+
+    const picker = await screen.findByLabelText('Sort by');
+    await waitFor(() => expect(picker).toBeDisabled());
+    expect(await screen.findByLabelText('ordering-direction')).toBeDisabled();
+  });
+
+  it('keeps the sort control live for an alert-table query on a fast-paging data source', async () => {
+    // The disable above is about the CURSOR walk, and an alert-table query never
+    // takes it: pkg/plugin/query.go's alertTable branch leaves AllowUncounted
+    // false, so netbox.go's `p.cursorPaging && spec.AllowUncounted &&
+    // cursorLegal(q)` is false and ?ordering= is sent with no ?start= alongside
+    // it. Disabling here made the picker dead for a query NetBox does sort, and
+    // told the user the reason was a limit that does not apply to it.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-alerttable-fastpaging',
+      datasourceInstanceSettings: { jsonData: { fastPagingNoTotals: true } },
+    } as any;
+    setup({ ordering: 'name', alertTable: true }, ds);
+
+    // Assert the combination actually rendered before asserting on it. Both
+    // halves have to be real: the switch proves this is the alert-table shape,
+    // and the sibling test above proves the same jsonData disables the picker
+    // for every other shape — so `not.toBeDisabled()` here cannot pass by the
+    // fast-paging setting having quietly gone missing.
+    expect(await screen.findByRole('switch', { name: /Alert table/i })).toBeChecked();
+    expect(await screen.findByLabelText('Sort by')).not.toBeDisabled();
+    expect(await screen.findByLabelText('ordering-direction')).not.toBeDisabled();
+  });
+
+  it('keeps the sort control live when fast paging is off', async () => {
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-nofastpaging',
+      datasourceInstanceSettings: { jsonData: { fastPagingNoTotals: false } },
+    } as any;
+    setup({ ordering: 'name' }, ds);
+
+    expect(await screen.findByLabelText('Sort by')).not.toBeDisabled();
+  });
+
+  it('survives a datasource that exposes no instance settings', async () => {
+    const ds = { ...datasource, uid: 'ds-sort-nosettings', datasourceInstanceSettings: undefined } as any;
+    setup({}, ds);
+
+    expect(await screen.findByLabelText('Sort by')).not.toBeDisabled();
+  });
+
+  // Tooltip copy is asserted on the constant, not the DOM: Grafana mounts a
+  // tooltip's text only on hover, which jsdom does not reproduce, so a DOM test
+  // here would pass for the wrong reason (see ConfigEditor.test.tsx).
+  it('tells the user what a sort costs, briefly', () => {
+    expect(ORDERING_TOOLTIP).toMatch(/6\.8M/);
+    expect(ORDERING_TOOLTIP).toMatch(/27\.6s/);
+    // A paragraph in this editor breaks the layout; the (i) tooltip is the
+    // established vehicle and Fast paging's is the longest one worth having.
+    expect(ORDERING_TOOLTIP.length).toBeLessThan(FAST_PAGING_TOOLTIP.length);
+    // The disabled copy has to name the setting to change, since nothing else
+    // on this screen explains why the control is dead.
+    expect(ORDERING_DISABLED_TOOLTIP).toMatch(/fast paging/i);
+    expect(ORDERING_DISABLED_TOOLTIP).toMatch(/data source settings/i);
+    // ...and it has to blame THIS query, not the data source. The picker is live
+    // for an alert-table query on that same data source (test above), so copy
+    // saying the data source cannot sort is refuted one control away.
+    expect(ORDERING_DISABLED_TOOLTIP).toMatch(/this query/i);
+    expect(ORDERING_DISABLED_TOOLTIP).not.toMatch(/cannot sort a fast-paged query/i);
+    // Same layout budget as the tooltip above: a paragraph here breaks the row.
+    expect(ORDERING_DISABLED_TOOLTIP.length).toBeLessThan(FAST_PAGING_TOOLTIP.length);
   });
 });

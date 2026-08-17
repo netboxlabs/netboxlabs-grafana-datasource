@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -1040,24 +1038,10 @@ var tsQuoted = regexp.MustCompile(`'([a-z_0-9]+)'`)
 // belongs on whichever side can run it for free: reading a file from Jest needs
 // Node's fs typings, which this project's tsconfig does not include.
 func TestIPContextFieldsMatchFrontend(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "..", "src", "types.ts"))
-	if err != nil {
-		t.Fatalf("read src/types.ts: %v", err)
-	}
-
-	// Narrow to the declaration so unrelated string literals elsewhere in the
-	// file (filter operators, join transforms) cannot leak into the comparison.
-	const startMarker = "export const IP_CONTEXT_FIELD_GROUPS"
-	start := strings.Index(string(src), startMarker)
-	if start < 0 {
-		t.Fatalf("IP_CONTEXT_FIELD_GROUPS not found in src/types.ts — update this guard, do not delete it")
-	}
-	rest := string(src)[start:]
-	end := strings.Index(rest, "\n];")
-	if end < 0 {
-		t.Fatalf("could not find the end of IP_CONTEXT_FIELD_GROUPS — update this guard, do not delete it")
-	}
-	decl := rest[:end]
+	// Narrowed to the declaration (see tsDeclaration) so unrelated string
+	// literals elsewhere in the file — filter operators, join transforms —
+	// cannot leak into the comparison.
+	decl := tsDeclaration(t, "IP_CONTEXT_FIELD_GROUPS")
 
 	var tsCols []string
 	for _, m := range tsIdentityOption.FindAllStringSubmatch(decl, -1) {
@@ -1085,23 +1069,10 @@ func TestIPContextFieldsMatchFrontend(t *testing.T) {
 // TestIPContextDefaultsMatchFrontend pairs the two default selections. Drift
 // here means a brand-new query opens with a column nothing can fill.
 func TestIPContextDefaultsMatchFrontend(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "..", "src", "types.ts"))
-	if err != nil {
-		t.Fatalf("read src/types.ts: %v", err)
-	}
-	const startMarker = "export const DEFAULT_IP_CONTEXT_FIELDS"
-	start := strings.Index(string(src), startMarker)
-	if start < 0 {
-		t.Fatalf("DEFAULT_IP_CONTEXT_FIELDS not found in src/types.ts — update this guard, do not delete it")
-	}
-	rest := string(src)[start:]
-	end := strings.Index(rest, "\n];")
-	if end < 0 {
-		t.Fatalf("could not find the end of DEFAULT_IP_CONTEXT_FIELDS")
-	}
+	decl := tsDeclaration(t, "DEFAULT_IP_CONTEXT_FIELDS")
 
 	var tsDefaults []string
-	for _, q := range tsQuoted.FindAllStringSubmatch(rest[:end], -1) {
+	for _, q := range tsQuoted.FindAllStringSubmatch(decl, -1) {
 		tsDefaults = append(tsDefaults, q[1])
 	}
 	a, b := sorted(tsDefaults), sorted(defaultIPEnrichFields)

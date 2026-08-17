@@ -36,6 +36,17 @@ export interface NetBoxQuery extends DataQuery {
   filters?: FilterRow[];
   /** Optional subset (and order) of columns to return. */
   fields?: string[];
+  /** For objects queries: ask NetBox to sort before the row limit applies.
+   * A BARE field name ('name'), optionally prefixed '-' for descending
+   * ('-last_updated'). Empty/absent means NetBox's own natural order, which is
+   * what every query did before sorting existed.
+   *
+   * Deliberately not the wire value: the backend appends the ',id' tiebreaker
+   * and validates the field against its allow-list (pkg/provider/netbox/
+   * ordering.go), because an unknown field is not harmlessly ignored upstream —
+   * on some models it ends the query with a 500. Storing 'name,id' here would
+   * be sent as 'name,id,id'. */
+  ordering?: string;
   /** For objects queries: return a single numeric count of matching objects
    * instead of a table. Required to alert on object counts — Grafana alert
    * expressions evaluate a number, not a table. */
@@ -257,6 +268,110 @@ export const DEFAULT_IP_CONTEXT_FIELDS: string[] = [
   'device_site',
   'device_tenant',
 ];
+
+/**
+ * The fields the query editor will offer to sort an object type on, keyed by
+ * object type. A type absent from this map is not sortable and gets no sort
+ * control at all — which is most of them, including every plugin model.
+ *
+ * SOURCE OF TRUTH: `orderingFields` in pkg/provider/netbox/ordering.go. This is
+ * the same list in a second language and the two MUST be changed together: the
+ * backend refuses to send a field it does not recognise, so a name added only
+ * here is offered by the picker and silently dropped upstream, and a name added
+ * only there is unreachable. (This repo has already been bitten once by two
+ * copies of one list drifting — see IP_CONTEXT_FIELD_GROUPS above, which now has
+ * a Go-side guard reading this file.)
+ *
+ * It is duplicated rather than fetched because it is small, fixed, shipped data
+ * that the editor needs to render its very first frame; the Go file carries the
+ * full derivation and every measurement. In short:
+ *
+ *  - Each field was probed on BOTH supported NetBox versions and in BOTH request
+ *    shapes the backend sends — with the `?fields=` projection and without it,
+ *    since the projection is skipped when a caller's filter already occupies
+ *    `fields` and again when no columns are selected, an all-columns query being
+ *    one no projection can express. A field qualifies only if it demonstrably
+ *    reordered on at least one version and errored on neither.
+ *  - It is an allow-list, not a deny-list: an unknown ordering field is not
+ *    uniformly ignored upstream — some raise `Cannot resolve keyword` as an
+ *    HTTP 500 that costs the user their panel. Defaulting to "do not offer it"
+ *    fails to today's behaviour; defaulting to "offer it" fails to an error.
+ *  - Three fields are excluded on a measurement, not a hunch — and NOT on the
+ *    same measurement, which is the point. Do not add them back:
+ *
+ *    dcim/sites `device_count` is the one that justifies the whole method, and
+ *    it is excluded for being CONDITIONAL rather than broken: it sorts fine
+ *    unprojected, and 500s (`Cannot resolve keyword 'device_count'`) under a
+ *    `?fields=` projection that does not name device_count itself. Which of
+ *    those a query is depends on what the user picked in Return fields, so the
+ *    sort would work until an unrelated control changed. This picker is rendered
+ *    before the columns are chosen and cannot be conditioned on them.
+ *
+ *    ipam/prefixes `scope` and ipam/ip-addresses `assigned_object` 500 on 4.6.4
+ *    but answer 200 on 4.4.10, where they are accepted and then silently
+ *    ignored: ascending and DESCENDING both return the unordered walk's own ids
+ *    (`scope` and `-scope` alike give [1 2 3 4], where `-id` gives [4 3 2 1]).
+ *    The descending probe is what shows it — ascending alone is consistent with
+ *    a real sort. So probing those two on 4.4.10 alone looks like evidence FOR
+ *    offering them, and a field that quietly does nothing on the version you
+ *    tested is a field that 500s on the version you did not. That asymmetry is
+ *    exactly why the list above is an allow-list.
+ *  - Being listed means NetBox ACCEPTS the field, never that it is cheap: on
+ *    6.8M devices these measured 2.3s (site) to 27.6s (role) against ~0.9s
+ *    unsorted, which is what ORDERING_TOOLTIP tells the user.
+ */
+export const ORDERING_FIELDS: Record<string, string[]> = {
+  'dcim/devices': ['id', 'name', 'site', 'role', 'device_type', 'status', 'last_updated'],
+  'dcim/interfaces': ['id', 'name', 'device', 'type', 'last_updated'],
+  'dcim/sites': ['id', 'name', 'slug', 'region', 'facility'],
+  'ipam/prefixes': ['id', 'prefix', 'status', 'tenant', 'vrf'],
+  'ipam/ip-addresses': ['id', 'address', 'dns_name', 'vrf', 'last_updated'],
+  'virtualization/virtual-machines': ['id', 'name', 'cluster', 'site', 'last_updated', 'vcpus', 'memory'],
+};
+
+/** The sortable fields for an object type, empty for one this plugin will not
+ *  sort. Returns a copy (mirroring OrderingFields' slices.Clone in Go): the
+ *  list it guards is the one the picker's options are built from, and a caller
+ *  that appends to it would widen the allow-list for the whole session. */
+export function orderingFieldsFor(objectType?: string): string[] {
+  return [...(ORDERING_FIELDS[objectType ?? ''] ?? [])];
+}
+
+/** DRF's descending prefix, which NetBox inherits from OrderingFilter.
+ *  Measured on the demo: `?ordering=-name,id` answers 200 and reverses the
+ *  FIELD's order — not the whole ascending walk, since the ",id" tiebreaker the
+ *  backend appends stays ascending inside a group of tied names. Either way the
+ *  direction never has to be validated; only the FIELD does. */
+const ORDERING_DESCENDING_PREFIX = '-';
+
+/** The bare field name inside a stored ordering, '' when there is no sort.
+ *  Trimmed for the same reason the backend trims (see orderingValue): the value
+ *  can come from a provisioned dashboard's YAML rather than this picker, and a
+ *  stray space is not a different field to a human. NetBox agrees — DRF strips
+ *  each ordering term, so `name ,id` sorts exactly like `name,id` — but the
+ *  allow-list on both sides matches literally, so an untrimmed ' name' would be
+ *  refused a sort that upstream would have honoured. */
+export function orderingField(ordering?: string): string {
+  const trimmed = (ordering ?? '').trim();
+  return trimmed.startsWith(ORDERING_DESCENDING_PREFIX) ? trimmed.slice(1).trim() : trimmed;
+}
+
+/** Whether a stored ordering asks for descending order. */
+export function orderingIsDescending(ordering?: string): boolean {
+  return (ordering ?? '').trim().startsWith(ORDERING_DESCENDING_PREFIX);
+}
+
+/** The value to store for a field/direction choice, or undefined for no sort.
+ *  Emits the bare name and at most a leading '-': the ',id' tiebreaker that
+ *  makes a paged sort deterministic is the backend's to append (it is required
+ *  on every sort, so a frontend that forgot it once would duplicate rows across
+ *  pages, and one that added it here would send 'name,id,id'). */
+export function composeOrdering(field: string, descending: boolean): string | undefined {
+  if (!field) {
+    return undefined;
+  }
+  return descending ? `${ORDERING_DESCENDING_PREFIX}${field}` : field;
+}
 
 /** NetBox filter lookup operators surfaced in the query editor. */
 // NetBox lookup operators. `value` is the lookup suffix sent to the API

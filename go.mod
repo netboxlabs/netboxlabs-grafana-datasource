@@ -3,7 +3,7 @@ module github.com/netboxlabs/netboxlabs-grafana-datasource
 go 1.26.6
 
 require (
-	github.com/grafana/grafana-plugin-sdk-go v0.296.0
+	github.com/grafana/grafana-plugin-sdk-go v0.296.2
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
 )
 

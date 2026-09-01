@@ -7,7 +7,6 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
-	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 // isTruncated reports whether a result holds fewer rows than the source says
@@ -96,12 +95,16 @@ func resultNotices(res *provider.Result, requestedLimit int, noun string) []data
 			Text:     capNoticeText(c),
 		})
 	}
-	if requestedLimit > netbox.MaxLimit {
+	// A nil result carries no ceiling, and res.MaxRows == 0 means the provider
+	// does not report one; either way there is nothing to compare against and no
+	// number worth quoting. Nil is reachable here — see isTruncated, which guards
+	// it for the same reason.
+	if res != nil && res.MaxRows > 0 && requestedLimit > res.MaxRows {
 		notices = append(notices, data.Notice{
 			Severity: data.NoticeSeverityWarning,
 			Text: fmt.Sprintf(
 				"Row limit reduced to %s (the maximum); you requested %s.",
-				thousands(netbox.MaxLimit), thousands(requestedLimit)),
+				thousands(res.MaxRows), thousands(requestedLimit)),
 		})
 	}
 	return notices
@@ -119,10 +122,17 @@ func truncationError(res *provider.Result, requestedLimit int, noun string) stri
 	if !isTruncated(res) {
 		return ""
 	}
+	if res.MaxRows <= 0 {
+		// No reported ceiling, so the "max N" advice would be a made-up number.
+		return fmt.Sprintf(
+			"Alert query returned %s of %s %s, so it would alert on an incomplete result. "+
+				"Raise the row limit or add filters so every match fits.",
+			thousands(len(res.Rows)), thousands(res.Total), noun)
+	}
 	return fmt.Sprintf(
 		"Alert query returned %s of %s %s, so it would alert on an incomplete result. "+
 			"Raise the row limit (max %s) or add filters so every match fits.",
-		thousands(len(res.Rows)), thousands(res.Total), noun, thousands(netbox.MaxLimit))
+		thousands(len(res.Rows)), thousands(res.Total), noun, thousands(res.MaxRows))
 }
 
 // capInfo returns the result's row cap, or nil when there is nothing to report.

@@ -1876,6 +1876,7 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 	}
 
 	return &provider.Result{
+		MaxRows: MaxLimit,
 		Columns: fields, Rows: rows, Total: requested,
 		Warnings: warnings, Notes: notes,
 		ColumnTypes: declaredColumnTypes(fields),

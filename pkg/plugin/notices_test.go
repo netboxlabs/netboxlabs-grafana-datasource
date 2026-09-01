@@ -11,7 +11,9 @@ import (
 )
 
 func res(rows, total int) *provider.Result {
-	r := &provider.Result{Total: total}
+	// MaxRows models what a real provider result carries: the ceiling that
+	// applied to the query. The notices that quote a maximum read it from here.
+	r := &provider.Result{Total: total, MaxRows: netbox.MaxLimit}
 	for i := 0; i < rows; i++ {
 		r.Rows = append(r.Rows, map[string]interface{}{"name": "x"})
 	}
@@ -343,5 +345,27 @@ func TestCapErrorIsPreferredOverDegradation(t *testing.T) {
 	}
 	if strings.Contains(cap, "degraded") {
 		t.Errorf("cap message calls a deliberate bound degraded: %q", cap)
+	}
+}
+
+// A provider that reports no ceiling must not cause a made-up number to be
+// printed, and must not suppress the truncation error itself — the result is
+// still incomplete, only the advice loses its parenthetical.
+func TestNoticesWhenProviderReportsNoCeiling(t *testing.T) {
+	r := res(10, 999)
+	r.MaxRows = 0
+
+	for _, n := range resultNotices(r, 999999, nounObjects) {
+		if n.Severity == data.NoticeSeverityWarning {
+			t.Errorf("want no clamp warning without a reported ceiling; got %q", n.Text)
+		}
+	}
+
+	msg := truncationError(r, 999999, nounObjects)
+	if msg == "" {
+		t.Fatal("a truncated result must still fail an alert query")
+	}
+	if strings.Contains(msg, "max ") {
+		t.Errorf("message must not quote a ceiling the provider never reported: %q", msg)
 	}
 }

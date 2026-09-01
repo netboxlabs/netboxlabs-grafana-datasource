@@ -586,7 +586,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		notes = append(notes, n)
 	}
 
-	return &provider.Result{Columns: columns, Rows: flatRows, Total: total, Notes: notes, Warnings: warnings, Capped: capped}, nil
+	return &provider.Result{Columns: columns, Rows: flatRows, Total: total, Notes: notes, Warnings: warnings, Capped: capped, MaxRows: MaxLimit}, nil
 }
 
 // projectionRejected reports whether a failed list request is worth repeating
@@ -1806,6 +1806,17 @@ func (p *Provider) pushChangedObjectType(ctx context.Context, q url.Values, want
 type UnknownObjectTypeError struct {
 	Type  string // the normalised, log-safe type the user asked for
 	Known int    // how many types the instance reported
+}
+
+// Classification reports this as the user's input rather than an upstream
+// failure, so the plugin layer answers it as a bad request. It carries the type
+// and the known-type count because the message is only actionable with them.
+func (e *UnknownObjectTypeError) Classification() *provider.UpstreamError {
+	return &provider.UpstreamError{
+		Kind:       provider.ErrorKindUnknownObjectType,
+		ObjectType: e.Type,
+		KnownTypes: e.Known,
+	}
 }
 
 func (e *UnknownObjectTypeError) Error() string {

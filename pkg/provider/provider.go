@@ -138,6 +138,20 @@ type Result struct {
 	// source (e.g. NetBox's list-envelope "count"), independent of Rows/limit.
 	// Used for count-only queries (alerting). 0 when the source cannot report it.
 	Total int `json:"total"`
+	// MaxRows is the row ceiling that applied to THIS query, as the provider
+	// enforced it. 0 means the provider does not report one.
+	//
+	// It lives on the result rather than being a package constant the plugin
+	// layer reads off one backend, for two reasons. A second Provider has its own
+	// ceiling — nothing says it matches NetBox's. And even within one backend the
+	// ceiling is not single-valued: the objects path clamps to the maximum while
+	// the change-log path clamps to a smaller default, so a single exported
+	// number was already standing in for two policies and could only be right
+	// about one of them.
+	//
+	// Consumers must treat 0 as "unknown" and omit any advice that would quote a
+	// ceiling, rather than printing one.
+	MaxRows int `json:"maxRows,omitempty"`
 	// Warnings reports partial-result degradation: the rows are worth returning,
 	// but some column the caller asked for is blank because a lookup FAILED
 	// rather than because the source holds nothing there. Without this, a blank

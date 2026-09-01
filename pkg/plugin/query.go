@@ -14,7 +14,6 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
-	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 // queryType discriminates the kinds of query the editor can issue.
@@ -365,15 +364,17 @@ func splitList(s string) []string {
 
 // healthErrorMessage maps an upstream error to a concise, user-facing message.
 func healthErrorMessage(err error) string {
-	var apiErr *netbox.APIError
-	if errors.As(err, &apiErr) {
-		switch apiErr.Status {
-		case 401, 403:
+	// Status 0 means the provider classified something that was not an HTTP
+	// refusal; there is no code to report, so fall through to the transport
+	// message rather than printing "HTTP 0".
+	if u := provider.Classify(err); u != nil && u.Status != 0 {
+		switch u.Kind {
+		case provider.ErrorKindAuth:
 			return "Authentication failed (check API token)"
-		case 404:
+		case provider.ErrorKindNotFound:
 			return "NetBox API not found at this URL (check the base URL)"
 		}
-		return fmt.Sprintf("NetBox returned HTTP %d", apiErr.Status)
+		return fmt.Sprintf("NetBox returned HTTP %d", u.Status)
 	}
 	return "Cannot reach NetBox: " + upstreamDetail(err)
 }
@@ -421,52 +422,39 @@ func upstreamDetail(err error) string {
 // raw NetBox API errors (500/405/etc.) and exception bodies aren't surfaced to
 // the user. The raw error is logged separately (sanitized) for operators.
 func queryErrorMessage(err error) string {
-	// An object type NetBox does not know is the USER's input, not an upstream
-	// failure, and it is the one error here the reader can actually act on. It is
-	// matched first, and by type, for the same reason *netbox.APIError is: an
-	// unclassified error falls through to the transport message below, which
-	// reported a typo in the annotation editor as "Couldn't reach NetBox: unknown
-	// NetBox object type …" — an accusation against the network for a misspelled
-	// field.
-	var unknownType *netbox.UnknownObjectTypeError
-	if errors.As(err, &unknownType) {
-		// Bounded like every other echoed string here: the type is free text from
-		// the annotation editor and lands in the same toast (see maxUpstreamDetail).
-		name := unknownType.Type
-		if len(name) > maxUpstreamDetail {
-			name = name[:maxUpstreamDetail] + "…"
-		}
-		return fmt.Sprintf("NetBox has no object type %q — it isn't one of the %d types this instance reports. Annotations filter by app_label.model, singular (e.g. dcim.device, ipam.ipaddress).",
-			name, unknownType.Known)
-	}
-
-	var apiErr *netbox.APIError
-	if errors.As(err, &apiErr) {
-		switch apiErr.Status {
-		case 405:
+	if u := provider.Classify(err); u != nil {
+		switch u.Kind {
+		// An object type the upstream does not know is the USER's input, not an
+		// upstream failure, and it is the one error here the reader can act on.
+		// Unclassified it fell through into the transport message below, which
+		// reported a typo in the annotation editor as "Couldn't reach NetBox:
+		// unknown NetBox object type …" — an accusation against the network for a
+		// misspelled field.
+		case provider.ErrorKindUnknownObjectType:
+			// Bounded like every other echoed string here: the type is free text
+			// from the annotation editor and lands in the same toast.
+			name := u.ObjectType
+			if len(name) > maxUpstreamDetail {
+				name = name[:maxUpstreamDetail] + "…"
+			}
+			return fmt.Sprintf("NetBox has no object type %q — it isn't one of the %d types this instance reports. Annotations filter by app_label.model, singular (e.g. dcim.device, ipam.ipaddress).",
+				name, u.KnownTypes)
+		case provider.ErrorKindNotListable:
 			return "This object type can't be queried — the NetBox endpoint doesn't support listing (HTTP 405). It may be an action endpoint, not a queryable collection."
-		case 400:
-			// netbox-branching rejects an unknown branch with this exact 400. The
-			// Branch field accepts a branch name or schema id (names resolve to the
-			// schema id); a 400 here means neither matched a real branch.
-			if strings.Contains(apiErr.Body, "Invalid branch identifier") {
-				return "NetBox didn't recognize that branch. Check the branch name or schema id against the branch list."
-			}
+		case provider.ErrorKindInvalidBranch:
+			return "NetBox didn't recognize that branch. Check the branch name or schema id against the branch list."
+		case provider.ErrorKindBadRequest:
 			return "NetBox rejected this query (HTTP 400). Check the filters and try again."
-		case 401, 403:
+		case provider.ErrorKindAuth:
 			return "Authentication failed (check the API token)."
-		case 404:
+		case provider.ErrorKindNotFound:
 			return "This object type was not found in NetBox (HTTP 404)."
-		case 500:
-			// QuerySetNotOrdered appears near the start of NetBox's error body,
-			// well within snippet()'s 300-char cap. A longer body (e.g. a debug
-			// traceback) could push the token past the cap; the match then falls
-			// through to the generic HTTP 500 message below — still safe.
-			if strings.Contains(apiErr.Body, "QuerySetNotOrdered") {
-				return "NetBox couldn't list this object type — the endpoint doesn't support pagination (HTTP 500). This model may not be queryable."
-			}
+		case provider.ErrorKindNotOrderable:
+			return "NetBox couldn't list this object type — the endpoint doesn't support pagination (HTTP 500). This model may not be queryable."
 		}
-		return fmt.Sprintf("NetBox returned HTTP %d for this object type.", apiErr.Status)
+		if u.Status != 0 {
+			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
+		}
 	}
 	return "Couldn't reach NetBox: " + upstreamDetail(err)
 }
@@ -484,8 +472,7 @@ func queryErrorResponse(err error) backend.DataResponse {
 // is a bad request, and saying otherwise tells the reader to retry something
 // only they can fix.
 func queryErrorStatus(err error) backend.Status {
-	var unknownType *netbox.UnknownObjectTypeError
-	if errors.As(err, &unknownType) {
+	if u := provider.Classify(err); u != nil && u.Kind == provider.ErrorKindUnknownObjectType {
 		return backend.StatusBadRequest
 	}
 	return backend.StatusInternal

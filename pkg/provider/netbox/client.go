@@ -350,3 +350,40 @@ func (p listPage) total() (int, bool) {
 	}
 	return *p.Count, true
 }
+
+// Classification reports this failure in the seam's backend-agnostic terms.
+//
+// The body inspection lives HERE, not in the plugin layer, because only this
+// package knows what NetBox's bodies mean — and because the body must not cross
+// the seam: it carries the request URL and up to 300 characters of upstream
+// response, neither of which belongs anywhere near a user-facing string.
+// Everything this returns is safe to render.
+func (e *APIError) Classification() *provider.UpstreamError {
+	c := &provider.UpstreamError{Status: e.Status, Kind: provider.ErrorKindUpstream}
+	switch e.Status {
+	case 400:
+		// netbox-branching rejects an unknown branch with this exact 400. The
+		// Branch field accepts a branch name or schema id (names resolve to the
+		// schema id); a 400 here means neither matched a real branch.
+		if strings.Contains(e.Body, "Invalid branch identifier") {
+			c.Kind = provider.ErrorKindInvalidBranch
+			return c
+		}
+		c.Kind = provider.ErrorKindBadRequest
+	case 401, 403:
+		c.Kind = provider.ErrorKindAuth
+	case 404:
+		c.Kind = provider.ErrorKindNotFound
+	case 405:
+		c.Kind = provider.ErrorKindNotListable
+	case 500:
+		// QuerySetNotOrdered appears near the start of NetBox's error body, well
+		// within snippet()'s 300-char cap. A longer body (e.g. a debug traceback)
+		// could push the token past the cap; the match then falls through to the
+		// generic upstream kind — still safe, just less specific.
+		if strings.Contains(e.Body, "QuerySetNotOrdered") {
+			c.Kind = provider.ErrorKindNotOrderable
+		}
+	}
+	return c
+}

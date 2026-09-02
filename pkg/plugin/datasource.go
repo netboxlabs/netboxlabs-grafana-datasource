@@ -80,6 +80,33 @@ func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings bac
 }
 
 // newProvider selects the enrichment backend based on the configured mode.
+// missingSetting names the first required setting this datasource has not been
+// given, or "" when it can be reached. It mirrors newProvider's switch: a mode
+// added there needs its prerequisites added here, or Save & Test will check the
+// wrong ones.
+func missingSetting(cfg *models.PluginSettings) string {
+	switch cfg.Mode {
+	case models.ModeReplicaCache:
+		switch {
+		case cfg.ReplicaCacheURL == "":
+			return "replica-cache URL is missing"
+		case cfg.NetBoxID == "":
+			return "NetBox instance ID is missing"
+		case cfg.Secrets == nil || cfg.Secrets.ReplicaCacheToken == "":
+			return "replica-cache token is missing"
+		}
+		return ""
+	default:
+		switch {
+		case cfg.URL == "":
+			return "NetBox URL is missing"
+		case cfg.Secrets == nil || cfg.Secrets.APIToken == "":
+			return "API token is missing"
+		}
+		return ""
+	}
+}
+
 func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.Provider, error) {
 	switch cfg.Mode {
 	case models.ModeNetBox, "":
@@ -100,7 +127,11 @@ func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.
 			// missing setting.
 			return nil, errors.New("replica-cache mode needs the NetBox instance ID")
 		}
-		return replicacache.New(cfg.ReplicaCacheURL, cfg.Secrets.ReplicaCacheToken, cfg.NetBoxID, httpClient), nil
+		return replicacache.New(cfg.ReplicaCacheURL, cfg.Secrets.ReplicaCacheToken, cfg.NetBoxID, httpClient,
+			// The cache serves database rows, which carry no link back to the
+			// NetBox UI. URL is what makes "View in NetBox" work in this mode;
+			// without it those links simply do not appear.
+			replicacache.WithNetBoxURL(cfg.URL)), nil
 	default:
 		return nil, fmt.Errorf("unknown provider mode %q", cfg.Mode)
 	}
@@ -242,11 +273,12 @@ func isAlertRequest(req *backend.QueryDataRequest) bool {
 
 // CheckHealth verifies the datasource can reach and authenticate to NetBox.
 func (d *Datasource) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
-	if d.cfg.URL == "" {
-		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: "NetBox URL is missing"}, nil
-	}
-	if d.cfg.Secrets == nil || d.cfg.Secrets.APIToken == "" {
-		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: "API token is missing"}, nil
+	// The prerequisites differ per backend, and checking NetBox's against a
+	// replica-cache datasource fails Save & Test on a correctly configured
+	// instance — the two authenticate with different credentials against
+	// different services, and replica-cache never uses the NetBox token.
+	if msg := missingSetting(d.cfg); msg != "" {
+		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: msg}, nil
 	}
 
 	msg, err := d.provider.HealthCheck(ctx)

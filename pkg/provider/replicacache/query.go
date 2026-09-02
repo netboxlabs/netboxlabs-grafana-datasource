@@ -95,6 +95,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	cols, rows := flattenRows(raws)
 	var warnings []string
 	if !spec.CountOnly {
+		if addDeepLinks(p.netboxURL, spec.ObjectType, rows) {
+			cols = append(cols, deepLinkColumn)
+		}
 		added, warns := p.resolveFKs(ctx, spec.ObjectType, rows)
 		cols = append(cols, added...)
 		warnings = warns
@@ -161,6 +164,10 @@ func (p *Provider) projectColumns(ctx context.Context, spec provider.QuerySpec) 
 			want[strings.TrimSuffix(f, "_slug")+"_id"] = true
 		case strings.HasPrefix(f, "cf_") && raw["custom_field_data"]:
 			want["custom_field_data"] = true
+		case f == deepLinkColumn:
+			// Built from the primary key, which the service returns on every
+			// projection regardless, so nothing extra needs requesting.
+			want["id"] = true
 		default:
 			return nil, false
 		}

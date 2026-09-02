@@ -368,3 +368,68 @@ func TestFKResolutionCachesDimensionReads(t *testing.T) {
 		t.Errorf("dimension read %d times across 3 queries, want 1 (the cache is not holding)", n)
 	}
 }
+
+// replica-cache serves database rows, which carry no link back to the NetBox
+// UI. Without synthesizing one, switching a datasource to this mode silently
+// removes every "View in NetBox" link from panels that had them — the plugin
+// layer keys that data link on a display_url column.
+func TestQuerySynthesizesNetBoxDeepLinks(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(7, "CORE-7", 4001)}
+	srv := f.start(t)
+	p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.example.com/"))
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	want := "https://netbox.example.com/dcim/devices/7/"
+	if got := res.Rows[0]["display_url"]; got != want {
+		t.Errorf("display_url = %v, want %v", got, want)
+	}
+	found := false
+	for _, c := range res.Columns {
+		if c == "display_url" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("display_url must be announced as a column, or the data link is never attached")
+	}
+}
+
+// Without a NetBox URL there is nothing to link to, and inventing one would
+// produce links that 404.
+func TestQueryOmitsDeepLinksWithoutANetBoxURL(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(7, "CORE-7", 4001)}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if _, ok := res.Rows[0]["display_url"]; ok {
+		t.Error("no NetBox URL is configured, so no link should be produced")
+	}
+}
+
+// Selecting the link column must work: it is derived from the primary key, and
+// naming it upstream would be rejected as an unknown field.
+func TestQueryProjectsTheDeepLinkColumn(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(7, "CORE-7", 4001)}
+	srv := f.start(t)
+	p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.example.com"))
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "display_url"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := res.Rows[0]["display_url"]; got != "https://netbox.example.com/dcim/devices/7/" {
+		t.Errorf("display_url = %v", got)
+	}
+}

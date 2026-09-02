@@ -1,0 +1,242 @@
+package replicacache
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"sort"
+	"strings"
+
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+)
+
+// Query executes an object query and returns flattened, joinable rows.
+//
+// Almost everything the NetBox provider does in Go happens upstream here:
+// filtering, sorting, projection and counting are all query parameters, which
+// is the entire reason this backend exists. What remains in process is turning
+// the raw table row into the shape the rest of the plugin expects — custom
+// fields out of their JSON blob, and foreign keys resolved to names.
+func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provider.Result, error) {
+	// Same contradiction the NetBox provider rejects: a caller that reads only
+	// the total cannot also be able to do without one.
+	if spec.CountOnly && spec.AllowUncounted {
+		return nil, fmt.Errorf("invalid query: CountOnly needs a total, AllowUncounted says one is not needed")
+	}
+	if err := p.validateObjectType(ctx, spec.ObjectType); err != nil {
+		return nil, err
+	}
+
+	q, err := buildFilterValues(spec.Filters)
+	if err != nil {
+		return nil, err
+	}
+
+	limit := spec.Limit
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > MaxLimit {
+		limit = MaxLimit
+	}
+
+	// A count-only caller reads Total and nothing else, so fetch the smallest
+	// page the service will return. The count in the envelope is for the whole
+	// filter and is unaffected by the limit.
+	if spec.CountOnly {
+		limit = 1
+	}
+
+	if spec.Ordering != "" {
+		q.Set("sort", spec.Ordering)
+	}
+
+	// Projection. Ask only for the columns needed to build what was requested.
+	if !spec.CountOnly {
+		if cols, ok := p.projectColumns(ctx, spec); ok {
+			q = withFields(q, cols)
+		}
+	}
+
+	raws, total, err := p.client.list(ctx, spec.ObjectType, q, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	cols, rows := flattenRows(raws)
+	var warnings []string
+	if !spec.CountOnly {
+		added, warns := p.resolveFKs(ctx, spec.ObjectType, rows)
+		cols = append(cols, added...)
+		warnings = warns
+	}
+
+	// Present the caller's chosen columns, in the order they asked for them.
+	// KeyFields are fetched and left in the rows but never announced: the caller
+	// reads them to build a join key and did not ask to see them.
+	if len(spec.Fields) > 0 {
+		present := map[string]bool{}
+		for _, c := range cols {
+			present[c] = true
+		}
+		var out []string
+		for _, f := range spec.Fields {
+			if present[f] {
+				out = append(out, f)
+			}
+		}
+		cols = out
+	}
+
+	var notes []string
+	if spec.Ordering != "" && len(raws) > 0 {
+		// The service sorts on real columns only. A sort requested on a column we
+		// synthesize (site, cf_*) was silently ignored upstream, and the contract
+		// requires saying so rather than letting a panel believe it is sorted.
+		if raw, rerr := p.rawColumns(ctx, spec.ObjectType); rerr == nil {
+			field := strings.TrimPrefix(spec.Ordering, "-")
+			if !raw[field] {
+				notes = append(notes, fmt.Sprintf(
+					"Rows are not sorted by %q: this backend can only sort on stored columns, and that one is derived. Sort by %s_id, or use a datasource in NetBox mode.", field, field))
+			}
+		}
+	}
+
+	return &provider.Result{
+		Columns:  cols,
+		Rows:     rows,
+		Total:    total,
+		MaxRows:  MaxLimit,
+		Warnings: warnings,
+		Notes:    notes,
+	}, nil
+}
+
+// projectColumns maps the caller's requested columns onto the columns that
+// exist upstream.
+//
+// The mapping is needed because several columns the caller can ask for are ours
+// rather than the service's: "site" is built from site_id, "cf_tier" out of the
+// custom_field_data blob. Naming those upstream is an error ("unknown column"),
+// and omitting their SOURCE would return the column empty.
+//
+// It reports ok=false when any requested column cannot be accounted for, and
+// the caller then asks for every column. That fallback is deliberate: an
+// unrecognized field usually means a saved dashboard naming something this
+// deployment no longer has, and fetching a wider row is a cost, while
+// projecting it away is a blank column with no explanation.
+func (p *Provider) projectColumns(ctx context.Context, spec provider.QuerySpec) ([]string, bool) {
+	if len(spec.Fields) == 0 && len(spec.KeyFields) == 0 {
+		return nil, false
+	}
+	raw, err := p.rawColumns(ctx, spec.ObjectType)
+	if err != nil || len(raw) == 0 {
+		return nil, false
+	}
+
+	want := map[string]bool{}
+	for _, f := range append(append([]string{}, spec.Fields...), spec.KeyFields...) {
+		switch {
+		case raw[f]:
+			want[f] = true
+		case raw[f+"_id"]:
+			// A resolved name is built from its id column.
+			want[f+"_id"] = true
+		case strings.HasSuffix(f, "_slug") && raw[strings.TrimSuffix(f, "_slug")+"_id"]:
+			want[strings.TrimSuffix(f, "_slug")+"_id"] = true
+		case strings.HasPrefix(f, "cf_") && raw["custom_field_data"]:
+			want["custom_field_data"] = true
+		default:
+			return nil, false
+		}
+	}
+	out := make([]string, 0, len(want))
+	for c := range want {
+		out = append(out, c)
+	}
+	return out, true
+}
+
+// withFields sets the projection parameter. The service always returns the
+// primary key regardless, which the flattener relies on for FK resolution.
+func withFields(q url.Values, cols []string) url.Values {
+	if len(cols) == 0 {
+		return q
+	}
+	if q == nil {
+		q = url.Values{}
+	}
+	q.Set("fields", strings.Join(cols, ","))
+	return q
+}
+
+// flattenRows converts raw table rows into flat column/value maps.
+//
+// Rows are already flat — the service serves database columns — so the only
+// real work is custom_field_data, which arrives as a JSON document encoded in a
+// string. It is expanded to cf_<name> columns to match what the NetBox provider
+// produces from the API's custom_fields object, so the same panel reads the
+// same column from either backend.
+func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}) {
+	var (
+		cols []string
+		seen = map[string]bool{}
+		out  = make([]map[string]interface{}, 0, len(raws))
+	)
+	addCol := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			cols = append(cols, name)
+		}
+	}
+
+	for _, raw := range raws {
+		var obj map[string]interface{}
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			continue
+		}
+		row := make(map[string]interface{}, len(obj)+4)
+		for k, v := range obj {
+			if k == "custom_field_data" {
+				for name, cv := range customFields(v) {
+					row["cf_"+name] = cv
+				}
+				continue
+			}
+			row[k] = v
+		}
+		out = append(out, row)
+	}
+
+	// Announce every column any row carries, in a stable order. Sorting rather
+	// than preserving document order is deliberate: Go randomizes map iteration,
+	// and a column list that reordered between refreshes would reorder the
+	// panel's table on every refresh.
+	for _, row := range out {
+		names := make([]string, 0, len(row))
+		for k := range row {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, k := range names {
+			addCol(k)
+		}
+	}
+	return cols, out
+}
+
+// customFields decodes the custom_field_data blob. It is a JSON object encoded
+// as a string, so it needs a second decode; anything else is ignored rather
+// than guessed at.
+func customFields(v interface{}) map[string]interface{} {
+	s, ok := v.(string)
+	if !ok || strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(s), &m) != nil {
+		return nil
+	}
+	return m
+}

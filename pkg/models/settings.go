@@ -11,9 +11,15 @@ import (
 type ProviderMode string
 
 const (
-	// ModeNetBox queries the NetBox REST API directly. This is the default and
-	// the only mode implemented today.
+	// ModeNetBox queries the NetBox REST API directly. This is the default.
 	ModeNetBox ProviderMode = "netbox"
+	// ModeReplicaCache queries the NetBox replica-cache read API: a columnar
+	// mirror built to answer at a scale the REST API cannot serve interactively.
+	//
+	// It is not a drop-in replacement. It cannot serve annotations, IP
+	// enrichment or topology, and it says so explicitly rather than returning
+	// empty results; see pkg/provider/replicacache.
+	ModeReplicaCache ProviderMode = "replica-cache"
 )
 
 // PluginSettings holds the non-secret configuration for a datasource instance.
@@ -25,10 +31,17 @@ type PluginSettings struct {
 	// differs from URL (compose/k8s service DNS). Deep-link URLs in results
 	// are rewritten from URL's base to PublicURL's. Empty = no rewrite.
 	PublicURL string `json:"publicUrl"`
-	// Mode selects the enrichment backend. Defaults to "netbox" — the only
-	// implemented backend today. The field is kept as the seam for a planned
-	// second, high-volume backend; there is no UI selector until that ships.
+	// Mode selects the enrichment backend. Defaults to "netbox".
 	Mode ProviderMode `json:"mode"`
+	// ReplicaCacheURL is the replica-cache service root, used when Mode is
+	// "replica-cache". It is a separate field from URL rather than a reuse of it
+	// because the two are different services with different hostnames, and a
+	// datasource may need both: URL still supplies the deep links that point a
+	// user at the NetBox UI for a row read from the cache.
+	ReplicaCacheURL string `json:"replicaCacheUrl"`
+	// NetBoxID identifies the NetBox instance the cache is holding, sent as the
+	// NBC-Netbox-ID header. The service rejects requests without it.
+	NetBoxID string `json:"netboxId"`
 	// TLSSkipVerify disables TLS certificate verification (self-signed certs).
 	TLSSkipVerify bool `json:"tlsSkipVerify"`
 	// TimeoutSeconds bounds individual upstream HTTP requests. Defaults to 30.
@@ -59,6 +72,11 @@ type PluginSettings struct {
 type SecretPluginSettings struct {
 	// APIToken is the NetBox API token used for `Authorization: Token <token>`.
 	APIToken string `json:"apiToken"`
+	// ReplicaCacheToken is the bearer token for the replica-cache service. It is
+	// held separately from APIToken because they are credentials for different
+	// services: they are issued, rotated and revoked independently, and a
+	// datasource configured for both must carry both.
+	ReplicaCacheToken string `json:"replicaCacheToken"`
 }
 
 // LoadPluginSettings parses datasource instance settings, applies defaults and
@@ -85,6 +103,7 @@ func LoadPluginSettings(source backend.DataSourceInstanceSettings) (*PluginSetti
 
 func loadSecretPluginSettings(source map[string]string) *SecretPluginSettings {
 	return &SecretPluginSettings{
-		APIToken: source["apiToken"],
+		APIToken:          source["apiToken"],
+		ReplicaCacheToken: source["replicaCacheToken"],
 	}
 }

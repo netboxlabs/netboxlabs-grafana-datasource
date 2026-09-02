@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/models"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/replicacache"
 )
 
 // Ensure Datasource implements the required SDK interfaces.
@@ -88,6 +90,17 @@ func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.
 			// size the utilization measurement budget: raising the timeout is how a
 			// user says "I will wait", and it is the only such dial they have.
 			netbox.WithRequestTimeout(time.Duration(cfg.TimeoutSeconds)*time.Second)), nil
+	case models.ModeReplicaCache:
+		if cfg.ReplicaCacheURL == "" {
+			return nil, errors.New("replica-cache mode needs a service URL")
+		}
+		if cfg.NetBoxID == "" {
+			// The service answers 400 without this header, which would surface as
+			// an opaque bad request on every query. Failing here instead names the
+			// missing setting.
+			return nil, errors.New("replica-cache mode needs the NetBox instance ID")
+		}
+		return replicacache.New(cfg.ReplicaCacheURL, cfg.Secrets.ReplicaCacheToken, cfg.NetBoxID, httpClient), nil
 	default:
 		return nil, fmt.Errorf("unknown provider mode %q", cfg.Mode)
 	}

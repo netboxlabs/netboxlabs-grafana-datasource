@@ -49,8 +49,16 @@ type Provider struct {
 type fieldsCacheEntry struct {
 	fields  []provider.Field
 	raw     map[string]bool // column names as they exist upstream
+	types   map[string]provider.FieldType
 	expires time.Time
 }
+
+// sampleRows is how many rows Fields reads to learn the columns and their
+// types. More than one, because a column that is null in the sampled row cannot
+// be typed, and a mistyped column is not cosmetic here: the operators a column
+// is offered depend on whether it holds text (see filterFieldsFor). Twenty is
+// one small page and resolves the common case of a sparsely populated column.
+const sampleRows = 20
 
 // Option configures a Provider.
 type Option func(*Provider)
@@ -267,7 +275,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	}
 	p.fieldsMu.Unlock()
 
-	raws, _, err := p.client.list(ctx, objectType, nil, 1)
+	raws, _, err := p.client.list(ctx, objectType, nil, sampleRows)
 	if err != nil {
 		return nil, err
 	}
@@ -291,9 +299,33 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	added, degraded := p.resolveFKs(ctx, objectType, rows)
 	cols = append(cols, added...)
 
+	// Type each column from the first NON-NULL value seen across the sample. A
+	// column that is null everywhere in the sample stays unknown, which
+	// fieldType reports as string; filterFieldsFor treats only a confirmed
+	// string as text-searchable, so an unknown column loses the text operators
+	// rather than being offered one that may match every row.
+	types := make(map[string]provider.FieldType, len(cols))
+	known := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		for _, row := range rows {
+			if v, ok := row[c]; ok && v != nil {
+				types[c] = fieldType(v)
+				known[c] = true
+				break
+			}
+		}
+	}
+
 	fields := make([]provider.Field, 0, len(cols))
 	for _, c := range cols {
-		fields = append(fields, provider.Field{Name: c, Type: fieldType(rows[0][c])})
+		t := provider.FieldTypeString
+		if known[c] {
+			t = types[c]
+		} else {
+			// Never typed: not text as far as operator selection is concerned.
+			types[c] = provider.FieldType("")
+		}
+		fields = append(fields, provider.Field{Name: c, Type: t})
 	}
 	sort.SliceStable(fields, func(i, j int) bool { return fields[i].Name < fields[j].Name })
 
@@ -308,7 +340,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	// resolve. Re-reading a sample costs one small request and self-heals.
 	if len(degraded) == 0 {
 		p.fieldsMu.Lock()
-		p.fields[objectType] = fieldsCacheEntry{fields: fields, raw: rawCols, expires: time.Now().Add(schemaTTL)}
+		p.fields[objectType] = fieldsCacheEntry{fields: fields, raw: rawCols, types: types, expires: time.Now().Add(schemaTTL)}
 		p.fieldsMu.Unlock()
 	}
 	return fields, nil
@@ -333,6 +365,23 @@ func (p *Provider) rawColumns(ctx context.Context, objectType string) (map[strin
 	return p.fields[objectType].raw, nil
 }
 
+// columnTypes reports the inferred type per upstream column. An entry missing
+// or empty means the type could not be determined from the sample.
+func (p *Provider) columnTypes(ctx context.Context, objectType string) map[string]provider.FieldType {
+	p.fieldsMu.Lock()
+	e, ok := p.fields[objectType]
+	p.fieldsMu.Unlock()
+	if ok && time.Now().Before(e.expires) {
+		return e.types
+	}
+	if _, err := p.Fields(ctx, objectType); err != nil {
+		return nil
+	}
+	p.fieldsMu.Lock()
+	defer p.fieldsMu.Unlock()
+	return p.fields[objectType].types
+}
+
 func fieldType(v interface{}) provider.FieldType {
 	switch v.(type) {
 	case bool:
@@ -351,7 +400,11 @@ func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provi
 	if err != nil {
 		return nil, err
 	}
-	return filterFieldsFor(fields), nil
+	raw, err := p.rawColumns(ctx, objectType)
+	if err != nil {
+		return nil, err
+	}
+	return filterFieldsFor(fields, raw, p.columnTypes(ctx, objectType)), nil
 }
 
 // FieldValues returns distinct values for a field, for editor autocomplete.

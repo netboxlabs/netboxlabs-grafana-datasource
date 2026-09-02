@@ -28,6 +28,11 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		return nil, err
 	}
 
+	if needsTypeCheck(spec.Filters) {
+		if err := validateFilterTypes(spec.Filters, p.columnTypes(ctx, spec.ObjectType)); err != nil {
+			return nil, err
+		}
+	}
 	q, err := buildFilterValues(spec.Filters)
 	if err != nil {
 		return nil, err

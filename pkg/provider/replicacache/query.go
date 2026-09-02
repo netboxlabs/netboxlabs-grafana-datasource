@@ -24,6 +24,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if spec.CountOnly && spec.AllowUncounted {
 		return nil, fmt.Errorf("invalid query: CountOnly needs a total, AllowUncounted says one is not needed")
 	}
+	if err := rejectBranch(ctx); err != nil {
+		return nil, err
+	}
 	if err := p.validateObjectType(ctx, spec.ObjectType); err != nil {
 		return nil, err
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -520,5 +521,48 @@ func TestQueryDoesNotFetchDiscoveryOnTheQueryPath(t *testing.T) {
 	// should have reached the discovery document.
 	if n := f.countRequestsFor("docs/openapi.json"); n != 0 {
 		t.Errorf("discovery was fetched %d times on the query path", n)
+	}
+}
+
+// Discovery is the slowest, least reliable request in this service, and FK
+// resolution runs after the rows have already arrived. An unbounded fetch there
+// delays a panel that has its data, so the wait is capped: the query returns
+// promptly with ids and an honest warning rather than blocking on discovery.
+func TestQueryDoesNotBlockIndefinitelyOnHungDiscovery(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{{"id": float64(4001), "name": "DC-1", "slug": "dc-1"}}
+	p := newTestProvider(t, f)
+
+	// Released with defer rather than t.Cleanup: httptest's Close waits for
+	// outstanding handlers, and cleanups run last-registered-first, so a
+	// Cleanup registered here would run AFTER Close and deadlock against the
+	// handler it is meant to release.
+	release := make(chan struct{})
+	f.mu.Lock()
+	f.hangSwagger = release
+	f.mu.Unlock()
+	defer close(release)
+
+	start := time.Now()
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("the query must still succeed on its own data: %v", err)
+	}
+	if elapsed > discoveryWaitBudget+3*time.Second {
+		t.Errorf("query took %s; the wait for discovery is meant to be capped at %s", elapsed, discoveryWaitBudget)
+	}
+	// The rows are complete and correct as ids.
+	if res.Rows[0]["site_id"] != float64(4001) {
+		t.Errorf("rows lost their data: %v", res.Rows[0])
+	}
+	// The missing names are stated rather than left as a silent gap.
+	if len(res.Warnings) == 0 {
+		t.Error("want a warning that related names are missing")
+	}
+	if _, ok := res.Rows[0]["site"]; ok {
+		t.Error("no name should be invented while the entity list is unavailable")
 	}
 }

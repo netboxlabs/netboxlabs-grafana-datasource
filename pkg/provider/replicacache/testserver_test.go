@@ -31,6 +31,9 @@ type fakeService struct {
 	requests []recordedRequest
 	// noSwagger serves a 500 for the API description.
 	noSwagger bool
+	// failEntities names entities that answer 500, to simulate one dimension
+	// timing out while the rest of the service is healthy.
+	failEntities map[string]bool
 }
 
 type recordedRequest struct {
@@ -39,7 +42,11 @@ type recordedRequest struct {
 }
 
 func newFakeService() *fakeService {
-	return &fakeService{entities: map[string][]map[string]interface{}{}, pageCap: 1000}
+	return &fakeService{
+		entities:     map[string][]map[string]interface{}{},
+		failEntities: map[string]bool{},
+		pageCap:      1000,
+	}
 }
 
 func (f *fakeService) start(t *testing.T) *httptest.Server {
@@ -76,6 +83,13 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 
 	if status != 0 {
 		writeErr(w, status, errBody)
+		return
+	}
+	f.mu.Lock()
+	broken := f.failEntities[entity]
+	f.mu.Unlock()
+	if broken {
+		writeErr(w, 500, "server error")
 		return
 	}
 	if !ok {

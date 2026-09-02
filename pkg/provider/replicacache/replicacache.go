@@ -426,11 +426,19 @@ func valueString(v interface{}) string {
 
 // Changes is not supported.
 //
-// Two independent reasons, either of which is sufficient. The service does not
-// replicate extras.objectchange — there is no change log to read. And every
-// row's created and last_updated arrive null (measured across devices and
-// sites), so even a reconstructed "what changed recently" has no timestamp to
-// filter on.
+// The decisive reason is that the service does not replicate
+// extras.objectchange: there is no change log to read, and nothing else can
+// stand in for one.
+//
+// Reconstructing an approximation from row timestamps does not work either, and
+// not for the reason it first appeared. created and last_updated are not
+// universally absent — tenancy/tenants carries both on every row — but they are
+// null on every row of the large tables measured (devices, sites, ip-addresses,
+// circuits). So the columns work while the data is missing from exactly the
+// tables an annotation would be about, which is worse than a clean absence: a
+// time-windowed query against them succeeds and returns nothing, which reads as
+// "nothing changed". That gap is a replication issue on the service side and
+// may close; the missing change log is the structural reason and will not.
 func (p *Provider) Changes(_ context.Context, _ provider.ChangeSpec) ([]provider.Change, error) {
 	return nil, &UnsupportedError{
 		Feature: "the change log",

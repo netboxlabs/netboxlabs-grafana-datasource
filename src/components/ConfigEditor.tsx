@@ -1,7 +1,7 @@
 import React, { ChangeEvent, useEffect } from 'react';
-import { InlineField, Input, SecretInput, InlineSwitch, FieldSet } from '@grafana/ui';
+import { InlineField, Input, SecretInput, InlineSwitch, FieldSet, Select } from '@grafana/ui';
 import { DataSourcePluginOptionsEditorProps } from '@grafana/data';
-import { NetBoxDataSourceOptions, NetBoxSecureJsonData } from '../types';
+import { NetBoxDataSourceOptions, NetBoxSecureJsonData, ProviderMode } from '../types';
 
 interface Props extends DataSourcePluginOptionsEditorProps<NetBoxDataSourceOptions, NetBoxSecureJsonData> {}
 
@@ -24,6 +24,33 @@ export const FAST_PAGING_TOOLTIP = [
   'Alert rules are unaffected; every evaluation asks for the real total and natural order.',
   'Leave it off below a few million records.',
 ].join(' ');
+
+/** Copy for the mode selector.
+ *
+ *  Kept as a constant for the same reason as FAST_PAGING_TOOLTIP: Grafana only
+ *  mounts tooltip text on hover, which jsdom does not reproduce, so asserting
+ *  it through the DOM would test the tooltip library rather than the wording.
+ *
+ *  It has to state what replica-cache CANNOT do. The mode is chosen for speed
+ *  on very large instances, and the three capabilities it drops are ones a user
+ *  would otherwise discover only when a saved panel starts failing. */
+export const MODE_TOOLTIP = [
+  'Where this datasource reads from.',
+  'NetBox API queries NetBox directly and supports every feature.',
+  'Replica cache reads a columnar mirror built for instances with millions of objects, where',
+  'the REST API cannot answer a panel in time.',
+  'It cannot serve annotations, IP enrichment or topology, and those queries fail with an',
+  'explanation rather than returning nothing.',
+].join(' ');
+
+const MODE_OPTIONS: Array<{ label: string; value: ProviderMode; description: string }> = [
+  { label: 'NetBox API', value: 'netbox', description: 'Query NetBox directly. Supports every feature.' },
+  {
+    label: 'Replica cache',
+    value: 'replica-cache',
+    description: 'Columnar mirror for very large instances. No annotations, IP enrichment or topology.',
+  },
+];
 
 export function ConfigEditor(props: Props) {
   const { onOptionsChange, options } = props;
@@ -89,10 +116,95 @@ export function ConfigEditor(props: Props) {
     });
   };
 
+  const onCacheTokenChange = (event: ChangeEvent<HTMLInputElement>) => {
+    onOptionsChange({ ...options, secureJsonData: { ...secureJsonData, replicaCacheToken: event.target.value } });
+  };
+
+  const onResetCacheToken = () => {
+    onOptionsChange({
+      ...options,
+      secureJsonFields: { ...secureJsonFields, replicaCacheToken: false },
+      secureJsonData: { ...secureJsonData, replicaCacheToken: '' },
+    });
+  };
+
+  // Unset means NetBox, matching the backend default in LoadPluginSettings.
+  const mode: ProviderMode = jsonData.mode ?? 'netbox';
+  const isCache = mode === 'replica-cache';
+
   return (
     <>
       <FieldSet label="Connection">
-        <InlineField label="NetBox URL" labelWidth={20} tooltip="Base URL of the NetBox instance, without /api">
+        <InlineField label="Mode" labelWidth={20} tooltip={MODE_TOOLTIP}>
+          <Select
+            inputId="config-mode"
+            width={40}
+            options={MODE_OPTIONS}
+            value={mode}
+            onChange={(v) => onJsonChange({ mode: (v.value ?? 'netbox') as ProviderMode })}
+          />
+        </InlineField>
+
+        {isCache && (
+          <>
+            <InlineField
+              label="Replica cache URL"
+              labelWidth={20}
+              tooltip="Base URL of the replica-cache service. This is a different host from NetBox."
+            >
+              <Input
+                required
+                id="config-replica-cache-url"
+                width={40}
+                value={jsonData.replicaCacheUrl ?? ''}
+                placeholder="https://<id>.replica-cache.example.com"
+                onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ replicaCacheUrl: e.target.value })}
+              />
+            </InlineField>
+
+            <InlineField
+              label="NetBox instance ID"
+              labelWidth={20}
+              tooltip="Identifies which NetBox instance the cache holds. Sent as the NBC-Netbox-ID header; the service rejects requests without it."
+            >
+              <Input
+                required
+                id="config-netbox-id"
+                width={40}
+                value={jsonData.netboxId ?? ''}
+                placeholder="nb-…"
+                onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ netboxId: e.target.value })}
+              />
+            </InlineField>
+
+            <InlineField
+              label="Replica cache token"
+              labelWidth={20}
+              tooltip="Bearer token for the replica-cache service. Separate from the NetBox API token — they are different services with independently issued credentials."
+            >
+              <SecretInput
+                required
+                id="config-replica-cache-token"
+                width={40}
+                isConfigured={Boolean(secureJsonFields?.replicaCacheToken)}
+                value={secureJsonData?.replicaCacheToken ?? ''}
+                placeholder="ff_…"
+                onReset={onResetCacheToken}
+                onChange={onCacheTokenChange}
+              />
+            </InlineField>
+          </>
+        )}
+
+        <InlineField
+          label="NetBox URL"
+          labelWidth={20}
+          tooltip={
+            isCache
+              ? 'Base URL of the NetBox instance the cache mirrors, without /api. Optional in this mode: it is used only to build "View in NetBox" links, since cache rows carry none. Leave it empty and rows have no links.'
+              : 'Base URL of the NetBox instance, without /api'
+          }
+        >
           <Input
             id="config-url"
             width={40}
@@ -116,18 +228,24 @@ export function ConfigEditor(props: Props) {
           />
         </InlineField>
 
-        <InlineField label="API Token" labelWidth={20} tooltip="NetBox API token (v1 or v2)">
-          <SecretInput
-            required
-            id="config-api-token"
-            width={40}
-            isConfigured={Boolean(secureJsonFields?.apiToken)}
-            value={secureJsonData?.apiToken ?? ''}
-            placeholder="nbt_… or a 40-character token"
-            onReset={onResetToken}
-            onChange={onTokenChange}
-          />
-        </InlineField>
+        {/* Hidden in replica-cache mode: that backend authenticates with its
+            own token and never sends this one, so asking for it would imply it
+            is needed — the confusion that made Save & Test fail on a correctly
+            configured cache datasource. */}
+        {!isCache && (
+          <InlineField label="API Token" labelWidth={20} tooltip="NetBox API token (v1 or v2)">
+            <SecretInput
+              required
+              id="config-api-token"
+              width={40}
+              isConfigured={Boolean(secureJsonFields?.apiToken)}
+              value={secureJsonData?.apiToken ?? ''}
+              placeholder="nbt_… or a 40-character token"
+              onReset={onResetToken}
+              onChange={onTokenChange}
+            />
+          </InlineField>
+        )}
       </FieldSet>
 
       <FieldSet label="Advanced">

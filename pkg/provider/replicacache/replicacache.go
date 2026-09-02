@@ -255,6 +255,22 @@ func humanize(model string) string {
 	return strings.Join(words, " ")
 }
 
+// cachedEntitySet returns the discovered entities ONLY if they are already
+// cached, never fetching. It exists so the query path can consult discovery
+// without waiting on it.
+func (p *Provider) cachedEntitySet() (map[string]bool, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.entities == nil || time.Now().After(p.expires) {
+		return nil, false
+	}
+	set := make(map[string]bool, len(p.entities))
+	for _, t := range p.entities {
+		set[t.Value] = true
+	}
+	return set, true
+}
+
 // entitySet returns the discovered entities as a lookup set.
 func (p *Provider) entitySet(ctx context.Context) (map[string]bool, error) {
 	types, err := p.ObjectTypes(ctx)
@@ -272,19 +288,25 @@ func (p *Provider) entitySet(ctx context.Context) (map[string]bool, error) {
 // request is built. Doing it here rather than letting the service answer 404
 // is what makes the message actionable: the reader learns it is not one of the
 // N types available, not that a URL was not found.
-func (p *Provider) validateObjectType(ctx context.Context, objectType string) error {
-	set, err := p.entitySet(ctx)
-	if err != nil {
-		// Discovery being unavailable must not take the datasource down with it.
-		// The entity list is served by one large document, and it was measured
-		// failing (TLS timeouts, truncated bodies) against an instance whose row
-		// endpoints were still answering — so blocking every query on it would
-		// turn a slow endpoint into a total outage.
-		//
-		// Proceeding is safe because the query itself is authoritative: an object
-		// type this deployment does not serve answers 404, which classifies as
-		// not-found and reads correctly. What is lost is only the better message
-		// (naming how many types DO exist), which is not worth the availability.
+func (p *Provider) validateObjectType(_ context.Context, objectType string) error {
+	// Deliberately consults only an ALREADY-CACHED entity list, and never
+	// fetches one.
+	//
+	// The list is served by a single large document that was measured failing
+	// (TLS timeouts, truncated bodies) against an instance whose row endpoints
+	// were still answering in ~1.3s. Fetching here put that request in front of
+	// every query, so a slow discovery endpoint delayed each panel by a full
+	// timeout before the row request it does not depend on had even started —
+	// and an object query could then pay it a second time in resolveFKs.
+	//
+	// Tolerating the failure was not enough; the wait was the problem. Skipping
+	// validation is safe because the row request is authoritative: an object
+	// type this deployment does not serve answers 404, which classifies as
+	// not-found and reads correctly. What is lost is only the better message
+	// naming how many types DO exist, and only until something warms the cache —
+	// which the query editor does when it populates its object-type dropdown.
+	set, ok := p.cachedEntitySet()
+	if !ok {
 		return nil
 	}
 	if !set[objectType] {

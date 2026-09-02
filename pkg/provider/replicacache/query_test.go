@@ -280,10 +280,18 @@ func TestQueryRejectsCountOnlyWithAllowUncounted(t *testing.T) {
 	}
 }
 
+// The better message — "not one of the N types this deployment reports" —
+// depends on discovery already being cached, because the query path never waits
+// on it. That is the real flow: the query editor populates its object-type
+// dropdown before a query can name a type.
 func TestQueryRejectsUnknownObjectType(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "d", 1)}
 	p := newTestProvider(t, f)
+
+	if _, err := p.ObjectTypes(context.Background()); err != nil {
+		t.Fatalf("warming discovery: %v", err)
+	}
 
 	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/widgets"})
 	if err == nil {
@@ -431,5 +439,86 @@ func TestQueryProjectsTheDeepLinkColumn(t *testing.T) {
 	}
 	if got := res.Rows[0]["display_url"]; got != "https://netbox.example.com/dcim/devices/7/" {
 		t.Errorf("display_url = %v", got)
+	}
+}
+
+// An empty Fields means "all columns". KeyFields name join-key sources the
+// caller reads but did not ask to see, and object queries populate them
+// whenever a join mapping is configured — so treating them as a projection
+// silently reduced an ordinary panel left at "All columns" to nothing but its
+// join keys.
+func TestQueryKeepsAllColumnsWhenOnlyKeyFieldsAreGiven(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		KeyFields:  []string{"name"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	// Every stored column should still be present, not just the join key.
+	for _, want := range []string{"status", "site_id", "role_id", "id"} {
+		if _, ok := res.Rows[0][want]; !ok {
+			t.Errorf("column %q was dropped; an empty Fields means all columns", want)
+		}
+	}
+	if len(res.Columns) < 5 {
+		t.Errorf("only %d columns returned (%v); the row was projected away", len(res.Columns), res.Columns)
+	}
+	// No projection should have been requested upstream at all.
+	if req, ok := f.requestWith("dcim/devices", "fields"); ok {
+		t.Errorf("a projection was pushed down for a key-fields-only query: %v", req.query)
+	}
+}
+
+// An explicit projection still fetches key-field sources alongside the
+// requested columns, which is what KeyFields is for.
+func TestQueryProjectsKeyFieldsAlongsideExplicitFields(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name"},
+		KeyFields:  []string{"status"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if res.Rows[0]["status"] != "active" {
+		t.Error("the key field's source was not fetched")
+	}
+	if len(res.Columns) != 1 || res.Columns[0] != "name" {
+		t.Errorf("Columns = %v, want only the requested field", res.Columns)
+	}
+}
+
+// Discovery is served by one large document that was measured failing while row
+// endpoints stayed healthy. Waiting on it before the row request delayed every
+// panel by a full timeout it did not depend on, so the query path must consult
+// only an already-cached entity list.
+func TestQueryDoesNotFetchDiscoveryOnTheQueryPath(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		CountOnly:  true,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if res.Total != 1 {
+		t.Errorf("Total = %d", res.Total)
+	}
+	// A count-only query needs neither validation nor FK resolution, so nothing
+	// should have reached the discovery document.
+	if n := f.countRequestsFor("docs/openapi.json"); n != 0 {
+		t.Errorf("discovery was fetched %d times on the query path", n)
 	}
 }

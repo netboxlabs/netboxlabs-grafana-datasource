@@ -59,6 +59,7 @@ func (f *fakeService) start(t *testing.T) *httptest.Server {
 func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/docs/openapi.json" {
 		f.mu.Lock()
+		f.requests = append(f.requests, recordedRequest{entity: "docs/openapi.json", query: r.URL.Query()})
 		fail := f.noSwagger
 		paths := map[string]interface{}{}
 		for e := range f.entities {

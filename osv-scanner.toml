@@ -20,3 +20,18 @@ reason = "react-router 6.30.4 pinned transitively by @grafana/ui@13.1.0; fix is 
 id = "GHSA-wrjc-x8rr-h8h6"
 ignoreUntil = 2026-10-01
 reason = "react-router 6.30.4 pinned transitively by @grafana/ui@13.1.0; fix is v7-only (incompatible). Externalized at runtime, not shipped. Re-review when @grafana/ui updates."
+
+# qs 6.15.3 is a dev-only transitive dependency (express/body-parser in the
+# plugin-e2e toolchain); it is not shipped in the plugin bundle. The fix, qs
+# 6.16.0, was published 2026-08-29 and is therefore still inside the .npmrc
+# `min-release-age=7` cooldown, so npm refuses to resolve it -- this is the
+# cooldown working as designed, not a blocker to route around. Replace both
+# entries with a package.json override once the fix ages out on 2026-09-05.
+[[IgnoredVulns]]
+id = "GHSA-4mjr-xmp4-gh2g"
+ignoreUntil = 2026-09-08
+reason = "qs 6.16.0 fix is inside the .npmrc min-release-age=7 cooldown (published 2026-08-29). Dev-only, not shipped. Pin the override once it ages out on 2026-09-05."
+[[IgnoredVulns]]
+id = "GHSA-x5fp-wj9c-mxmx"
+ignoreUntil = 2026-09-08
+reason = "qs 6.16.0 fix is inside the .npmrc min-release-age=7 cooldown (published 2026-08-29). Dev-only, not shipped. Pin the override once it ages out on 2026-09-05."

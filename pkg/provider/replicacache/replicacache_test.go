@@ -433,3 +433,73 @@ func TestRawColumnsSurviveDegradation(t *testing.T) {
 		t.Error("a resolved name must never appear in the raw schema")
 	}
 }
+
+// BaseURL is what the plugin layer uses as the prefix when rewriting links from
+// an internal host to a browser-facing one. The deep links point at NetBox, so
+// returning the cache root left that prefix matching nothing and handed the
+// user an internal, unreachable NetBox URL.
+func TestBaseURLIsTheLinkBase(t *testing.T) {
+	f := newFakeService()
+	srv := f.start(t)
+
+	withNetBox := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.internal/"))
+	if got := withNetBox.BaseURL(); got != "https://netbox.internal" {
+		t.Errorf("BaseURL = %q, want the NetBox base the links were built from", got)
+	}
+
+	// Nothing is linkable without a NetBox URL, so there is nothing to rewrite
+	// and the cache root is a harmless fallback.
+	without := New(srv.URL, "t", "nb", srv.Client())
+	if got := without.BaseURL(); got != srv.URL {
+		t.Errorf("BaseURL = %q, want the cache root as fallback", got)
+	}
+}
+
+// Autocomplete must not push ILIKE at a non-text column: the service answers
+// either 500 or, worse, HTTP 200 with the whole unfiltered population, so the
+// dropdown would offer values that do not match what was typed.
+func TestFieldValuesDoesNotPushTextSearchAtNonTextColumns(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		deviceFixture(1, "CORE-1", 4001), deviceFixture(22, "CORE-2", 4001), deviceFixture(3, "EDGE-1", 4001),
+	}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	vals, err := p.FieldValues(ctx, "dcim/devices", "id", "2", 100)
+	if err != nil {
+		t.Fatalf("FieldValues: %v", err)
+	}
+	// No ilike parameter may reach the service for a numeric column.
+	for _, r := range f.requests {
+		for k := range r.query {
+			if strings.Contains(k, "filter[id]__ilike") {
+				t.Errorf("pushed an unsafe text predicate at a numeric column: %v", r.query)
+			}
+		}
+	}
+	// The search is still honoured, locally: 22 contains "2", 1 and 3 do not.
+	if len(vals) != 1 || vals[0] != "22" {
+		t.Errorf("want the locally matched value [22], got %v", vals)
+	}
+}
+
+// A text column keeps the pushdown, which is the whole point of having it.
+func TestFieldValuesPushesTextSearchForTextColumns(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		deviceFixture(1, "CORE-1", 4001), deviceFixture(2, "EDGE-1", 4001),
+	}
+	p := newTestProvider(t, f)
+
+	vals, err := p.FieldValues(context.Background(), "dcim/devices", "name", "core", 100)
+	if err != nil {
+		t.Fatalf("FieldValues: %v", err)
+	}
+	if _, ok := f.requestWith("dcim/devices", "filter[name]__ilike"); !ok {
+		t.Error("a text column should still have its search pushed down")
+	}
+	if len(vals) != 1 || vals[0] != "CORE-1" {
+		t.Errorf("got %v, want [CORE-1]", vals)
+	}
+}

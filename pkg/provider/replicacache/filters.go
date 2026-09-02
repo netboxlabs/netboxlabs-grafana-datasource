@@ -70,6 +70,21 @@ func (e *UnsupportedFilterError) Classification() *provider.UpstreamError {
 // first selection.
 func buildFilterValues(filters []provider.Filter) (url.Values, error) {
 	q := url.Values{}
+
+	// Exact filters are accumulated per field rather than written as they are
+	// seen. Two rows on one field mean OR — the NetBox provider encodes that as
+	// repeated params, which DRF unions — and writing each one in turn would let
+	// the last overwrite the rest, silently narrowing "status is active or
+	// planned" to "status is planned". replica-cache expresses the same thing
+	// with `in`, so the values are collected and emitted once.
+	exactValues := map[string][]string{}
+	var exactOrder []string
+
+	// Non-exact operators cannot be unioned, so a repeated one on the same field
+	// is refused rather than resolved by last-write-wins. Different operators on
+	// one field are fine and compose (gt with lt is a range).
+	seen := map[string]bool{}
+
 	for _, f := range filters {
 		if f.Field == "" {
 			continue
@@ -95,28 +110,49 @@ func buildFilterValues(filters []provider.Filter) (url.Values, error) {
 
 		switch op {
 		case opExact:
-			if len(values) == 1 {
-				q.Set(param(f.Field, "eq"), values[0])
-			} else {
-				// `in` takes the comma-separated list the variable already gave us.
-				q.Set(param(f.Field, "in"), strings.Join(values, ","))
+			if _, ok := exactValues[f.Field]; !ok {
+				exactOrder = append(exactOrder, f.Field)
 			}
+			exactValues[f.Field] = append(exactValues[f.Field], values...)
 		case opGT, opLT:
 			if len(values) > 1 {
 				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 					Reason: "a comparison accepts a single value, but several were given"}
 			}
+			key := f.Field + "|" + op
+			if seen[key] {
+				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+					Reason: "the same comparison is applied twice to this field; this backend cannot combine them, so remove one"}
+			}
+			seen[key] = true
 			q.Set(param(f.Field, op), values[0])
 		case opIExact, opIContns, opIStarts, opIEnds:
 			if len(values) > 1 {
 				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 					Reason: "this backend cannot combine several values for a text match; select one value or filter on equality"}
 			}
+			key := f.Field + "|ilike"
+			if seen[key] {
+				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+					Reason: "two text matches are applied to this field; this backend cannot combine them, so remove one"}
+			}
+			seen[key] = true
 			q.Set(param(f.Field, "ilike"), likePattern(op, values[0]))
 		default:
 			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 				Reason: "this backend supports only equality, text match, greater/less than and is-empty"}
 		}
+	}
+
+	for _, field := range exactOrder {
+		values := exactValues[field]
+		if len(values) == 1 {
+			q.Set(param(field, "eq"), values[0])
+			continue
+		}
+		// `in` takes the comma-separated union of every exact value asked for,
+		// whether they arrived as one multi-value variable or as several rows.
+		q.Set(param(field, "in"), strings.Join(values, ","))
 	}
 	return q, nil
 }

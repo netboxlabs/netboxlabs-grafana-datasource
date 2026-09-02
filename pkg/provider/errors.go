@@ -41,6 +41,12 @@ const (
 	// ErrorKindNotFound because it is actionable in the query editor and should
 	// be answered as a bad request rather than an outage.
 	ErrorKindUnknownObjectType ErrorKind = "unknown-object-type"
+	// ErrorKindUnsupported is a capability the configured backend does not have.
+	// It is neither a failure nor bad input: the answer does not exist there, and
+	// no retry or correction to the query will produce one. It is separate from
+	// ErrorKindBadRequest because the remedy is different — the reader has to
+	// point the query at a backend that can answer it, not fix the query.
+	ErrorKindUnsupported ErrorKind = "unsupported"
 	// ErrorKindUpstream is any other identified upstream refusal. Status carries
 	// the code; there is nothing more specific to say.
 	ErrorKindUpstream ErrorKind = "upstream"
@@ -64,6 +70,17 @@ type UpstreamError struct {
 	// KnownTypes is set only for ErrorKindUnknownObjectType: how many types the
 	// instance does report, so the message can say how far off the input was.
 	KnownTypes int
+	// Detail is a complete, user-facing sentence the PROVIDER wrote about this
+	// failure, used where the kind alone cannot say enough — today
+	// ErrorKindUnsupported, where naming the missing capability and the way
+	// around it is the whole value of the message.
+	//
+	// It must be authored by the provider, never copied from an upstream
+	// response. Everything else on this struct is a classification precisely so
+	// that no upstream text crosses the seam, and a field that carried a
+	// response body here would undo that in one line. Providers must keep it
+	// short; the plugin layer bounds it before display regardless.
+	Detail string
 }
 
 func (e *UpstreamError) Error() string {

@@ -623,6 +623,18 @@ func queryErrorMessage(err error) string {
 			}
 			return fmt.Sprintf("NetBox has no object type %q — it isn't one of the %d types this instance reports. Annotations filter by app_label.model, singular (e.g. dcim.device, ipam.ipaddress).",
 				name, u.KnownTypes)
+		// A capability the backend does not have. The provider's own sentence is
+		// preferred because only it can name what is missing and what to use
+		// instead; it is provider-authored (never an upstream body) but bounded
+		// here anyway, on the same principle as every other echoed string.
+		case provider.ErrorKindUnsupported:
+			if d := strings.TrimSpace(u.Detail); d != "" {
+				if len(d) > maxUpstreamDetail {
+					d = d[:maxUpstreamDetail] + "…"
+				}
+				return d
+			}
+			return "This query isn't supported by the backend this datasource is configured to use."
 		case provider.ErrorKindNotListable:
 			return "This object type can't be queried — the NetBox endpoint doesn't support listing (HTTP 405). It may be an action endpoint, not a queryable collection."
 		case provider.ErrorKindInvalidBranch:
@@ -656,7 +668,11 @@ func queryErrorResponse(err error) backend.DataResponse {
 // is a bad request, and saying otherwise tells the reader to retry something
 // only they can fix.
 func queryErrorStatus(err error) backend.Status {
-	if u := provider.Classify(err); u != nil && u.Kind == provider.ErrorKindUnknownObjectType {
+	// Unsupported joins unknown-object-type here: both are settled facts about
+	// what was asked for, and reporting them as StatusInternal would tell the
+	// reader to retry something that will never succeed.
+	if u := provider.Classify(err); u != nil &&
+		(u.Kind == provider.ErrorKindUnknownObjectType || u.Kind == provider.ErrorKindUnsupported) {
 		return backend.StatusBadRequest
 	}
 	return backend.StatusInternal

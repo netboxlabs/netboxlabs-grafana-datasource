@@ -302,3 +302,69 @@ func TestUnknownTypeWithoutDiscoveryClassifiesAsNotFound(t *testing.T) {
 		t.Fatalf("want a not-found classification, got %+v", u)
 	}
 }
+
+// A dimension that times out yields a SHORTER column list, because the resolved
+// names are missing. Caching that would pin the loss for the whole TTL: the
+// editor would stop offering columns that queries keep returning. Measured live
+// as 47 and 53 columns where a healthy run returns 56.
+func TestFieldsDoesNotCacheADegradedColumnList(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	// The sites dimension is unreachable, so "site" and "site_slug" cannot be built.
+	f.failEntities["dcim/sites"] = true
+	degraded, err := p.Fields(ctx, "dcim/devices")
+	if err != nil {
+		t.Fatalf("Fields: %v", err)
+	}
+	if names(degraded)["site"] {
+		t.Fatal("site should be absent while its dimension is unreachable")
+	}
+
+	// It recovers, and the next read must reflect that rather than serving the
+	// short list from cache.
+	f.failEntities["dcim/sites"] = false
+	healthy, err := p.Fields(ctx, "dcim/devices")
+	if err != nil {
+		t.Fatalf("Fields after recovery: %v", err)
+	}
+	if !names(healthy)["site"] {
+		t.Error("site is still missing after the dimension recovered: a degraded column list was cached")
+	}
+	if len(healthy) <= len(degraded) {
+		t.Errorf("recovered list (%d) should be longer than the degraded one (%d)", len(healthy), len(degraded))
+	}
+}
+
+// A complete answer IS cached, or every editor interaction would re-sample.
+func TestFieldsCachesACompleteColumnList(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if _, err := p.Fields(ctx, "dcim/devices"); err != nil {
+			t.Fatalf("Fields %d: %v", i, err)
+		}
+	}
+	if n := f.countRequestsFor("dcim/devices"); n != 1 {
+		t.Errorf("sampled %d times across 3 calls, want 1", n)
+	}
+}
+
+func names(fields []provider.Field) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range fields {
+		out[f.Name] = true
+	}
+	return out
+}

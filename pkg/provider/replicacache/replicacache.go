@@ -288,7 +288,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	}
 
 	cols, rows := flattenRows(raws)
-	added, _ := p.resolveFKs(ctx, objectType, rows)
+	added, degraded := p.resolveFKs(ctx, objectType, rows)
 	cols = append(cols, added...)
 
 	fields := make([]provider.Field, 0, len(cols))
@@ -297,9 +297,20 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	}
 	sort.SliceStable(fields, func(i, j int) bool { return fields[i].Name < fields[j].Name })
 
-	p.fieldsMu.Lock()
-	p.fields[objectType] = fieldsCacheEntry{fields: fields, raw: rawCols, expires: time.Now().Add(schemaTTL)}
-	p.fieldsMu.Unlock()
+	// Only a COMPLETE answer is cached. The resolved columns exist only if every
+	// dimension answered, so a single timed-out dimension yields a SHORTER list —
+	// measured live as 47 and 53 columns where a healthy run returns 56, losing
+	// site, role, device_type, location and their slugs.
+	//
+	// Caching that would pin the loss for the whole TTL: the editor would stop
+	// offering columns that queries keep returning, and the user would have no
+	// way to tell a column that never exists from one that briefly failed to
+	// resolve. Re-reading a sample costs one small request and self-heals.
+	if len(degraded) == 0 {
+		p.fieldsMu.Lock()
+		p.fields[objectType] = fieldsCacheEntry{fields: fields, raw: rawCols, expires: time.Now().Add(schemaTTL)}
+		p.fieldsMu.Unlock()
+	}
 	return fields, nil
 }
 

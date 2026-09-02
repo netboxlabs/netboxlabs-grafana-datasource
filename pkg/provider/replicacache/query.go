@@ -144,7 +144,15 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 // deployment no longer has, and fetching a wider row is a cost, while
 // projecting it away is a blank column with no explanation.
 func (p *Provider) projectColumns(ctx context.Context, spec provider.QuerySpec) ([]string, bool) {
-	if len(spec.Fields) == 0 && len(spec.KeyFields) == 0 {
+	// An empty Fields means "all columns" — the contract's wording and the query
+	// editor's default. KeyFields alone must NOT trigger a projection: they name
+	// join-key sources the caller reads but did not ask to see, so projecting
+	// onto them would return a panel containing nothing but its join keys.
+	//
+	// Object queries populate KeyFields whenever a join mapping is configured,
+	// so this fired on an ordinary panel left at "All columns" and silently
+	// removed every unrelated column from it.
+	if len(spec.Fields) == 0 {
 		return nil, false
 	}
 	raw, err := p.rawColumns(ctx, spec.ObjectType)

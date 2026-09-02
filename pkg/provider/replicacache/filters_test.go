@@ -131,7 +131,11 @@ func TestBuildFilterValuesRefusesMultiValueComparison(t *testing.T) {
 }
 
 func TestFilterFieldsAdvertisesOnlySupportedOperators(t *testing.T) {
-	got := filterFieldsFor([]provider.Field{{Name: "name"}, {Name: "id"}})
+	fields := []provider.Field{{Name: "name", Type: provider.FieldTypeString}, {Name: "id", Type: provider.FieldTypeNumber}}
+	raw := map[string]bool{"name": true, "id": true}
+	types := map[string]provider.FieldType{"name": provider.FieldTypeString, "id": provider.FieldTypeNumber}
+
+	got := filterFieldsFor(fields, raw, types)
 	if len(got) != 2 {
 		t.Fatalf("want 2 filter fields, got %d", len(got))
 	}
@@ -143,5 +147,94 @@ func TestFilterFieldsAdvertisesOnlySupportedOperators(t *testing.T) {
 		if _, err := buildFilterValues([]provider.Filter{{Field: "id", Operator: op, Value: "1"}}); err != nil {
 			t.Errorf("operator %q is advertised but rejected by the translator: %v", op, err)
 		}
+	}
+}
+
+// ILIKE against a non-text column was measured returning HTTP 200 with the
+// UNFILTERED total, so a text operator must never be offered for one.
+func TestFilterFieldsWithholdsTextOperatorsFromNonTextColumns(t *testing.T) {
+	fields := []provider.Field{
+		{Name: "name", Type: provider.FieldTypeString},
+		{Name: "id", Type: provider.FieldTypeNumber},
+		{Name: "sometimes_null", Type: provider.FieldTypeString},
+	}
+	raw := map[string]bool{"name": true, "id": true, "sometimes_null": true}
+	types := map[string]provider.FieldType{
+		"name": provider.FieldTypeString,
+		"id":   provider.FieldTypeNumber,
+		// never seen holding a value, so it cannot be typed
+		"sometimes_null": provider.FieldType(""),
+	}
+
+	byName := map[string][]string{}
+	for _, f := range filterFieldsFor(fields, raw, types) {
+		byName[f.Name] = f.Operators
+	}
+	has := func(ops []string, op string) bool {
+		for _, o := range ops {
+			if o == op {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(byName["name"], opIContns) {
+		t.Error("a text column must keep the text operators")
+	}
+	if has(byName["id"], opIContns) {
+		t.Error("a numeric column must not be offered a text match: ILIKE on it returns every row unfiltered")
+	}
+	if has(byName["sometimes_null"], opIContns) {
+		t.Error("an untypeable column must not be offered a text match")
+	}
+	// Equality and is-empty stay available everywhere.
+	for _, n := range []string{"name", "id", "sometimes_null"} {
+		if !has(byName[n], opExact) || !has(byName[n], opEmpty) {
+			t.Errorf("%q lost equality or is-empty", n)
+		}
+	}
+}
+
+// Derived columns are built here, not stored upstream, so filtering on one is
+// rejected as an unknown column. They must not be advertised as filterable.
+func TestFilterFieldsExcludesDerivedColumns(t *testing.T) {
+	fields := []provider.Field{
+		{Name: "site_id", Type: provider.FieldTypeNumber},
+		{Name: "site", Type: provider.FieldTypeString},
+		{Name: "cf_tier", Type: provider.FieldTypeString},
+	}
+	raw := map[string]bool{"site_id": true}
+	types := map[string]provider.FieldType{"site_id": provider.FieldTypeNumber, "site": provider.FieldTypeString}
+
+	got := filterFieldsFor(fields, raw, types)
+	if len(got) != 1 || got[0].Name != "site_id" {
+		t.Fatalf("want only the upstream column offered, got %+v", got)
+	}
+}
+
+// A saved dashboard predates the editor's current answer, so the combination
+// has to be refused at query time too.
+func TestValidateFilterTypesRefusesTextMatchOnNonTextColumn(t *testing.T) {
+	types := map[string]provider.FieldType{"id": provider.FieldTypeNumber, "name": provider.FieldTypeString}
+
+	err := validateFilterTypes([]provider.Filter{{Field: "id", Operator: opIContns, Value: "1"}}, types)
+	if err == nil {
+		t.Fatal("want a refusal for a text match on a numeric column")
+	}
+	var unsupported *UnsupportedFilterError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("want *UnsupportedFilterError, got %T", err)
+	}
+
+	if err := validateFilterTypes([]provider.Filter{{Field: "name", Operator: opIContns, Value: "x"}}, types); err != nil {
+		t.Errorf("a text match on a text column must be allowed: %v", err)
+	}
+	// Equality is safe on any type and must not be blocked.
+	if err := validateFilterTypes([]provider.Filter{{Field: "id", Operator: opExact, Value: "1"}}, types); err != nil {
+		t.Errorf("equality on a numeric column must be allowed: %v", err)
+	}
+	// Unknown types mean we cannot judge; the request stays authoritative.
+	if err := validateFilterTypes([]provider.Filter{{Field: "id", Operator: opIContns, Value: "1"}}, nil); err != nil {
+		t.Errorf("with no type information the filter must pass through: %v", err)
 	}
 }

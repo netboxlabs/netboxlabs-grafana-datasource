@@ -167,20 +167,97 @@ func boolString(b bool) string {
 	return "false"
 }
 
-// filterFieldsFor advertises every discovered column with the operator set the
-// backend honours.
+// textOperators need the column to hold text. They compile to SQL ILIKE, which
+// the backend applies without checking the column's type.
+var textOperators = map[string]bool{
+	opIExact: true, opIContns: true, opIStarts: true, opIEnds: true,
+}
+
+// filterFieldsFor advertises the columns that can actually be filtered, each
+// with the operators that are safe for its type.
 //
-// The operator set does not vary by column. That is a property of the service,
-// not an assumption: it validates the operator against a fixed list and the
-// column against the table's schema, and reports the two failures separately
-// ("invalid filter operator: regex" versus "unknown column: nope"). So there is
-// nothing per-column to discover, and offering the same list everywhere is
-// accurate rather than a simplification.
-func filterFieldsFor(fields []provider.Field) []provider.FilterField {
+// Two restrictions, both of which produce a broken query if skipped.
+//
+// Only columns that exist UPSTREAM are offered. The resolved names (site) and
+// custom fields (cf_*) are built here, not stored there, so filtering on one is
+// rejected as an unknown column.
+//
+// Text operators are offered only for a column confirmed to hold text. Operator
+// validity does vary by column, which is not obvious from how the service
+// reports errors: it validates the operator against a fixed list and the column
+// against the schema, and reports those two clearly and separately. Type
+// compatibility is a third check that does not happen, and ILIKE against a
+// non-text column was measured failing two different ways on the same column:
+//
+//	filter[id]__ilike=ZZZZ  -> HTTP 500 {"error":"count query failed"}
+//	filter[id]__ilike=%1%   -> HTTP 200, count 6824570 — the UNFILTERED total
+//
+// The second is why this gate exists. A 500 is at least visible; a filter that
+// returns every row under a healthy status code is a panel quietly showing the
+// whole fleet while claiming to show a subset.
+//
+// A column never seen holding a value cannot be typed and is treated as
+// non-text. Withholding an operator costs a dropdown entry; offering one that
+// silently matches everything costs a wrong answer.
+func filterFieldsFor(fields []provider.Field, raw map[string]bool, types map[string]provider.FieldType) []provider.FilterField {
 	out := make([]provider.FilterField, 0, len(fields))
 	for _, f := range fields {
-		out = append(out, provider.FilterField{Name: f.Name, Operators: supportedOperators})
+		if len(raw) > 0 && !raw[f.Name] {
+			continue
+		}
+		ops := make([]string, 0, len(supportedOperators))
+		for _, op := range supportedOperators {
+			if textOperators[op] && types[f.Name] != provider.FieldTypeString {
+				continue
+			}
+			ops = append(ops, op)
+		}
+		out = append(out, provider.FilterField{Name: f.Name, Operators: ops})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// needsTypeCheck reports whether any filter uses an operator whose validity
+// depends on the column's type. It exists so a query with no text match never
+// pays for a schema sample — notably the count-only path, whose whole point is
+// to skip work it will not read.
+func needsTypeCheck(filters []provider.Filter) bool {
+	for _, f := range filters {
+		op := f.Operator
+		if op == "exact" {
+			op = opExact
+		}
+		if textOperators[op] {
+			return true
+		}
+	}
+	return false
+}
+
+// validateFilterTypes refuses a filter whose operator is unsafe for the
+// column's type, before any request is built.
+//
+// FilterFields already hides those combinations from the editor, but a saved
+// dashboard predates the editor's current answer and a provisioned one never
+// consulted it. Sending it anyway is what produces the silent unfiltered
+// result above, so it is refused here as well.
+func validateFilterTypes(filters []provider.Filter, types map[string]provider.FieldType) error {
+	if len(types) == 0 {
+		return nil // types unknown; the request itself remains authoritative
+	}
+	for _, f := range filters {
+		op := f.Operator
+		if op == "exact" {
+			op = opExact
+		}
+		if !textOperators[op] {
+			continue
+		}
+		if t, seen := types[f.Field]; seen && t != provider.FieldTypeString {
+			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+				Reason: "a text match needs a text column, and this backend applies it to any column without checking — returning either a server error or, worse, every row unfiltered"}
+		}
+	}
+	return nil
 }

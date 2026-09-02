@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -96,8 +97,26 @@ func New(base, token, netboxID string, httpClient *http.Client, opts ...Option) 
 	return p
 }
 
-func (p *Provider) Name() string    { return "replica-cache" }
-func (p *Provider) BaseURL() string { return p.client.BaseURL() }
+func (p *Provider) Name() string { return "replica-cache" }
+
+// BaseURL returns the base the result's deep links were built from, which is
+// what the seam documents it as and what the plugin layer uses it for:
+// rewriting links from an internal host to a browser-facing one (publicUrl).
+//
+// For this provider that is the NETBOX base, not the cache's own root. The
+// links point at objects in the NetBox UI — the cache has no UI — so returning
+// the cache root would leave the rewrite prefix matching nothing and hand the
+// user an internal, unreachable NetBox URL.
+//
+// It falls back to the cache root when no NetBox URL is configured. Nothing is
+// linkable in that case, so there is nothing to rewrite, and the value is only
+// ever used as a prefix to match.
+func (p *Provider) BaseURL() string {
+	if p.netboxURL != "" {
+		return strings.TrimRight(strings.TrimSpace(p.netboxURL), "/")
+	}
+	return p.client.BaseURL()
+}
 
 // UnsupportedError is a capability this backend does not have. It is not a
 // failure and not the user's mistake: the answer does not exist here.
@@ -465,12 +484,23 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 		return nil, nil
 	}
 
-	params, err := buildFilterValues([]provider.Filter{{Field: field, Operator: opIContns, Value: q}})
-	if err != nil {
-		return nil, err
-	}
-	if q == "" {
-		params = nil
+	// A substring search is only pushed down when the column holds text.
+	// ILIKE against a non-text column is the hazard this provider already
+	// guards in FilterFields: it answers either 500 or, worse, HTTP 200 with
+	// the whole unfiltered population. Autocomplete would then quietly offer
+	// values that do not match what the user typed, while looking healthy.
+	//
+	// For every other column the page is fetched unfiltered and matched here.
+	// That is a sample rather than the column's full domain, which is already
+	// true of this endpoint, and an honest subset beats a confident wrong list.
+	pushDown := q != "" && p.columnTypes(ctx, objectType)[field] == provider.FieldTypeString
+	var params url.Values
+	if pushDown {
+		var err error
+		params, err = buildFilterValues([]provider.Filter{{Field: field, Operator: opIContns, Value: q}})
+		if err != nil {
+			return nil, err
+		}
 	}
 	params = withFields(params, []string{field})
 
@@ -478,6 +508,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	if err != nil {
 		return nil, err
 	}
+	needle := strings.ToLower(q)
 	seen := map[string]bool{}
 	var out []string
 	for _, r := range raws {
@@ -487,6 +518,11 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 		}
 		s := valueString(obj[field])
 		if s == "" || seen[s] {
+			continue
+		}
+		// When the search could not be pushed down, apply it here so the caller
+		// still gets matches rather than an arbitrary page of every value.
+		if !pushDown && needle != "" && !strings.Contains(strings.ToLower(s), needle) {
 			continue
 		}
 		seen[s] = true

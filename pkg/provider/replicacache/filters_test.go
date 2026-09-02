@@ -238,3 +238,105 @@ func TestValidateFilterTypesRefusesTextMatchOnNonTextColumn(t *testing.T) {
 		t.Errorf("with no type information the filter must pass through: %v", err)
 	}
 }
+
+// Two rows on one field mean OR. Writing each in turn let the last overwrite
+// the rest, so "status is active or planned" silently became "status is
+// planned" — a narrower result set, with nothing to show it happened.
+func TestBuildFilterValuesUnionsRepeatedExactFilters(t *testing.T) {
+	got, err := buildFilterValues([]provider.Filter{
+		{Field: "status", Value: "active"},
+		{Field: "status", Value: "planned"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v := got.Get("filter[status]__in"); v != "active,planned" {
+		t.Errorf("filter[status]__in = %q, want %q", v, "active,planned")
+	}
+	if got.Get("filter[status]__eq") != "" {
+		t.Error("a unioned filter must not also emit eq")
+	}
+}
+
+// The same union, whether the values arrive as several rows, one multi-value
+// variable, or a mix of the two.
+func TestBuildFilterValuesUnionsMixedExactSources(t *testing.T) {
+	got, err := buildFilterValues([]provider.Filter{
+		{Field: "status", Value: "active,planned"},
+		{Field: "status", Value: "offline"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v := got.Get("filter[status]__in"); v != "active,planned,offline" {
+		t.Errorf("filter[status]__in = %q", v)
+	}
+}
+
+// A single exact filter still uses eq rather than a one-element in.
+func TestBuildFilterValuesKeepsSingleExactAsEq(t *testing.T) {
+	got, err := buildFilterValues([]provider.Filter{{Field: "status", Value: "active"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v := got.Get("filter[status]__eq"); v != "active" {
+		t.Errorf("filter[status]__eq = %q", v)
+	}
+}
+
+// Filters on different fields stay independent.
+func TestBuildFilterValuesKeepsFieldsSeparate(t *testing.T) {
+	got, err := buildFilterValues([]provider.Filter{
+		{Field: "status", Value: "active"},
+		{Field: "status", Value: "planned"},
+		{Field: "name", Value: "CORE-1"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v := got.Get("filter[status]__in"); v != "active,planned" {
+		t.Errorf("status = %q", v)
+	}
+	if v := got.Get("filter[name]__eq"); v != "CORE-1" {
+		t.Errorf("name = %q", v)
+	}
+}
+
+// Non-exact operators cannot be unioned, so a repeat is refused rather than
+// resolved by last-write-wins — the failure mode this whole change is about.
+func TestBuildFilterValuesRefusesRepeatedNonExactOperators(t *testing.T) {
+	cases := []struct {
+		name    string
+		filters []provider.Filter
+	}{
+		{"two contains", []provider.Filter{
+			{Field: "name", Operator: "ic", Value: "core"},
+			{Field: "name", Operator: "ic", Value: "edge"},
+		}},
+		{"two gt", []provider.Filter{
+			{Field: "id", Operator: "gt", Value: "5"},
+			{Field: "id", Operator: "gt", Value: "9"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := buildFilterValues(tc.filters); err == nil {
+				t.Fatal("want a refusal, got none: silently dropping one narrows the result")
+			}
+		})
+	}
+}
+
+// Different operators on one field compose into a range and must be kept.
+func TestBuildFilterValuesAllowsARangeOnOneField(t *testing.T) {
+	got, err := buildFilterValues([]provider.Filter{
+		{Field: "id", Operator: "gt", Value: "5"},
+		{Field: "id", Operator: "lt", Value: "10"},
+	})
+	if err != nil {
+		t.Fatalf("a range must be allowed: %v", err)
+	}
+	if got.Get("filter[id]__gt") != "5" || got.Get("filter[id]__lt") != "10" {
+		t.Errorf("range lost: %v", got)
+	}
+}

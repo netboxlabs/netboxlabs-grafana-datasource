@@ -48,8 +48,31 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		limit = 1
 	}
 
+	// Sorting is only accepted on columns that physically exist: the service
+	// answers `sort=site` with 400 "unknown sort column: site" rather than
+	// ignoring it. Passing a derived column straight through would therefore
+	// turn a saved panel into an error toast the moment someone sorts by a
+	// related object's name.
+	//
+	// The seam permits a provider to ignore Ordering as long as it says so, so
+	// the unsortable request is dropped and stated instead. Substituting the id
+	// column was the tempting alternative and is worse: site_id order is not
+	// site-name order, and the panel would look correctly sorted while being
+	// ordered by something the reader cannot see.
+	var notes []string
 	if spec.Ordering != "" {
-		q.Set("sort", spec.Ordering)
+		field := strings.TrimPrefix(spec.Ordering, "-")
+		sortable := true
+		if raw, rerr := p.rawColumns(ctx, spec.ObjectType); rerr == nil && len(raw) > 0 {
+			sortable = raw[field]
+		}
+		if sortable {
+			q.Set("sort", spec.Ordering)
+		} else {
+			notes = append(notes, fmt.Sprintf(
+				"Rows are not sorted by %q: this backend sorts only on stored columns, and that one is derived from %s_id. Sort by %s_id instead, or use a datasource in NetBox mode.",
+				field, field, field))
+		}
 	}
 
 	// Projection. Ask only for the columns needed to build what was requested.
@@ -87,20 +110,6 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 			}
 		}
 		cols = out
-	}
-
-	var notes []string
-	if spec.Ordering != "" && len(raws) > 0 {
-		// The service sorts on real columns only. A sort requested on a column we
-		// synthesize (site, cf_*) was silently ignored upstream, and the contract
-		// requires saying so rather than letting a panel believe it is sorted.
-		if raw, rerr := p.rawColumns(ctx, spec.ObjectType); rerr == nil {
-			field := strings.TrimPrefix(spec.Ordering, "-")
-			if !raw[field] {
-				notes = append(notes, fmt.Sprintf(
-					"Rows are not sorted by %q: this backend can only sort on stored columns, and that one is derived. Sort by %s_id, or use a datasource in NetBox mode.", field, field))
-			}
-		}
 	}
 
 	return &provider.Result{

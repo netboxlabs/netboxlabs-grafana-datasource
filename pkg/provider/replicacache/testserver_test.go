@@ -31,6 +31,9 @@ type fakeService struct {
 	requests []recordedRequest
 	// noSwagger serves a 500 for the API description.
 	noSwagger bool
+	// hangSwagger blocks the API description until the test finishes, modelling
+	// the measured failure where discovery times out while row endpoints answer.
+	hangSwagger chan struct{}
 	// failEntities names entities that answer 500, to simulate one dimension
 	// timing out while the rest of the service is healthy.
 	failEntities map[string]bool
@@ -59,6 +62,7 @@ func (f *fakeService) start(t *testing.T) *httptest.Server {
 func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/docs/openapi.json" {
 		f.mu.Lock()
+		hang := f.hangSwagger
 		f.requests = append(f.requests, recordedRequest{entity: "docs/openapi.json", query: r.URL.Query()})
 		fail := f.noSwagger
 		paths := map[string]interface{}{}
@@ -67,6 +71,9 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 			paths["/v1/"+e+"/{id}"] = map[string]interface{}{"get": map[string]interface{}{}}
 		}
 		f.mu.Unlock()
+		if hang != nil {
+			<-hang
+		}
 		if fail {
 			writeErr(w, 500, "server error")
 			return

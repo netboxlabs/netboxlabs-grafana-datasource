@@ -244,11 +244,18 @@ func (c *fkCache) store(entity string, rows map[int]related) {
 // exists but did not answer leaves a blank name column, which looks exactly
 // like "this device has no site" — so that one is stated.
 func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[string]interface{}) ([]string, []string) {
-	known, err := p.entitySet(ctx)
-	if err != nil {
-		// Without the entity list nothing can be targeted. The rows are complete
-		// and correct as ids, so this degrades rather than fails.
-		return nil, []string{"Related names could not be added: the list of available object types could not be read. Columns such as \"site\" and \"role\" are missing; the matching *_id columns still hold the values."}
+	// The entity list is needed to target the FKs, but this runs AFTER the rows
+	// have arrived — so an unbounded fetch here delays a panel that already has
+	// its data, which is the one place a long timeout buys nothing.
+	//
+	// So the wait is capped, and the refresh behind it is shared between
+	// concurrent panels. Healthy discovery (~1.6s) resolves inside the budget
+	// and the names appear; a hung one costs a few seconds once rather than a
+	// full HTTP timeout per query, and the result degrades honestly. Rows are
+	// complete and correct as ids either way; only the names are missing.
+	known, ok := p.entitySetSoon(discoveryWaitBudget)
+	if !ok {
+		return nil, []string{"Related names could not be added yet: the list of available object types is still being read. Columns such as \"site\" and \"role\" are missing from this result; the matching *_id columns still hold the values, and a refresh should resolve them."}
 	}
 
 	// Group the ids to resolve by target entity.

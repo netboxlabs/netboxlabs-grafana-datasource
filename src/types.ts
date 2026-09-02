@@ -1,10 +1,13 @@
 import { DataSourceJsonData, SelectableValue } from '@grafana/data';
 import { DataQuery } from '@grafana/schema';
 
-/** Enrichment backend. Only 'netbox' exists today; the type and the `mode`
- * option are kept as the seam for a planned second, high-volume backend
- * (no UI selector until then). */
-export type ProviderMode = 'netbox';
+/** Which backend the datasource reads from.
+ *
+ * 'netbox' queries the NetBox REST API directly and is the default.
+ * 'replica-cache' reads a columnar mirror built for instances the REST API
+ * cannot serve interactively; it cannot do annotations, IP enrichment or
+ * topology, and says so rather than returning empty results. */
+export type ProviderMode = 'netbox' | 'replica-cache';
 
 /** A single field/operator/value constraint applied to a query. */
 export interface FilterRow {
@@ -103,6 +106,11 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
    * reaches NetBox via internal service DNS). Used to rewrite deep links. */
   publicUrl?: string;
   mode?: ProviderMode;
+  /** replica-cache service root. Required when mode is 'replica-cache'. */
+  replicaCacheUrl?: string;
+  /** Identifies the NetBox instance the cache mirrors, sent as NBC-Netbox-ID.
+   * Required when mode is 'replica-cache'. */
+  netboxId?: string;
   tlsSkipVerify?: boolean;
   timeoutSeconds?: number;
   /** Opt-in for very large NetBox instances: table queries page by ID and skip
@@ -117,6 +125,10 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
 /** Secret values — never returned to the frontend after being set. */
 export interface NetBoxSecureJsonData {
   apiToken?: string;
+  /** Bearer token for replica-cache. Held separately from apiToken because the
+   * two are credentials for different services, issued and rotated
+   * independently. */
+  replicaCacheToken?: string;
 }
 
 export interface ObjectTypeOption {

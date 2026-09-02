@@ -34,6 +34,17 @@ import (
 // schemaTTL bounds how long the discovered entity list is reused.
 const schemaTTL = 10 * time.Minute
 
+// discoveryWarmBudget bounds the background discovery refresh itself. No caller
+// waits this long; it exists so a hung endpoint cannot hold a goroutine and a
+// connection forever.
+const discoveryWarmBudget = 60 * time.Second
+
+// discoveryWaitBudget is the most a query will wait for discovery it needs but
+// does not have. Measured healthy at ~1.6s for the full document, so this
+// covers the good case with headroom while capping the bad one far below the
+// request timeout it would otherwise inherit.
+const discoveryWaitBudget = 4 * time.Second
+
 // Provider is the replica-cache implementation of provider.Provider.
 type Provider struct {
 	client *Client
@@ -45,6 +56,10 @@ type Provider struct {
 	mu       sync.Mutex
 	entities []provider.ObjectType
 	expires  time.Time
+	// warmDone is non-nil while a background discovery refresh is in flight, and
+	// is closed when it ends. One refresh serves every concurrent panel, and a
+	// caller may wait on it for a bounded time instead of issuing its own.
+	warmDone chan struct{}
 
 	fieldsMu sync.Mutex
 	fields   map[string]fieldsCacheEntry
@@ -155,6 +170,26 @@ func (e *UnknownObjectTypeError) Classification() *provider.UpstreamError {
 		Kind:       provider.ErrorKindUnknownObjectType,
 		ObjectType: e.Type,
 		KnownTypes: e.Known,
+	}
+}
+
+// rejectBranch refuses a branch-scoped request.
+//
+// replica-cache mirrors the main dataset and has no notion of a NetBox branch.
+// A query carrying one would be answered from main and look entirely healthy,
+// so a panel or alert rule would report the main branch's data while its editor
+// says it is scoped to a branch. That is a wrong answer rather than a missing
+// feature, which is why it fails instead of ignoring the field.
+//
+// It is reachable: a saved or provisioned query keeps its branch when the
+// datasource behind it is switched to this mode.
+func rejectBranch(ctx context.Context) error {
+	if provider.BranchFromContext(ctx) == "" {
+		return nil
+	}
+	return &UnsupportedError{
+		Feature: "branches",
+		Detail:  "This datasource is configured to read from replica-cache, which mirrors the main dataset only and cannot answer a branch-scoped query. Clear the branch, or use a datasource in NetBox mode.",
 	}
 }
 
@@ -271,17 +306,62 @@ func (p *Provider) cachedEntitySet() (map[string]bool, bool) {
 	return set, true
 }
 
-// entitySet returns the discovered entities as a lookup set.
-func (p *Provider) entitySet(ctx context.Context) (map[string]bool, error) {
-	types, err := p.ObjectTypes(ctx)
-	if err != nil {
-		return nil, err
+// warmEntities starts a background discovery refresh if one is not already
+// running, and returns a channel closed when it finishes. It never blocks.
+//
+// Discovery is the slowest and least reliable request in this service —
+// measured timing out while row endpoints answered in ~1.3s — so it must never
+// sit inline on the query path. But it cannot simply be skipped either: nothing
+// else on a rendering dashboard populates the cache (the editor warms it when it
+// lists object types; a dashboard that only renders panels does not), so FK
+// names would be permanently absent there.
+//
+// One refresh therefore serves every caller, and callers choose how long they
+// are willing to wait for it.
+func (p *Provider) warmEntities() <-chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.warmDone != nil {
+		return p.warmDone
 	}
-	set := make(map[string]bool, len(types))
-	for _, t := range types {
-		set[t.Value] = true
+	done := make(chan struct{})
+	p.warmDone = done
+
+	go func() {
+		// Bounded so a hung discovery endpoint cannot hold a goroutine and a
+		// connection indefinitely. Nothing is required to wait for this, so the
+		// budget can exceed what any caller will spend on it.
+		ctx, cancel := context.WithTimeout(context.Background(), discoveryWarmBudget)
+		defer cancel()
+		_, _ = p.ObjectTypes(ctx)
+
+		p.mu.Lock()
+		p.warmDone = nil
+		p.mu.Unlock()
+		close(done)
+	}()
+	return done
+}
+
+// entitySetSoon returns the entity list, waiting at most budget for a refresh
+// that is already running or that it starts.
+//
+// The bound is the whole point. Waiting indefinitely puts a timeout-prone
+// request in front of work that does not depend on it; not waiting at all
+// throws away the healthy case, where discovery answers in under two seconds
+// and the caller can simply have the right answer. A short cap keeps the good
+// case correct and makes the bad case cost a fixed, small amount instead of a
+// full HTTP timeout — per refresh rather than per panel, since the refresh is
+// shared.
+func (p *Provider) entitySetSoon(budget time.Duration) (map[string]bool, bool) {
+	if set, ok := p.cachedEntitySet(); ok {
+		return set, true
 	}
-	return set, nil
+	select {
+	case <-p.warmEntities():
+	case <-time.After(budget):
+	}
+	return p.cachedEntitySet()
 }
 
 // validateObjectType rejects a type this deployment does not serve, before any
@@ -325,6 +405,9 @@ func (p *Provider) validateObjectType(_ context.Context, objectType string) erro
 // the columns a query will return, including the resolved names (site) and
 // custom fields (cf_*) that are not columns upstream.
 func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Field, error) {
+	if err := rejectBranch(ctx); err != nil {
+		return nil, err
+	}
 	if err := p.validateObjectType(ctx, objectType); err != nil {
 		return nil, err
 	}
@@ -491,6 +574,9 @@ func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provi
 // millions of rows to be exhaustive — would make the editor unusable for the
 // instances this backend exists to serve.
 func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string, limit int) ([]string, error) {
+	if err := rejectBranch(ctx); err != nil {
+		return nil, err
+	}
 	if err := p.validateObjectType(ctx, objectType); err != nil {
 		return nil, err
 	}

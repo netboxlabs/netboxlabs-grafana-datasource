@@ -668,12 +668,19 @@ func queryErrorResponse(err error) backend.DataResponse {
 // is a bad request, and saying otherwise tells the reader to retry something
 // only they can fix.
 func queryErrorStatus(err error) backend.Status {
-	// Unsupported joins unknown-object-type here: both are settled facts about
-	// what was asked for, and reporting them as StatusInternal would tell the
-	// reader to retry something that will never succeed.
-	if u := provider.Classify(err); u != nil &&
-		(u.Kind == provider.ErrorKindUnknownObjectType || u.Kind == provider.ErrorKindUnsupported) {
-		return backend.StatusBadRequest
+	// These three are settled facts about what was asked for, and StatusInternal
+	// says "our side broke, try again" — the opposite of what the reader has to
+	// do. A bad request belongs with them: whether it came from the upstream
+	// answering 400 or from a filter this backend cannot express, the query is
+	// what has to change, and no retry will help.
+	//
+	// Genuine upstream failures are untouched. A 500 or an unreachable host
+	// classifies as ErrorKindUpstream or not at all, and stays internal.
+	if u := provider.Classify(err); u != nil {
+		switch u.Kind {
+		case provider.ErrorKindUnknownObjectType, provider.ErrorKindUnsupported, provider.ErrorKindBadRequest:
+			return backend.StatusBadRequest
+		}
 	}
 	return backend.StatusInternal
 }

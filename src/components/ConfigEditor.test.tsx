@@ -153,3 +153,66 @@ describe('fast paging setting', () => {
     expect(screen.getByRole('switch', { name: /fast paging/i })).toBeChecked();
   });
 });
+
+// Without these fields the mode is reachable only through provisioning or by
+// editing datasource settings by hand, which is how it shipped in the first
+// draft. They also have to be conditional: the NetBox API token is never sent
+// in replica-cache mode, and showing it implies a credential the backend does
+// not use — the same confusion that made Save & Test fail on a correctly
+// configured cache datasource.
+describe('replica-cache mode', () => {
+  it('defaults to NetBox mode and asks only for NetBox settings', () => {
+    setup();
+    expect(screen.getByLabelText(/API Token/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Replica cache URL/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/NetBox instance ID/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Replica cache token/i)).not.toBeInTheDocument();
+  });
+
+  it('asks for the cache connection settings when that mode is selected', () => {
+    setup({ mode: 'replica-cache' });
+    expect(screen.getByLabelText(/Replica cache URL/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/NetBox instance ID/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Replica cache token/i)).toBeInTheDocument();
+  });
+
+  it('hides the NetBox API token in replica-cache mode', () => {
+    setup({ mode: 'replica-cache' });
+    expect(screen.queryByLabelText(/API Token/i)).not.toBeInTheDocument();
+  });
+
+  // The NetBox URL stays available in cache mode, because it is what builds the
+  // "View in NetBox" links that cache rows cannot carry themselves.
+  it('keeps the NetBox URL available in replica-cache mode', () => {
+    setup({ mode: 'replica-cache' });
+    expect(screen.getByLabelText(/NetBox URL/i)).toBeInTheDocument();
+  });
+
+  it('writes each cache setting into jsonData', () => {
+    const { onOptionsChange } = setup({ mode: 'replica-cache' });
+
+    fireEvent.change(screen.getByLabelText(/Replica cache URL/i), {
+      target: { value: 'https://cache.example.com' },
+    });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ jsonData: expect.objectContaining({ replicaCacheUrl: 'https://cache.example.com' }) })
+    );
+
+    fireEvent.change(screen.getByLabelText(/NetBox instance ID/i), { target: { value: 'nb-123' } });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ jsonData: expect.objectContaining({ netboxId: 'nb-123' }) })
+    );
+  });
+
+  // The cache token must land in secureJsonData, or it is stored in the clear.
+  it('stores the cache token as a secret, separate from the NetBox token', () => {
+    const { onOptionsChange } = setup({ mode: 'replica-cache' });
+
+    fireEvent.change(screen.getByLabelText(/Replica cache token/i), { target: { value: 'ff_secret' } });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ secureJsonData: expect.objectContaining({ replicaCacheToken: 'ff_secret' }) })
+    );
+    const call = onOptionsChange.mock.calls[0][0];
+    expect(call.jsonData.replicaCacheToken).toBeUndefined();
+  });
+});

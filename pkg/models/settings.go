@@ -36,8 +36,10 @@ type PluginSettings struct {
 	// ReplicaCacheURL is the replica-cache service root, used when Mode is
 	// "replica-cache". It is a separate field from URL rather than a reuse of it
 	// because the two are different services with different hostnames, and a
-	// datasource may need both: URL still supplies the deep links that point a
-	// user at the NetBox UI for a row read from the cache.
+	// datasource may need both: URL supplies the deep links that point a user at
+	// the NetBox UI for a row read from the cache, since the cache serves
+	// database rows that carry no such link. URL is optional in this mode — when
+	// it is unset the rows simply carry no "View in NetBox" link.
 	ReplicaCacheURL string `json:"replicaCacheUrl"`
 	// NetBoxID identifies the NetBox instance the cache is holding, sent as the
 	// NBC-Netbox-ID header. The service rejects requests without it.

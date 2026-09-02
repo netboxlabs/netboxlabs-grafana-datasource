@@ -37,6 +37,9 @@ const schemaTTL = 10 * time.Minute
 type Provider struct {
 	client *Client
 	fk     *fkCache
+	// netboxURL is the NetBox instance this cache mirrors, used only to build
+	// deep links back into the NetBox UI. Empty means no links are produced.
+	netboxURL string
 
 	mu       sync.Mutex
 	entities []provider.ObjectType
@@ -47,10 +50,19 @@ type Provider struct {
 }
 
 type fieldsCacheEntry struct {
-	fields  []provider.Field
-	raw     map[string]bool // column names as they exist upstream
-	types   map[string]provider.FieldType
-	expires time.Time
+	fields []provider.Field
+	raw    map[string]bool // column names as they exist upstream
+	types  map[string]provider.FieldType
+	// complete is false when FK resolution degraded while this entry was built,
+	// so `fields` is missing the resolved columns. The entry is still cached,
+	// because `raw` and `types` come from the main-table sample and are correct
+	// either way — and they are what decides which columns may be FILTERED. An
+	// entry withheld entirely made rawColumns return nil, which FilterFields
+	// read as "no restriction" and used to advertise site and cf_* as
+	// filterable; selecting one sends a synthesized name upstream as a physical
+	// column and answers 400.
+	complete bool
+	expires  time.Time
 }
 
 // sampleRows is how many rows Fields reads to learn the columns and their
@@ -62,6 +74,13 @@ const sampleRows = 20
 
 // Option configures a Provider.
 type Option func(*Provider)
+
+// WithNetBoxURL supplies the NetBox instance this cache mirrors, so rows can
+// carry a link back to the object in the NetBox UI. replica-cache serves
+// database rows and cannot produce that link itself.
+func WithNetBoxURL(base string) Option {
+	return func(p *Provider) { p.netboxURL = base }
+}
 
 // New builds a replica-cache provider. netboxID is the tenant identifier sent
 // as NBC-Netbox-ID; the service rejects requests without it.
@@ -269,7 +288,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 		return nil, err
 	}
 	p.fieldsMu.Lock()
-	if e, ok := p.fields[objectType]; ok && time.Now().Before(e.expires) {
+	if e, ok := p.fields[objectType]; ok && e.complete && time.Now().Before(e.expires) {
 		p.fieldsMu.Unlock()
 		return e.fields, nil
 	}
@@ -296,6 +315,9 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	}
 
 	cols, rows := flattenRows(raws)
+	if addDeepLinks(p.netboxURL, objectType, rows) {
+		cols = append(cols, deepLinkColumn)
+	}
 	added, degraded := p.resolveFKs(ctx, objectType, rows)
 	cols = append(cols, added...)
 
@@ -329,20 +351,33 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	}
 	sort.SliceStable(fields, func(i, j int) bool { return fields[i].Name < fields[j].Name })
 
-	// Only a COMPLETE answer is cached. The resolved columns exist only if every
-	// dimension answered, so a single timed-out dimension yields a SHORTER list —
-	// measured live as 47 and 53 columns where a healthy run returns 56, losing
-	// site, role, device_type, location and their slugs.
+	// The entry is always stored, but only a COMPLETE one is served back from
+	// the cache by Fields.
 	//
-	// Caching that would pin the loss for the whole TTL: the editor would stop
-	// offering columns that queries keep returning, and the user would have no
-	// way to tell a column that never exists from one that briefly failed to
-	// resolve. Re-reading a sample costs one small request and self-heals.
-	if len(degraded) == 0 {
-		p.fieldsMu.Lock()
-		p.fields[objectType] = fieldsCacheEntry{fields: fields, raw: rawCols, types: types, expires: time.Now().Add(schemaTTL)}
-		p.fieldsMu.Unlock()
+	// The resolved columns exist only if every dimension answered, so a single
+	// timed-out dimension yields a SHORTER list — measured live as 47 and 53
+	// columns where a healthy run returns 56, losing site, role, device_type,
+	// location and their slugs. Serving that from cache would pin the loss for
+	// the whole TTL: the editor would stop offering columns that queries keep
+	// returning, with no way to tell a column that never exists from one that
+	// briefly failed to resolve. Marking it incomplete makes the next call
+	// re-read a sample, which costs one small request and self-heals.
+	//
+	// Storing it anyway matters just as much. raw and types come from the
+	// main-table sample, which succeeded, and they are what decide which columns
+	// may be filtered and with which operators. Withholding the entry made
+	// rawColumns return nil, and FilterFields reads an empty map as "no
+	// restriction" — advertising site and cf_* as filterable, which answers 400
+	// when selected.
+	p.fieldsMu.Lock()
+	p.fields[objectType] = fieldsCacheEntry{
+		fields:   fields,
+		raw:      rawCols,
+		types:    types,
+		complete: len(degraded) == 0,
+		expires:  time.Now().Add(schemaTTL),
 	}
+	p.fieldsMu.Unlock()
 	return fields, nil
 }
 

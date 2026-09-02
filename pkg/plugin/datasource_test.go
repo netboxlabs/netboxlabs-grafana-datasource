@@ -526,3 +526,67 @@ func TestQueryData_FastPaging_AlertRulesAreUnaffected(t *testing.T) {
 		}
 	})
 }
+
+// The two backends authenticate with different credentials against different
+// services. Checking NetBox's prerequisites against a replica-cache datasource
+// failed Save & Test on a correctly provisioned instance, before the provider
+// was ever reached.
+func TestMissingSettingIsModeAware(t *testing.T) {
+	full := func() *models.PluginSettings {
+		return &models.PluginSettings{
+			Mode:            models.ModeReplicaCache,
+			ReplicaCacheURL: "https://cache.example.com",
+			NetBoxID:        "nb-1",
+			Secrets:         &models.SecretPluginSettings{ReplicaCacheToken: "ff_x"},
+		}
+	}
+
+	t.Run("replica-cache needs no NetBox token", func(t *testing.T) {
+		cfg := full()
+		if msg := missingSetting(cfg); msg != "" {
+			t.Errorf("a fully configured replica-cache datasource was rejected: %q", msg)
+		}
+	})
+
+	t.Run("replica-cache reports its own missing settings", func(t *testing.T) {
+		cases := map[string]func(*models.PluginSettings){
+			"replica-cache URL is missing":  func(c *models.PluginSettings) { c.ReplicaCacheURL = "" },
+			"NetBox instance ID is missing": func(c *models.PluginSettings) { c.NetBoxID = "" },
+			"replica-cache token is missing": func(c *models.PluginSettings) {
+				c.Secrets = &models.SecretPluginSettings{}
+			},
+		}
+		for want, break_ := range cases {
+			cfg := full()
+			break_(cfg)
+			if got := missingSetting(cfg); got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		}
+	})
+
+	t.Run("netbox mode is unchanged", func(t *testing.T) {
+		cfg := &models.PluginSettings{Mode: models.ModeNetBox}
+		if got := missingSetting(cfg); got != "NetBox URL is missing" {
+			t.Errorf("got %q", got)
+		}
+		cfg.URL = "https://netbox.example.com"
+		if got := missingSetting(cfg); got != "API token is missing" {
+			t.Errorf("got %q", got)
+		}
+		cfg.Secrets = &models.SecretPluginSettings{APIToken: "t"}
+		if got := missingSetting(cfg); got != "" {
+			t.Errorf("a configured NetBox datasource was rejected: %q", got)
+		}
+	})
+
+	// An empty Mode defaults to NetBox in LoadPluginSettings, and must behave
+	// the same here rather than falling into a mode-specific branch.
+	t.Run("an unset mode behaves as netbox", func(t *testing.T) {
+		cfg := &models.PluginSettings{URL: "https://netbox.example.com",
+			Secrets: &models.SecretPluginSettings{APIToken: "t"}}
+		if got := missingSetting(cfg); got != "" {
+			t.Errorf("got %q, want no error", got)
+		}
+	})
+}

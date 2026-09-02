@@ -368,3 +368,68 @@ func names(fields []provider.Field) map[string]bool {
 	}
 	return out
 }
+
+// Regression: while a FK dimension is unreachable, the enriched field list is
+// incomplete — but the raw schema from the main-table sample is not, and it is
+// what decides which columns may be filtered. Withholding the whole cache entry
+// made rawColumns return nil, which filterFieldsFor reads as "no restriction",
+// advertising site and cf_* as filterable. Selecting one sends a synthesized
+// name upstream as a physical column and answers 400.
+func TestFilterFieldsNeverAdvertisesDerivedColumnsWhileDegraded(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	f.failEntities["dcim/sites"] = true
+	ffs, err := p.FilterFields(ctx, "dcim/devices")
+	if err != nil {
+		t.Fatalf("FilterFields: %v", err)
+	}
+	if len(ffs) == 0 {
+		t.Fatal("want the upstream columns to remain filterable while a dimension is down")
+	}
+	for _, ff := range ffs {
+		if ff.Name == "site" || ff.Name == "site_slug" || strings.HasPrefix(ff.Name, "cf_") {
+			t.Errorf("%q was advertised as filterable; it is not an upstream column and would answer 400", ff.Name)
+		}
+	}
+	// The real columns are still offered, so the editor stays usable.
+	found := false
+	for _, ff := range ffs {
+		if ff.Name == "site_id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("site_id should still be filterable: it is a stored column and the sample succeeded")
+	}
+}
+
+// The raw schema stays available through a degradation, since it comes from the
+// main-table sample rather than from FK resolution.
+func TestRawColumnsSurviveDegradation(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{{"id": float64(4001), "name": "DC-1", "slug": "dc-1"}}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	f.failEntities["dcim/sites"] = true
+	raw, err := p.rawColumns(ctx, "dcim/devices")
+	if err != nil {
+		t.Fatalf("rawColumns: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatal("raw columns must survive a failed dimension: the main-table sample succeeded")
+	}
+	if !raw["site_id"] || !raw["name"] {
+		t.Errorf("raw schema incomplete: %v", raw)
+	}
+	if raw["site"] {
+		t.Error("a resolved name must never appear in the raw schema")
+	}
+}

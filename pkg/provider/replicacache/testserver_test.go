@@ -122,6 +122,17 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 		filtered = keep
 	}
 
+	// The real service rejects a sort on anything but a stored column:
+	// sort=site answers 400 "unknown sort column: site" rather than ignoring it.
+	// The fake must do the same, or a provider that passes a derived column
+	// through looks healthy here and 400s in production.
+	if srt := strings.TrimPrefix(q.Get("sort"), "-"); srt != "" && len(rows) > 0 {
+		if _, exists := rows[0][srt]; !exists {
+			writeErr(w, 400, "unknown sort column: "+srt)
+			return
+		}
+	}
+
 	total := len(filtered)
 
 	start := 0

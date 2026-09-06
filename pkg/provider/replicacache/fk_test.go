@@ -517,7 +517,7 @@ func TestIDsMustBeWholeAndPositive(t *testing.T) {
 		// NetBox primary keys are 64-bit. An int32 cap — which this first had —
 		// would reject legitimate ids on a large instance, and the bound that
 		// matters is the one the wire format imposes: ids arrive as float64.
-		float64(2147483648), float64(1 << 52), float64(maxExactID),
+		float64(2147483648), float64(1 << 52), float64(maxExactID - 1),
 	} {
 		id, ok := toInt(v)
 		if !ok {
@@ -527,10 +527,20 @@ func TestIDsMustBeWholeAndPositive(t *testing.T) {
 			t.Errorf("toInt(%#v) = %d, which is a different object", v, id)
 		}
 	}
-	// Past what a float64 holds exactly, the value that came back is not the
-	// value that was sent, so accepting it would identify a different object.
+	// The bound is INJECTIVITY, not exact representability. 2^53 is exactly
+	// representable, but so is 2^53+1's rounded form — they are the same
+	// float64 — and the rounding happens during decode, before anything here
+	// can see it. Accepting 2^53 would therefore accept 2^53+1 as a different
+	// object's id.
+	if id, ok := toInt(float64(maxExactID)); ok {
+		t.Errorf("toInt accepted %d, which 2^53+1 also decodes to", id)
+	}
 	if id, ok := toInt(float64(maxExactID) * 4); ok {
 		t.Errorf("toInt accepted an inexact id as %d", id)
+	}
+	// Everything below the bound is unambiguous.
+	if got, ok := toInt(float64(maxExactID - 1)); !ok || got != maxExactID-1 {
+		t.Errorf("toInt(2^53-1) = %d,%v; want it accepted unchanged", got, ok)
 	}
 }
 

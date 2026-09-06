@@ -3,7 +3,12 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import { createTheme } from '@grafana/data';
 import { ORDERING_DISABLED_TOOLTIP, ORDERING_TOOLTIP, QueryEditor } from './QueryEditor';
 import { FAST_PAGING_TOOLTIP } from './ConfigEditor';
-import { IP_CONTEXT_FIELD_GROUPS, IP_CONTEXT_FIELD_OPTIONS, DEFAULT_IP_CONTEXT_FIELDS, orderingFieldsFor } from '../types';
+import {
+  IP_CONTEXT_FIELD_GROUPS,
+  IP_CONTEXT_FIELD_OPTIONS,
+  DEFAULT_IP_CONTEXT_FIELDS,
+  orderingFieldsFor,
+} from '../types';
 
 jest.mock('@grafana/runtime', () => ({
   ...jest.requireActual('@grafana/runtime'),
@@ -635,7 +640,7 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
     setup({ objectType: 'dcim/racks' }, ds);
 
     const picker = await screen.findByLabelText('Sort by');
-    fireEvent.keyDown(picker, { key: "ArrowDown" });
+    fireEvent.keyDown(picker, { key: 'ArrowDown' });
     expect(await screen.findByText('asset_tag')).toBeInTheDocument();
     expect(screen.getByText('name')).toBeInTheDocument();
   });
@@ -870,5 +875,34 @@ describe('query type change and filters', () => {
     await pickQueryType('Topology');
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ queryType: 'topology' }));
     expect(onChange.mock.calls.at(-1)![0].filters).toEqual([{ field: 'site', operator: '', value: 'dc1' }]);
+  });
+});
+
+describe('branch field when branching is unavailable', () => {
+  // A saved query keeps its branch when its datasource is switched to a backend
+  // that has none. The backend then refuses every execution and says to clear
+  // it — advice the reader cannot follow if the only control that can is dead.
+  it('stays editable when the query still carries a branch', async () => {
+    const ds = {
+      ...datasource,
+      uid: 'ds-branch-retained',
+      getBranchingInstalled: jest.fn().mockResolvedValue(false),
+    } as any;
+    setup({ branch: 'schema_abc' }, ds);
+
+    const input = await screen.findByDisplayValue('schema_abc');
+    await waitFor(() => expect(input).not.toBeDisabled());
+  });
+
+  it('is disabled when there is no branch to clear', async () => {
+    const ds = {
+      ...datasource,
+      uid: 'ds-branch-empty',
+      getBranchingInstalled: jest.fn().mockResolvedValue(false),
+    } as any;
+    setup({}, ds);
+
+    const input = await screen.findByPlaceholderText('(main)');
+    await waitFor(() => expect(input).toBeDisabled());
   });
 });

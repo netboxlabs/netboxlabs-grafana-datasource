@@ -264,9 +264,14 @@ func (p *Provider) objectTypes(ctx context.Context, refresh cachePolicy) ([]prov
 			continue
 		}
 		seen[value] = true
+		label := humanize(model)
+		if plugin, ok := strings.CutPrefix(app, "plugins/"); ok {
+			// "Bgp: Bgp Sessions", as the NetBox provider labels the same model.
+			label = humanize(plugin) + ": " + label
+		}
 		out = append(out, provider.ObjectType{
 			Value: value,
-			Label: humanize(model),
+			Label: label,
 			App:   app,
 			Model: model,
 		})
@@ -303,13 +308,26 @@ func (p *Provider) objectTypes(ctx context.Context, refresh cachePolicy) ([]prov
 // and anything else, so only listable collections become object types.
 func parseEntityPath(path string) (app, model string, ok bool) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 3 || parts[0] != "v1" {
+	if len(parts) < 3 || parts[0] != "v1" {
 		return "", "", false
 	}
-	if strings.ContainsAny(parts[1]+parts[2], "{}") {
-		return "", "", false
+	for _, p := range parts {
+		// Detail routes carry a path parameter; only collections are listable.
+		if strings.ContainsAny(p, "{}") {
+			return "", "", false
+		}
 	}
-	return parts[1], parts[2], true
+	switch {
+	case len(parts) == 3:
+		return parts[1], parts[2], true
+	case len(parts) == 4 && parts[1] == "plugins":
+		// A plugin's models sit one level deeper. The app carries the plugin
+		// name so that the object type reads plugins/bgp/bgp-sessions — the same
+		// value the NetBox provider produces for the same model, which is the
+		// point: a saved query has to name one thing in both modes.
+		return parts[1] + "/" + parts[2], parts[3], true
+	}
+	return "", "", false
 }
 
 // acronyms are rendered upper-case in labels, so the editor reads "IP

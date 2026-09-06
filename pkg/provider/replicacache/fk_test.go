@@ -440,3 +440,35 @@ func TestFullyResolvedDimensionDoesNotWarn(t *testing.T) {
 		t.Errorf("nothing was missing, so nothing should be reported: %v", res.Warnings)
 	}
 }
+
+// The coverage check has to compare WHICH ids came back, not how many. A lookup
+// for {4001,4002} answered with {4001,9999} has the same cardinality while
+// leaving 4002 unresolved, so subtracting map sizes reported nothing missing.
+func TestCoverageIsCheckedByIDNotByCount(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		deviceFixture(1, "CORE-1", 4001),
+		deviceFixture(2, "CORE-2", 4002),
+	}
+	// The dimension answers with the right NUMBER of rows and the wrong ones.
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+		{"id": float64(9999), "name": "Somewhere-Else", "slug": "elsewhere"},
+	}
+	f.ignoreIDFilterFor = "dcim/sites"
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var warned bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "dcim/sites") && strings.Contains(w, "missing") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("4002 was never answered for; that must be reported: %v", res.Warnings)
+	}
+}

@@ -426,11 +426,30 @@ func TestValidateFilterTypesRefusesTheEmptyFamilyOnTextColumns(t *testing.T) {
 	}
 }
 
-// A column whose type was never established is not treated as text, so the
-// empty family stays available rather than disappearing on a sparse column.
-func TestEmptyFamilyAllowedWhenTypeIsUnknown(t *testing.T) {
+// A column whose type was never established must NOT get the empty family.
+//
+// This test previously asserted the opposite, and was wrong: "unknown" is not
+// "not text". A nullable text column that was NULL in every sampled row is
+// precisely what cannot be typed, and precisely where IS NULL would later miss
+// the "" rows — so the untyped case is the one most likely to invert, not the
+// one safe to wave through.
+func TestEmptyFamilyRefusedWhenTypeIsUnknown(t *testing.T) {
 	types := map[string]provider.FieldType{"mystery": provider.FieldType("")}
-	if err := validateFilterTypes([]provider.Filter{{Field: "mystery", Operator: opEmpty}}, types); err != nil {
-		t.Errorf("an untyped column should not be refused is-empty: %v", err)
+	for _, op := range []string{opEmpty, opNEmpty} {
+		if err := validateFilterTypes([]provider.Filter{{Field: "mystery", Operator: op}}, types); err == nil {
+			t.Errorf("%q on an untyped column must be refused: it may be nullable text", op)
+		}
+	}
+
+	// A confirmed non-text type still gets them.
+	ok := map[string]provider.FieldType{
+		"n": provider.FieldTypeNumber,
+		"b": provider.FieldTypeBoolean,
+		"t": provider.FieldTypeTime,
+	}
+	for field := range ok {
+		if err := validateFilterTypes([]provider.Filter{{Field: field, Operator: opEmpty}}, ok); err != nil {
+			t.Errorf("is-empty on a confirmed %s column must be allowed: %v", ok[field], err)
+		}
 	}
 }

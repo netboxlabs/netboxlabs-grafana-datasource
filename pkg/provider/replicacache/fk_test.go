@@ -138,3 +138,32 @@ func TestDisplayOf(t *testing.T) {
 		})
 	}
 }
+
+// A parent_id is the table's own primary key. Every entity on a live instance
+// that carries the column is self-referential, and the naming candidates
+// cannot find that — they look for a "parents" model, which no deployment has
+// — so these columns stayed bare ids while NetBox mode resolved them to names.
+func TestParentResolvesToTheQueriedEntity(t *testing.T) {
+	for _, entity := range []string{
+		"dcim/locations", "dcim/site-groups", "dcim/regions",
+		"dcim/device-roles", "dcim/interfaces", "tenancy/tenant-groups",
+	} {
+		got, ok := fkTarget(entity, "parent", knownEntities)
+		if !ok || got != entity {
+			t.Errorf("fkTarget(%q,\"parent\") = %q,%v; want %q", entity, got, ok, entity)
+		}
+	}
+
+	// Still bounded by what the deployment reports: an entity absent from the
+	// list resolves to nothing rather than to itself.
+	if got, ok := fkTarget("dcim/module-bays", "parent", knownEntities); ok {
+		t.Errorf("resolved to %q, but dcim/module-bays is not in this deployment", got)
+	}
+
+	// And the polymorphic parent stays unresolved: it is a different column
+	// (parent_object, backed by a content-type id) and pointing it at the
+	// queried entity would be a confidently wrong name.
+	if got, ok := fkTarget("dcim/locations", "parent_object", knownEntities); ok {
+		t.Errorf("resolved parent_object to %q; its target is decided by a content-type id", got)
+	}
+}

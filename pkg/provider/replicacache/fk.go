@@ -104,6 +104,22 @@ func fkTarget(entity, base string, known map[string]bool) (string, bool) {
 		return "", false
 	}
 
+	// A parent_id is the table's own primary key. Checked against every entity
+	// on a live instance that carries the column — device-roles, interfaces,
+	// locations, module-bays, regions, site-groups, tenant-groups,
+	// virtualization interfaces and wireless-lan-groups — the target is always
+	// the queried entity itself. The naming candidates below cannot find that:
+	// they look for a "parents" model, which no deployment has, so the column
+	// stayed a bare id while NetBox mode resolved it to a name, and a saved
+	// panel selecting "parent" went blank on switching modes.
+	//
+	// NetBox's polymorphic parents are different columns entirely
+	// (parent_object_type_id, and parent_object which is excluded above), so
+	// there is no case where a parent_id points somewhere other than home.
+	if base == "parent" && known[entity] {
+		return entity, true
+	}
+
 	app, model := splitEntity(entity)
 	slug := strings.ReplaceAll(base, "_", "-")
 

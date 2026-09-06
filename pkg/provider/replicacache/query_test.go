@@ -1149,3 +1149,51 @@ func TestAJoinKeySourceThatVanishesIsReported(t *testing.T) {
 		t.Errorf("site = %v, want DC-Northeast in the rows", res.Rows[0]["site"])
 	}
 }
+
+// An OBJECT custom field flattens in NetBox mode to cf_<name> (the display
+// name) plus cf_<name>_id. The column this mirrors holds the bare id, so
+// cf_<name> is that number and the _id column was simply absent — a saved panel
+// selecting it got no column and no explanation.
+func TestObjectCustomFieldExposesItsID(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/interfaces"] = []map[string]interface{}{{
+		"id": float64(1), "name": "eth0",
+		"custom_field_data": `{"owning_tenant": 22, "tier": "gold", "tags": ["a","b"]}`,
+	}}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/interfaces",
+		Fields:     []string{"name", "cf_owning_tenant_id"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := res.Rows[0]["cf_owning_tenant_id"]; got != float64(22) {
+		t.Errorf("cf_owning_tenant_id = %#v, want 22", got)
+	}
+	var announced bool
+	for _, c := range res.Columns {
+		if c == "cf_owning_tenant_id" {
+			announced = true
+		}
+	}
+	if !announced {
+		t.Errorf("cf_owning_tenant_id missing from %v", res.Columns)
+	}
+
+	// A custom field whose value is NOT an identifier has no id to offer, and
+	// inventing one would be worse than the missing column.
+	res, err = p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/interfaces",
+		Fields:     []string{"name", "cf_tier_id", "cf_tags_id"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	for _, c := range []string{"cf_tier_id", "cf_tags_id"} {
+		if _, ok := res.Rows[0][c]; ok {
+			t.Errorf("%s was invented from a value that is not an identifier", c)
+		}
+	}
+}

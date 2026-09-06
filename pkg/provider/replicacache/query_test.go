@@ -600,3 +600,39 @@ func TestQueryStopsWaitingForDiscoveryWhenCancelled(t *testing.T) {
 		t.Error("rows must survive a cancelled discovery wait")
 	}
 }
+
+// End to end for the self-referential case: a panel written against the NetBox
+// provider selects "parent", not "parent_id", and the resolution has to read
+// the parent's name out of the SAME table it is querying.
+func TestQueryResolvesSelfReferentialParent(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/locations"] = []map[string]interface{}{
+		{"id": float64(10), "name": "Campus", "slug": "campus", "parent_id": nil},
+		{"id": float64(11), "name": "Building A", "slug": "building-a", "parent_id": float64(10)},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/locations"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var child map[string]interface{}
+	for _, r := range res.Rows {
+		if r["id"] == float64(11) {
+			child = r
+		}
+	}
+	if child == nil {
+		t.Fatal("Building A missing from the result")
+	}
+	if got := child["parent"]; got != "Campus" {
+		t.Errorf("parent = %v, want Campus", got)
+	}
+	if got := child["parent_slug"]; got != "campus" {
+		t.Errorf("parent_slug = %v, want campus", got)
+	}
+	// The raw id must survive: join keys and deep links use it.
+	if got := child["parent_id"]; got != float64(10) {
+		t.Errorf("parent_id = %v, want 10", got)
+	}
+}

@@ -250,9 +250,21 @@ func TestValidateFilterTypesRefusesTextMatchOnNonTextColumn(t *testing.T) {
 	if err := validateFilterTypes([]provider.Filter{{Field: "id", Operator: opExact, Value: "1"}}, types); err != nil {
 		t.Errorf("equality on a numeric column must be allowed: %v", err)
 	}
-	// Unknown types mean we cannot judge; the request stays authoritative.
-	if err := validateFilterTypes([]provider.Filter{{Field: "id", Operator: opIContns, Value: "1"}}, nil); err != nil {
-		t.Errorf("with no type information the filter must pass through: %v", err)
+	// Unknown types fail CLOSED. This previously asserted the opposite, on the
+	// reasoning that the request itself would be authoritative — which does not
+	// hold here: a text match on a numeric column does not fail, it answers
+	// HTTP 200 over the unfiltered population. There is no error to defer to.
+	if err := validateFilterTypes([]provider.Filter{{Field: "id", Operator: opIContns, Value: "1"}}, nil); err == nil {
+		t.Error("a type-sensitive filter must be refused when no type information is available")
+	}
+	// A column absent from an otherwise-populated map is the same case.
+	if err := validateFilterTypes([]provider.Filter{{Field: "mystery", Operator: opIContns, Value: "x"}},
+		map[string]provider.FieldType{"name": provider.FieldTypeString}); err == nil {
+		t.Error("an unseen column must be refused a text match")
+	}
+	// Operators whose validity does not depend on type are unaffected.
+	if err := validateFilterTypes([]provider.Filter{{Field: "anything", Operator: opExact, Value: "x"}}, nil); err != nil {
+		t.Errorf("equality does not depend on type and must still work: %v", err)
 	}
 }
 

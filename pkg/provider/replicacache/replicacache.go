@@ -501,7 +501,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	rawCols := map[string]bool{}
 	var obj map[string]interface{}
 	if err := json.Unmarshal(raws[0], &obj); err != nil {
-		return nil, fmt.Errorf("reading sample row for %s: %w", objectType, err)
+		return nil, &TransportError{Op: "reading a sample row for " + objectType, Err: err, Message: rowShapeGuidance}
 	}
 	for k := range obj {
 		rawCols[k] = true
@@ -611,7 +611,10 @@ func (p *Provider) columnSample(ctx context.Context, objectType string) (fieldsC
 	rawCols := map[string]bool{}
 	var obj map[string]interface{}
 	if err := json.Unmarshal(raws[0], &obj); err != nil {
-		return fieldsCacheEntry{}, fmt.Errorf("reading sample row for %s: %w", objectType, err)
+		// Classified like every other row-shape failure. Unclassified this
+		// rendered as "Couldn't reach NetBox" for a malformed response from the
+		// cache — a connection this mode may not even have configured.
+		return fieldsCacheEntry{}, &TransportError{Op: "reading a sample row for " + objectType, Err: err, Message: rowShapeGuidance}
 	}
 	for k := range obj {
 		rawCols[k] = true

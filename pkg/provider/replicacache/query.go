@@ -76,12 +76,23 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// site-name order, and the panel would look correctly sorted while being
 	// ordered by something the reader cannot see.
 	var notes []string
-	if spec.Ordering != "" {
-		field := strings.TrimPrefix(spec.Ordering, "-")
+	if ordering := strings.TrimSpace(spec.Ordering); ordering != "" {
+		// Trimmed for the same reason the NetBox path trims (see
+		// netbox/ordering.go's orderingValue): the value can come from a
+		// provisioned dashboard's YAML rather than the editor's picker, and a
+		// stray space is not a different field to a human. Untrimmed, " -name "
+		// did not even match the "-" prefix, so a stored descending sort on a
+		// perfectly ordinary column was reported as derived and dropped.
+		direction, field := "", ordering
+		if rest, ok := strings.CutPrefix(field, "-"); ok {
+			direction, field = "-", rest
+		}
+		field = strings.TrimSpace(field)
+		ordering = direction + field
 		raw, rerr := p.rawColumns(ctx, spec.ObjectType)
 		switch {
 		case rerr == nil && len(raw) > 0 && raw[field]:
-			q.Set("sort", spec.Ordering)
+			q.Set("sort", ordering)
 		case rerr == nil && len(raw) > 0:
 			notes = append(notes, fmt.Sprintf(
 				"Rows are not sorted by %q: this backend sorts only on stored columns, and that one is derived from %s_id. Sort by %s_id instead, or use a datasource in NetBox mode.",
@@ -314,6 +325,23 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, er
 			}
 		}
 		if obj != nil {
+			// A relationship id that is present but not an identifier is a
+			// malformed row, and a silent one: nullFKColumns would otherwise
+			// read it as "no relationship" and synthesize a legitimate-looking
+			// null column, which an alert-table query counts as a real row.
+			for col, v := range obj {
+				base, isFK := strings.CutSuffix(col, "_id")
+				if !isFK || base == "" {
+					continue
+				}
+				if _, kind := classifyFKValue(v); kind == fkBadID {
+					return nil, nil, &TransportError{
+						Op:      "reading " + col,
+						Err:     errMalformedFK,
+						Message: "Replica cache returned a relationship id that is not a usable identifier. The service is reachable but answered with something unexpected.",
+					}
+				}
+			}
 			if _, ok := toInt(obj["id"]); !ok {
 				// Measured: the service returns id on every projection, even one
 				// that did not ask for it — `fields=serial` comes back as

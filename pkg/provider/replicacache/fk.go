@@ -161,6 +161,17 @@ func fkTarget(entity, base string, known map[string]bool) (string, bool) {
 	}
 	// Any app, but only when exactly one matches. Ambiguity here would be a
 	// coin flip between two real models, which is worse than leaving the id.
+	//
+	// Not for a plugin's models. The measurement that justifies this fallback —
+	// 33 right against 1 wrong — was taken over NetBox's own apps, where the
+	// naming is consistent because one project chose it. A plugin's schema is
+	// arbitrary and third-party, so a unique basename elsewhere in the
+	// deployment is not evidence about it: plugins/acme/widgets.role_id would
+	// resolve to ipam/roles purely because that is the only "roles" model
+	// anyone happens to serve. Leaving the id is the honest answer.
+	if strings.HasPrefix(app, "plugins/") {
+		return "", false
+	}
 	var found string
 	var n int
 	for _, cand := range pluralize(slug) {
@@ -587,14 +598,27 @@ func nullFKColumns(rows []map[string]interface{}) []string {
 			if !ok || base == "" || polymorphicFKs[base] || unexposedFKs[base] {
 				continue
 			}
-			if _, isNum := toInt(v); isNum {
+			switch _, kind := classifyFKValue(v); kind {
+			case fkID:
 				// Some row does carry an id, so this column is resolution's
 				// business, not ours.
 				bases[base] = false
-				continue
-			}
-			if _, seen := bases[base]; !seen {
-				bases[base] = true
+			case fkBadID:
+				// Unreachable: flattenRows refuses the row before this runs. Kept
+				// explicit so the switch stays exhaustive and a future caller
+				// that skips that check does not silently land in fkNull.
+				bases[base] = false
+			case fkNotAKey:
+				// Not a foreign key at all — NetBox has CharFields whose names
+				// end in _id, such as circuits.ProviderNetwork.service_id, which
+				// holds the provider's own service identifier as text. Deriving
+				// a "service" column of nils from one was inventing a
+				// relationship that does not exist.
+				bases[base] = false
+			case fkNull:
+				if _, seen := bases[base]; !seen {
+					bases[base] = true
+				}
 			}
 		}
 	}
@@ -616,6 +640,32 @@ func nullFKColumns(rows []map[string]interface{}) []string {
 	return out
 }
 
+// fkValueKind says what a *_id column's value is, which the three cases below
+// need to tell apart and toInt alone cannot: it answers false for a genuine
+// null, for a malformed number and for a column that is not a key at all.
+type fkValueKind int
+
+const (
+	fkNull    fkValueKind = iota // a genuine null relationship
+	fkID                         // a usable identifier
+	fkBadID                      // a number, but not an identifier
+	fkNotAKey                    // not a number, so not a foreign key
+)
+
+func classifyFKValue(v interface{}) (int, fkValueKind) {
+	if v == nil {
+		return 0, fkNull
+	}
+	switch n := v.(type) {
+	case float64, int, json.Number:
+		if id, ok := toInt(n); ok {
+			return id, fkID
+		}
+		return 0, fkBadID
+	}
+	return 0, fkNotAKey
+}
+
 func hasResolvableFK(rows []map[string]interface{}) bool {
 	for _, row := range rows {
 		for col, v := range row {
@@ -631,7 +681,7 @@ func hasResolvableFK(rows []map[string]interface{}) bool {
 			if polymorphicFKs[base] || unexposedFKs[base] {
 				continue
 			}
-			if _, isNum := toInt(v); isNum {
+			if _, kind := classifyFKValue(v); kind == fkID {
 				return true
 			}
 		}

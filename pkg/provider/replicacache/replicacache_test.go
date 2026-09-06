@@ -817,3 +817,71 @@ func TestHealthCheckDoesNotAnswerFromCache(t *testing.T) {
 		t.Errorf("ObjectTypes should still serve its cache: %d types, err %v", len(types), err)
 	}
 }
+
+// A plugin's models sit one level deeper, and the object type has to read
+// plugins/bgp/bgp-sessions — the same value the NetBox provider produces for
+// the same model. A saved query names one thing; both modes have to answer to
+// it. Rejecting the path omitted every plugin model from the editor, and once
+// discovery was cached validateObjectType rejected the saved query too.
+func TestDiscoveryAcceptsPluginPaths(t *testing.T) {
+	cases := []struct {
+		path              string
+		wantApp, wantMode string
+		ok                bool
+	}{
+		{"/v1/dcim/devices", "dcim", "devices", true},
+		{"/v1/plugins/bgp/bgp-sessions", "plugins/bgp", "bgp-sessions", true},
+		{"/v1/plugins/branching/branches", "plugins/branching", "branches", true},
+		// Detail routes are not collections, at either depth.
+		{"/v1/dcim/devices/{id}", "", "", false},
+		{"/v1/plugins/bgp/bgp-sessions/{id}", "", "", false},
+		// Four segments that are not a plugin namespace stay rejected: nothing
+		// says what they would mean.
+		{"/v1/dcim/devices/interfaces", "", "", false},
+		{"/v1/dcim", "", "", false},
+	}
+	for _, tc := range cases {
+		app, model, ok := parseEntityPath(tc.path)
+		if ok != tc.ok || app != tc.wantApp || model != tc.wantMode {
+			t.Errorf("parseEntityPath(%q) = %q,%q,%v; want %q,%q,%v",
+				tc.path, app, model, ok, tc.wantApp, tc.wantMode, tc.ok)
+		}
+	}
+}
+
+// The whole path: a plugin model must reach the editor's list, with the label
+// the NetBox provider gives it, and a query against it must be accepted rather
+// than refused by validateObjectType.
+func TestPluginModelIsQueryable(t *testing.T) {
+	f := newFakeService()
+	f.entities["plugins/bgp/bgp-sessions"] = []map[string]interface{}{
+		{"id": float64(1), "name": "peer-1"},
+	}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	types, err := p.ObjectTypes(ctx)
+	if err != nil {
+		t.Fatalf("ObjectTypes: %v", err)
+	}
+	var found *provider.ObjectType
+	for i := range types {
+		if types[i].Value == "plugins/bgp/bgp-sessions" {
+			found = &types[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("plugin model missing from %d discovered types", len(types))
+	}
+	if found.Label != "Bgp: Bgp Sessions" {
+		t.Errorf("label = %q, want the NetBox provider's wording", found.Label)
+	}
+
+	res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "plugins/bgp/bgp-sessions"})
+	if err != nil {
+		t.Fatalf("a discovered type must be queryable: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Errorf("rows = %d, want 1", len(res.Rows))
+	}
+}

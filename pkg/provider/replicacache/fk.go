@@ -565,16 +565,25 @@ func toInt(v interface{}) (int, bool) {
 	return 0, false
 }
 
-// maxExactID is the largest integer a float64 holds exactly. Ids arrive through
-// encoding/json as float64, so this is the representation's own limit rather
-// than a chosen one: past it the value that came back is not the value that was
-// sent, and accepting it would silently identify a different object. NetBox
-// primary keys are 64-bit, so a smaller cap — int32, as this first had — would
-// reject legitimate ids on a large instance.
+// maxExactID bounds ids at the range where float64 is INJECTIVE, which is a
+// stronger property than being exactly representable and is the one that
+// matters here.
+//
+// Ids arrive through encoding/json as float64, and the rounding happens during
+// decode, before anything here can inspect the value: the wire integer
+// 9007199254740993 is already 9007199254740992 by the time it is checked, so a
+// bound that merely excluded inexact values could not detect the collision.
+// Below 2^53 no two integers share a float64, so an accepted value names
+// exactly one object. 2^53 itself is excluded because 2^53+1 rounds onto it.
+//
+// The alternative — decoding rows with json.Number to keep the token — would
+// change the type of every value in every row, and with it type inference and
+// frame building, to defend a boundary no NetBox instance reaches: its keys are
+// 64-bit, but 2^53 is nine quadrillion rows.
 const maxExactID = 1 << 53
 
 func fromFloat(f float64) (int, bool) {
-	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) || f <= 0 || f > maxExactID {
+	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) || f <= 0 || f >= maxExactID {
 		return 0, false
 	}
 	return int(f), true

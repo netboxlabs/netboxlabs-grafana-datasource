@@ -21,6 +21,7 @@ import {
   useBranchingInstalled,
   BRANCH_FIELD_TOOLTIP,
   BRANCH_FIELD_DISABLED_TOOLTIP,
+  BRANCH_FIELD_RETAINED_TOOLTIP,
 } from '../hooks/useBranchingInstalled';
 import {
   EMPTY_FAMILY_OPERATORS,
@@ -119,7 +120,14 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   const styles = useStyles2(getStyles);
   const queryType: QueryType = query.queryType ?? 'objects';
   const branchingInstalled = useBranchingInstalled(datasource);
-  const branchDisabled = branchingInstalled === false;
+  // Disabled when branching is unavailable — EXCEPT when the query already
+  // carries a branch. A saved query keeps its branch when its datasource is
+  // switched to a backend that has none, and the backend then refuses every
+  // execution and says to clear it. Disabling the only control that can do that
+  // left the reader with no way to follow the advice short of editing the query
+  // JSON or switching the datasource back.
+  const branchRetained = (query.branch ?? '') !== '';
+  const branchDisabled = branchingInstalled === false && !branchRetained;
   const [objectTypes, setObjectTypes] = useState<ObjectTypeOption[]>([]);
   const [fields, setFields] = useState<string[]>([]);
   const [filterFields, setFilterFields] = useState<FilterField[]>([]);
@@ -293,7 +301,13 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
         label="Branch"
         labelWidth={20}
         disabled={branchDisabled}
-        tooltip={branchDisabled ? BRANCH_FIELD_DISABLED_TOOLTIP : BRANCH_FIELD_TOOLTIP}
+        tooltip={
+          branchDisabled
+            ? BRANCH_FIELD_DISABLED_TOOLTIP
+            : branchingInstalled === false
+              ? BRANCH_FIELD_RETAINED_TOOLTIP
+              : BRANCH_FIELD_TOOLTIP
+        }
       >
         <Input
           id="query-branch"

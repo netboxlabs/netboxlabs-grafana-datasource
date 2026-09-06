@@ -10,6 +10,13 @@ export const BRANCH_FIELD_TOOLTIP =
 export const BRANCH_FIELD_DISABLED_TOOLTIP =
   'The netbox-branching plugin is not installed on the connected NetBox, so branch selection is unavailable.';
 
+/** Tooltip shown when branching is unavailable but the query still carries a
+ *  branch. The field stays editable in that state precisely so the value can be
+ *  removed: the backend refuses such a query and tells the reader to clear it,
+ *  which is only actionable if the control is live. */
+export const BRANCH_FIELD_RETAINED_TOOLTIP =
+  'This backend has no branches, but this query still carries one, so it will fail until the branch is cleared. Empty this field to target the main dataset.';
+
 /**
  * Probes whether netbox-branching is installed on the datasource's NetBox and
  * returns a tri-state:

@@ -789,3 +789,31 @@ func TestEmptyDiscoveryPointsAtTheCacheNotNetBox(t *testing.T) {
 		t.Errorf("NetBox is optional in this mode; guidance should not send them there: %q", u.Detail)
 	}
 }
+
+// Save & Test must make a live request. Answering from a discovery result up
+// to ten minutes old lets it report "Connected" after the token has been
+// revoked, while every query fails — a wrong answer from the one button whose
+// whole job is to check the connection.
+func TestHealthCheckDoesNotAnswerFromCache(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	if _, err := p.HealthCheck(ctx); err != nil {
+		t.Fatalf("first health check: %v", err)
+	}
+	// Everything now fails, as it would after a revoked token.
+	f.mu.Lock()
+	f.status, f.errBody = http.StatusUnauthorized, "invalid token"
+	f.mu.Unlock()
+
+	if msg, err := p.HealthCheck(ctx); err == nil {
+		t.Fatalf("health check still reported %q from a stale cache", msg)
+	}
+	// And the cached entity list is still usable for the editor: a failed health
+	// check must not empty the dropdowns.
+	if types, err := p.ObjectTypes(ctx); err != nil || len(types) == 0 {
+		t.Errorf("ObjectTypes should still serve its cache: %d types, err %v", len(types), err)
+	}
+}

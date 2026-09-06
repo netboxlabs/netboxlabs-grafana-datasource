@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // FK resolution turns replica-cache's flat foreign keys into the shape the
@@ -34,12 +36,6 @@ const fkCacheTTL = 5 * time.Minute
 // query string comfortably inside normal proxy limits while still resolving a
 // full page of rows in a handful of requests.
 const fkBatchSize = 200
-
-// displayFields is the preference order for the human-readable label of a
-// related object. It deliberately matches nestedDisplay in the NetBox provider,
-// because the two have to produce the same string for the same object: a
-// device-type shows its model, an IP its address, a circuit its cid.
-var displayFields = []string{"display", "name", "label", "address", "prefix", "cid", "model", "rgb"}
 
 // polymorphicFKs are id columns whose target is decided by a companion
 // content-type column rather than by the column name.
@@ -456,16 +452,18 @@ func (p *Provider) fetchRelated(ctx context.Context, entity string, ids []int) (
 	return out, nil
 }
 
-// displayOf picks the human-readable label for a dimension row, mirroring the
-// NetBox provider's choice so both backends render the same object the same way.
+// displayOf picks the human-readable label for a dimension row.
+//
+// The preference order IS the NetBox provider's, not a copy of it: both call
+// the shared contract, so the two cannot drift into rendering the same object
+// differently. The id fallback is this backend's own, and deliberate — a
+// dimension row that was genuinely found must never render blank, because a
+// blank site reads as "this device has no site" rather than as "the name could
+// not be determined".
 func displayOf(obj map[string]interface{}) string {
-	for _, k := range displayFields {
-		if s := stringOf(obj[k]); s != "" {
-			return s
-		}
+	if s := provider.NestedDisplay(obj); s != "" {
+		return s
 	}
-	// Nothing nameable: fall back to the id so the column is never blank when a
-	// row genuinely was found.
 	if id, ok := toInt(obj["id"]); ok {
 		return strconv.Itoa(id)
 	}

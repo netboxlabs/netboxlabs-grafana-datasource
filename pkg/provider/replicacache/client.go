@@ -179,6 +179,7 @@ var (
 	errOversizedBody     = errors.New("response exceeds 64 MiB")
 	errMalformedEnvelope = errors.New(`response envelope is missing "count" or "results"`)
 	errMalformedRow      = errors.New("result row is not an object")
+	errInconsistentCount = errors.New("page holds more rows than its reported total")
 	errEmptyDiscovery    = errors.New("API description lists no object types")
 )
 
@@ -294,6 +295,22 @@ func (c *Client) listOnce(ctx context.Context, entity string, q url.Values, curs
 	// the API.
 	if err := c.get(ctx, "/v1/"+entity, params, &page); err != nil {
 		return listPage{}, err
+	}
+	if page.Count != nil && page.Results != nil {
+		// Presence is not enough: the two members have to agree. A page holding
+		// more rows than the total it reports, or a negative total, is
+		// internally contradictory — and the shape that matters is
+		// {"count":0,"results":[{…}]}, which a count query would report as no
+		// matches while the truncation guard reads Total==0 as "unavailable"
+		// rather than as a reason to refuse. An alert would then evaluate a
+		// response that contradicts itself.
+		if n := *page.Count; n < 0 || len(*page.Results) > n {
+			return listPage{}, &TransportError{
+				Op:      "reading response from " + truncate(c.base+"/v1/"+entity),
+				Err:     errInconsistentCount,
+				Message: "Replica cache returned a response whose row count contradicts its total. The service is reachable but answered with something unexpected.",
+			}
+		}
 	}
 	if page.Count == nil || page.Results == nil {
 		// Valid JSON in the wrong shape — an intermediary's error page, or a

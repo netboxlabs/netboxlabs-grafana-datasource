@@ -185,3 +185,48 @@ func TestEveryStatusNamesTheCache(t *testing.T) {
 		}
 	}
 }
+
+// Presence is not enough: the two envelope members have to agree. A page
+// holding more rows than the total it reports would be read by a count query as
+// no matches, while the truncation guard treats Total==0 as "unavailable"
+// rather than as a reason to refuse — so an alert could evaluate a response
+// that contradicts itself.
+func TestPageContradictingItsOwnCountIsRejected(t *testing.T) {
+	for _, body := range []string{
+		`{"count": 0, "results": [{"id": 1, "name": "CORE-1"}]}`,
+		`{"count": -5, "results": []}`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		}))
+
+		p := New(srv.URL, "t", "nb", srv.Client())
+		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+		srv.Close()
+		if err == nil {
+			t.Errorf("%s was accepted", body)
+			continue
+		}
+		if !errors.Is(err, errInconsistentCount) {
+			t.Errorf("%s: want errInconsistentCount, got %v", body, err)
+		}
+	}
+
+	// A page smaller than the total is the ordinary case — that is what paging
+	// IS — and must not be caught by this guard.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count": 500, "results": [{"id": 1, "name": "CORE-1"}]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("a partial page is normal: %v", err)
+	}
+	if res.Total != 500 || len(res.Rows) != 1 {
+		t.Errorf("total=%d rows=%d, want 500 and 1", res.Total, len(res.Rows))
+	}
+}

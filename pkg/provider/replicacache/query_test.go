@@ -636,3 +636,35 @@ func TestQueryResolvesSelfReferentialParent(t *testing.T) {
 		t.Errorf("parent_id = %v, want 10", got)
 	}
 }
+
+// The raw schema is what separates a stored column from a derived one. When it
+// cannot be read we do not know which this is, and pushing the sort anyway
+// fails in the worst direction: the service answers a derived column with 400
+// "unknown sort column", so an optional ordering kills the whole panel.
+func TestSortIsDroppedWhenTheSchemaCannotBeRead(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+
+	// The schema probe goes first and fails; the row fetch behind it succeeds.
+	f.mu.Lock()
+	f.failOnce["dcim/devices"] = true
+	f.mu.Unlock()
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Ordering:   "site",
+	})
+	if err != nil {
+		t.Fatalf("the rows are healthy, so the query must succeed: %v", err)
+	}
+	if r, ok := f.requestWith("dcim/devices", "sort"); ok {
+		t.Errorf("sort was pushed without confirming the column is stored: %v", r.query)
+	}
+	if len(res.Notes) == 0 {
+		t.Error("dropping the sort must be stated, not silent")
+	}
+	if len(res.Rows) != 1 {
+		t.Errorf("want the row, got %d", len(res.Rows))
+	}
+}

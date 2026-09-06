@@ -37,6 +37,10 @@ type fakeService struct {
 	// failEntities names entities that answer 500, to simulate one dimension
 	// timing out while the rest of the service is healthy.
 	failEntities map[string]bool
+	// failOnce names entities whose FIRST request answers 500 and whose later
+	// requests are served normally — a transient failure, which is how the
+	// schema probe can fail while the row fetch behind it succeeds.
+	failOnce map[string]bool
 }
 
 type recordedRequest struct {
@@ -48,6 +52,7 @@ func newFakeService() *fakeService {
 	return &fakeService{
 		entities:     map[string][]map[string]interface{}{},
 		failEntities: map[string]bool{},
+		failOnce:     map[string]bool{},
 		pageCap:      1000,
 	}
 }
@@ -65,6 +70,9 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 		hang := f.hangSwagger
 		f.requests = append(f.requests, recordedRequest{entity: "docs/openapi.json", query: r.URL.Query()})
 		fail := f.noSwagger
+		// status applies here too: a revoked token or a wrong instance id is
+		// rejected on every path, discovery included.
+		status, errBody := f.status, f.errBody
 		paths := map[string]interface{}{}
 		for e := range f.entities {
 			paths["/v1/"+e] = map[string]interface{}{"get": map[string]interface{}{}}
@@ -73,6 +81,10 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		if hang != nil {
 			<-hang
+		}
+		if status != 0 {
+			writeErr(w, status, errBody)
+			return
 		}
 		if fail {
 			writeErr(w, 500, "server error")
@@ -95,6 +107,10 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	broken := f.failEntities[entity]
+	if f.failOnce[entity] {
+		delete(f.failOnce, entity)
+		broken = true
+	}
 	f.mu.Unlock()
 	if broken {
 		writeErr(w, 500, "server error")

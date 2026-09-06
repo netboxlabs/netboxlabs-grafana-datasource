@@ -70,16 +70,23 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	var notes []string
 	if spec.Ordering != "" {
 		field := strings.TrimPrefix(spec.Ordering, "-")
-		sortable := true
-		if raw, rerr := p.rawColumns(ctx, spec.ObjectType); rerr == nil && len(raw) > 0 {
-			sortable = raw[field]
-		}
-		if sortable {
+		raw, rerr := p.rawColumns(ctx, spec.ObjectType)
+		switch {
+		case rerr == nil && len(raw) > 0 && raw[field]:
 			q.Set("sort", spec.Ordering)
-		} else {
+		case rerr == nil && len(raw) > 0:
 			notes = append(notes, fmt.Sprintf(
 				"Rows are not sorted by %q: this backend sorts only on stored columns, and that one is derived from %s_id. Sort by %s_id instead, or use a datasource in NetBox mode.",
 				field, field, field))
+		default:
+			// The schema could not be read, so we cannot tell a stored column
+			// from a derived one. Pushing the sort anyway fails CLOSED in the
+			// worst way: a derived column is answered with 400 "unknown sort
+			// column", turning an optional ordering into a dead panel. Dropping
+			// it costs the ordering and says so, which the seam permits.
+			notes = append(notes, fmt.Sprintf(
+				"Rows are not sorted by %q: this backend sorts only on stored columns, and its schema could not be read to confirm that one is stored. Retry, or use a datasource in NetBox mode.",
+				field))
 		}
 	}
 

@@ -307,8 +307,22 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, er
 		row := make(map[string]interface{}, len(obj)+4)
 		for k, v := range obj {
 			if k == "custom_field_data" {
-				for name, cv := range customFields(v) {
-					row["cf_"+name] = cv
+				// Through the SHARED contract, not a copy of it. A custom field
+				// holding a list or an object was previously written straight
+				// into cf_<name>, so a panel selecting the cf_<name>_count that
+				// NetBox mode produces got no such column, and the list itself
+				// rendered in a different format.
+				//
+				// What cannot be matched is the OBJECT custom field. NetBox's API
+				// expands it to a nested object; the column this mirrors holds
+				// the bare id, and the target model is named by a content-type id
+				// the service does not expose — the same wall as the polymorphic
+				// FKs. So cf_<name> is that id, and no _id/_slug follow it.
+				cf := customFields(v)
+				for _, name := range sortedNames(cf) {
+					provider.FlattenField("cf_"+name, cf[name], func(n string, val interface{}) {
+						row[n] = val
+					})
 				}
 				continue
 			}
@@ -337,6 +351,18 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, er
 // customFields decodes the custom_field_data blob. It is a JSON object encoded
 // as a string, so it needs a second decode; anything else is ignored rather
 // than guessed at.
+// sortedNames keeps the derived custom-field columns in a deterministic order,
+// since Go randomizes map iteration and a column list that reordered between
+// refreshes would reorder the panel's table on every refresh.
+func sortedNames(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func customFields(v interface{}) map[string]interface{} {
 	s, ok := v.(string)
 	if !ok || strings.TrimSpace(s) == "" {

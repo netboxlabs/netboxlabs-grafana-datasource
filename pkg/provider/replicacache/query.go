@@ -103,6 +103,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	}
 
 	cols, rows := flattenRows(raws)
+	cols = append(cols, addChoiceValueAliases(spec.Fields, rows)...)
 	var warnings []string
 	if !spec.CountOnly {
 		if addDeepLinks(p.netboxURL, spec.ObjectType, rows) {
@@ -138,6 +139,46 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		Warnings: warnings,
 		Notes:    notes,
 	}, nil
+}
+
+// addChoiceValueAliases fills in the <field>_value columns a panel written
+// against NetBox mode selects.
+//
+// There, flattenObject splits a choice object into <field> carrying the LABEL
+// ("Active") and <field>_value carrying the raw value ("active"). This backend
+// stores choices as the raw value in a plain column and publishes no labels at
+// all, so <field> already holds what <field>_value would, and a saved panel
+// selecting status_value went blank on switching modes.
+//
+// Only requested aliases are added. Emitting <field>_value beside every string
+// column would double the width of every result for the sake of a name almost
+// nobody asks for, and nothing outside a NetBox-mode panel asks for one: the
+// editor here offers the physical columns.
+func addChoiceValueAliases(fields []string, rows []map[string]interface{}) []string {
+	var added []string
+	for _, f := range fields {
+		base, ok := strings.CutSuffix(f, "_value")
+		if !ok || base == "" {
+			continue
+		}
+		used := false
+		for _, row := range rows {
+			v, ok := row[base]
+			if !ok {
+				continue
+			}
+			if _, taken := row[f]; taken {
+				// The service has a real column by that name; it wins.
+				return added
+			}
+			row[f] = v
+			used = true
+		}
+		if used {
+			added = append(added, f)
+		}
+	}
+	return added
 }
 
 // projectColumns maps the caller's requested columns onto the columns that
@@ -180,6 +221,12 @@ func (p *Provider) projectColumns(ctx context.Context, spec provider.QuerySpec) 
 			want[f+"_id"] = true
 		case strings.HasSuffix(f, "_slug") && raw[strings.TrimSuffix(f, "_slug")+"_id"]:
 			want[strings.TrimSuffix(f, "_slug")+"_id"] = true
+		case strings.HasSuffix(f, "_value") && raw[strings.TrimSuffix(f, "_value")]:
+			// NetBox mode splits a choice into <field> (the label, "Active") and
+			// <field>_value (the raw value, "active"). This backend stores the
+			// raw value in the physical column and has no labels at all, so the
+			// alias is built from it — see addChoiceValueAliases.
+			want[strings.TrimSuffix(f, "_value")] = true
 		case strings.HasPrefix(f, "cf_") && raw["custom_field_data"]:
 			want["custom_field_data"] = true
 		case f == deepLinkColumn:

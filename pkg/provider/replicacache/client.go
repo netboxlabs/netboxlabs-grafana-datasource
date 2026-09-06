@@ -144,6 +144,9 @@ func (e *APIError) Classification() *provider.UpstreamError {
 type TransportError struct {
 	Op  string
 	Err error
+	// Message overrides the default guidance, for a failure that is not about
+	// reachability — a 200 whose body will not parse, say.
+	Message string
 }
 
 func (e *TransportError) Error() string { return e.Op + ": " + e.Err.Error() }
@@ -152,10 +155,11 @@ func (e *TransportError) Unwrap() error { return e.Err }
 // Classification reports an unreachable cache, naming the setting to check.
 // Status stays 0: nothing answered, so there is no code to report.
 func (e *TransportError) Classification() *provider.UpstreamError {
-	return &provider.UpstreamError{
-		Kind:   provider.ErrorKindUpstream,
-		Detail: "Cannot reach replica-cache. Check the replica-cache URL and that the service is reachable from Grafana.",
+	detail := e.Message
+	if detail == "" {
+		detail = "Cannot reach replica-cache. Check the replica-cache URL and that the service is reachable from Grafana."
 	}
+	return &provider.UpstreamError{Kind: provider.ErrorKindUpstream, Detail: detail}
 }
 
 // errorBody is the service's failure shape: {"error": "unknown column: foo"}.
@@ -214,7 +218,15 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out interfa
 		return nil
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("decoding response from %s: %w", truncate(raw), err)
+		// A 200 carrying something we cannot parse is the service's problem, not
+		// the network's — but left unclassified it renders through the plugin's
+		// fallback as "Couldn't reach NetBox", which is wrong twice over: we
+		// reached it, and it was not NetBox.
+		return &TransportError{
+			Op:      "decoding response from " + truncate(raw),
+			Err:     err,
+			Message: "Replica cache returned a response that could not be read. The service is reachable but answered with something unexpected.",
+		}
 	}
 	return nil
 }

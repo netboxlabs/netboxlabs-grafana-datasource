@@ -247,6 +247,17 @@ func (p *Provider) ObjectTypes(ctx context.Context) ([]provider.ObjectType, erro
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Value < out[j].Value })
 
+	// An empty list is treated as a FAILURE rather than an answer. A 200
+	// carrying no usable paths — a transient discovery hiccup, a truncated
+	// document — would otherwise be cached for the full TTL, and every object
+	// query then fails locally against an entity set that says nothing exists,
+	// while the row endpoints are perfectly healthy. That is the opposite of
+	// the degradation this path is built for: not knowing must let the row
+	// request decide, and caching "nothing" is a confident wrong answer.
+	if len(out) == 0 {
+		return nil, fmt.Errorf("replica-cache reported no object types; the API description was empty or unreadable")
+	}
+
 	p.mu.Lock()
 	p.entities = out
 	p.expires = time.Now().Add(schemaTTL)

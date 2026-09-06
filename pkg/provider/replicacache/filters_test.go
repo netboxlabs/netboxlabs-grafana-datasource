@@ -465,3 +465,34 @@ func TestEmptyFamilyRefusedWhenTypeIsUnknown(t *testing.T) {
 		}
 	}
 }
+
+// The is-empty refusal used to recommend "filter on equality with an empty
+// value". Following that advice lands in the branch below, which drops the
+// filter and returns the unfiltered population — the very outcome the refusal
+// exists to prevent. This pins both halves: the advice, and the behaviour that
+// makes the old advice wrong.
+func TestIsEmptyRefusalDoesNotRecommendADiscardedFilter(t *testing.T) {
+	types := map[string]provider.FieldType{"serial": provider.FieldTypeString}
+	err := validateFilterTypes([]provider.Filter{{Field: "serial", Operator: "empty"}}, types)
+	if err == nil {
+		t.Fatal("is-empty on a text column must still be refused")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "equality with an empty value") {
+		t.Errorf("recommends a filter that is discarded: %q", msg)
+	}
+	if !strings.Contains(msg, "NetBox mode") {
+		t.Errorf("should point at what actually works: %q", msg)
+	}
+
+	// Why that advice was wrong: an equality filter with an empty value emits
+	// no parameter at all. Same as NetBox mode, which drops empties too — so
+	// this is consistency, not a gap to close here.
+	q, err := buildFilterValues([]provider.Filter{{Field: "serial", Operator: "exact", Value: ""}})
+	if err != nil {
+		t.Fatalf("buildFilterValues: %v", err)
+	}
+	if len(q) != 0 {
+		t.Errorf("an empty equality value must emit no filter, got %v", q)
+	}
+}

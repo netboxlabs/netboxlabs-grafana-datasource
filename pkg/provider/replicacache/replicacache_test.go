@@ -503,3 +503,80 @@ func TestFieldValuesPushesTextSearchForTextColumns(t *testing.T) {
 		t.Errorf("got %v, want [CORE-1]", vals)
 	}
 }
+
+// An RFC3339 timestamp arrives from JSON as a string like any other. Calling it
+// text is what decides the column is offered a "contains" filter, which this
+// backend then applies to a TIMESTAMP column — the 500-or-unfiltered hazard the
+// provider already guards for numerics.
+func TestTimestampColumnsAreNotText(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{{
+		"id": float64(1), "name": "CORE-1",
+		"created":      "2026-05-06T17:34:30.696190Z",
+		"last_updated": "2026-05-07T16:30:21.910011Z",
+		// A text column that merely looks date-ish must keep its text operators.
+		"description": "2026 refresh",
+	}}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	byName := map[string]provider.FieldType{}
+	fields, err := p.Fields(ctx, "dcim/devices")
+	if err != nil {
+		t.Fatalf("Fields: %v", err)
+	}
+	for _, fl := range fields {
+		byName[fl.Name] = fl.Type
+	}
+	for _, ts := range []string{"created", "last_updated"} {
+		if byName[ts] != provider.FieldTypeTime {
+			t.Errorf("%s typed %q, want time", ts, byName[ts])
+		}
+	}
+	if byName["description"] != provider.FieldTypeString {
+		t.Errorf("description typed %q, want string", byName["description"])
+	}
+
+	ffs, err := p.FilterFields(ctx, "dcim/devices")
+	if err != nil {
+		t.Fatalf("FilterFields: %v", err)
+	}
+	for _, ff := range ffs {
+		if ff.Name != "created" && ff.Name != "last_updated" {
+			continue
+		}
+		for _, op := range ff.Operators {
+			if textOperators[op] {
+				t.Errorf("%s was offered text operator %q; ILIKE on a timestamp is the hazard this gate exists for", ff.Name, op)
+			}
+		}
+	}
+}
+
+// The shared error wording names the NetBox URL and API token, which this mode
+// does not use — so a credential failure would send the reader to fix a field
+// with no bearing on it.
+func TestCacheFailuresNameCacheSettings(t *testing.T) {
+	cases := map[int][]string{
+		401: {"replica-cache token", "NetBox instance ID"},
+		403: {"replica-cache token"},
+		404: {"replica-cache URL"},
+		503: {"not a NetBox failure"},
+	}
+	for status, wants := range cases {
+		e := &APIError{Status: status}
+		d := e.Classification().Detail
+		if d == "" {
+			t.Errorf("status %d carries no guidance, so the generic NetBox wording would be shown", status)
+			continue
+		}
+		for _, w := range wants {
+			if !strings.Contains(d, w) {
+				t.Errorf("status %d guidance should mention %q, got: %s", status, w, d)
+			}
+		}
+		if strings.Contains(d, "NetBox API token") || strings.Contains(d, "NetBox URL") {
+			t.Errorf("status %d points at a NetBox setting this mode does not use: %s", status, d)
+		}
+	}
+}

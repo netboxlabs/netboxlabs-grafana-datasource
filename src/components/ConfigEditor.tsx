@@ -105,6 +105,11 @@ export function ConfigEditor(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mirroredUrl, topLevelUrl]);
 
+  // Merges rather than replaces. Both modes' tokens live in one secureJsonData,
+  // and a form can hold an unsaved value for each: entering a cache token,
+  // switching to NetBox mode and typing an API token used to discard the first,
+  // so switching back showed an empty field and the user's input was gone.
+  //
   // secureJsonData carries every secret not saved yet, including ones other
   // controls on this page write (Grafana Cloud's PDC network selector sets
   // secureSocksProxyPassword for a network that has one), so the token is merged

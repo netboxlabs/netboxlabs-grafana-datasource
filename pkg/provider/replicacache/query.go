@@ -230,13 +230,14 @@ func unresolvedRelationWarnings(spec provider.QuerySpec, cols []string, rows []m
 	if len(spec.Fields) == 0 {
 		return nil
 	}
-	present := make(map[string]bool, len(cols))
-	for _, c := range cols {
-		present[c] = true
-	}
 	var out []string
-	for _, f := range spec.Fields {
-		if present[f] {
+	// KeyFields as well as Fields. A join source is deliberately absent from
+	// cols — the caller reads it without displaying it — so this asks the ROWS
+	// whether the value was built. Checking cols would have reported every join
+	// key as missing, and omitting them let a join announce an output column
+	// with an empty value on every row, silently.
+	for _, f := range append(append([]string{}, spec.Fields...), spec.KeyFields...) {
+		if hasColumn(rows, f) {
 			continue
 		}
 		base := strings.TrimSuffix(f, "_slug")
@@ -371,6 +372,7 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, er
 	}
 
 	objs := make([]map[string]interface{}, 0, len(raws))
+	seenIDs := make(map[int]bool, len(raws))
 	for _, raw := range raws {
 		var obj map[string]interface{}
 		if err := json.Unmarshal(raw, &obj); err != nil {
@@ -381,7 +383,26 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, er
 			}
 		}
 		if obj != nil {
-			if _, ok := toInt(obj["id"]); !ok {
+			if id, ok := toInt(obj["id"]); ok {
+				// A repeated id means one object came back twice and another
+				// never did, while len(rows) still reaches the reported total —
+				// so the result looks complete and an alert evaluates it.
+				//
+				// Safe to call a protocol violation rather than concurrency:
+				// the service's cursor is a KEYSET, measured by decoding it.
+				// With sparse ids it reads [185205,185205] — the last row's id
+				// in both slots, not an offset — so each page asks for ids after
+				// the last one seen, and inserts or deletes elsewhere cannot
+				// make a row repeat.
+				if seenIDs[id] {
+					return nil, nil, &TransportError{
+						Op:      "reading a result row",
+						Err:     errDuplicateRow,
+						Message: "Replica cache returned the same object twice, so some rows are missing from a result that otherwise looks complete. The service is reachable but answered with something unexpected.",
+					}
+				}
+				seenIDs[id] = true
+			} else {
 				// Measured: the service returns id on every projection, even one
 				// that did not ask for it — `fields=serial` comes back as
 				// {id, serial} — which is the same invariant the deep-link column

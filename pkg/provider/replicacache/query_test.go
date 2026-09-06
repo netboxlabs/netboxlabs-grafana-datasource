@@ -1095,3 +1095,57 @@ func TestARequestedRelationshipThatVanishesIsReported(t *testing.T) {
 		t.Errorf("a field with no source column is not a degradation: %v", res.Warnings)
 	}
 }
+
+// A join source is deliberately absent from Columns — the caller reads it
+// without displaying it — so a relationship that failed to build there produced
+// no warning, and applyJoinKeys announced an output column with an empty value
+// on every row.
+func TestAJoinKeySourceThatVanishesIsReported(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "site_id": "4001"}, // text, so "site" never builds
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name"},
+		KeyFields:  []string{"site"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var warned bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "site") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("a join key that never built must be stated: %v", res.Warnings)
+	}
+
+	// And a join key that DID build stays silent — checking Columns instead of
+	// Rows would have reported every join key as missing, since they are
+	// deliberately not announced.
+	f2 := newFakeService()
+	f2.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f2.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	p2 := newTestProvider(t, f2)
+	res, err = p2.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name"},
+		KeyFields:  []string{"site"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("the join key built fine: %v", res.Warnings)
+	}
+	if res.Rows[0]["site"] != "DC-Northeast" {
+		t.Errorf("site = %v, want DC-Northeast in the rows", res.Rows[0]["site"])
+	}
+}

@@ -352,6 +352,19 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 				for id, r := range fetched {
 					have[id] = r
 				}
+				// A 200 that answers for only some of the ids asked about is not
+				// a protocol failure: these are separate tables replicated
+				// independently, so a row can reference a site whose own row has
+				// not arrived yet, or was deleted between the two requests. It
+				// still leaves the column blank on those rows, which reads as
+				// "this device has no site" — the same confusion the warning
+				// beside it exists to prevent, and one an alert rule would
+				// otherwise consume as fact.
+				if n := len(missing) - len(fetched); n > 0 {
+					warnings = append(warnings, fmt.Sprintf(
+						"Related names from %s are missing for %d of the %d objects referenced here, so those columns are blank on those rows; the matching *_id columns still hold the values. The cache mirrors each table separately, so a reference can outrun the row it points at.",
+						target, n, len(ids)))
+				}
 			}
 		}
 		resolved[target] = have

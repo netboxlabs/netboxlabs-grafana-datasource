@@ -374,3 +374,69 @@ func TestDimensionRowWithoutAnIDIsReported(t *testing.T) {
 		t.Errorf("site_id = %v, want 4001 — the id the warning points at must survive", res.Rows[0]["site_id"])
 	}
 }
+
+// A dimension that answers for only SOME of the ids asked about is not a
+// protocol failure — these are separate tables replicated independently, so a
+// reference can outrun the row it points at, or the row can be deleted between
+// the two requests. But it leaves the column blank on those rows, which reads
+// as "this device has no site", and an alert rule would consume that as fact.
+func TestPartiallyResolvedDimensionIsReported(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		deviceFixture(1, "CORE-1", 4001),
+		deviceFixture(2, "CORE-2", 4002), // site 4002 has not replicated yet
+	}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("a lagging replica must not fail the query: %v", err)
+	}
+	var warned bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "dcim/sites") && strings.Contains(w, "missing") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("the unresolved reference must be stated, got %v", res.Warnings)
+	}
+	// The half that DID resolve still resolves, and both ids survive.
+	var one, two map[string]interface{}
+	for _, r := range res.Rows {
+		switch r["id"] {
+		case float64(1):
+			one = r
+		case float64(2):
+			two = r
+		}
+	}
+	if one["site"] != "DC-Northeast" {
+		t.Errorf("site = %v, want DC-Northeast", one["site"])
+	}
+	if two["site_id"] != float64(4002) {
+		t.Errorf("site_id = %v, want 4002 — the id the warning points at must survive", two["site_id"])
+	}
+}
+
+// And a dimension that answers for everything asked about must stay silent, or
+// the warning becomes noise that hides the real ones.
+func TestFullyResolvedDimensionDoesNotWarn(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("nothing was missing, so nothing should be reported: %v", res.Warnings)
+	}
+}

@@ -444,10 +444,13 @@ func (p *Provider) fetchRelated(ctx context.Context, entity string, ids []int) (
 			}
 			id, ok := toInt(obj["id"])
 			if !ok {
-				// A row without a usable id cannot be matched to anything that
-				// referenced it. Not a protocol failure — the row is an object —
-				// so it is left out rather than failing the query.
-				continue
+				// Being object-shaped is not enough: without an id there is
+				// nothing to match against the rows that referenced it. Skipping
+				// it let fetchRelated report SUCCESS with names missing, so no
+				// degradation warning was raised and the panel showed a blank
+				// "site" with nothing to explain it — the same silence as the
+				// null rows above, one shape further in.
+				return nil, &TransportError{Op: "reading a " + entity + " row", Err: errRowWithoutID, Message: rowShapeGuidance}
 			}
 			out[id] = related{display: displayOf(obj), slug: stringOf(obj["slug"])}
 		}

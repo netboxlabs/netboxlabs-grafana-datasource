@@ -455,7 +455,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	for _, c := range cols {
 		for _, row := range rows {
 			if v, ok := row[c]; ok && v != nil {
-				types[c] = fieldType(v)
+				types[c] = fieldType(c, v)
 				known[c] = true
 				break
 			}
@@ -541,15 +541,40 @@ func (p *Provider) columnTypes(ctx context.Context, objectType string) map[strin
 	return p.fields[objectType].types
 }
 
-func fieldType(v interface{}) provider.FieldType {
+// fieldType classifies a sampled value.
+//
+// The timestamp case is not cosmetic. An RFC3339 value arrives from JSON as a
+// string like any other, and calling it text is what decides that the column is
+// offered a "contains" filter — which this backend then applies to a TIMESTAMP
+// column, answering either a 500 or, worse, HTTP 200 over the unfiltered
+// population. Mirrors netbox.inferType, which draws the same distinction for
+// the same reason.
+func fieldType(name string, v interface{}) provider.FieldType {
 	switch v.(type) {
 	case bool:
 		return provider.FieldTypeBoolean
 	case float64, int, json.Number:
 		return provider.FieldTypeNumber
-	default:
-		return provider.FieldTypeString
 	}
+	if isTimeColumn(name) {
+		if s, ok := v.(string); ok {
+			if _, err := time.Parse(time.RFC3339, s); err == nil {
+				return provider.FieldTypeTime
+			}
+		}
+	}
+	return provider.FieldTypeString
+}
+
+// isTimeColumn names the columns whose string values are timestamps. Gated on
+// the name as well as the format so a text column that happens to hold
+// something RFC3339-shaped is not reclassified out of its text operators.
+func isTimeColumn(name string) bool {
+	switch name {
+	case "created", "last_updated", "last_used", "time", "expires":
+		return true
+	}
+	return false
 }
 
 // FilterFields advertises every column with the operator set the backend

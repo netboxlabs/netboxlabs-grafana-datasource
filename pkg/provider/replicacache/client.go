@@ -115,10 +115,20 @@ func (e *APIError) Classification() *provider.UpstreamError {
 	switch e.Status {
 	case 400:
 		c.Kind = provider.ErrorKindBadRequest
+		c.Detail = "Replica cache rejected this query (HTTP 400). Check the filters and try again."
 	case 401, 403:
 		c.Kind = provider.ErrorKindAuth
+		// Names THIS backend's settings. The shared wording says to check the
+		// NetBox API token and URL, which this mode does not use at all — so it
+		// would send a reader to fix a field that has no bearing on the failure.
+		// 403 is a tenant/token mismatch, so the instance ID is as likely to be
+		// wrong as the token.
+		c.Detail = "Replica cache rejected the credentials. Check the replica-cache token and the NetBox instance ID."
 	case 404:
 		c.Kind = provider.ErrorKindNotFound
+		c.Detail = "Replica cache has no such endpoint. Check the replica-cache URL, and that this object type is one the cache serves."
+	case 500, 502, 503, 504:
+		c.Detail = fmt.Sprintf("Replica cache returned HTTP %d. The cache is reachable but could not answer; this is not a NetBox failure.", e.Status)
 	}
 	return c
 }

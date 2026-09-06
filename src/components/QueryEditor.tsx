@@ -195,7 +195,15 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   // the data source, so a panel author has no other way to learn why sorting is
   // unavailable here. Optional chaining because a saved query is edited by
   // whatever object Grafana hands us.
-  const fastPaging = datasource.datasourceInstanceSettings?.jsonData?.fastPagingNoTotals === true;
+  //
+  // Mode is part of the condition. Fast paging is NetBox's cursor walk; the
+  // replica-cache backend ignores FastPagingNoTotals entirely and honours its
+  // own sort parameter, so reading the flag alone took a working control away
+  // from it — and the value survives a mode switch, so a datasource that had
+  // fast paging on before being pointed at the cache arrived with sorting
+  // disabled for a limit that does not apply.
+  const settings = datasource.datasourceInstanceSettings?.jsonData;
+  const fastPaging = settings?.mode !== 'replica-cache' && settings?.fastPagingNoTotals === true;
   // The setting alone is not the condition — the cursor walk is, and an
   // alert-table query never takes it. pkg/plugin/query.go's alertTable branch
   // leaves AllowUncounted false (only the plain objects branch sets it, and only

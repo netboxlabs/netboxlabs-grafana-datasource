@@ -489,7 +489,10 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 		rawCols[k] = true
 	}
 
-	cols, rows := flattenRows(raws)
+	cols, rows, err := flattenRows(raws)
+	if err != nil {
+		return nil, err
+	}
 	if addDeepLinks(p.netboxURL, objectType, rows) {
 		cols = append(cols, deepLinkColumn)
 	}
@@ -595,7 +598,10 @@ func (p *Provider) columnSample(ctx context.Context, objectType string) (fieldsC
 	for k := range obj {
 		rawCols[k] = true
 	}
-	cols, rows := flattenRows(raws)
+	cols, rows, err := flattenRows(raws)
+	if err != nil {
+		return fieldsCacheEntry{}, err
+	}
 
 	entry := fieldsCacheEntry{
 		raw: rawCols,

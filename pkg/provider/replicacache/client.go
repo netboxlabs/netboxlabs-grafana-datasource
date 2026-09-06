@@ -130,6 +130,12 @@ func (e *APIError) Classification() *provider.UpstreamError {
 		c.Detail = "Replica cache has no such endpoint. Check the replica-cache URL, and that this object type is one the cache serves."
 	case 500, 502, 503, 504:
 		c.Detail = fmt.Sprintf("Replica cache returned HTTP %d. The cache is reachable but could not answer; this is not a NetBox failure.", e.Status)
+	default:
+		// Every remaining status still needs to name the right service. Without
+		// this, a 429, 405 or 413 kept an empty Detail and both renderers fell
+		// through to "NetBox returned HTTP 429" — pointing at a connection this
+		// mode may not even have configured.
+		c.Detail = fmt.Sprintf("Replica cache returned HTTP %d for this request. The cache is reachable but did not answer it; this is not a NetBox failure.", e.Status)
 	}
 	return c
 }
@@ -172,6 +178,7 @@ var maxBodyBytes int64 = 64 << 20
 var (
 	errOversizedBody     = errors.New("response exceeds 64 MiB")
 	errMalformedEnvelope = errors.New(`response envelope is missing "count" or "results"`)
+	errMalformedRow      = errors.New("result row is not an object")
 	errEmptyDiscovery    = errors.New("API description lists no object types")
 )
 

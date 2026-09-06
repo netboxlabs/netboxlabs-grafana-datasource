@@ -102,7 +102,10 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		return nil, err
 	}
 
-	cols, rows := flattenRows(raws)
+	cols, rows, err := flattenRows(raws)
+	if err != nil {
+		return nil, err
+	}
 	cols = append(cols, addChoiceValueAliases(spec.Fields, rows)...)
 	var warnings []string
 	if !spec.CountOnly {
@@ -264,7 +267,11 @@ func withFields(q url.Values, cols []string) url.Values {
 // string. It is expanded to cf_<name> columns to match what the NetBox provider
 // produces from the API's custom_fields object, so the same panel reads the
 // same column from either backend.
-func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}) {
+// rowShapeGuidance is shared by both row-shape failures: the cause is the same
+// and so is the thing to check.
+const rowShapeGuidance = "Replica cache returned a result row that is not an object. The service is reachable but answered with something unexpected."
+
+func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, error) {
 	var (
 		cols []string
 		seen = map[string]bool{}
@@ -280,7 +287,22 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}) {
 	for _, raw := range raws {
 		var obj map[string]interface{}
 		if err := json.Unmarshal(raw, &obj); err != nil {
-			continue
+			return nil, nil, &TransportError{
+				Op:      "reading a result row",
+				Err:     err,
+				Message: rowShapeGuidance,
+			}
+		}
+		if obj == nil {
+			// A JSON null decodes into the map without error and leaves it nil.
+			// Skipping it silently drops a row the count still includes; keeping
+			// it appends an EMPTY row, which an alert-table query turns into a
+			// value of 1 — a spurious alert built out of a malformed response.
+			return nil, nil, &TransportError{
+				Op:      "reading a result row",
+				Err:     errMalformedRow,
+				Message: rowShapeGuidance,
+			}
 		}
 		row := make(map[string]interface{}, len(obj)+4)
 		for k, v := range obj {
@@ -309,7 +331,7 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}) {
 			addCol(k)
 		}
 	}
-	return cols, out
+	return cols, out, nil
 }
 
 // customFields decodes the custom_field_data blob. It is a JSON object encoded

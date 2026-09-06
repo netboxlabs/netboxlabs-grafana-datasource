@@ -278,3 +278,17 @@ describe('token handling across modes', () => {
     expect(sent.apiToken).toBe('nbt_unsaved');
   });
 });
+
+// Fast paging is a NetBox-only trade: the replica-cache backend has no cursor
+// walk to opt into, so the switch would be a control that changes nothing.
+describe('ConfigEditor fast paging visibility', () => {
+  it('hides the fast paging switch in replica-cache mode', () => {
+    setup({ mode: 'replica-cache' });
+    expect(screen.queryByText('Fast paging')).not.toBeInTheDocument();
+  });
+
+  it('shows it in NetBox mode', () => {
+    setup({});
+    expect(screen.getByText('Fast paging')).toBeInTheDocument();
+  });
+});

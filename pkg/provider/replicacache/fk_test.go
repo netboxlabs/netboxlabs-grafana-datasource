@@ -339,3 +339,38 @@ func TestAllNullRelationshipStillHasItsColumn(t *testing.T) {
 		t.Errorf("columns = %v, want just tenant", res.Columns)
 	}
 }
+
+// Being object-shaped is not enough for a dimension row: without an id there is
+// nothing to match against the rows that referenced it. Skipping it let
+// fetchRelated report success with names missing, so no degradation warning was
+// raised and the panel showed a blank "site" with nothing to explain it.
+func TestDimensionRowWithoutAnIDIsReported(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	// The id is stripped on the way out, so the row still matches the filter
+	// that asked for it and reaches the decoder — which is the path under test.
+	f.idlessRowsFor = "dcim/sites"
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		// The device rows are fine, so the query still answers — a dead
+		// dimension degrades the result rather than destroying it.
+		t.Fatalf("Query: %v", err)
+	}
+	var named bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "dcim/sites") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the failed dimension must be named, got %v", res.Warnings)
+	}
+	if res.Rows[0]["site_id"] != float64(4001) {
+		t.Errorf("site_id = %v, want 4001 — the id the warning points at must survive", res.Rows[0]["site_id"])
+	}
+}

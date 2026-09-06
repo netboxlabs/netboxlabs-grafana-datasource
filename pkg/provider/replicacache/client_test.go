@@ -379,3 +379,32 @@ func TestSamplingFailureIsReportedAsItselfNotAsABadFilter(t *testing.T) {
 		t.Errorf("guidance should name the credentials, got %q", u.Detail)
 	}
 }
+
+// {"count":1,"results":[{}]} is object-shaped and non-nil, so the null/scalar
+// guards let it through — one empty row with a matching total, which an
+// alert-table query turns into a value of 1. Measured on a live instance: the
+// service returns id on every projection, even one that did not ask for it, so
+// requiring it costs nothing.
+func TestRowWithoutAPrimaryKeyIsRejected(t *testing.T) {
+	for _, body := range []string{
+		`{"count": 1, "results": [{}]}`,
+		`{"count": 1, "results": [{"name": "CORE-1"}]}`,
+		`{"count": 1, "results": [{"id": "not-a-number", "name": "CORE-1"}]}`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		}))
+
+		p := New(srv.URL, "t", "nb", srv.Client())
+		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+		srv.Close()
+		if err == nil {
+			t.Errorf("%s was accepted", body)
+			continue
+		}
+		if !errors.Is(err, errRowWithoutID) {
+			t.Errorf("%s: want errRowWithoutID, got %v", body, err)
+		}
+	}
+}

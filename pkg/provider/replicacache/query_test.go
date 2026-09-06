@@ -711,3 +711,42 @@ func TestProjectionDoesNotWaitOnDiscovery(t *testing.T) {
 		t.Fatal("the query blocked on discovery; column facts must come from the row sample")
 	}
 }
+
+// A panel written against NetBox mode selects status_value, which there is the
+// raw value beside the label. This backend has no labels — the physical column
+// holds the raw value — so the alias is built from it rather than left blank.
+func TestChoiceValueAliasIsBuiltFromThePhysicalColumn(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "status": "active"},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "status_value"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := res.Rows[0]["status_value"]; got != "active" {
+		t.Errorf("status_value = %v, want active", got)
+	}
+	var announced bool
+	for _, c := range res.Columns {
+		if c == "status_value" {
+			announced = true
+		}
+	}
+	if !announced {
+		t.Errorf("status_value must be announced as a column, got %v", res.Columns)
+	}
+
+	// The projection has to fetch the physical column it is built from, or the
+	// alias would be built from a value that was never requested.
+	if r, ok := f.requestWith("dcim/devices", "fields"); ok {
+		if !strings.Contains(r.query.Get("fields"), "status") {
+			t.Errorf("projection dropped the source column: %q", r.query.Get("fields"))
+		}
+	}
+}

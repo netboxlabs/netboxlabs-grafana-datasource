@@ -194,8 +194,15 @@ func rejectBranch(ctx context.Context) error {
 }
 
 // HealthCheck verifies connectivity, credentials and the tenant header.
+//
+// It bypasses the discovery cache deliberately. Answering from a result up to
+// ten minutes old would let Save & Test report "Connected" after the token has
+// been revoked or the service has gone away, while every query fails — a wrong
+// answer from the one button whose whole job is to make a live request. The
+// cost is one request per press, which is what the button is for; the refresh
+// also leaves the cache warm.
 func (p *Provider) HealthCheck(ctx context.Context) (string, error) {
-	types, err := p.ObjectTypes(ctx)
+	types, err := p.objectTypes(ctx, forceRefresh)
 	if err != nil {
 		return "", err
 	}
@@ -213,8 +220,20 @@ type swaggerDoc struct {
 
 // ObjectTypes lists the entities this deployment serves.
 func (p *Provider) ObjectTypes(ctx context.Context) ([]provider.ObjectType, error) {
+	return p.objectTypes(ctx, useCache)
+}
+
+// cachePolicy says whether a discovery result may be served from cache.
+type cachePolicy bool
+
+const (
+	useCache     cachePolicy = false
+	forceRefresh cachePolicy = true
+)
+
+func (p *Provider) objectTypes(ctx context.Context, refresh cachePolicy) ([]provider.ObjectType, error) {
 	p.mu.Lock()
-	if p.entities != nil && time.Now().Before(p.expires) {
+	if !bool(refresh) && p.entities != nil && time.Now().Before(p.expires) {
 		out := p.entities
 		p.mu.Unlock()
 		return out, nil

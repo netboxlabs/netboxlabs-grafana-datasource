@@ -171,15 +171,22 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
         isBranches ? { showErrorAlert: false } : undefined
       );
     } catch (err) {
-      // Degrade the branch variable to a "main"-only list ONLY when branching
-      // isn't installed (the branches endpoint 404s, surfaced by the backend as
-      // a "not found" message). Any other failure (auth, 5xx, network) is
-      // rethrown so the outage/misconfig surfaces instead of being hidden behind
-      // main. If the message can't be matched, we rethrow — the safe default.
-      const detail = String(
-        (err as { data?: { error?: string }; message?: string })?.data?.error ?? (err as Error)?.message ?? ''
-      );
-      if (isBranches && /not found|404/i.test(detail)) {
+      // Degrade the branch variable to a "main"-only list ONLY when the branches
+      // endpoint isn't there. Any other failure (auth, 5xx, network) is rethrown
+      // so the outage/misconfig surfaces instead of being hidden behind main.
+      //
+      // The backend now sends its classification alongside the message, which is
+      // what this reads first. Matching the prose was a contract nobody
+      // declared: the same condition reads "not found" from NetBox and "Replica
+      // cache has no object type ..." from the cache, so the fallback stopped
+      // working the moment a second provider existed — a dashboard with a branch
+      // variable threw on refresh instead of degrading. The regex stays as a
+      // fallback for a backend that sends no kind.
+      const data = (err as { data?: { error?: string; kind?: string } })?.data;
+      const kind = data?.kind ?? '';
+      const detail = String(data?.error ?? (err as Error)?.message ?? '');
+      const missing = kind === 'not-found' || kind === 'unknown-object-type' || /not found|404/i.test(detail);
+      if (isBranches && missing) {
         return out;
       }
       throw err;

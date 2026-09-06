@@ -353,13 +353,19 @@ func (p *Provider) warmEntities() <-chan struct{} {
 // case correct and makes the bad case cost a fixed, small amount instead of a
 // full HTTP timeout — per refresh rather than per panel, since the refresh is
 // shared.
-func (p *Provider) entitySetSoon(budget time.Duration) (map[string]bool, bool) {
+func (p *Provider) entitySetSoon(ctx context.Context, budget time.Duration) (map[string]bool, bool) {
 	if set, ok := p.cachedEntitySet(); ok {
 		return set, true
 	}
 	select {
 	case <-p.warmEntities():
 	case <-time.After(budget):
+	case <-ctx.Done():
+		// The caller has gone — a cancelled dashboard, or one that hit its
+		// deadline. Holding the backend for the rest of the budget serves
+		// nobody: the rows are already fetched and nothing will read them. The
+		// refresh itself continues in the background, so the next query still
+		// benefits.
 	}
 	return p.cachedEntitySet()
 }

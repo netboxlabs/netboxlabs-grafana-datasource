@@ -337,17 +337,31 @@ func needsTypeCheck(filters []provider.Filter) bool {
 // consulted it. Sending it anyway is what produces the silent unfiltered
 // result above, so it is refused here as well.
 func validateFilterTypes(filters []provider.Filter, types map[string]provider.FieldType) error {
-	if len(types) == 0 {
-		return nil // types unknown; the request itself remains authoritative
-	}
 	for _, f := range filters {
 		op := f.Operator
 		if op == "exact" {
 			op = opExact
 		}
-		t, seen := types[f.Field]
-		if !seen {
+		// Only these operators care about the column's type. Equality, `in` and
+		// the comparisons work on anything, so they are never held up by a
+		// schema we could not read.
+		if !textOperators[op] && !nullOperators[op] {
 			continue
+		}
+
+		// For the ones that do care, fail CLOSED when the type cannot be
+		// confirmed — whether the schema sample failed outright (types nil) or
+		// this column was never seen holding a value.
+		//
+		// The earlier version let those through, reasoning that the request
+		// itself was authoritative. That is wrong for exactly this family: a
+		// text match against a numeric column does not fail, it answers HTTP
+		// 200 over the unfiltered population. "The request will tell us" only
+		// holds when a wrong request produces an error.
+		t, seen := types[f.Field]
+		if !seen || t == provider.FieldType("") {
+			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+				Reason: "this column's type could not be determined, and this operator is only safe on some types — a text match on a numeric column returns every row while appearing to filter. Retry once the object type's fields have loaded, or filter on equality"}
 		}
 		if textOperators[op] && t != provider.FieldTypeString {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,

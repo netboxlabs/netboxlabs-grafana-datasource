@@ -131,7 +131,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		if addDeepLinks(p.netboxURL, spec.ObjectType, rows) {
 			cols = append(cols, deepLinkColumn)
 		}
-		added, warns := p.resolveFKs(ctx, spec.ObjectType, rows)
+		added, warns := p.resolveFKs(ctx, spec.ObjectType, rows, wantedRelations(spec))
 		cols = append(cols, added...)
 		warnings = warns
 	}
@@ -213,6 +213,25 @@ func hasColumn(rows []map[string]interface{}, name string) bool {
 		}
 	}
 	return false
+}
+
+// wantedRelations names the relationships whose NAMES the caller asked to see,
+// or nil when it asked for everything.
+//
+// A caller that selected site_id asked for the id and nothing else — resolving
+// "site" for it spends the discovery budget on a column that will be projected
+// away, and risks a warning that alert evaluation reads as a failure.
+// KeyFields count, but by the same rule: joining on "site" needs the name,
+// joining on "site_id" does not.
+func wantedRelations(spec provider.QuerySpec) map[string]bool {
+	if len(spec.Fields) == 0 {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, f := range append(append([]string{}, spec.Fields...), spec.KeyFields...) {
+		want[strings.TrimSuffix(f, "_slug")] = true
+	}
+	return want
 }
 
 // projectColumns maps the caller's requested columns onto the columns that

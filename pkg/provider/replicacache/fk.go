@@ -301,7 +301,16 @@ func (c *fkCache) store(entity string, rows map[int]related) {
 // because nothing failed and the id is still there to see. A dimension that
 // exists but did not answer leaves a blank name column, which looks exactly
 // like "this device has no site" — so that one is stated.
-func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[string]interface{}) ([]string, []string) {
+// want names the derived columns the caller actually asked for, or is nil to
+// mean all of them.
+//
+// It exists because resolving a name the caller did not request is not free
+// twice over: it can spend the whole discovery budget, and a dimension that
+// fails adds a warning — which alert evaluation treats as a hard failure (see
+// pkg/plugin/query.go's degradationError). A rule selecting only site_id would
+// stop firing because dcim/sites was unreachable, though every value it asked
+// for was present.
+func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[string]interface{}, want map[string]bool) ([]string, []string) {
 	// The entity list is needed to target the FKs, but this runs AFTER the rows
 	// have arrived — so an unbounded fetch here delays a panel that already has
 	// its data, which is the one place a long timeout buys nothing.
@@ -315,7 +324,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	// projection of scalar columns only, has no *_id to target — and paying the
 	// discovery budget to discover that would add seconds to a query that was
 	// never going to use the answer.
-	if !hasResolvableFK(rows) {
+	if !hasResolvableFK(rows, want) {
 		return nullFKColumns(rows), nil
 	}
 
@@ -333,7 +342,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	for _, row := range rows {
 		for col, v := range row {
 			base, ok := strings.CutSuffix(col, "_id")
-			if !ok || base == "" {
+			if !ok || base == "" || !wanted(want, base) {
 				continue
 			}
 			id, ok := toInt(v)
@@ -593,6 +602,13 @@ func fromFloat(f float64) (int, bool) {
 // related object. It is deliberately cheap and permissive: a false positive
 // costs one discovery lookup, while a false negative would silently drop the
 // resolved names.
+// wanted reports whether a relationship's derived columns were asked for. A nil
+// set means every column was, which is what an unprojected query and the schema
+// sample both need.
+func wanted(want map[string]bool, base string) bool {
+	return want == nil || want[base]
+}
+
 // nullFKColumns announces the derived column for a relationship that is null on
 // every row, and fills it with nils.
 //
@@ -683,11 +699,11 @@ func classifyFKValue(v interface{}) (int, fkValueKind) {
 	return 0, fkNotAKey
 }
 
-func hasResolvableFK(rows []map[string]interface{}) bool {
+func hasResolvableFK(rows []map[string]interface{}, want map[string]bool) bool {
 	for _, row := range rows {
 		for col, v := range row {
 			base, ok := strings.CutSuffix(col, "_id")
-			if !ok || base == "" {
+			if !ok || base == "" || !wanted(want, base) {
 				continue
 			}
 			// The suffix alone is not enough. owner_id, created_by_id and

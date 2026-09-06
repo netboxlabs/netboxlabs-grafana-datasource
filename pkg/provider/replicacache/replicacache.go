@@ -514,7 +514,9 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	if addDeepLinks(p.netboxURL, objectType, rows) {
 		cols = append(cols, deepLinkColumn)
 	}
-	added, degraded := p.resolveFKs(ctx, objectType, rows)
+	// nil: the editor's field list has to offer every relationship, not just
+	// the ones some earlier query happened to select.
+	added, degraded := p.resolveFKs(ctx, objectType, rows, nil)
 	cols = append(cols, added...)
 
 	// Shared with the query path's lighter probe, so the two cannot disagree

@@ -85,6 +85,63 @@ describe('metricFindQuery', () => {
     expect(out).toEqual([{ text: 'main', value: 'main' }]);
   });
 
+  it('degrades for replica-cache, whose wording matches no regex', async () => {
+    // The prose fallback was a contract nobody declared: the same condition
+    // reads "not found" from NetBox and "Replica cache has no object type ..."
+    // from the cache, so a dashboard with a branch variable threw on refresh
+    // the moment a second provider existed. The backend sends its
+    // classification now, and that is what this reads.
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockRejectedValue({
+      status: 400,
+      data: {
+        error:
+          'Replica cache has no object type "plugins/branching/branches" — it isn\'t one of the 74 types this deployment reports.',
+        kind: 'unknown-object-type',
+      },
+    });
+    const out = await ds.metricFindQuery({
+      refId: 'v',
+      objectType: 'plugins/branching/branches',
+      valueField: 'schema_id',
+      textField: 'name',
+    });
+    expect(out).toEqual([{ text: 'main', value: 'main' }]);
+  });
+
+  it('degrades when the cache reports the endpoint missing', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockRejectedValue({
+      status: 502,
+      data: { error: 'Replica cache has no such endpoint. Check the replica-cache URL.', kind: 'not-found' },
+    });
+    const out = await ds.metricFindQuery({
+      refId: 'v',
+      objectType: 'plugins/branching/branches',
+      valueField: 'schema_id',
+      textField: 'name',
+    });
+    expect(out).toEqual([{ text: 'main', value: 'main' }]);
+  });
+
+  it('still rethrows a classified failure that is NOT a missing endpoint', async () => {
+    // The kind must not become a blanket "degrade on anything classified":
+    // an auth failure hidden behind "main" is exactly what this guard prevents.
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockRejectedValue({
+      status: 400,
+      data: { error: 'Replica cache rejected the credentials.', kind: 'auth' },
+    });
+    await expect(
+      ds.metricFindQuery({
+        refId: 'v',
+        objectType: 'plugins/branching/branches',
+        valueField: 'schema_id',
+        textField: 'name',
+      })
+    ).rejects.toBeDefined();
+  });
+
   it('rethrows a real branch-list failure (outage/auth) instead of hiding it behind "main"', async () => {
     const ds = makeDS();
     (ds as any).runResourceQuery = jest

@@ -293,3 +293,89 @@ func TestGrowingTotalMidWalkIsNotAContradiction(t *testing.T) {
 		t.Errorf("total = %d, want the first page's 1", res.Total)
 	}
 }
+
+// A cursor that does not advance would re-fetch the same page until the limit
+// was reached, handing back one row duplicated and another never seen — and
+// passing every count check on the way, since the duplicates are real rows and
+// the totals agree.
+func TestRepeatedCursorIsRejected(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		// Always the same row, always the same cursor.
+		_, _ = w.Write([]byte(`{"count": 2, "results": [{"id": 1, "name": "A"}], "next_cursor": "stuck"}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Limit: 100})
+	if err == nil {
+		t.Fatal("a repeated cursor must be refused, not walked in circles")
+	}
+	if !errors.Is(err, errCursorNotAdvancing) {
+		t.Errorf("want errCursorNotAdvancing, got %v", err)
+	}
+	// And it stops promptly rather than spinning to the limit.
+	if hits > 3 {
+		t.Errorf("made %d requests; the repeat should be caught on the second", hits)
+	}
+}
+
+// Distinct cursors are the ordinary walk and must not be caught by the guard.
+func TestDistinctCursorsWalkNormally(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		switch n {
+		case 1:
+			_, _ = w.Write([]byte(`{"count": 3, "results": [{"id": 1}], "next_cursor": "c2"}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"count": 3, "results": [{"id": 2}], "next_cursor": "c3"}`))
+		default:
+			_, _ = w.Write([]byte(`{"count": 3, "results": [{"id": 3}]}`))
+		}
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Limit: 100})
+	if err != nil {
+		t.Fatalf("an ordinary multi-page walk must succeed: %v", err)
+	}
+	if len(res.Rows) != 3 {
+		t.Errorf("rows = %d, want 3", len(res.Rows))
+	}
+}
+
+// An outage while sampling the schema is an outage, not a bad filter. Folded
+// into a nil map it became an UnsupportedFilterError and an HTTP 400 telling
+// the reader their column's type could not be determined — sending them to edit
+// a filter that was fine, over a credential that was not.
+func TestSamplingFailureIsReportedAsItselfNotAsABadFilter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error": "invalid token"}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Filters:    []provider.Filter{{Field: "name", Operator: "ic", Value: "CORE"}},
+	})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	u := provider.Classify(err)
+	if u == nil || u.Kind != provider.ErrorKindAuth {
+		t.Fatalf("a 401 must classify as auth, got %+v", u)
+	}
+	if strings.Contains(u.Detail, "type could not be determined") {
+		t.Errorf("the filter is not the problem: %q", u.Detail)
+	}
+	if !strings.Contains(u.Detail, "credentials") {
+		t.Errorf("guidance should name the credentials, got %q", u.Detail)
+	}
+}

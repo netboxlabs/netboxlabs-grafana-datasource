@@ -762,3 +762,30 @@ func TestTimestampValuesDecideRegardlessOfColumnName(t *testing.T) {
 		}
 	}
 }
+
+// The service that failed is replica-cache, and NetBox is optional in this
+// mode — possibly not configured at all. An unclassified error renders through
+// the plugin's fallback as "Cannot reach NetBox", sending Save & Test at the
+// wrong service.
+func TestEmptyDiscoveryPointsAtTheCacheNotNetBox(t *testing.T) {
+	f := newFakeService() // no entities, so the description has no list paths
+	p := newTestProvider(t, f)
+
+	_, err := p.ObjectTypes(context.Background())
+	if err == nil {
+		t.Fatal("want an error for an empty API description")
+	}
+	if !errors.Is(err, errEmptyDiscovery) {
+		t.Errorf("want errEmptyDiscovery, got %v", err)
+	}
+	u := provider.Classify(err)
+	if u == nil {
+		t.Fatal("an unclassified error renders as a NetBox failure")
+	}
+	if !strings.Contains(u.Detail, "Replica cache") {
+		t.Errorf("guidance should name the cache: %q", u.Detail)
+	}
+	if strings.Contains(u.Detail, "NetBox URL") {
+		t.Errorf("NetBox is optional in this mode; guidance should not send them there: %q", u.Detail)
+	}
+}

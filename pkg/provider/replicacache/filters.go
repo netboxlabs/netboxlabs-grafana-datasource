@@ -369,7 +369,7 @@ func validateFilterTypes(filters []provider.Filter, types map[string]provider.Fi
 		}
 		if nullOperators[op] && !blankSafe(t) {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-				Reason: "this backend answers is-empty with IS NULL, but NetBox stores a blank text field as an empty string, so the result would be the exact opposite of what was asked; filter on equality with an empty value instead"}
+				Reason: "this backend answers is-empty with IS NULL, but NetBox stores a blank text field as an empty string, so the result would be the exact opposite of what was asked. There is no equivalent here — an equality filter with an empty value is dropped, as it is in NetBox mode, so it would return every row — use NetBox mode for this filter"}
 		}
 	}
 	return nil

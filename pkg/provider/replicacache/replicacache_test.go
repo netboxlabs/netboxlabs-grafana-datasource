@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -637,5 +638,57 @@ func TestTransportFailuresNameTheCache(t *testing.T) {
 	}
 	if strings.Contains(u.Detail, "NetBox URL") || strings.Contains(u.Detail, "NetBox API") {
 		t.Errorf("guidance points at a NetBox setting: %q", u.Detail)
+	}
+}
+
+// A 200 carrying no usable paths is a discovery FAILURE, not an answer of
+// "nothing exists". Caching it would pin an empty entity set for the whole TTL,
+// and every object query would then be rejected locally while the row endpoints
+// are perfectly healthy — the opposite of the degradation this path is for.
+func TestEmptyDiscoveryIsNotCachedAsAnAnswer(t *testing.T) {
+	f := newFakeService() // no entities at all, so the document has no list paths
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	if _, err := p.ObjectTypes(ctx); err == nil {
+		t.Fatal("an empty API description must be an error, not an empty answer")
+	}
+
+	// And nothing was cached: a query must still reach the row endpoint rather
+	// than being refused against an entity set that claims nothing exists.
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("the row request is authoritative when discovery failed: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Errorf("want the row, got %d", len(res.Rows))
+	}
+}
+
+// A 200 whose body will not parse is the service's problem, not the network's —
+// but unclassified it renders as "Couldn't reach NetBox", which is wrong twice:
+// we reached it, and it was not NetBox.
+func TestMalformedResponseNamesTheCache(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count": 3, "results": [{"id":`)) // truncated
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err == nil {
+		t.Fatal("want an error for an unreadable body")
+	}
+	u := provider.Classify(err)
+	if u == nil {
+		t.Fatal("a malformed response must be classified, or it renders as a NetBox failure")
+	}
+	if !strings.Contains(u.Detail, "Replica cache") {
+		t.Errorf("guidance should name the cache: %q", u.Detail)
+	}
+	if strings.Contains(u.Detail, "Cannot reach") {
+		t.Errorf("we did reach it; the wording should not say otherwise: %q", u.Detail)
 	}
 }

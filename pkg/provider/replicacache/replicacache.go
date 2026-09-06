@@ -643,12 +643,19 @@ func typeColumns(cols []string, rows []map[string]interface{}) map[string]provid
 
 // columnTypes reports the inferred type per upstream column. An entry missing
 // or empty means the type could not be determined from the sample.
-func (p *Provider) columnTypes(ctx context.Context, objectType string) map[string]provider.FieldType {
+// The error is RETURNED rather than folded into a nil map. Both mean "no types
+// here", but they need different answers: an empty table genuinely has no types
+// to offer and the filter check should fail closed on that, while a 401 or a
+// 5xx is an outage. Swallowing the second turned it into an
+// UnsupportedFilterError and an HTTP 400 telling the reader their column's type
+// could not be determined — sending them to edit a filter that was fine, over a
+// credential or a service that was not.
+func (p *Provider) columnTypes(ctx context.Context, objectType string) (map[string]provider.FieldType, error) {
 	e, err := p.columnSample(ctx, objectType)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return e.types
+	return e.types, nil
 }
 
 // fieldType classifies a sampled value.
@@ -717,7 +724,11 @@ func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provi
 	if err != nil {
 		return nil, err
 	}
-	return filterFieldsFor(fields, raw, p.columnTypes(ctx, objectType)), nil
+	types, err := p.columnTypes(ctx, objectType)
+	if err != nil {
+		return nil, err
+	}
+	return filterFieldsFor(fields, raw, types), nil
 }
 
 // FieldValues returns distinct values for a field, for editor autocomplete.
@@ -755,7 +766,12 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	// For every other column the page is fetched unfiltered and matched here.
 	// That is a sample rather than the column's full domain, which is already
 	// true of this endpoint, and an honest subset beats a confident wrong list.
-	pushDown := q != "" && p.columnTypes(ctx, objectType)[field] == provider.FieldTypeString
+	// A sampling failure here is not fatal: not knowing the type means not
+	// pushing down, and the unfiltered fetch below still answers. The request
+	// that follows is authoritative — if the service is genuinely down, it fails
+	// there, with its own classified error, rather than here.
+	types, _ := p.columnTypes(ctx, objectType)
+	pushDown := q != "" && types[field] == provider.FieldTypeString
 	var params url.Values
 	if pushDown {
 		var err error

@@ -32,7 +32,15 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	}
 
 	if needsTypeCheck(spec.Filters) {
-		if err := validateFilterTypes(spec.Filters, p.columnTypes(ctx, spec.ObjectType)); err != nil {
+		// A sampling FAILURE is reported as itself. Only a successful sample
+		// that simply has no type for the column reaches validateFilterTypes,
+		// which fails closed on it — the two look alike as a nil map and need
+		// opposite answers.
+		types, err := p.columnTypes(ctx, spec.ObjectType)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateFilterTypes(spec.Filters, types); err != nil {
 			return nil, err
 		}
 	}

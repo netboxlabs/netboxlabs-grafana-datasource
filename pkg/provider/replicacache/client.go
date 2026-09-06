@@ -176,11 +176,12 @@ var maxBodyBytes int64 = 64 << 20
 // errOversizedBody and errMissingCount are the protocol violations the client
 // refuses outright, kept as sentinels so tests can name what they assert.
 var (
-	errOversizedBody     = errors.New("response exceeds 64 MiB")
-	errMalformedEnvelope = errors.New(`response envelope is missing "count" or "results"`)
-	errMalformedRow      = errors.New("result row is not an object")
-	errInconsistentCount = errors.New("page holds more rows than its reported total")
-	errEmptyDiscovery    = errors.New("API description lists no object types")
+	errOversizedBody      = errors.New("response exceeds 64 MiB")
+	errMalformedEnvelope  = errors.New(`response envelope is missing "count" or "results"`)
+	errMalformedRow       = errors.New("result row is not an object")
+	errInconsistentCount  = errors.New("page holds more rows than its reported total")
+	errCursorNotAdvancing = errors.New("pagination cursor repeated")
+	errEmptyDiscovery     = errors.New("API description lists no object types")
 )
 
 // errorBody is the service's failure shape: {"error": "unknown column: foo"}.
@@ -351,6 +352,9 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		maxTotal int
 		cursor   string
 		first    = true
+		// seenCursors is every cursor already followed, so a service that
+		// repeats one is caught rather than walked in circles.
+		seenCursors = map[string]bool{}
 	)
 	for len(rows) < limit {
 		want := limit - len(rows)
@@ -405,6 +409,20 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		if page.NextCursor == "" || len(page.rows()) == 0 {
 			break
 		}
+		// A cursor that does not advance would re-fetch the same page until the
+		// limit was reached, handing back one row duplicated and another never
+		// seen — and passing every count check on the way, since the duplicates
+		// are real rows and the totals agree. It is also the only shape here
+		// that could spin: the loop's other exits are an empty page and an
+		// absent cursor.
+		if seenCursors[page.NextCursor] {
+			return nil, 0, &TransportError{
+				Op:      "reading response from " + truncate(c.base+"/v1/"+entity),
+				Err:     errCursorNotAdvancing,
+				Message: "Replica cache returned the same pagination cursor twice, so the results would repeat rather than continue. The service is reachable but answered with something unexpected.",
+			}
+		}
+		seenCursors[page.NextCursor] = true
 		cursor = page.NextCursor
 	}
 	if len(rows) > limit {

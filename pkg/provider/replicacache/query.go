@@ -134,6 +134,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		added, warns := p.resolveFKs(ctx, spec.ObjectType, rows, wantedRelations(spec))
 		cols = append(cols, added...)
 		warnings = warns
+		warnings = append(warnings, unresolvedRelationWarnings(spec, cols, rows)...)
 	}
 
 	// Present the caller's chosen columns, in the order they asked for them.
@@ -213,6 +214,41 @@ func hasColumn(rows []map[string]interface{}, name string) bool {
 		}
 	}
 	return false
+}
+
+// unresolvedRelationWarnings reports a relationship the caller asked to SEE
+// that produced no column at all.
+//
+// Every silent path into that state has been closed one at a time; this is the
+// backstop for the ones nobody has thought of yet. The most recent was a page
+// whose site_id was a string in every row: no value proved the column was a
+// relationship, so it was accepted as text, and a request for "site" came back
+// with neither a column nor a word about why. A blank column at least reads as
+// a blank; a missing one a panel selected is invisible, and alert evaluation
+// treats warnings as failures precisely so it never runs on one.
+func unresolvedRelationWarnings(spec provider.QuerySpec, cols []string, rows []map[string]interface{}) []string {
+	if len(spec.Fields) == 0 {
+		return nil
+	}
+	present := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		present[c] = true
+	}
+	var out []string
+	for _, f := range spec.Fields {
+		if present[f] {
+			continue
+		}
+		base := strings.TrimSuffix(f, "_slug")
+		// Only when the SOURCE column is there. A field this deployment simply
+		// does not have is the projection's business, not a degradation.
+		if !hasColumn(rows, base+"_id") {
+			continue
+		}
+		out = append(out, fmt.Sprintf(
+			"%q could not be built from %s_id, so the column is missing from this result; the id column still holds the value.", f, base))
+	}
+	return out
 }
 
 // wantedRelations names the relationships whose NAMES the caller asked to see,

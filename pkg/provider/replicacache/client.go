@@ -431,6 +431,15 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 	if len(rows) > limit {
 		rows = rows[:limit]
 	}
+	// The LARGEST count seen, not the first. Both are the service's own answer,
+	// but a stale one understates: with a first page of 9,999, later pages
+	// reporting 10,001 and a limit of 10,000, returning 9,999 beside 10,000 rows
+	// makes isTruncated read len(Rows) >= Total and report a complete answer, so
+	// an alert evaluates a subset as the whole population. maxTotal can only be
+	// larger, so this can only make truncation MORE visible, never less.
+	if maxTotal > total {
+		total = maxTotal
+	}
 	return rows, total, nil
 }
 

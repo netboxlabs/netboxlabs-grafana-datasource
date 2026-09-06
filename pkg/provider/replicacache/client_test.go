@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -286,11 +287,14 @@ func TestGrowingTotalMidWalkIsNotAContradiction(t *testing.T) {
 	if len(res.Rows) != 3 {
 		t.Errorf("rows = %d, want 3", len(res.Rows))
 	}
-	// Total stays the first page's answer: it and len(Rows) answer different
-	// questions, and recomputing it from the rows would report a truncated page
-	// as the whole population.
-	if res.Total != 1 {
-		t.Errorf("total = %d, want the first page's 1", res.Total)
+	// Total is the LARGEST count any page reported, not the first. It is still
+	// the service's own answer rather than len(Rows) — those two numbers answer
+	// different questions — but a stale first page understates it, and Total is
+	// what the truncation guard compares against: with a first page of 9,999,
+	// later pages reporting 10,001 and a limit of 10,000, the stale value made
+	// len(Rows) >= Total and an incomplete subset read as the whole population.
+	if res.Total != 3 {
+		t.Errorf("total = %d, want the largest count seen (3)", res.Total)
 	}
 }
 
@@ -406,5 +410,39 @@ func TestRowWithoutAPrimaryKeyIsRejected(t *testing.T) {
 		if !errors.Is(err, errRowWithoutID) {
 			t.Errorf("%s: want errRowWithoutID, got %v", body, err)
 		}
+	}
+}
+
+// The case the stale total hid: a count that grows PAST the limit. The walk
+// stops at the limit with a complete-looking answer, and an alert evaluates a
+// subset as the whole population.
+func TestTotalCoversAPageCountThatGrewPastTheLimit(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		row := `{"id": ` + strconv.Itoa(n) + `}`
+		if n == 1 {
+			_, _ = w.Write([]byte(`{"count": 2, "results": [` + row + `], "next_cursor": "c2"}`))
+			return
+		}
+		// More rows arrived while we walked; the service now knows about three.
+		_, _ = w.Write([]byte(`{"count": 3, "results": [` + row + `], "next_cursor": "c3"}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Limit: 2})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("rows = %d, want the limit of 2", len(res.Rows))
+	}
+	if res.Total != 3 {
+		t.Errorf("total = %d, want 3 — the stale 2 would make this look complete", res.Total)
+	}
+	if len(res.Rows) >= res.Total {
+		t.Error("this result IS truncated and the numbers must say so")
 	}
 }

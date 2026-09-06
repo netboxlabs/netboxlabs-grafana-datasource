@@ -241,3 +241,40 @@ describe('config field order', () => {
     expect(netboxOrder[2]).toMatch(/Browser URL/i);
   });
 });
+
+// Both modes' tokens share one secureJsonData, and the form can hold an unsaved
+// value for each. Replacing the object instead of merging discarded the other
+// mode's token, so switching back showed an empty field and the input was gone.
+describe('token handling across modes', () => {
+  it('keeps an unsaved cache token when the NetBox token is entered', () => {
+    const onOptionsChange = jest.fn();
+    render(
+      <ConfigEditor
+        options={{ ...makeOptions({}), secureJsonData: { replicaCacheToken: 'ff_unsaved' } } as any}
+        onOptionsChange={onOptionsChange}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText(/API Token/i), { target: { value: 'nbt_new' } });
+
+    const sent = onOptionsChange.mock.calls[0][0].secureJsonData;
+    expect(sent.apiToken).toBe('nbt_new');
+    expect(sent.replicaCacheToken).toBe('ff_unsaved');
+  });
+
+  it('keeps an unsaved NetBox token when the cache token is entered', () => {
+    const onOptionsChange = jest.fn();
+    render(
+      <ConfigEditor
+        options={{ ...makeOptions({ mode: 'replica-cache' }), secureJsonData: { apiToken: 'nbt_unsaved' } } as any}
+        onOptionsChange={onOptionsChange}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText(/Replica cache token/i), { target: { value: 'ff_new' } });
+
+    const sent = onOptionsChange.mock.calls[0][0].secureJsonData;
+    expect(sent.replicaCacheToken).toBe('ff_new');
+    expect(sent.apiToken).toBe('nbt_unsaved');
+  });
+});

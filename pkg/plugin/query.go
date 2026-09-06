@@ -467,6 +467,9 @@ func healthErrorMessage(err error) string {
 	// refusal; there is no code to report, so fall through to the transport
 	// message rather than printing "HTTP 0".
 	if u := provider.Classify(err); u != nil && u.Status != 0 {
+		if d := boundedDetail(u); d != "" {
+			return d
+		}
 		switch u.Kind {
 		case provider.ErrorKindAuth:
 			return "Authentication failed (check API token)"
@@ -476,6 +479,19 @@ func healthErrorMessage(err error) string {
 		return fmt.Sprintf("NetBox returned HTTP %d", u.Status)
 	}
 	return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
+}
+
+// boundedDetail returns the provider's own sentence about a failure, bounded.
+//
+// Detail is provider-authored and never carries upstream response text (see
+// provider.UpstreamError), but it is bounded here anyway on the same principle
+// as every other echoed string: the caller cannot see who wrote it.
+func boundedDetail(u *provider.UpstreamError) string {
+	d := strings.TrimSpace(u.Detail)
+	if len(d) > maxUpstreamDetail {
+		d = d[:maxUpstreamDetail] + "…"
+	}
+	return d
 }
 
 // maxUpstreamDetail bounds a user-supplied string echoed in a user-facing
@@ -607,6 +623,16 @@ const (
 // the user. The raw error is logged separately (sanitized) for operators.
 func queryErrorMessage(err error) string {
 	if u := provider.Classify(err); u != nil {
+		// A provider-authored sentence wins wherever one exists. The wording
+		// below says "NetBox" and points at the NetBox URL and API token, which
+		// is wrong for a datasource reading from a different backend: it sends
+		// the reader to settings that mode does not even use. Only the provider
+		// knows which credential its failure is about.
+		if u.Kind != provider.ErrorKindUnknownObjectType {
+			if d := boundedDetail(u); d != "" {
+				return d
+			}
+		}
 		switch u.Kind {
 		// An object type the upstream does not know is the USER's input, not an
 		// upstream failure, and it is the one error here the reader can act on.
@@ -628,10 +654,7 @@ func queryErrorMessage(err error) string {
 		// instead; it is provider-authored (never an upstream body) but bounded
 		// here anyway, on the same principle as every other echoed string.
 		case provider.ErrorKindUnsupported:
-			if d := strings.TrimSpace(u.Detail); d != "" {
-				if len(d) > maxUpstreamDetail {
-					d = d[:maxUpstreamDetail] + "…"
-				}
+			if d := boundedDetail(u); d != "" {
 				return d
 			}
 			return "This query isn't supported by the backend this datasource is configured to use."

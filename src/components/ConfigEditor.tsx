@@ -104,8 +104,12 @@ export function ConfigEditor(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mirroredUrl, topLevelUrl]);
 
+  // Merges rather than replaces. Both modes' tokens live in one secureJsonData,
+  // and a form can hold an unsaved value for each: entering a cache token,
+  // switching to NetBox mode and typing an API token used to discard the first,
+  // so switching back showed an empty field and the user's input was gone.
   const onTokenChange = (event: ChangeEvent<HTMLInputElement>) => {
-    onOptionsChange({ ...options, secureJsonData: { apiToken: event.target.value } });
+    onOptionsChange({ ...options, secureJsonData: { ...secureJsonData, apiToken: event.target.value } });
   };
 
   const onResetToken = () => {

@@ -433,10 +433,21 @@ func (p *Provider) fetchRelated(ctx context.Context, entity string, ids []int) (
 		for _, raw := range raws {
 			var obj map[string]interface{}
 			if err := json.Unmarshal(raw, &obj); err != nil {
-				continue
+				return nil, &TransportError{Op: "reading a " + entity + " row", Err: err, Message: rowShapeGuidance}
+			}
+			if obj == nil {
+				// Same trap as the top-level rows: a JSON null decodes without
+				// error and leaves the map nil. Skipping it made fetchRelated
+				// report SUCCESS with a name missing, so resolveFKs raised no
+				// degradation warning and the panel showed a blank "site" with
+				// nothing to say why.
+				return nil, &TransportError{Op: "reading a " + entity + " row", Err: errMalformedRow, Message: rowShapeGuidance}
 			}
 			id, ok := toInt(obj["id"])
 			if !ok {
+				// A row without a usable id cannot be matched to anything that
+				// referenced it. Not a protocol failure — the row is an object —
+				// so it is left out rather than failing the query.
 				continue
 			}
 			out[id] = related{display: displayOf(obj), slug: stringOf(obj["slug"])}
@@ -487,10 +498,20 @@ func toInt(v interface{}) (int, bool) {
 func hasResolvableFK(rows []map[string]interface{}) bool {
 	for _, row := range rows {
 		for col, v := range row {
-			if base, ok := strings.CutSuffix(col, "_id"); ok && base != "" {
-				if _, isNum := toInt(v); isNum {
-					return true
-				}
+			base, ok := strings.CutSuffix(col, "_id")
+			if !ok || base == "" {
+				continue
+			}
+			// The suffix alone is not enough. owner_id, created_by_id and
+			// assigned_object_id are rejected by fkTarget no matter what
+			// discovery returns, so counting them here bought a wait of up to
+			// the whole budget to learn something already known — on a
+			// projection of exactly those columns, every query paid it.
+			if polymorphicFKs[base] || unexposedFKs[base] {
+				continue
+			}
+			if _, isNum := toInt(v); isNum {
+				return true
 			}
 		}
 	}

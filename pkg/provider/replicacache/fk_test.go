@@ -1,6 +1,12 @@
 package replicacache
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+)
 
 // knownEntities is a realistic slice of what a deployment reports, including
 // the pairs that make FK targeting ambiguous.
@@ -218,5 +224,70 @@ func TestFKTargetHandlesRelationshipsConventionCannotDerive(t *testing.T) {
 		if got, ok := fkTarget(tc.entity, tc.column, thin); ok {
 			t.Errorf("resolved %s.%s to %q, but the target is not served here", tc.entity, tc.column, got)
 		}
+	}
+}
+
+// Discovery is only worth waiting for if something in the rows could actually
+// be resolved. These bases are rejected by fkTarget whatever discovery returns,
+// so counting them bought a wait of up to the whole budget to learn something
+// already known.
+func TestUnresolvableIDsDoNotJustifyDiscovery(t *testing.T) {
+	unresolvable := []map[string]interface{}{{
+		"id":                 float64(1),
+		"owner_id":           float64(7),
+		"created_by_id":      float64(8),
+		"last_updated_by_id": float64(9),
+		"assigned_object_id": float64(10),
+		"scope_id":           float64(11),
+		"name":               "CORE-1",
+	}}
+	if hasResolvableFK(unresolvable) {
+		t.Error("none of these can be resolved; discovery must not be waited on")
+	}
+
+	// One resolvable id alongside them is enough to make the wait worthwhile.
+	withSite := []map[string]interface{}{{
+		"id": float64(1), "owner_id": float64(7), "site_id": float64(4001),
+	}}
+	if !hasResolvableFK(withSite) {
+		t.Error("site_id is resolvable, so discovery is worth waiting for")
+	}
+}
+
+// A null row in a DIMENSION response is the trap the top-level fix does not
+// cover: it decodes without error, leaves the map nil, and skipping it made
+// fetchRelated report SUCCESS with a name missing — so resolveFKs raised no
+// degradation warning and the panel showed a blank "site" with nothing to
+// explain it.
+func TestNullDimensionRowIsReportedNotSwallowed(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	f.nullRowsFor = "dcim/sites"
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		// The device rows are fine, so the query still answers: a failed
+		// dimension degrades the result, it does not destroy it.
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Warnings) == 0 {
+		t.Fatal("a dimension that returned nothing usable must be reported, not passed off as resolved")
+	}
+	var named bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "dcim/sites") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the warning should name the dimension that failed, got %v", res.Warnings)
+	}
+	// And the id survives, which is what the warning tells the reader to use.
+	if res.Rows[0]["site_id"] != float64(4001) {
+		t.Errorf("site_id = %v, want 4001", res.Rows[0]["site_id"])
 	}
 }

@@ -243,7 +243,7 @@ func TestUnresolvableIDsDoNotJustifyDiscovery(t *testing.T) {
 		"scope_id":           float64(11),
 		"name":               "CORE-1",
 	}}
-	if hasResolvableFK(unresolvable) {
+	if hasResolvableFK(unresolvable, nil) {
 		t.Error("none of these can be resolved; discovery must not be waited on")
 	}
 
@@ -251,7 +251,7 @@ func TestUnresolvableIDsDoNotJustifyDiscovery(t *testing.T) {
 	withSite := []map[string]interface{}{{
 		"id": float64(1), "owner_id": float64(7), "site_id": float64(4001),
 	}}
-	if !hasResolvableFK(withSite) {
+	if !hasResolvableFK(withSite, nil) {
 		t.Error("site_id is resolvable, so discovery is worth waiting for")
 	}
 }

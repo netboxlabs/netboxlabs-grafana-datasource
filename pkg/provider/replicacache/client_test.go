@@ -124,3 +124,64 @@ func TestEmptyResultsArrayIsAnAnswer(t *testing.T) {
 		t.Errorf("want an empty result, got total=%d rows=%d", res.Total, len(res.Rows))
 	}
 }
+
+// A JSON null in results decodes into the map without error and leaves it nil.
+// Appending it produces an EMPTY row that the count still includes, and an
+// alert-table query turns an empty row into a value of 1 — a spurious alert
+// built out of a malformed response.
+func TestNullResultRowIsRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count": 1, "results": [null]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err == nil {
+		t.Fatal("a null row must be refused, not turned into an empty row")
+	}
+	if !errors.Is(err, errMalformedRow) {
+		t.Errorf("want errMalformedRow, got %v", err)
+	}
+	if u := provider.Classify(err); u == nil || !strings.Contains(u.Detail, "Replica cache") {
+		t.Errorf("guidance should name the cache, got %+v", u)
+	}
+}
+
+// A row that is a scalar rather than an object is the same protocol failure.
+func TestScalarResultRowIsRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count": 1, "results": ["CORE-1"]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	if _, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"}); err == nil {
+		t.Fatal("a scalar row must be refused")
+	}
+}
+
+// Every status has to name the right service. An unenumerated one kept an empty
+// Detail, and both renderers then fell through to "NetBox returned HTTP 429" —
+// a connection this mode may not even have configured.
+func TestEveryStatusNamesTheCache(t *testing.T) {
+	for _, status := range []int{405, 413, 429, 418} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error": "nope"}`))
+		}))
+
+		p := New(srv.URL, "t", "nb", srv.Client())
+		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+		srv.Close()
+		if err == nil {
+			t.Fatalf("HTTP %d must be an error", status)
+		}
+		u := provider.Classify(err)
+		if u == nil || !strings.Contains(u.Detail, "Replica cache") {
+			t.Errorf("HTTP %d guidance should name the cache, got %+v", status, u)
+		}
+	}
+}

@@ -281,13 +281,20 @@ export function ConfigEditor(props: Props) {
             (pkg/plugin/query.go gates it on the FromAlert header, not on the
             Alert table switch) — which is the one thing a reader of this switch
             most needs to be sure of. */}
-        <InlineField label="Fast paging" labelWidth={20} tooltip={FAST_PAGING_TOOLTIP}>
-          <InlineSwitch
-            id="config-fast-paging"
-            value={Boolean(jsonData.fastPagingNoTotals)}
-            onChange={(e) => onJsonChange({ fastPagingNoTotals: e.currentTarget.checked })}
-          />
-        </InlineField>
+        {/* NetBox only: the replica-cache backend has no cursor walk to opt
+            into, so the switch would be a control that changes nothing. Hidden
+            rather than disabled — there is nothing to explain, unlike the
+            ordering picker, which is disabled because a NetBox setting really
+            is suppressing it. */}
+        {!isCache && (
+          <InlineField label="Fast paging" labelWidth={20} tooltip={FAST_PAGING_TOOLTIP}>
+            <InlineSwitch
+              id="config-fast-paging"
+              value={Boolean(jsonData.fastPagingNoTotals)}
+              onChange={(e) => onJsonChange({ fastPagingNoTotals: e.currentTarget.checked })}
+            />
+          </InlineField>
+        )}
       </FieldSet>
     </>
   );

@@ -596,6 +596,23 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
     expect(await screen.findByLabelText('ordering-direction')).not.toBeDisabled();
   });
 
+  it('keeps the sort control live in replica-cache mode even with fast paging set', async () => {
+    // Fast paging is NetBox's cursor walk. The replica-cache backend ignores
+    // FastPagingNoTotals and honours its own sort parameter, so reading the flag
+    // without the mode took a working control away — and the value survives a
+    // mode switch, so a data source that had fast paging on before being pointed
+    // at the cache arrived with sorting dead for a limit that does not apply.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-cache-fastpaging',
+      datasourceInstanceSettings: { jsonData: { mode: 'replica-cache', fastPagingNoTotals: true } },
+    } as any;
+    setup({ ordering: 'name' }, ds);
+
+    expect(await screen.findByLabelText('Sort by')).not.toBeDisabled();
+    expect(await screen.findByLabelText('ordering-direction')).not.toBeDisabled();
+  });
+
   it('keeps the sort control live when fast paging is off', async () => {
     const ds = {
       ...datasource,

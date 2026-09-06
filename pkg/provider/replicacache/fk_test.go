@@ -167,3 +167,56 @@ func TestParentResolvesToTheQueriedEntity(t *testing.T) {
 		t.Errorf("resolved parent_object to %q; its target is decided by a content-type id", got)
 	}
 }
+
+// Measured, not guessed. fkTarget was run over every foreign-key column found
+// on a live instance and its answer compared against the target NetBox's own
+// 4.4.10 schema gives. These are the pairs the derivation could not reach, and
+// the first one is the reason overrides are consulted before it: nothing named
+// "virtual-machine-roles" exists, so the global-basename fallback settled on
+// the only "roles" model in the list and rendered VM roles with IPAM names.
+func TestFKTargetHandlesRelationshipsConventionCannotDerive(t *testing.T) {
+	known := map[string]bool{}
+	for k, v := range knownEntities {
+		known[k] = v
+	}
+	known["dcim/mac-addresses"] = true
+	known["virtualization/interfaces"] = true
+
+	cases := []struct {
+		entity, column, want string
+	}{
+		{"virtualization/virtual-machines", "role", "dcim/device-roles"},
+		{"dcim/interfaces", "lag", "dcim/interfaces"},
+		{"dcim/interfaces", "bridge", "dcim/interfaces"},
+		{"dcim/interfaces", "untagged_vlan", "ipam/vlans"},
+		{"dcim/interfaces", "qinq_svlan", "ipam/vlans"},
+		{"dcim/interfaces", "primary_mac_address", "dcim/mac-addresses"},
+		{"ipam/vlans", "qinq_svlan", "ipam/vlans"},
+		{"virtualization/interfaces", "bridge", "virtualization/interfaces"},
+		{"virtualization/interfaces", "untagged_vlan", "ipam/vlans"},
+		{"dcim/device-types", "default_platform", "dcim/platforms"},
+		{"dcim/locations", "parent", "dcim/locations"},
+		// The derivation still owns everything it can reach.
+		{"dcim/devices", "role", "dcim/device-roles"},
+		{"ipam/prefixes", "role", "ipam/roles"},
+		{"dcim/devices", "primary_ip4", "ipam/ip-addresses"},
+	}
+	for _, tc := range cases {
+		got, ok := fkTarget(tc.entity, tc.column, known)
+		if !ok || got != tc.want {
+			t.Errorf("fkTarget(%q,%q) = %q,%v; want %q", tc.entity, tc.column, got, ok, tc.want)
+		}
+	}
+
+	// Overrides stay gated on the entity list: a deployment not serving the
+	// target degrades to the raw id rather than to a name it cannot read.
+	thin := map[string]bool{"virtualization/virtual-machines": true, "dcim/interfaces": true}
+	for _, tc := range []struct{ entity, column string }{
+		{"virtualization/virtual-machines", "role"},
+		{"dcim/interfaces", "untagged_vlan"},
+	} {
+		if got, ok := fkTarget(tc.entity, tc.column, thin); ok {
+			t.Errorf("resolved %s.%s to %q, but the target is not served here", tc.entity, tc.column, got)
+		}
+	}
+}

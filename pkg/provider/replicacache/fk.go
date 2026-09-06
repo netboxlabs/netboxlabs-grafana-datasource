@@ -66,15 +66,51 @@ var unexposedFKs = map[string]bool{
 	"last_updated_by": true,
 }
 
-// ipAddressFKs are the columns that reference an IP address under a name that
-// does not contain "ip-address". Convention cannot find these, and they are
-// common enough on devices and VMs to be worth naming.
-var ipAddressFKs = map[string]bool{
-	"primary_ip":  true,
-	"primary_ip4": true,
-	"primary_ip6": true,
-	"oob_ip":      true,
-	"nat_inside":  true,
+// namedFKs are relationships convention cannot derive, because the column is
+// named for its ROLE rather than for its target: an interface's untagged_vlan
+// is a vlan, a device's primary_ip4 an ip-address, a device-type's
+// default_platform a platform.
+//
+// A key of "app/model.column" applies to that entity only; a bare "column"
+// applies wherever the column appears. Every entry was measured: fkTarget was
+// run over every foreign-key column on a live instance and its answer compared
+// against the target NetBox's own schema gives, and these are the pairs where
+// the derivation could not reach a table this deployment actually serves.
+//
+// The qualified entry is the one that matters most. A virtual machine's role is
+// a dcim device-role, which no candidate finds, and the global-basename
+// fallback then settled on the only "roles" model in the list — ipam/roles —
+// rendering VM roles with unrelated IPAM names wherever the ids overlapped.
+// That is the confidently-wrong-name failure the fallback is otherwise careful
+// to avoid, and it is why an override is checked before any derivation.
+var namedFKs = map[string]string{
+	"virtualization/virtual-machines.role": "dcim/device-roles",
+
+	"primary_ip":  "ipam/ip-addresses",
+	"primary_ip4": "ipam/ip-addresses",
+	"primary_ip6": "ipam/ip-addresses",
+	"oob_ip":      "ipam/ip-addresses",
+	"nat_inside":  "ipam/ip-addresses",
+
+	"untagged_vlan":       "ipam/vlans",
+	"qinq_svlan":          "ipam/vlans",
+	"primary_mac_address": "dcim/mac-addresses",
+	"default_platform":    "dcim/platforms",
+}
+
+// selfFKs are the columns whose target is the table they appear in. NetBox's
+// self-referential relationships are named for the role the OTHER row plays —
+// an interface's lag is the port-channel it belongs to, its bridge the bridge
+// it is a member of — so the derivation looks for "dcim/lags" or
+// "dcim/bridges", which no deployment has, and the column stayed a bare id
+// while NetBox mode resolved it to a name.
+//
+// NetBox's polymorphic parents are different columns entirely (parent_object,
+// excluded above), so none of these can point anywhere but home.
+var selfFKs = map[string]bool{
+	"parent": true,
+	"lag":    true,
+	"bridge": true,
 }
 
 // fkTarget decides which entity a foreign-key column points at.
@@ -96,28 +132,18 @@ func fkTarget(entity, base string, known map[string]bool) (string, bool) {
 	if polymorphicFKs[base] || unexposedFKs[base] {
 		return "", false
 	}
-	if ipAddressFKs[base] {
-		const ipEntity = "ipam/ip-addresses"
-		if known[ipEntity] {
-			return ipEntity, true
-		}
-		return "", false
+	// Overrides win over every derivation below, including the global-basename
+	// fallback that would otherwise answer some of them incorrectly. Still gated
+	// on the entity list: a deployment not serving the target degrades to the
+	// raw id rather than to the name of something it cannot read.
+	if e, ok := namedFKs[entity+"."+base]; ok {
+		return e, known[e]
 	}
-
-	// A parent_id is the table's own primary key. Checked against every entity
-	// on a live instance that carries the column — device-roles, interfaces,
-	// locations, module-bays, regions, site-groups, tenant-groups,
-	// virtualization interfaces and wireless-lan-groups — the target is always
-	// the queried entity itself. The naming candidates below cannot find that:
-	// they look for a "parents" model, which no deployment has, so the column
-	// stayed a bare id while NetBox mode resolved it to a name, and a saved
-	// panel selecting "parent" went blank on switching modes.
-	//
-	// NetBox's polymorphic parents are different columns entirely
-	// (parent_object_type_id, and parent_object which is excluded above), so
-	// there is no case where a parent_id points somewhere other than home.
-	if base == "parent" && known[entity] {
-		return entity, true
+	if e, ok := namedFKs[base]; ok {
+		return e, known[e]
+	}
+	if selfFKs[base] {
+		return entity, known[entity]
 	}
 
 	app, model := splitEntity(entity)

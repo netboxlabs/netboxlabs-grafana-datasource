@@ -893,3 +893,91 @@ func TestOrderingIsNormalizedBeforeItIsValidated(t *testing.T) {
 		}
 	}
 }
+
+// Whether a *_id column is a relationship is decided across the PAGE, not per
+// value. One row's numeric site_id confirms the column is a real foreign key,
+// so a string in the next row is malformed rather than evidence that the column
+// is text — read per value it was accepted, and resolveFKs would resolve the
+// first row, leave the second blank, and warn about neither.
+func TestAConfirmedForeignKeyColumnRejectsTextInOtherRows(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "site_id": float64(4001)},
+		{"id": float64(2), "name": "CORE-2", "site_id": "4002"},
+	}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	p := newTestProvider(t, f)
+
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err == nil {
+		t.Fatal("a confirmed relationship column must not accept text in another row")
+	}
+	if !errors.Is(err, errMalformedFK) {
+		t.Errorf("want errMalformedFK, got %v", err)
+	}
+}
+
+// The other side of the same rule: a column where NO row carries an id is not a
+// relationship at all, so text in it is ordinary data. service_id is a NetBox
+// CharField, and a page of them must stay a perfectly good answer.
+func TestATextColumnEndingInIDIsStillNotARelationship(t *testing.T) {
+	f := newFakeService()
+	f.entities["circuits/provider-networks"] = []map[string]interface{}{
+		{"id": float64(1), "name": "NET-1", "service_id": "SVC-9"},
+		{"id": float64(2), "name": "NET-2", "service_id": "SVC-10"},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "circuits/provider-networks"})
+	if err != nil {
+		t.Fatalf("a text column that ends in _id is ordinary data: %v", err)
+	}
+	if res.Rows[0]["service_id"] != "SVC-9" {
+		t.Errorf("service_id = %v, want SVC-9", res.Rows[0]["service_id"])
+	}
+	for _, c := range res.Columns {
+		if c == "service" {
+			t.Errorf("invented a relationship from a text column: %v", res.Columns)
+		}
+	}
+}
+
+// Returning nil for an unreadable payload read as "no custom fields", so the
+// physical column was dropped, every requested cf_* column vanished, and
+// nothing said why.
+func TestUnreadableCustomFieldsAreReported(t *testing.T) {
+	for _, bad := range []interface{}{
+		`{"tier": `, // truncated
+		`["not", "an", "object"]`,
+		float64(42),
+		true,
+	} {
+		f := newFakeService()
+		f.entities["dcim/devices"] = []map[string]interface{}{
+			{"id": float64(1), "name": "CORE-1", "custom_field_data": bad},
+		}
+		p := newTestProvider(t, f)
+		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+		if err == nil {
+			t.Errorf("custom_field_data %#v was silently dropped", bad)
+			continue
+		}
+		if !errors.Is(err, errMalformedCustomFields) {
+			t.Errorf("%#v: want errMalformedCustomFields, got %v", bad, err)
+		}
+	}
+
+	// The legitimately empty shapes are still answers, not failures.
+	for _, ok := range []interface{}{nil, "", "   ", "{}"} {
+		f := newFakeService()
+		f.entities["dcim/devices"] = []map[string]interface{}{
+			{"id": float64(1), "name": "CORE-1", "custom_field_data": ok},
+		}
+		p := newTestProvider(t, f)
+		if _, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"}); err != nil {
+			t.Errorf("custom_field_data %#v is an empty answer, not a failure: %v", ok, err)
+		}
+	}
+}

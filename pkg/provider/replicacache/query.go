@@ -315,6 +315,7 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, er
 		}
 	}
 
+	objs := make([]map[string]interface{}, 0, len(raws))
 	for _, raw := range raws {
 		var obj map[string]interface{}
 		if err := json.Unmarshal(raw, &obj); err != nil {
@@ -325,23 +326,6 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, er
 			}
 		}
 		if obj != nil {
-			// A relationship id that is present but not an identifier is a
-			// malformed row, and a silent one: nullFKColumns would otherwise
-			// read it as "no relationship" and synthesize a legitimate-looking
-			// null column, which an alert-table query counts as a real row.
-			for col, v := range obj {
-				base, isFK := strings.CutSuffix(col, "_id")
-				if !isFK || base == "" {
-					continue
-				}
-				if _, kind := classifyFKValue(v); kind == fkBadID {
-					return nil, nil, &TransportError{
-						Op:      "reading " + col,
-						Err:     errMalformedFK,
-						Message: "Replica cache returned a relationship id that is not a usable identifier. The service is reachable but answered with something unexpected.",
-					}
-				}
-			}
 			if _, ok := toInt(obj["id"]); !ok {
 				// Measured: the service returns id on every projection, even one
 				// that did not ask for it — `fields=serial` comes back as
@@ -368,6 +352,20 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, er
 				Message: rowShapeGuidance,
 			}
 		}
+		objs = append(objs, obj)
+	}
+
+	// Whether a *_id column is a relationship is decided ACROSS the page, not
+	// per value. One row's numeric site_id confirms the column is a real
+	// foreign key, and a string in the next row is then malformed rather than
+	// evidence that the column is text — read per value it was accepted, and
+	// resolveFKs would resolve the first row, leave the second blank, and warn
+	// about neither.
+	if err := validateFKColumns(objs); err != nil {
+		return nil, nil, err
+	}
+
+	for _, obj := range objs {
 		row := make(map[string]interface{}, len(obj)+4)
 		for k, v := range obj {
 			if k == "custom_field_data" {
@@ -382,7 +380,10 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, er
 				// the bare id, and the target model is named by a content-type id
 				// the service does not expose — the same wall as the polymorphic
 				// FKs. So cf_<name> is that id, and no _id/_slug follow it.
-				cf := customFields(v)
+				cf, cferr := customFields(v)
+				if cferr != nil {
+					return nil, nil, cferr
+				}
 				for _, name := range sortedNames(cf) {
 					provider.FlattenField("cf_"+name, cf[name], func(n string, val interface{}) {
 						row[n] = val
@@ -427,14 +428,78 @@ func sortedNames(m map[string]interface{}) []string {
 	return out
 }
 
-func customFields(v interface{}) map[string]interface{} {
-	s, ok := v.(string)
-	if !ok || strings.TrimSpace(s) == "" {
-		return nil
+func customFields(v interface{}) (map[string]interface{}, error) {
+	// Absent or blank is a real answer: this object has no custom fields.
+	if v == nil {
+		return nil, nil
 	}
-	var m map[string]interface{}
-	if json.Unmarshal([]byte(s), &m) != nil {
-		return nil
+	bad := func() error {
+		// Returning nil here read as "no custom fields", so the physical column
+		// was dropped, every requested cf_* column vanished, and nothing said
+		// why — a dashboard quietly short of data, and an alert-table query
+		// proceeding without the labels it asked for.
+		return &TransportError{
+			Op:      "reading custom_field_data",
+			Err:     errMalformedCustomFields,
+			Message: "Replica cache returned custom field data that could not be read. The service is reachable but answered with something unexpected.",
+		}
 	}
-	return m
+	switch t := v.(type) {
+	case map[string]interface{}:
+		// Tolerated: the column is a JSON string today, but a service that sent
+		// the object itself would be giving us the same thing in a better shape.
+		return t, nil
+	case string:
+		if strings.TrimSpace(t) == "" {
+			return nil, nil
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(t), &m); err != nil || m == nil {
+			return nil, bad()
+		}
+		return m, nil
+	}
+	return nil, bad()
+}
+
+// validateFKColumns decides per COLUMN, across the whole page, whether a *_id
+// column is a relationship, and refuses a page that contradicts itself.
+//
+// A column is a foreign key if any row carries a usable id for it. NetBox also
+// has CharFields whose names end in _id — circuits.ProviderNetwork.service_id
+// holds the provider's own service identifier as text — and those are not
+// relationships at all, so a page where every non-null value is a string is
+// accepted and simply not resolved.
+func validateFKColumns(objs []map[string]interface{}) error {
+	isFK := map[string]bool{}
+	for _, obj := range objs {
+		for col, v := range obj {
+			if base, ok := strings.CutSuffix(col, "_id"); ok && base != "" {
+				if _, kind := classifyFKValue(v); kind == fkID {
+					isFK[col] = true
+				}
+			}
+		}
+	}
+	for _, obj := range objs {
+		for col, v := range obj {
+			base, ok := strings.CutSuffix(col, "_id")
+			if !ok || base == "" {
+				continue
+			}
+			_, kind := classifyFKValue(v)
+			switch {
+			case kind == fkBadID:
+			case isFK[col] && kind == fkNotAKey:
+			default:
+				continue
+			}
+			return &TransportError{
+				Op:      "reading " + col,
+				Err:     errMalformedFK,
+				Message: "Replica cache returned a relationship id that is not a usable identifier. The service is reachable but answered with something unexpected.",
+			}
+		}
+	}
+	return nil
 }

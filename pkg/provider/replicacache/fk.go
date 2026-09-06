@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"sort"
 	"strconv"
@@ -213,8 +214,16 @@ func singularize(s string) string {
 	return s
 }
 
+// splitEntity divides an object type into its app and its model.
+//
+// It splits at the LAST slash, not the first, because a plugin's models sit one
+// level deeper: plugins/acme/widgets is the widgets model of the plugins/acme
+// app, which is also what parseEntityPath produces for it. Splitting at the
+// first slash made the app "plugins" and the model "acme/widgets", so a
+// role_id could not reach plugins/acme/roles and — worse — fell through to the
+// global-basename fallback, which would have resolved it to ipam/roles.
 func splitEntity(e string) (app, model string) {
-	if i := strings.IndexByte(e, '/'); i >= 0 {
+	if i := strings.LastIndexByte(e, '/'); i >= 0 {
 		return e[:i], e[i+1:]
 	}
 	return "", e
@@ -301,7 +310,10 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 
 	known, ok := p.entitySetSoon(ctx, discoveryWaitBudget)
 	if !ok {
-		return nil, []string{"Related names could not be added yet: the list of available object types is still being read. Columns such as \"site\" and \"role\" are missing from this result; the matching *_id columns still hold the values, and a refresh should resolve them."}
+		// The all-null columns still stand: they are derived from the rows
+		// alone and need nothing from discovery, so a projection of site and
+		// tenant should lose only the one that had ids to resolve.
+		return nullFKColumns(rows), []string{"Related names could not be added yet: the list of available object types is still being read. Columns such as \"site\" and \"role\" are missing from this result; the matching *_id columns still hold the values, and a refresh should resolve them."}
 	}
 
 	// Group the ids to resolve by target entity.
@@ -348,6 +360,23 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 				warnings = append(warnings, fmt.Sprintf(
 					"Related names from %s could not be read, so those columns are blank on some rows; the matching *_id columns still hold the values.", target))
 			} else {
+				// Only the rows that were ASKED for. An id__in lookup answered
+				// with an id outside the request is not an answer to anything,
+				// and storing it would let a later query take an unrequested —
+				// possibly wrong — label as authoritative, with no lookup and no
+				// warning, for the whole cache lifetime.
+				wanted := make(map[int]bool, len(missing))
+				for _, id := range missing {
+					wanted[id] = true
+				}
+				keep := make(map[int]related, len(fetched))
+				for id, r := range fetched {
+					if wanted[id] {
+						keep[id] = r
+					}
+				}
+				fetched = keep
+
 				p.fk.store(target, fetched)
 				for id, r := range fetched {
 					have[id] = r
@@ -504,17 +533,32 @@ func stringOf(v interface{}) string {
 }
 
 // toInt accepts the shapes a JSON number can arrive in.
+// toInt reads a primary key or foreign key. Every caller wants an identifier,
+// so the bar is a positive whole number that fits: JSON has one number type, and
+// an id of 1.9 silently truncated to 1 would be a DIFFERENT object in every
+// lookup and deep link built from it, while 0, a negative and a non-finite
+// value are not identifiers at all.
 func toInt(v interface{}) (int, bool) {
 	switch n := v.(type) {
 	case float64:
-		return int(n), true
+		return fromFloat(n)
 	case int:
-		return n, true
+		return n, n > 0
 	case json.Number:
 		i, err := n.Int64()
-		return int(i), err == nil
+		if err != nil || i <= 0 || i > math.MaxInt32 {
+			return 0, false
+		}
+		return int(i), true
 	}
 	return 0, false
+}
+
+func fromFloat(f float64) (int, bool) {
+	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) || f <= 0 || f > math.MaxInt32 {
+		return 0, false
+	}
+	return int(f), true
 }
 
 // hasResolvableFK reports whether any row carries a column that could name a

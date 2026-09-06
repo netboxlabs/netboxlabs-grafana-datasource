@@ -2,6 +2,7 @@ package replicacache
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 
@@ -470,5 +471,131 @@ func TestCoverageIsCheckedByIDNotByCount(t *testing.T) {
 	}
 	if !warned {
 		t.Errorf("4002 was never answered for; that must be reported: %v", res.Warnings)
+	}
+}
+
+// A plugin's models sit one level deeper, so the app has to keep the plugin
+// name. Splitting at the FIRST slash made the app "plugins" and the model
+// "acme/widgets", which cannot reach plugins/acme/roles — and then falls
+// through to the global-basename fallback, which would resolve role_id to the
+// unrelated ipam/roles wherever the ids overlapped.
+func TestPluginEntitiesKeepTheirNamespace(t *testing.T) {
+	if app, model := splitEntity("plugins/acme/widgets"); app != "plugins/acme" || model != "widgets" {
+		t.Errorf("splitEntity = %q,%q; want plugins/acme,widgets", app, model)
+	}
+	if app, model := splitEntity("dcim/devices"); app != "dcim" || model != "devices" {
+		t.Errorf("splitEntity = %q,%q; want dcim,devices", app, model)
+	}
+
+	known := map[string]bool{
+		"plugins/acme/widgets": true,
+		"plugins/acme/roles":   true,
+		"ipam/roles":           true,
+		"dcim/devices":         true,
+		"dcim/device-roles":    true,
+	}
+	if got, ok := fkTarget("plugins/acme/widgets", "role", known); !ok || got != "plugins/acme/roles" {
+		t.Errorf("fkTarget = %q,%v; want plugins/acme/roles — ipam/roles is a different model", got, ok)
+	}
+}
+
+// JSON has one number type, so an id of 1.9 truncated to 1 would be a DIFFERENT
+// object in every lookup and deep link built from it, and 0, a negative or a
+// non-finite value is not an identifier at all.
+func TestIDsMustBeWholeAndPositive(t *testing.T) {
+	for _, v := range []interface{}{
+		float64(1.9), float64(0), float64(-5), math.NaN(), math.Inf(1),
+		"12", nil, true, float64(1) / 3,
+	} {
+		if id, ok := toInt(v); ok {
+			t.Errorf("toInt(%#v) = %d, accepted; not a usable identifier", v, id)
+		}
+	}
+	for _, v := range []interface{}{float64(1), float64(4001), int(7)} {
+		if _, ok := toInt(v); !ok {
+			t.Errorf("toInt(%#v) rejected a valid id", v)
+		}
+	}
+}
+
+// An id__in lookup answered with an id outside the request is not an answer to
+// anything. Storing it let a later query take an unrequested — possibly wrong —
+// label as authoritative, with no lookup and no warning, for the whole cache
+// lifetime.
+func TestUnrequestedDimensionRowsAreNotCached(t *testing.T) {
+	f := newFakeService()
+	// TWO devices, so the lookup asks for two ids and its limit is two — with
+	// only one, the unrequested row is truncated away before it can be cached
+	// and the case cannot occur at all.
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		deviceFixture(1, "CORE-1", 4001),
+		deviceFixture(2, "CORE-2", 4002),
+	}
+	// Asked for {4001,4002}; answered with {4001,9999}.
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+		{"id": float64(9999), "name": "POISONED", "slug": "poisoned"},
+	}
+	f.ignoreIDFilterFor = "dcim/sites"
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	if _, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices"}); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	// Directly: the row nobody asked for must not be sitting in the cache.
+	if have, _ := p.fk.lookup("dcim/sites", []int{9999}); len(have) != 0 {
+		t.Errorf("9999 was cached without being requested: %v", have)
+	}
+
+	// 9999 was never asked for, so it must not be sitting in the cache waiting
+	// to answer for a device that references it.
+	f.mu.Lock()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(3, "CORE-3", 9999)}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(9999), "name": "Real-Site-9999", "slug": "real-9999"},
+	}
+	f.ignoreIDFilterFor = ""
+	f.mu.Unlock()
+
+	res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := res.Rows[0]["site"]; got != "Real-Site-9999" {
+		t.Errorf("site = %v; a value that was never requested must not have been cached", got)
+	}
+}
+
+// A failed discovery must not also lose the columns that need none. site_id has
+// ids and cannot resolve without the entity list; tenant_id is null on every
+// row, which is derived from the rows alone.
+func TestNullColumnsSurviveADiscoveryFailure(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "site_id": float64(4001), "tenant_id": nil},
+	}
+	release := make(chan struct{})
+	defer close(release)
+	f.hangSwagger = release
+
+	srv := f.start(t)
+	p := New(srv.URL, "t", "nb", srv.Client())
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var hasTenant bool
+	for _, c := range res.Columns {
+		if c == "tenant" {
+			hasTenant = true
+		}
+	}
+	if !hasTenant {
+		t.Errorf("tenant needs nothing from discovery and must survive it: %v", res.Columns)
+	}
+	if len(res.Warnings) == 0 {
+		t.Error("the columns that DID need discovery must still be reported missing")
 	}
 }

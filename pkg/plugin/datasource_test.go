@@ -590,3 +590,42 @@ func TestMissingSettingIsModeAware(t *testing.T) {
 		}
 	})
 }
+
+// Failing construction meant no Datasource existed for CheckHealth to run on,
+// so Save & Test never reached missingSetting — the one place that can name
+// WHICH field is absent. A provisioned datasource missing its URL reported a
+// construction failure instead.
+func TestReplicaCacheHealthNamesTheMissingSetting(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		json string
+		want string
+	}{
+		{"no url", `{"mode":"replica-cache","netboxId":"nb-1"}`, "replica-cache URL is missing"},
+		{"no instance id", `{"mode":"replica-cache","replicaCacheUrl":"http://c"}`, "NetBox instance ID is missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, err := NewDatasource(context.Background(), backend.DataSourceInstanceSettings{
+				JSONData:                []byte(tc.json),
+				DecryptedSecureJSONData: map[string]string{"replicaCacheToken": "t"},
+			})
+			if err != nil {
+				t.Fatalf("construction must succeed so Save & Test can explain: %v", err)
+			}
+			ds, ok := inst.(*Datasource)
+			if !ok {
+				t.Fatalf("want a *Datasource, got %T", inst)
+			}
+			res, err := ds.CheckHealth(context.Background(), &backend.CheckHealthRequest{})
+			if err != nil {
+				t.Fatalf("CheckHealth: %v", err)
+			}
+			if res.Status != backend.HealthStatusError {
+				t.Errorf("status = %v, want an error", res.Status)
+			}
+			if !strings.Contains(res.Message, tc.want) {
+				t.Errorf("message = %q, want it to name %q", res.Message, tc.want)
+			}
+		})
+	}
+}

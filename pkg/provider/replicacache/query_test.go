@@ -750,3 +750,73 @@ func TestChoiceValueAliasIsBuiltFromThePhysicalColumn(t *testing.T) {
 		}
 	}
 }
+
+// A composite custom field has to expand the way NetBox mode expands it, or a
+// panel selecting the cf_<name>_count that mode produces gets no such column
+// and the list itself renders in a different format.
+func TestCompositeCustomFieldsFollowTheSharedContract(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{{
+		"id": float64(1), "name": "CORE-1",
+		"custom_field_data": `{"services": ["dns", "ntp", "syslog"],
+			"tier": "gold",
+			"empty_list": [],
+			"owner": {"id": 22, "name": "Acme", "slug": "acme"},
+			"criticality": {"value": "high", "label": "High"}}`,
+	}}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	row := res.Rows[0]
+	for _, tc := range []struct {
+		col  string
+		want interface{}
+	}{
+		{"cf_services", "dns; ntp; syslog"},
+		{"cf_services_count", float64(3)},
+		{"cf_empty_list", ""},
+		{"cf_empty_list_count", float64(0)},
+		{"cf_tier", "gold"},
+		{"cf_owner", "Acme"},
+		{"cf_owner_id", float64(22)},
+		{"cf_owner_slug", "acme"},
+		{"cf_criticality", "High"},
+		{"cf_criticality_value", "high"},
+	} {
+		if got := row[tc.col]; got != tc.want {
+			t.Errorf("%s = %#v, want %#v", tc.col, got, tc.want)
+		}
+	}
+}
+
+// Guards the CONTRACT rather than the wiring: that hoisting a whole
+// custom_fields object produces exactly the columns that calling the same
+// contract per field does. The sibling test above guards the wiring — it is the
+// one that fails if this backend stops routing through the contract at all.
+func TestCustomFieldExpansionMatchesNetBoxMode(t *testing.T) {
+	cf := map[string]interface{}{
+		"services":    []interface{}{"dns", "ntp"},
+		"owner":       map[string]interface{}{"id": float64(22), "name": "Acme", "slug": "acme"},
+		"criticality": map[string]interface{}{"value": "high", "label": "High"},
+		"tier":        "gold",
+	}
+	netboxSide := map[string]interface{}{}
+	provider.FlattenField("custom_fields", cf, func(n string, v interface{}) { netboxSide[n] = v })
+
+	cacheSide := map[string]interface{}{}
+	for _, name := range sortedNames(cf) {
+		provider.FlattenField("cf_"+name, cf[name], func(n string, v interface{}) { cacheSide[n] = v })
+	}
+
+	if len(netboxSide) != len(cacheSide) {
+		t.Fatalf("column sets differ: netbox %v, cache %v", netboxSide, cacheSide)
+	}
+	for k, want := range netboxSide {
+		if got, ok := cacheSide[k]; !ok || got != want {
+			t.Errorf("%s: cache has %#v, netbox has %#v", k, got, want)
+		}
+	}
+}

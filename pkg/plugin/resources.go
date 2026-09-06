@@ -167,9 +167,19 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
+	writeErrorKind(w, status, err, "")
+}
+
+// writeErrorKind writes the error body, optionally carrying the provider's
+// classification so a caller can branch on the KIND rather than on the wording.
+func writeErrorKind(w http.ResponseWriter, status int, err error, kind string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+	body := map[string]string{"error": err.Error()}
+	if kind != "" {
+		body["kind"] = kind
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // writeProviderError logs the raw provider error (sanitized) and writes the
@@ -187,7 +197,17 @@ func writeProviderError(w http.ResponseWriter, err error) {
 	if queryErrorStatus(err) == backend.StatusBadRequest {
 		status = http.StatusBadRequest
 	}
-	writeError(w, status, errMsg(queryErrorMessage(err)))
+	// The classification travels with the message. A caller that has to BRANCH
+	// on the failure — the branch variable degrades to a main-only list when the
+	// branches endpoint is not there — was matching the prose instead, which is
+	// a contract nobody declared: the same condition reads "not found" from one
+	// backend and "Replica cache has no object type …" from the other, so the
+	// fallback stopped working the moment a second provider existed.
+	kind := ""
+	if u := provider.Classify(err); u != nil {
+		kind = string(u.Kind)
+	}
+	writeErrorKind(w, status, errMsg(queryErrorMessage(err)), kind)
 }
 
 type errMsg string

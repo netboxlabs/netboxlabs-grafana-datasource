@@ -566,3 +566,37 @@ func TestQueryDoesNotBlockIndefinitelyOnHungDiscovery(t *testing.T) {
 		t.Error("no name should be invented while the entity list is unavailable")
 	}
 }
+
+// A cancelled dashboard should not hold the backend for the rest of the
+// discovery budget: the rows are already fetched and nothing will read them.
+func TestQueryStopsWaitingForDiscoveryWhenCancelled(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{{"id": float64(4001), "name": "DC-1", "slug": "dc-1"}}
+	release := make(chan struct{})
+	p := newTestProvider(t, f)
+	f.mu.Lock()
+	f.hangSwagger = release
+	f.mu.Unlock()
+	defer close(release)
+
+	// Cancelled shortly after the call starts: the row fetch completes, then FK
+	// resolution finds a cold cache and would otherwise wait out the budget.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices"})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("the rows were already fetched, so the query should still return them: %v", err)
+	}
+	if elapsed >= discoveryWaitBudget {
+		t.Errorf("waited %s despite cancellation; the budget is %s and should have been cut short",
+			elapsed, discoveryWaitBudget)
+	}
+	if res.Rows[0]["site_id"] != float64(4001) {
+		t.Error("rows must survive a cancelled discovery wait")
+	}
+}

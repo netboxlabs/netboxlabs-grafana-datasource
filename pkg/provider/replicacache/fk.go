@@ -261,7 +261,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 		return nil, nil
 	}
 
-	known, ok := p.entitySetSoon(discoveryWaitBudget)
+	known, ok := p.entitySetSoon(ctx, discoveryWaitBudget)
 	if !ok {
 		return nil, []string{"Related names could not be added yet: the list of available object types is still being read. Columns such as \"site\" and \"role\" are missing from this result; the matching *_id columns still hold the values, and a refresh should resolve them."}
 	}

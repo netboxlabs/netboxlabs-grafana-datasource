@@ -216,3 +216,28 @@ describe('replica-cache mode', () => {
     expect(call.jsonData.replicaCacheToken).toBeUndefined();
   });
 });
+
+// The NetBox URL and Browser URL fields sit in the same place in both modes, so
+// switching Mode does not shuffle the form under the cursor. They are shared
+// settings, not mode-specific ones: the mode-specific fields follow them.
+describe('config field order', () => {
+  const labelsInOrder = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('label'))
+      .map((l) => l.textContent?.trim())
+      .filter((t): t is string => Boolean(t));
+
+  it('keeps the shared connection fields directly after Mode in both modes', () => {
+    const netbox = render(<ConfigEditor options={makeOptions({})} onOptionsChange={jest.fn()} />).container;
+    const netboxOrder = labelsInOrder(netbox).slice(0, 3);
+
+    const cache = render(
+      <ConfigEditor options={makeOptions({ mode: 'replica-cache' })} onOptionsChange={jest.fn()} />
+    ).container;
+    const cacheOrder = labelsInOrder(cache).slice(0, 3);
+
+    expect(netboxOrder).toEqual(cacheOrder);
+    expect(netboxOrder[0]).toMatch(/Mode/i);
+    expect(netboxOrder[1]).toMatch(/NetBox URL/i);
+    expect(netboxOrder[2]).toMatch(/Browser URL/i);
+  });
+});

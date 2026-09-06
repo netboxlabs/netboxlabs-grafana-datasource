@@ -255,7 +255,15 @@ func (p *Provider) ObjectTypes(ctx context.Context) ([]provider.ObjectType, erro
 	// the degradation this path is built for: not knowing must let the row
 	// request decide, and caching "nothing" is a confident wrong answer.
 	if len(out) == 0 {
-		return nil, fmt.Errorf("replica-cache reported no object types; the API description was empty or unreadable")
+		// Classified, not a bare error: the service that failed is replica-cache,
+		// and NetBox is optional in this mode. Unclassified it renders through
+		// the plugin's fallback as "Cannot reach NetBox", pointing Save & Test at
+		// the wrong service — or at one that is not configured at all.
+		return nil, &TransportError{
+			Op:      "listing object types",
+			Err:     errEmptyDiscovery,
+			Message: "Replica cache returned an empty API description, so no object types could be listed. The service is reachable but answered with nothing usable; retry, and check the replica-cache URL and NetBox instance ID.",
+		}
 	}
 
 	p.mu.Lock()

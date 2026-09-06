@@ -170,8 +170,9 @@ var maxBodyBytes int64 = 64 << 20
 // errOversizedBody and errMissingCount are the protocol violations the client
 // refuses outright, kept as sentinels so tests can name what they assert.
 var (
-	errOversizedBody = errors.New("response exceeds 64 MiB")
-	errMissingCount  = errors.New(`response envelope has no "count"`)
+	errOversizedBody  = errors.New("response exceeds 64 MiB")
+	errMissingCount   = errors.New(`response envelope has no "count"`)
+	errEmptyDiscovery = errors.New("API description lists no object types")
 )
 
 // errorBody is the service's failure shape: {"error": "unknown column: foo"}.

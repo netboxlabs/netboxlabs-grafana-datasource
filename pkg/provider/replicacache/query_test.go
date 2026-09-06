@@ -981,3 +981,72 @@ func TestUnreadableCustomFieldsAreReported(t *testing.T) {
 		}
 	}
 }
+
+// Resolving a name the caller did not ask for is not free twice over: it can
+// spend the whole discovery budget, and a dimension that fails adds a warning —
+// which alert evaluation treats as a hard failure. A rule selecting only
+// site_id would stop firing because dcim/sites was unreachable, though every
+// value it asked for was present.
+func TestUnrequestedRelationshipsAreNotResolved(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	f.failEntities["dcim/sites"] = true // the dimension is down
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	// Asking for the id only: the dimension being down is not this query's
+	// problem, and must not be reported as a degradation.
+	res, err := p.Query(ctx, provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "site_id"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("site was never asked for: %v", res.Warnings)
+	}
+	if res.Rows[0]["site_id"] != float64(4001) {
+		t.Errorf("site_id = %v, want 4001", res.Rows[0]["site_id"])
+	}
+
+	// Asking for the NAME: now the failure is this query's problem and must be
+	// reported, or the blank column would read as "this device has no site".
+	res, err = p.Query(ctx, provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "site"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Warnings) == 0 {
+		t.Error("site was asked for and could not be read; that must be reported")
+	}
+}
+
+// A join key names a source the caller reads without displaying, and the same
+// rule applies to it: joining on "site" needs the name, joining on "site_id"
+// does not.
+func TestJoinKeysFollowTheSameRule(t *testing.T) {
+	if want := wantedRelations(provider.QuerySpec{
+		Fields: []string{"name"}, KeyFields: []string{"site_id"},
+	}); want["site"] {
+		t.Errorf("site_id as a join key does not need the name: %v", want)
+	}
+	if want := wantedRelations(provider.QuerySpec{
+		Fields: []string{"name"}, KeyFields: []string{"site"},
+	}); !want["site"] {
+		t.Errorf("site as a join key needs the name: %v", want)
+	}
+	// A slug is built from the same lookup, so it counts as wanting it.
+	if want := wantedRelations(provider.QuerySpec{Fields: []string{"site_slug"}}); !want["site"] {
+		t.Errorf("site_slug needs the site lookup: %v", want)
+	}
+	// No projection at all still means everything.
+	if want := wantedRelations(provider.QuerySpec{}); want != nil {
+		t.Errorf("an unprojected query wants every relationship, got %v", want)
+	}
+}

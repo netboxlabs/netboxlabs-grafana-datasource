@@ -239,6 +239,22 @@ var nullOperators = map[string]bool{
 	opEmpty: true, opNEmpty: true,
 }
 
+// blankSafe reports whether a column's type is one where blank genuinely means
+// NULL, so IS NULL answers the question asked.
+//
+// It requires a CONFIRMED type. An unknown type is not "not text": a nullable
+// text column that happened to be NULL in every sampled row is exactly the case
+// that cannot be typed, and it is also exactly the case where IS NULL would
+// later miss the "" rows. Treating unknown as safe reproduced the inversion
+// this gate exists to prevent, on the columns most likely to hit it.
+func blankSafe(t provider.FieldType) bool {
+	switch t {
+	case provider.FieldTypeNumber, provider.FieldTypeBoolean, provider.FieldTypeTime:
+		return true
+	}
+	return false
+}
+
 // textOperators need the column to hold text. They compile to SQL ILIKE, which
 // the backend applies without checking the column's type.
 var textOperators = map[string]bool{
@@ -285,7 +301,7 @@ func filterFieldsFor(fields []provider.Field, raw map[string]bool, types map[str
 			}
 			// The mirror of the rule above: a text match needs text, and an
 			// is-empty check needs a column where blank means NULL.
-			if nullOperators[op] && isText {
+			if nullOperators[op] && !blankSafe(types[f.Name]) {
 				continue
 			}
 			ops = append(ops, op)
@@ -337,7 +353,7 @@ func validateFilterTypes(filters []provider.Filter, types map[string]provider.Fi
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 				Reason: "a text match needs a text column, and this backend applies it to any column without checking — returning either a server error or, worse, every row unfiltered"}
 		}
-		if nullOperators[op] && t == provider.FieldTypeString {
+		if nullOperators[op] && !blankSafe(t) {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 				Reason: "this backend answers is-empty with IS NULL, but NetBox stores a blank text field as an empty string, so the result would be the exact opposite of what was asked; filter on equality with an empty value instead"}
 		}

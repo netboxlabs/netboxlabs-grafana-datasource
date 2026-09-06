@@ -3,8 +3,10 @@ package replicacache
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -578,5 +580,62 @@ func TestCacheFailuresNameCacheSettings(t *testing.T) {
 		if strings.Contains(d, "NetBox API token") || strings.Contains(d, "NetBox URL") {
 			t.Errorf("status %d points at a NetBox setting this mode does not use: %s", status, d)
 		}
+	}
+}
+
+// A DateField serializes as YYYY-MM-DD rather than RFC3339, and a fixed list of
+// five names cannot enumerate the columns that use it. Both gaps left date
+// columns classified as text and offered ILIKE.
+func TestDateColumnsAreNotText(t *testing.T) {
+	f := newFakeService()
+	f.entities["circuits/circuits"] = []map[string]interface{}{{
+		"id": float64(1), "cid": "ntt-001",
+		"termination_date": "2026-05-06",
+		"install_date":     "2026-01-02",
+		"created":          "2026-05-06T17:34:30.696190Z",
+		// Not a date column by name, and must keep its text operators even
+		// though the value would parse.
+		"description": "2026-05-06 cutover",
+	}}
+	p := newTestProvider(t, f)
+
+	fields, err := p.Fields(context.Background(), "circuits/circuits")
+	if err != nil {
+		t.Fatalf("Fields: %v", err)
+	}
+	byName := map[string]provider.FieldType{}
+	for _, fl := range fields {
+		byName[fl.Name] = fl.Type
+	}
+	for _, c := range []string{"termination_date", "install_date", "created"} {
+		if byName[c] != provider.FieldTypeTime {
+			t.Errorf("%s typed %q, want time", c, byName[c])
+		}
+	}
+	if byName["description"] != provider.FieldTypeString {
+		t.Errorf("description typed %q, want string — the name gate should keep it text", byName["description"])
+	}
+}
+
+// A request that never reached the service must say so about the CACHE. Left
+// unclassified it renders through the plugin's fallback as "Cannot reach
+// NetBox", sending an operator to a connection that is not what failed.
+func TestTransportFailuresNameTheCache(t *testing.T) {
+	// A port nothing is listening on: the request cannot complete.
+	p := New("http://127.0.0.1:1", "t", "nb", &http.Client{Timeout: 2 * time.Second})
+
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err == nil {
+		t.Fatal("want an error when the cache is unreachable")
+	}
+	u := provider.Classify(err)
+	if u == nil {
+		t.Fatal("a transport failure must still be classified, or it renders as a NetBox failure")
+	}
+	if !strings.Contains(u.Detail, "replica-cache") {
+		t.Errorf("guidance should name the cache, got: %q", u.Detail)
+	}
+	if strings.Contains(u.Detail, "NetBox URL") || strings.Contains(u.Detail, "NetBox API") {
+		t.Errorf("guidance points at a NetBox setting: %q", u.Detail)
 	}
 }

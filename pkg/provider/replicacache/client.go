@@ -133,6 +133,31 @@ func (e *APIError) Classification() *provider.UpstreamError {
 	return c
 }
 
+// TransportError is a request that never reached the service — the host is
+// unreachable, TLS failed, or it timed out.
+//
+// It exists to be CLASSIFIED. An ordinary wrapped error is unclassified, and
+// the plugin layer's fallback for that is "Cannot reach NetBox", which points
+// an operator at the NetBox connection when the thing that failed was the
+// cache. Carrying our own sentence is the difference between a useful message
+// and one that sends them to the wrong setting.
+type TransportError struct {
+	Op  string
+	Err error
+}
+
+func (e *TransportError) Error() string { return e.Op + ": " + e.Err.Error() }
+func (e *TransportError) Unwrap() error { return e.Err }
+
+// Classification reports an unreachable cache, naming the setting to check.
+// Status stays 0: nothing answered, so there is no code to report.
+func (e *TransportError) Classification() *provider.UpstreamError {
+	return &provider.UpstreamError{
+		Kind:   provider.ErrorKindUpstream,
+		Detail: "Cannot reach replica-cache. Check the replica-cache URL and that the service is reachable from Grafana.",
+	}
+}
+
 // errorBody is the service's failure shape: {"error": "unknown column: foo"}.
 type errorBody struct {
 	Error string `json:"error"`
@@ -167,13 +192,15 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out interfa
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("requesting %s: %w", truncate(raw), err)
+		return &TransportError{Op: "requesting " + truncate(raw), Err: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("reading response from %s: %w", truncate(raw), err)
+		// A body that stops mid-read is the same class of failure: the service
+		// never finished answering.
+		return &TransportError{Op: "reading response from " + truncate(raw), Err: err}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		apiErr := &APIError{Status: resp.StatusCode, URL: raw, Body: snippet(body)}

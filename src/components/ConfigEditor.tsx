@@ -145,6 +145,38 @@ export function ConfigEditor(props: Props) {
           />
         </InlineField>
 
+        <InlineField
+          label="NetBox URL"
+          labelWidth={20}
+          tooltip={
+            isCache
+              ? 'Base URL of the NetBox instance the cache mirrors, without /api. Optional in this mode: it is used only to build "View in NetBox" links, since cache rows carry none. Leave it empty and rows have no links.'
+              : 'Base URL of the NetBox instance, without /api'
+          }
+        >
+          <Input
+            id="config-url"
+            width={40}
+            value={jsonData.url ?? ''}
+            placeholder="https://netbox.example.com"
+            onChange={(e: ChangeEvent<HTMLInputElement>) => onUrlChange(e.target.value)}
+          />
+        </InlineField>
+
+        <InlineField
+          label="Browser URL"
+          labelWidth={20}
+          tooltip="Where users' browsers reach NetBox, if different from the URL above (e.g. Grafana connects via an internal service name). Used to build 'View in NetBox' links. Leave empty if both match."
+        >
+          <Input
+            id="config-public-url"
+            width={40}
+            value={jsonData.publicUrl ?? ''}
+            placeholder="(optional) where browsers reach NetBox"
+            onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ publicUrl: e.target.value })}
+          />
+        </InlineField>
+
         {isCache && (
           <>
             <InlineField
@@ -195,38 +227,6 @@ export function ConfigEditor(props: Props) {
             </InlineField>
           </>
         )}
-
-        <InlineField
-          label="NetBox URL"
-          labelWidth={20}
-          tooltip={
-            isCache
-              ? 'Base URL of the NetBox instance the cache mirrors, without /api. Optional in this mode: it is used only to build "View in NetBox" links, since cache rows carry none. Leave it empty and rows have no links.'
-              : 'Base URL of the NetBox instance, without /api'
-          }
-        >
-          <Input
-            id="config-url"
-            width={40}
-            value={jsonData.url ?? ''}
-            placeholder="https://netbox.example.com"
-            onChange={(e: ChangeEvent<HTMLInputElement>) => onUrlChange(e.target.value)}
-          />
-        </InlineField>
-
-        <InlineField
-          label="Browser URL"
-          labelWidth={20}
-          tooltip="Where users' browsers reach NetBox, if different from the URL above (e.g. Grafana connects via an internal service name). Used to build 'View in NetBox' links. Leave empty if both match."
-        >
-          <Input
-            id="config-public-url"
-            width={40}
-            value={jsonData.publicUrl ?? ''}
-            placeholder="(optional) where browsers reach NetBox"
-            onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ publicUrl: e.target.value })}
-          />
-        </InlineField>
 
         {/* Hidden in replica-cache mode: that backend authenticates with its
             own token and never sends this one, so asking for it would imply it

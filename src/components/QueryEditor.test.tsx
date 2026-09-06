@@ -2,7 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { ORDERING_DISABLED_TOOLTIP, ORDERING_TOOLTIP, QueryEditor } from './QueryEditor';
 import { FAST_PAGING_TOOLTIP } from './ConfigEditor';
-import { IP_CONTEXT_FIELD_GROUPS, IP_CONTEXT_FIELD_OPTIONS, DEFAULT_IP_CONTEXT_FIELDS } from '../types';
+import { IP_CONTEXT_FIELD_GROUPS, IP_CONTEXT_FIELD_OPTIONS, DEFAULT_IP_CONTEXT_FIELDS, orderingFieldsFor } from '../types';
 
 jest.mock('@grafana/runtime', () => ({
   ...jest.requireActual('@grafana/runtime'),
@@ -610,6 +610,48 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
 
     expect(await screen.findByLabelText('Sort by')).not.toBeDisabled();
     expect(await screen.findByLabelText('ordering-direction')).not.toBeDisabled();
+  });
+
+  it('builds replica-cache sort options from the stored columns, not the NetBox allow-list', async () => {
+    // The allow-list is NetBox's, and it was wrong for the cache in both
+    // directions: dcim/racks and every plugin model have no entry and so got no
+    // sort control at all, while dcim/devices offered site and role, which are
+    // derived and which the backend drops with a note. The cache's sortable set
+    // is its STORED columns, which the backend already publishes as the
+    // filterable set.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-cache-options',
+      datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+      getFilterFields: jest.fn().mockResolvedValue([
+        { name: 'asset_tag', operators: [''] },
+        { name: 'name', operators: ['', 'ic'] },
+      ]),
+    } as any;
+    // dcim/racks has no allow-list entry at all, so in NetBox mode this object
+    // type gets no control whatsoever.
+    expect(orderingFieldsFor('dcim/racks')).toEqual([]);
+    setup({ objectType: 'dcim/racks' }, ds);
+
+    const picker = await screen.findByLabelText('Sort by');
+    fireEvent.keyDown(picker, { key: "ArrowDown" });
+    expect(await screen.findByText('asset_tag')).toBeInTheDocument();
+    expect(screen.getByText('name')).toBeInTheDocument();
+  });
+
+  it('keeps a stored sort in the options when the schema does not list it', async () => {
+    // Otherwise the control vanishes from under a saved panel while the schema
+    // loads, or for good if the column is gone.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-cache-stored',
+      datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+      getFilterFields: jest.fn().mockResolvedValue([{ name: 'name', operators: [''] }]),
+    } as any;
+    setup({ objectType: 'dcim/racks', ordering: '-serial' }, ds);
+
+    expect(await screen.findByLabelText('Sort by')).toBeInTheDocument();
+    expect(await screen.findByText('serial')).toBeInTheDocument();
   });
 
   it('keeps the sort control live when fast paging is off', async () => {

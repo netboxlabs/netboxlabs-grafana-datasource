@@ -1050,3 +1050,48 @@ func TestJoinKeysFollowTheSameRule(t *testing.T) {
 		t.Errorf("an unprojected query wants every relationship, got %v", want)
 	}
 }
+
+// A relationship the caller asked to SEE that produced no column at all must
+// say so. A blank column reads as a blank; a missing one a panel selected is
+// invisible, and alert evaluation treats warnings as failures precisely so it
+// never runs on one.
+func TestARequestedRelationshipThatVanishesIsReported(t *testing.T) {
+	f := newFakeService()
+	// site_id is a string in every row, so nothing proves the column is a
+	// relationship and it is accepted as text — a request for "site" then
+	// produced neither a column nor a word about why.
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "site_id": "4001"},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "site"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var warned bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "site") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("site was requested and never appeared; that must be stated: %v", res.Warnings)
+	}
+
+	// A field this deployment simply does not have is the projection's
+	// business, not a degradation — no source column, no warning.
+	res, err = p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "nonexistent"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("a field with no source column is not a degradation: %v", res.Warnings)
+	}
+}

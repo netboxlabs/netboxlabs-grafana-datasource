@@ -83,6 +83,14 @@ var unexposedFKs = map[string]bool{
 var namedFKs = map[string]string{
 	"virtualization/virtual-machines.role": "dcim/device-roles",
 
+	// A wireless link's two ends are interfaces, but nothing in "interface_a"
+	// derives dcim/interfaces: the candidates look for wireless/interface-as.
+	// Qualified rather than bare, because the _a/_b suffix is a convention for
+	// "the two ends of a thing", and what those ends ARE is the model's answer,
+	// not the column name's.
+	"wireless/wireless-links.interface_a": "dcim/interfaces",
+	"wireless/wireless-links.interface_b": "dcim/interfaces",
+
 	"primary_ip":  "ipam/ip-addresses",
 	"primary_ip4": "ipam/ip-addresses",
 	"primary_ip6": "ipam/ip-addresses",
@@ -139,7 +147,13 @@ func fkTarget(entity, base string, known map[string]bool) (string, bool) {
 	if e, ok := namedFKs[base]; ok {
 		return e, known[e]
 	}
-	if selfFKs[base] {
+	// Not for a plugin's models, for the same reason the global-basename
+	// fallback is not: parent, lag and bridge are NetBox-core conventions, and
+	// they are generic enough words that an arbitrary third-party schema can use
+	// any of them for something else entirely. The named overrides above stay
+	// available to plugins because those names — primary_ip4, untagged_vlan —
+	// are specific enough that using one is following the convention on purpose.
+	if selfFKs[base] && !strings.HasPrefix(entity, "plugins/") {
 		return entity, known[entity]
 	}
 

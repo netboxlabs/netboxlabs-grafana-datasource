@@ -703,3 +703,48 @@ func TestPluginForeignKeysAreNotGuessedAcrossApps(t *testing.T) {
 		t.Errorf("fkTarget = %q,%v; want tenancy/tenants", got, ok)
 	}
 }
+
+// The self-FK shortcut is a NetBox-core convention, and parent/lag/bridge are
+// generic enough words that an arbitrary third-party schema can use any of them
+// for something else. It is checked BEFORE the global-basename guard, so
+// restricting that one alone left this route open.
+func TestSelfFKConventionsDoNotApplyToPlugins(t *testing.T) {
+	known := map[string]bool{
+		"plugins/acme/widgets": true,
+		"dcim/interfaces":      true,
+		"dcim/locations":       true,
+	}
+	for _, base := range []string{"parent", "lag", "bridge"} {
+		if got, ok := fkTarget("plugins/acme/widgets", base, known); ok {
+			t.Errorf("%s_id on a plugin model resolved to %q on a core convention", base, got)
+		}
+		// The same convention still holds for NetBox's own models.
+		if got, ok := fkTarget("dcim/interfaces", base, known); !ok || got != "dcim/interfaces" {
+			t.Errorf("fkTarget(dcim/interfaces,%s) = %q,%v; want dcim/interfaces", base, got, ok)
+		}
+	}
+	// The NAMED overrides stay available to plugins: primary_ip4 and
+	// untagged_vlan are specific enough that using one is following the
+	// convention on purpose, unlike "parent".
+	known["ipam/ip-addresses"] = true
+	if got, ok := fkTarget("plugins/acme/widgets", "primary_ip4", known); !ok || got != "ipam/ip-addresses" {
+		t.Errorf("fkTarget = %q,%v; want ipam/ip-addresses", got, ok)
+	}
+}
+
+// A wireless link's two ends are interfaces, and nothing in "interface_a"
+// derives dcim/interfaces — the candidates look for wireless/interface-as.
+func TestWirelessLinkEndpointsResolveToInterfaces(t *testing.T) {
+	known := map[string]bool{"wireless/wireless-links": true, "dcim/interfaces": true}
+	for _, base := range []string{"interface_a", "interface_b"} {
+		got, ok := fkTarget("wireless/wireless-links", base, known)
+		if !ok || got != "dcim/interfaces" {
+			t.Errorf("fkTarget(wireless/wireless-links,%s) = %q,%v; want dcim/interfaces", base, got, ok)
+		}
+	}
+	// Qualified, not bare: what the two ends of a thing ARE is the model's
+	// answer, not the column name's.
+	if got, ok := fkTarget("dcim/devices", "interface_a", known); ok {
+		t.Errorf("resolved interface_a on an unrelated model to %q", got)
+	}
+}

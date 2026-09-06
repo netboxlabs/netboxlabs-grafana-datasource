@@ -170,9 +170,9 @@ var maxBodyBytes int64 = 64 << 20
 // errOversizedBody and errMissingCount are the protocol violations the client
 // refuses outright, kept as sentinels so tests can name what they assert.
 var (
-	errOversizedBody  = errors.New("response exceeds 64 MiB")
-	errMissingCount   = errors.New(`response envelope has no "count"`)
-	errEmptyDiscovery = errors.New("API description lists no object types")
+	errOversizedBody     = errors.New("response exceeds 64 MiB")
+	errMalformedEnvelope = errors.New(`response envelope is missing "count" or "results"`)
+	errEmptyDiscovery    = errors.New("API description lists no object types")
 )
 
 // errorBody is the service's failure shape: {"error": "unknown column: foo"}.
@@ -182,16 +182,26 @@ type errorBody struct {
 
 // listPage is one page of a list response. Rows stay as raw JSON so that key
 // order survives into the flattened output.
-// Count is a pointer so that an envelope missing the field is distinguishable
-// from one reporting zero rows. The difference matters: Total feeds the count
-// query's single number and the "showing N of M" truncation notice, which is
-// suppressed when Total is zero. Decoded as a plain int, a proxy or error page
-// answering {"results":[...]} would silently present a truncated table as the
-// whole population.
+// Count and Results are pointers so that an envelope MISSING either is
+// distinguishable from one reporting zero rows. The difference matters: Total
+// feeds the count query's single number and the "showing N of M" truncation
+// notice, which is suppressed when Total is zero. Decoded as plain values, a
+// proxy or error page answering {"results":[...]} would present a truncated
+// table as the whole population, and one answering {"count":0} would report no
+// matches — indistinguishable from a real empty answer, including to an alert
+// rule evaluating it.
 type listPage struct {
-	Count      *int              `json:"count"`
-	NextCursor string            `json:"next_cursor"`
-	Results    []json.RawMessage `json:"results"`
+	Count      *int               `json:"count"`
+	NextCursor string             `json:"next_cursor"`
+	Results    *[]json.RawMessage `json:"results"`
+}
+
+// rows is Results with the presence check already done by listOnce.
+func (p listPage) rows() []json.RawMessage {
+	if p.Results == nil {
+		return nil
+	}
+	return *p.Results
 }
 
 // get performs an authenticated GET and returns the decoded body.
@@ -278,13 +288,13 @@ func (c *Client) listOnce(ctx context.Context, entity string, q url.Values, curs
 	if err := c.get(ctx, "/v1/"+entity, params, &page); err != nil {
 		return listPage{}, err
 	}
-	if page.Count == nil {
+	if page.Count == nil || page.Results == nil {
 		// Valid JSON in the wrong shape — an intermediary's error page, or a
 		// different service behind the URL. Accepting it would report zero for
 		// count queries and quietly drop the truncation notice.
 		return listPage{}, &TransportError{
 			Op:      "reading response from " + truncate(c.base+"/v1/"+entity),
-			Err:     errMissingCount,
+			Err:     errMalformedEnvelope,
 			Message: "Replica cache returned a response in an unexpected shape. Check that the replica-cache URL points at the service and not at a proxy or error page.",
 		}
 	}
@@ -335,12 +345,12 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 			total = *page.Count
 			first = false
 		}
-		rows = append(rows, page.Results...)
+		rows = append(rows, page.rows()...)
 
 		// A page that comes back empty or without a cursor is the end of the
 		// result set. Both conditions are needed: the service omits the cursor on
 		// the last page, and a zero-row page with a cursor would otherwise spin.
-		if page.NextCursor == "" || len(page.Results) == 0 {
+		if page.NextCursor == "" || len(page.rows()) == 0 {
 			break
 		}
 		cursor = page.NextCursor

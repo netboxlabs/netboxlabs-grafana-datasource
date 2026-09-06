@@ -668,3 +668,46 @@ func TestSortIsDroppedWhenTheSchemaCannotBeRead(t *testing.T) {
 		t.Errorf("want the row, got %d", len(res.Rows))
 	}
 }
+
+// The query path must not wait on entity discovery to learn its columns.
+// Discovery is one large document measured failing while row endpoints answered
+// in about 1.3s; putting it in front of the row request delayed every panel by
+// a wait the rows do not depend on. Raw columns and types come from the
+// main-table sample, which needs no discovery at all.
+func TestProjectionDoesNotWaitOnDiscovery(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	// Discovery hangs for the whole test, as it does when the description
+	// endpoint times out while the row endpoints are healthy.
+	release := make(chan struct{})
+	defer close(release)
+	f.hangSwagger = release
+
+	srv := f.start(t)
+	p := New(srv.URL, "t", "nb", srv.Client())
+
+	done := make(chan error, 1)
+	go func() {
+		// Columns are needed for both the projection and the sort check, so this
+		// spec exercises rawColumns and columnTypes with a cold cache.
+		_, err := p.Query(context.Background(), provider.QuerySpec{
+			ObjectType: "dcim/devices",
+			Fields:     []string{"name", "status"},
+			Ordering:   "name",
+			Filters:    []provider.Filter{{Field: "name", Operator: "ic", Value: "CORE"}},
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the rows are healthy, so the query must answer: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the query blocked on discovery; column facts must come from the row sample")
+	}
+}

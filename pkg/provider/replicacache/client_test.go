@@ -446,3 +446,48 @@ func TestTotalCoversAPageCountThatGrewPastTheLimit(t *testing.T) {
 		t.Error("this result IS truncated and the numbers must say so")
 	}
 }
+
+// A repeated id means one object came back twice and another never did, while
+// len(rows) still reaches the reported total — so the result looks complete and
+// an alert evaluates it. Distinct, advancing cursors, so the repeated-cursor
+// guard does not catch this.
+func TestDuplicateObjectIDsAreRejected(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			_, _ = w.Write([]byte(`{"count": 2, "results": [{"id": 1, "name": "A"}], "next_cursor": "c2"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"count": 2, "results": [{"id": 1, "name": "A"}]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Limit: 100})
+	if err == nil {
+		t.Fatal("two rows for one object must not be read as a complete result")
+	}
+	if !errors.Is(err, errDuplicateRow) {
+		t.Errorf("want errDuplicateRow, got %v", err)
+	}
+}
+
+// Within one page too, and distinct ids across pages stay perfectly ordinary.
+func TestDistinctObjectIDsWalkNormally(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count": 3, "results": [{"id": 1}, {"id": 2}, {"id": 3}]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Limit: 100})
+	if err != nil {
+		t.Fatalf("distinct ids are an ordinary page: %v", err)
+	}
+	if len(res.Rows) != 3 {
+		t.Errorf("rows = %d, want 3", len(res.Rows))
+	}
+}

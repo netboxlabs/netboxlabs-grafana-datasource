@@ -545,10 +545,15 @@ func queryErrorMessage(err error) string {
 		// is wrong for a datasource reading from a different backend: it sends
 		// the reader to settings that mode does not even use. Only the provider
 		// knows which credential its failure is about.
-		if u.Kind != provider.ErrorKindUnknownObjectType {
-			if d := boundedDetail(u); d != "" {
-				return d
-			}
+		//
+		// That includes the unknown-object-type case, which used to be excepted:
+		// the sentence below names the annotation format app_label.model, and a
+		// backend addressing types as plural slash paths would send the reader
+		// to a correction that fails again. The exception is gone; the NetBox
+		// provider sets no Detail for this kind, so it still gets the wording
+		// below.
+		if d := boundedDetail(u); d != "" {
+			return d
 		}
 		switch u.Kind {
 		// An object type the upstream does not know is the USER's input, not an

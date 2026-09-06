@@ -165,11 +165,18 @@ func (e *UnknownObjectTypeError) Error() string {
 
 // Classification reports the type as the user's input, answered as a bad
 // request rather than an upstream failure.
+//
+// Detail is set because the shared wording for this kind is NetBox's: it tells
+// the reader to use a singular app_label.model such as dcim.device, which this
+// backend does not accept. Object types here are the plural slash paths the
+// service publishes, so following that advice would produce a second failure.
 func (e *UnknownObjectTypeError) Classification() *provider.UpstreamError {
 	return &provider.UpstreamError{
 		Kind:       provider.ErrorKindUnknownObjectType,
 		ObjectType: e.Type,
 		KnownTypes: e.Known,
+		Detail: fmt.Sprintf("Replica cache has no object type %q — it isn't one of the %d types this deployment reports. Object types here are plural paths, e.g. dcim/devices or ipam/ip-addresses.",
+			e.Type, e.Known),
 	}
 }
 
@@ -489,31 +496,20 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	added, degraded := p.resolveFKs(ctx, objectType, rows)
 	cols = append(cols, added...)
 
-	// Type each column from the first NON-NULL value seen across the sample. A
-	// column that is null everywhere in the sample stays unknown, which
-	// fieldType reports as string; filterFieldsFor treats only a confirmed
-	// string as text-searchable, so an unknown column loses the text operators
-	// rather than being offered one that may match every row.
-	types := make(map[string]provider.FieldType, len(cols))
-	known := make(map[string]bool, len(cols))
-	for _, c := range cols {
-		for _, row := range rows {
-			if v, ok := row[c]; ok && v != nil {
-				types[c] = fieldType(c, v)
-				known[c] = true
-				break
-			}
-		}
-	}
+	// Shared with the query path's lighter probe, so the two cannot disagree
+	// about a column's type.
+	types := typeColumns(cols, rows)
 
 	fields := make([]provider.Field, 0, len(cols))
 	for _, c := range cols {
-		t := provider.FieldTypeString
-		if known[c] {
-			t = types[c]
-		} else {
-			// Never typed: not text as far as operator selection is concerned.
-			types[c] = provider.FieldType("")
+		// A column that was null everywhere in the sample is reported to the
+		// editor as text — it has to be shown as something — while its recorded
+		// type stays empty, which is what filterFieldsFor and validateFilterTypes
+		// read as "not confirmed text" so it loses the text operators rather
+		// than being offered one that may match every row.
+		t := types[c]
+		if t == provider.FieldType("") {
+			t = provider.FieldTypeString
 		}
 		fields = append(fields, provider.Field{Name: c, Type: t})
 	}
@@ -554,35 +550,99 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 // fields (cf_*) are ours, not the service's, and asking for them by name would
 // be rejected as an unknown column.
 func (p *Provider) rawColumns(ctx context.Context, objectType string) (map[string]bool, error) {
+	e, err := p.columnSample(ctx, objectType)
+	if err != nil {
+		return nil, err
+	}
+	return e.raw, nil
+}
+
+// columnSample returns the cached column facts, reading a sample if there are
+// none.
+//
+// It deliberately does NOT go through Fields. Fields is the editor-facing
+// method and resolves foreign keys, which waits on entity discovery — measured
+// at up to the four-second budget against an instance whose row endpoints were
+// answering in about 1.3s. On the query path that wait buys nothing: raw
+// columns and types both come from the main-table sample, which is one small
+// request, and putting discovery in front of it delayed every panel by a wait
+// the row request does not depend on. Resolution still happens after the rows
+// arrive, where it belongs.
+func (p *Provider) columnSample(ctx context.Context, objectType string) (fieldsCacheEntry, error) {
 	p.fieldsMu.Lock()
 	e, ok := p.fields[objectType]
 	p.fieldsMu.Unlock()
 	if ok && time.Now().Before(e.expires) {
-		return e.raw, nil
+		return e, nil
 	}
-	if _, err := p.Fields(ctx, objectType); err != nil {
-		return nil, err
+
+	raws, _, err := p.client.list(ctx, objectType, nil, sampleRows)
+	if err != nil {
+		return fieldsCacheEntry{}, err
 	}
+	if len(raws) == 0 {
+		// An empty table teaches nothing about columns. Not an error, and not
+		// cached either: the next call should look again rather than pin an
+		// empty schema for the whole TTL.
+		return fieldsCacheEntry{}, nil
+	}
+
+	rawCols := map[string]bool{}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(raws[0], &obj); err != nil {
+		return fieldsCacheEntry{}, fmt.Errorf("reading sample row for %s: %w", objectType, err)
+	}
+	for k := range obj {
+		rawCols[k] = true
+	}
+	cols, rows := flattenRows(raws)
+
+	entry := fieldsCacheEntry{
+		raw: rawCols,
+		// Incomplete on purpose: this entry has no resolved columns and no
+		// field list, so Fields must not serve it back as one.
+		types:   typeColumns(cols, rows),
+		expires: time.Now().Add(schemaTTL),
+	}
+
+	// Never overwrite a live entry: Fields may have stored a richer one while
+	// this sample was in flight, and that one knows about resolved columns.
 	p.fieldsMu.Lock()
-	defer p.fieldsMu.Unlock()
-	return p.fields[objectType].raw, nil
+	if cur, ok := p.fields[objectType]; !ok || !time.Now().Before(cur.expires) {
+		p.fields[objectType] = entry
+	} else {
+		entry = cur
+	}
+	p.fieldsMu.Unlock()
+	return entry, nil
+}
+
+// typeColumns types each column from the first NON-NULL value seen across the
+// sample. A column that is null everywhere stays unknown — recorded as the
+// empty type, which filterFieldsFor and validateFilterTypes both read as "not
+// confirmed text" rather than as text.
+func typeColumns(cols []string, rows []map[string]interface{}) map[string]provider.FieldType {
+	types := make(map[string]provider.FieldType, len(cols))
+	for _, c := range cols {
+		types[c] = provider.FieldType("")
+		for _, row := range rows {
+			if v, ok := row[c]; ok && v != nil {
+				types[c] = fieldType(c, v)
+				break
+			}
+		}
+	}
+	return types
 }
 
 // columnTypes reports the inferred type per upstream column. An entry missing
 // or empty means the type could not be determined from the sample.
 func (p *Provider) columnTypes(ctx context.Context, objectType string) map[string]provider.FieldType {
-	p.fieldsMu.Lock()
-	e, ok := p.fields[objectType]
-	p.fieldsMu.Unlock()
-	if ok && time.Now().Before(e.expires) {
-		return e.types
-	}
-	if _, err := p.Fields(ctx, objectType); err != nil {
+	e, err := p.columnSample(ctx, objectType)
+	if err != nil {
 		return nil
 	}
-	p.fieldsMu.Lock()
-	defer p.fieldsMu.Unlock()
-	return p.fields[objectType].types
+	return e.types
 }
 
 // fieldType classifies a sampled value.

@@ -894,3 +894,39 @@ func TestQuery_Objects_AlertEvaluationRejectsATruncatedResult(t *testing.T) {
 		}
 	})
 }
+
+// stubClassified is an error carrying exactly the classification a provider
+// would attach, so the rendering can be exercised without a provider.
+type stubClassified struct{ u *provider.UpstreamError }
+
+func (e *stubClassified) Error() string                           { return "stub" }
+func (e *stubClassified) Classification() *provider.UpstreamError { return e.u }
+
+// The unknown-object-type message used to be the one kind that ignored a
+// provider's own sentence, so a backend addressing types as plural slash paths
+// was answered with NetBox's annotation format — a correction that fails again.
+func TestUnknownObjectTypeUsesTheProvidersOwnWording(t *testing.T) {
+	withDetail := &stubClassified{u: &provider.UpstreamError{
+		Kind:       provider.ErrorKindUnknownObjectType,
+		ObjectType: "dcim/widgets",
+		KnownTypes: 74,
+		Detail:     "Replica cache has no object type \"dcim/widgets\". Object types here are plural paths, e.g. dcim/devices.",
+	}}
+	if got := queryErrorMessage(withDetail); !strings.Contains(got, "plural paths") {
+		t.Errorf("provider detail should win, got %q", got)
+	}
+	if got := queryErrorMessage(withDetail); strings.Contains(got, "app_label.model") {
+		t.Errorf("NetBox's annotation format is wrong for this backend, got %q", got)
+	}
+
+	// A provider that authors no sentence still gets the NetBox wording, which
+	// is correct for the annotation editor it was written for.
+	noDetail := &stubClassified{u: &provider.UpstreamError{
+		Kind:       provider.ErrorKindUnknownObjectType,
+		ObjectType: "dcim.widget",
+		KnownTypes: 90,
+	}}
+	if got := queryErrorMessage(noDetail); !strings.Contains(got, "app_label.model") {
+		t.Errorf("want the NetBox wording as the fallback, got %q", got)
+	}
+}

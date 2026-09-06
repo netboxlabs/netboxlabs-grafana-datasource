@@ -28,8 +28,8 @@ func TestEnvelopeWithoutCountIsRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("an envelope with no count must be refused, not read as zero rows")
 	}
-	if !errors.Is(err, errMissingCount) {
-		t.Errorf("want errMissingCount, got %v", err)
+	if !errors.Is(err, errMalformedEnvelope) {
+		t.Errorf("want errMalformedEnvelope, got %v", err)
 	}
 	u := provider.Classify(err)
 	if u == nil || !strings.Contains(u.Detail, "unexpected shape") {
@@ -82,5 +82,45 @@ func TestOversizedBodyIsRejected(t *testing.T) {
 	}
 	if u := provider.Classify(err); u == nil || !strings.Contains(u.Detail, "64 MiB") {
 		t.Errorf("guidance should name the limit and a remedy, got %+v", u)
+	}
+}
+
+// The other half of the envelope. An intermediary answering {"count":0} with
+// no results decodes to a nil slice, which is indistinguishable from a real
+// empty answer — including to an alert rule, which would evaluate "no matches"
+// as a fact rather than as a failure to read.
+func TestEnvelopeWithoutResultsIsRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count": 0}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err == nil {
+		t.Fatal("an envelope with no results must be refused, not read as zero matches")
+	}
+	if !errors.Is(err, errMalformedEnvelope) {
+		t.Errorf("want errMalformedEnvelope, got %v", err)
+	}
+}
+
+// And an explicitly empty results array is a real answer, so the guard stays on
+// presence rather than becoming a rejection of empty tables.
+func TestEmptyResultsArrayIsAnAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count": 0, "results": []}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("an empty table is a valid answer: %v", err)
+	}
+	if len(res.Rows) != 0 || res.Total != 0 {
+		t.Errorf("want an empty result, got total=%d rows=%d", res.Total, len(res.Rows))
 	}
 }

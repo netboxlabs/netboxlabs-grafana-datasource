@@ -558,23 +558,32 @@ func fieldType(name string, v interface{}) provider.FieldType {
 	}
 	if isTimeColumn(name) {
 		if s, ok := v.(string); ok {
-			if _, err := time.Parse(time.RFC3339, s); err == nil {
-				return provider.FieldTypeTime
+			// Both shapes: NetBox DateTimeFields serialize as RFC3339, plain
+			// DateFields as YYYY-MM-DD. Missing the second left columns such as
+			// circuits.termination_date classified as text and offered ILIKE.
+			for _, layout := range []string{time.RFC3339, time.DateOnly} {
+				if _, err := time.Parse(layout, s); err == nil {
+					return provider.FieldTypeTime
+				}
 			}
 		}
 	}
 	return provider.FieldTypeString
 }
 
-// isTimeColumn names the columns whose string values are timestamps. Gated on
-// the name as well as the format so a text column that happens to hold
-// something RFC3339-shaped is not reclassified out of its text operators.
+// isTimeColumn names the columns whose string values are dates or timestamps.
+//
+// Gated on the name as well as the format, so a text column that happens to
+// hold something date-shaped keeps its text operators. The suffix rule catches
+// the DateField columns a fixed list cannot enumerate — termination_date,
+// install_date and whatever a deployment adds next — without claiming every
+// string that parses as a date.
 func isTimeColumn(name string) bool {
 	switch name {
 	case "created", "last_updated", "last_used", "time", "expires":
 		return true
 	}
-	return false
+	return strings.HasSuffix(name, "_date") || strings.HasSuffix(name, "_at")
 }
 
 // FilterFields advertises every column with the operator set the backend

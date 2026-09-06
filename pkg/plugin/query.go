@@ -466,10 +466,16 @@ func healthErrorMessage(err error) string {
 	// Status 0 means the provider classified something that was not an HTTP
 	// refusal; there is no code to report, so fall through to the transport
 	// message rather than printing "HTTP 0".
-	if u := provider.Classify(err); u != nil && u.Status != 0 {
+	// Detail first, and before the status check: a transport failure carries no
+	// HTTP code but is exactly where the provider's own wording matters most —
+	// the generic fallback below names NetBox, which is the wrong service when
+	// a different backend is what could not be reached.
+	if u := provider.Classify(err); u != nil {
 		if d := boundedDetail(u); d != "" {
 			return d
 		}
+	}
+	if u := provider.Classify(err); u != nil && u.Status != 0 {
 		switch u.Kind {
 		case provider.ErrorKindAuth:
 			return "Authentication failed (check API token)"

@@ -37,6 +37,9 @@ type fakeService struct {
 	// failEntities names entities that answer 500, to simulate one dimension
 	// timing out while the rest of the service is healthy.
 	failEntities map[string]bool
+	// nullRowsFor names an entity whose rows come back as JSON nulls, which
+	// decode without error but leave the row map nil.
+	nullRowsFor string
 	// failOnce names entities whose FIRST request answers 500 and whose later
 	// requests are served normally — a transient failure, which is how the
 	// schema probe can fail while the row fetch behind it succeeds.
@@ -196,6 +199,18 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 			projected = append(projected, cut)
 		}
 		page = projected
+	}
+
+	f.mu.Lock()
+	nullRows := f.nullRowsFor == entity
+	f.mu.Unlock()
+	if nullRows {
+		// Valid JSON, valid envelope, unusable rows: each element decodes into
+		// a map without error and leaves it nil.
+		nulls := make([]interface{}, len(page))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": total, "results": nulls})
+		return
 	}
 
 	resp := map[string]interface{}{"count": total, "results": page}

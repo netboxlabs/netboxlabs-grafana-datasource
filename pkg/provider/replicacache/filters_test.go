@@ -496,3 +496,36 @@ func TestIsEmptyRefusalDoesNotRecommendADiscardedFilter(t *testing.T) {
 		t.Errorf("an empty equality value must emit no filter, got %v", q)
 	}
 }
+
+// The service has no escape syntax. Measured, not assumed: a backslash is
+// matched literally rather than consumed, so `COR\E-N95%` returns nothing where
+// Postgres escape semantics would have matched CORE-N9504-01. A % or _ in the
+// user's own value therefore silently widens the population, and a count or
+// alert query evaluates that with no rows on screen to reveal it.
+func TestTextFilterRefusesWildcardsItCannotEscape(t *testing.T) {
+	for _, op := range []string{"ic", "ie", "isw", "iew"} {
+		for _, v := range []string{"A_B", "50%", "rack_1"} {
+			_, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: op, Value: v}})
+			if err == nil {
+				t.Errorf("%s %q was accepted; it would match more rows than asked for", op, v)
+				continue
+			}
+			if !strings.Contains(err.Error(), "wildcard") {
+				t.Errorf("%s %q: the reason should name the problem, got %v", op, v, err)
+			}
+		}
+	}
+
+	// Ordinary values are untouched, and equality is unaffected: it is not a
+	// pattern match, so a % or _ there means itself.
+	q, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: "ic", Value: "CORE"}})
+	if err != nil {
+		t.Fatalf("an ordinary text match must still work: %v", err)
+	}
+	if got := q.Get(param("name", "ilike")); got != "%CORE%" {
+		t.Errorf("pattern = %q, want %%CORE%%", got)
+	}
+	if _, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: "", Value: "rack_1"}}); err != nil {
+		t.Errorf("equality is not a pattern match and must accept it: %v", err)
+	}
+}

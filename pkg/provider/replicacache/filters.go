@@ -142,6 +142,10 @@ func buildFilterValues(filters []provider.Filter) (url.Values, error) {
 				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 					Reason: "this backend cannot combine several values for a text match; select one value or filter on equality"}
 			}
+			if i := strings.IndexAny(values[0], "%_"); i >= 0 {
+				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+					Reason: fmt.Sprintf("the value contains %q, which this backend treats as a wildcard rather than as itself, so the filter would match more rows than were asked for. It has no escape syntax — a backslash is matched literally rather than consumed — so the wider result cannot be avoided, and a count or alert query would evaluate it with no rows on screen to reveal the mismatch. Filter on equality, or use a datasource in NetBox mode, which escapes it", string(values[0][i]))}
+			}
 			key := f.Field + "|ilike"
 			if seen[key] {
 				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
@@ -180,10 +184,13 @@ func param(field, op string) string {
 //
 // Note on wildcards in user input: a value containing % or _ is passed through
 // unescaped, so "50%" as a contains-match also matches strings that merely
-// start with "50". The service documents no escape syntax, and inventing one
-// that it may not honour would risk the opposite error — a pattern that matches
-// nothing, reported as an empty result. Over-matching is at least visible in
-// the rows returned.
+// start with "50".
+//
+// A value carrying % or _ of its own is refused before it gets here (see
+// wildcardError): the service has no escape syntax, which was measured rather
+// than assumed. Backslash is matched LITERALLY, not consumed as an escape —
+// `COR\E-N95%` returns nothing where Postgres escape semantics would have
+// matched CORE-N9504-01 — so there is no way to ask for a literal wildcard.
 func likePattern(op, v string) string {
 	switch op {
 	case opIContns:

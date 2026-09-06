@@ -512,10 +512,25 @@ func TestIDsMustBeWholeAndPositive(t *testing.T) {
 			t.Errorf("toInt(%#v) = %d, accepted; not a usable identifier", v, id)
 		}
 	}
-	for _, v := range []interface{}{float64(1), float64(4001), int(7)} {
-		if _, ok := toInt(v); !ok {
+	for _, v := range []interface{}{
+		float64(1), float64(4001), int(7),
+		// NetBox primary keys are 64-bit. An int32 cap — which this first had —
+		// would reject legitimate ids on a large instance, and the bound that
+		// matters is the one the wire format imposes: ids arrive as float64.
+		float64(2147483648), float64(1 << 52), float64(maxExactID),
+	} {
+		id, ok := toInt(v)
+		if !ok {
 			t.Errorf("toInt(%#v) rejected a valid id", v)
 		}
+		if f, isF := v.(float64); isF && float64(id) != f {
+			t.Errorf("toInt(%#v) = %d, which is a different object", v, id)
+		}
+	}
+	// Past what a float64 holds exactly, the value that came back is not the
+	// value that was sent, so accepting it would identify a different object.
+	if id, ok := toInt(float64(maxExactID) * 4); ok {
+		t.Errorf("toInt accepted an inexact id as %d", id)
 	}
 }
 

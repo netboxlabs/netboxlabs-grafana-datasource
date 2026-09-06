@@ -885,3 +885,32 @@ func TestPluginModelIsQueryable(t *testing.T) {
 		t.Errorf("rows = %d, want 1", len(res.Rows))
 	}
 }
+
+// The schema sample has its own decoder, ahead of flattenRows. Unclassified, a
+// malformed response from the cache rendered as "Couldn't reach NetBox" — a
+// connection this mode may not even have configured.
+func TestMalformedSampleRowNamesTheCache(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// A valid envelope whose first row is a scalar.
+		_, _ = w.Write([]byte(`{"count": 1, "results": ["CORE-1"]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	// A type-sensitive filter forces the cold schema sample before the query.
+	_, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Filters:    []provider.Filter{{Field: "name", Operator: "ic", Value: "CORE"}},
+	})
+	if err == nil {
+		t.Fatal("want an error for a malformed sample row")
+	}
+	u := provider.Classify(err)
+	if u == nil {
+		t.Fatal("an unclassified error renders as a NetBox failure")
+	}
+	if !strings.Contains(u.Detail, "Replica cache") {
+		t.Errorf("guidance should name the cache: %q", u.Detail)
+	}
+}

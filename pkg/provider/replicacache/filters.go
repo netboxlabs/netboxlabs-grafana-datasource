@@ -52,9 +52,20 @@ func (e *UnsupportedFilterError) Error() string {
 		e.Field, e.Operator, e.Reason)
 }
 
-// Classification reports the filter as a bad request rather than an outage.
+// Classification reports the filter as an unsupported capability, carrying the
+// reason with it.
+//
+// Not a bare bad request: that kind renders as the generic "NetBox rejected
+// this query (HTTP 400)", which loses the only useful part of this error and
+// blames NetBox for a request that never left this process. The unsupported
+// kind carries Detail, which the plugin layer prefers over its own wording —
+// exactly so a provider can explain a limit only it understands. Both still
+// answer as StatusBadRequest, so nothing about retry behaviour changes.
 func (e *UnsupportedFilterError) Classification() *provider.UpstreamError {
-	return &provider.UpstreamError{Kind: provider.ErrorKindBadRequest}
+	return &provider.UpstreamError{
+		Kind:   provider.ErrorKindUnsupported,
+		Detail: e.Error(),
+	}
 }
 
 // buildFilterValues translates provider filters into replica-cache query
@@ -203,6 +214,31 @@ func boolString(b bool) string {
 	return "false"
 }
 
+// nullOperators ask whether a column has a value. They compile to SQL IS NULL,
+// which is the wrong question for a TEXT column.
+//
+// NetBox stores a blank character field as "" rather than NULL, so the two
+// answers invert. Measured against a staging instance where every device has a
+// blank serial:
+//
+//	filter[serial]__isnull=true   -> 0          (what we send for "is empty")
+//	filter[serial]__eq=           -> 6,824,570  (what NetBox means by empty)
+//	filter[serial]__isnull=false  -> 6,824,570  (our "has any value")
+//
+// So "is empty" matched nothing where every row qualified, and "has any value"
+// matched everything where none did — a panel switched from NetBox mode to this
+// one silently inverts, with no error.
+//
+// Neither can be expressed correctly here. "Is empty" would need `isnull OR
+// eq ""`, and this backend ANDs its filters with no OR; `eq ""` alone is right
+// only for a column that is NOT NULL, which we cannot know without a schema
+// endpoint (DATA-206). "Has any value" needs a negation operator the backend
+// does not have at all. So they are withheld for text and kept for everything
+// else, where blank-string semantics do not arise.
+var nullOperators = map[string]bool{
+	opEmpty: true, opNEmpty: true,
+}
+
 // textOperators need the column to hold text. They compile to SQL ILIKE, which
 // the backend applies without checking the column's type.
 var textOperators = map[string]bool{
@@ -241,9 +277,15 @@ func filterFieldsFor(fields []provider.Field, raw map[string]bool, types map[str
 		if len(raw) > 0 && !raw[f.Name] {
 			continue
 		}
+		isText := types[f.Name] == provider.FieldTypeString
 		ops := make([]string, 0, len(supportedOperators))
 		for _, op := range supportedOperators {
-			if textOperators[op] && types[f.Name] != provider.FieldTypeString {
+			if textOperators[op] && !isText {
+				continue
+			}
+			// The mirror of the rule above: a text match needs text, and an
+			// is-empty check needs a column where blank means NULL.
+			if nullOperators[op] && isText {
 				continue
 			}
 			ops = append(ops, op)
@@ -264,7 +306,7 @@ func needsTypeCheck(filters []provider.Filter) bool {
 		if op == "exact" {
 			op = opExact
 		}
-		if textOperators[op] {
+		if textOperators[op] || nullOperators[op] {
 			return true
 		}
 	}
@@ -287,12 +329,17 @@ func validateFilterTypes(filters []provider.Filter, types map[string]provider.Fi
 		if op == "exact" {
 			op = opExact
 		}
-		if !textOperators[op] {
+		t, seen := types[f.Field]
+		if !seen {
 			continue
 		}
-		if t, seen := types[f.Field]; seen && t != provider.FieldTypeString {
+		if textOperators[op] && t != provider.FieldTypeString {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 				Reason: "a text match needs a text column, and this backend applies it to any column without checking — returning either a server error or, worse, every row unfiltered"}
+		}
+		if nullOperators[op] && t == provider.FieldTypeString {
+			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+				Reason: "this backend answers is-empty with IS NULL, but NetBox stores a blank text field as an empty string, so the result would be the exact opposite of what was asked; filter on equality with an empty value instead"}
 		}
 	}
 	return nil

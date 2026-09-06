@@ -296,7 +296,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	// discovery budget to discover that would add seconds to a query that was
 	// never going to use the answer.
 	if !hasResolvableFK(rows) {
-		return nil, nil
+		return nullFKColumns(rows), nil
 	}
 
 	known, ok := p.entitySetSoon(ctx, discoveryWaitBudget)
@@ -358,8 +358,11 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	}
 
 	// Apply, collecting new column names in a deterministic order.
-	var added []string
+	added := nullFKColumns(rows)
 	seen := map[string]bool{}
+	for _, c := range added {
+		seen[c] = true
+	}
 	baseNames := make([]string, 0, len(bases))
 	for b := range bases {
 		baseNames = append(baseNames, b)
@@ -493,6 +496,57 @@ func toInt(v interface{}) (int, bool) {
 // related object. It is deliberately cheap and permissive: a false positive
 // costs one discovery lookup, while a false negative would silently drop the
 // resolved names.
+// nullFKColumns announces the derived column for a relationship that is null on
+// every row, and fills it with nils.
+//
+// NetBox mode has the column: its API answers "tenant": null, which flattens to
+// a tenant column of nulls. Here the same fact arrives as tenant_id: null, from
+// which nothing is resolved, so the column did not exist at all — and a panel
+// selecting tenant lost it on switching modes, or came back with NO columns
+// when tenant was the only field selected.
+//
+// This is not the same as the ids that FAILED to resolve, which are still left
+// out on purpose a few lines below. An all-empty column there would read as
+// "this device has no tenant" when the truth is "the tenant could not be read",
+// and that case has its own warning. All-null is different: there really is no
+// tenant, and saying so is the accurate answer as well as the compatible one.
+func nullFKColumns(rows []map[string]interface{}) []string {
+	bases := map[string]bool{}
+	for _, row := range rows {
+		for col, v := range row {
+			base, ok := strings.CutSuffix(col, "_id")
+			if !ok || base == "" || polymorphicFKs[base] || unexposedFKs[base] {
+				continue
+			}
+			if _, isNum := toInt(v); isNum {
+				// Some row does carry an id, so this column is resolution's
+				// business, not ours.
+				bases[base] = false
+				continue
+			}
+			if _, seen := bases[base]; !seen {
+				bases[base] = true
+			}
+		}
+	}
+
+	out := make([]string, 0, len(bases))
+	for base, allNull := range bases {
+		if allNull {
+			out = append(out, base)
+		}
+	}
+	sort.Strings(out)
+	for _, base := range out {
+		for _, row := range rows {
+			if _, exists := row[base]; !exists {
+				row[base] = nil
+			}
+		}
+	}
+	return out
+}
+
 func hasResolvableFK(rows []map[string]interface{}) bool {
 	for _, row := range rows {
 		for col, v := range row {

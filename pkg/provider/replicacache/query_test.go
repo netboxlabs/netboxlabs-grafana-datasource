@@ -820,3 +820,41 @@ func TestCustomFieldExpansionMatchesNetBoxMode(t *testing.T) {
 		}
 	}
 }
+
+// A mixed selection: a custom choice already flattened to cf_x_value, and a
+// physical choice needing the alias. Returning on the first stopped the second
+// from being built, and the projection then dropped it entirely.
+func TestChoiceValueAliasSurvivesAnEarlierRealValueColumn(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{{
+		"id": float64(1), "name": "CORE-1", "status": "active",
+		"custom_field_data": `{"criticality": {"value": "high", "label": "High"}}`,
+	}}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"cf_criticality_value", "status_value"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	// The real column keeps its own value; it is not overwritten by the alias.
+	if got := res.Rows[0]["cf_criticality_value"]; got != "high" {
+		t.Errorf("cf_criticality_value = %#v, want high", got)
+	}
+	if got := res.Rows[0]["status_value"]; got != "active" {
+		t.Errorf("status_value = %#v, want active — the earlier field must not stop it", got)
+	}
+	for _, want := range []string{"cf_criticality_value", "status_value"} {
+		var found bool
+		for _, c := range res.Columns {
+			if c == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s missing from columns %v", want, res.Columns)
+		}
+	}
+}

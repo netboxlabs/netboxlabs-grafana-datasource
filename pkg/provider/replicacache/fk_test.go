@@ -291,3 +291,51 @@ func TestNullDimensionRowIsReportedNotSwallowed(t *testing.T) {
 		t.Errorf("site_id = %v, want 4001", res.Rows[0]["site_id"])
 	}
 }
+
+// NetBox mode answers "tenant": null, which flattens to a tenant column of
+// nulls. Here the same fact arrives as tenant_id: null, so nothing resolved and
+// the column did not exist — a panel selecting tenant lost it on switching
+// modes, and came back with NO columns when tenant was the only field selected.
+func TestAllNullRelationshipStillHasItsColumn(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "site_id": float64(4001), "tenant_id": nil},
+		{"id": float64(2), "name": "CORE-2", "site_id": float64(4001), "tenant_id": nil},
+	}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	// The partial case: site resolves, tenant is null everywhere, so tenant
+	// never reached the resolution path at all.
+	res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var hasTenant bool
+	for _, c := range res.Columns {
+		if c == "tenant" {
+			hasTenant = true
+		}
+	}
+	if !hasTenant {
+		t.Errorf("tenant missing from columns %v", res.Columns)
+	}
+	if v, ok := res.Rows[0]["tenant"]; !ok || v != nil {
+		t.Errorf("tenant = %#v (present %v), want a nil value", v, ok)
+	}
+	if res.Rows[0]["site"] != "DC-Northeast" {
+		t.Errorf("site = %v, want DC-Northeast — resolution must still work", res.Rows[0]["site"])
+	}
+
+	// And selecting only that column must not come back with nothing.
+	res, err = p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"tenant"}})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Columns) != 1 || res.Columns[0] != "tenant" {
+		t.Errorf("columns = %v, want just tenant", res.Columns)
+	}
+}

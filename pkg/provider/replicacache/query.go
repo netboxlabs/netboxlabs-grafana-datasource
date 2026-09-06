@@ -164,15 +164,18 @@ func addChoiceValueAliases(fields []string, rows []map[string]interface{}) []str
 		if !ok || base == "" {
 			continue
 		}
+		// A real column by that name wins, and only for THIS field: a custom
+		// choice already flattened to cf_x_value must not stop a status_value
+		// later in the same selection from being built, which is what returning
+		// here did — the projection then dropped status_value entirely.
+		if hasColumn(rows, f) {
+			continue
+		}
 		used := false
 		for _, row := range rows {
 			v, ok := row[base]
 			if !ok {
 				continue
-			}
-			if _, taken := row[f]; taken {
-				// The service has a real column by that name; it wins.
-				return added
 			}
 			row[f] = v
 			used = true
@@ -182,6 +185,15 @@ func addChoiceValueAliases(fields []string, rows []map[string]interface{}) []str
 		}
 	}
 	return added
+}
+
+func hasColumn(rows []map[string]interface{}, name string) bool {
+	for _, row := range rows {
+		if _, ok := row[name]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // projectColumns maps the caller's requested columns onto the columns that

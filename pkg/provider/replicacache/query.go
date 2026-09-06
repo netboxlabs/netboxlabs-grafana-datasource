@@ -126,6 +126,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		return nil, err
 	}
 	cols = append(cols, addChoiceValueAliases(spec.Fields, rows)...)
+	cols = append(cols, addCustomFieldIDAliases(spec.Fields, rows)...)
 	var warnings []string
 	if !spec.CountOnly {
 		if addDeepLinks(p.netboxURL, spec.ObjectType, rows) {
@@ -199,6 +200,45 @@ func addChoiceValueAliases(fields []string, rows []map[string]interface{}) []str
 			}
 			row[f] = v
 			used = true
+		}
+		if used {
+			added = append(added, f)
+		}
+	}
+	return added
+}
+
+// addCustomFieldIDAliases fills in the cf_<name>_id columns a NetBox-mode panel
+// selects for an OBJECT custom field.
+//
+// There the API expands the field to a nested object, which flattens to
+// cf_<name> (the display name) plus cf_<name>_id. The column this mirrors holds
+// the bare id, so cf_<name> is that number and the _id column was simply
+// absent — a saved panel selecting it got no column and no explanation.
+//
+// The name still cannot be resolved: the target model is behind a content-type
+// id the service does not expose, which is the same wall as the polymorphic
+// FKs. But the ID is right there, and it is what a join or a link is built
+// from, so withholding it because the label is unavailable helps nobody.
+func addCustomFieldIDAliases(fields []string, rows []map[string]interface{}) []string {
+	var added []string
+	for _, f := range fields {
+		base, ok := strings.CutSuffix(f, "_id")
+		if !ok || !strings.HasPrefix(base, "cf_") {
+			continue
+		}
+		if hasColumn(rows, f) {
+			continue
+		}
+		used := false
+		for _, row := range rows {
+			// Only when the value really is an identifier. A text or list custom
+			// field named cf_x has no id to offer, and inventing one from a
+			// number that is not a key would be worse than the missing column.
+			if id, isID := toInt(row[base]); isID {
+				row[f] = float64(id)
+				used = true
+			}
 		}
 		if used {
 			added = append(added, f)

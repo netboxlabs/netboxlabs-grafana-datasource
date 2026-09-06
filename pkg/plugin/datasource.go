@@ -2,7 +2,6 @@ package plugin
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -118,15 +117,12 @@ func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.
 			// user says "I will wait", and it is the only such dial they have.
 			netbox.WithRequestTimeout(time.Duration(cfg.TimeoutSeconds)*time.Second)), nil
 	case models.ModeReplicaCache:
-		if cfg.ReplicaCacheURL == "" {
-			return nil, errors.New("replica-cache mode needs a service URL")
-		}
-		if cfg.NetBoxID == "" {
-			// The service answers 400 without this header, which would surface as
-			// an opaque bad request on every query. Failing here instead names the
-			// missing setting.
-			return nil, errors.New("replica-cache mode needs the NetBox instance ID")
-		}
+		// Constructed even when the URL or the instance id is missing, exactly as
+		// NetBox mode is with an empty URL. Failing here failed NewDatasource, so
+		// no Datasource existed for CheckHealth to run on and Save & Test never
+		// reached missingSetting above — the one place that can name WHICH field
+		// is absent. A provisioned datasource missing its URL reported a
+		// construction failure instead of "replica-cache URL is missing".
 		return replicacache.New(cfg.ReplicaCacheURL, cfg.Secrets.ReplicaCacheToken, cfg.NetBoxID, httpClient,
 			// The cache serves database rows, which carry no link back to the
 			// NetBox UI. URL is what makes "View in NetBox" work in this mode;

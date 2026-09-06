@@ -289,7 +289,7 @@ func withFields(q url.Values, cols []string) url.Values {
 // same column from either backend.
 // rowShapeGuidance is shared by both row-shape failures: the cause is the same
 // and so is the thing to check.
-const rowShapeGuidance = "Replica cache returned a result row that is not an object. The service is reachable but answered with something unexpected."
+const rowShapeGuidance = "Replica cache returned a result row that is not a usable object. The service is reachable but answered with something unexpected."
 
 func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, error) {
 	var (
@@ -311,6 +311,22 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, er
 				Op:      "reading a result row",
 				Err:     err,
 				Message: rowShapeGuidance,
+			}
+		}
+		if obj != nil {
+			if _, ok := toInt(obj["id"]); !ok {
+				// Measured: the service returns id on every projection, even one
+				// that did not ask for it — `fields=serial` comes back as
+				// {id, serial} — which is the same invariant the deep-link column
+				// already relies on. A row without one identifies no object, and
+				// {"count":1,"results":[{}]} would otherwise be one empty row with
+				// a matching total, which an alert-table query turns into a value
+				// of 1.
+				return nil, nil, &TransportError{
+					Op:      "reading a result row",
+					Err:     errRowWithoutID,
+					Message: rowShapeGuidance,
+				}
 			}
 		}
 		if obj == nil {

@@ -40,6 +40,11 @@ type fakeService struct {
 	// nullRowsFor names an entity whose rows come back as JSON nulls, which
 	// decode without error but leave the row map nil.
 	nullRowsFor string
+	// idlessRowsFor names an entity whose rows come back as objects with their
+	// primary key stripped — object-shaped, but nothing to match a reference
+	// against. Stripped on the way OUT so the row still matches the id filter
+	// that asked for it, which is what makes this reachable at all.
+	idlessRowsFor string
 	// failOnce names entities whose FIRST request answers 500 and whose later
 	// requests are served normally — a transient failure, which is how the
 	// schema probe can fail while the row fetch behind it succeeds.
@@ -203,7 +208,21 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 
 	f.mu.Lock()
 	nullRows := f.nullRowsFor == entity
+	idless := f.idlessRowsFor == entity
 	f.mu.Unlock()
+	if idless {
+		stripped := make([]map[string]interface{}, 0, len(page))
+		for _, row := range page {
+			cut := map[string]interface{}{}
+			for k, v := range row {
+				if k != "id" {
+					cut[k] = v
+				}
+			}
+			stripped = append(stripped, cut)
+		}
+		page = stripped
+	}
 	if nullRows {
 		// Valid JSON, valid envelope, unusable rows: each element decodes into
 		// a map without error and leaves it nil.

@@ -40,6 +40,10 @@ type fakeService struct {
 	// nullRowsFor names an entity whose rows come back as JSON nulls, which
 	// decode without error but leave the row map nil.
 	nullRowsFor string
+	// ignoreIDFilterFor names an entity that answers an id__in filter with its
+	// whole table, modelling a cache or intermediary that mishandled the filter
+	// and returned the right NUMBER of rows but not the right ones.
+	ignoreIDFilterFor string
 	// idlessRowsFor names an entity whose rows come back as objects with their
 	// primary key stripped — object-shaped, but nothing to match a reference
 	// against. Stripped on the way OUT so the row still matches the id filter
@@ -130,6 +134,18 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
+	f.mu.Lock()
+	ignoreIDFilter := f.ignoreIDFilterFor == entity
+	f.mu.Unlock()
+	if ignoreIDFilter {
+		q = url.Values{}
+		for k, vs := range r.URL.Query() {
+			if strings.HasPrefix(k, "filter[id]") {
+				continue
+			}
+			q[k] = vs
+		}
+	}
 	// Filtering: only what the tests need, but rejecting an unknown column the
 	// way the real service does, so a projection bug surfaces as a failure.
 	filtered := rows

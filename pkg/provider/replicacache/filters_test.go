@@ -2,6 +2,7 @@ package replicacache
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
@@ -104,8 +105,15 @@ func TestBuildFilterValuesRefusesUnsupportedOperators(t *testing.T) {
 			if !errors.As(err, &unsupported) {
 				t.Fatalf("want *UnsupportedFilterError, got %T", err)
 			}
-			if c := unsupported.Classification(); c.Kind != provider.ErrorKindBadRequest {
-				t.Errorf("want a bad-request classification so the editor is blamed, not the network; got %q", c.Kind)
+			c := unsupported.Classification()
+			if c.Kind != provider.ErrorKindUnsupported {
+				t.Errorf("want an unsupported classification so the reason survives; got %q", c.Kind)
+			}
+			// Detail is what the user actually reads. Without it the message
+			// degrades to a generic "NetBox rejected this query", which blames a
+			// service the request never reached.
+			if !strings.Contains(c.Detail, op) {
+				t.Errorf("Detail should name the offending operator: %q", c.Detail)
 			}
 		})
 	}
@@ -187,11 +195,20 @@ func TestFilterFieldsWithholdsTextOperatorsFromNonTextColumns(t *testing.T) {
 	if has(byName["sometimes_null"], opIContns) {
 		t.Error("an untypeable column must not be offered a text match")
 	}
-	// Equality and is-empty stay available everywhere.
+	// Equality stays available everywhere.
 	for _, n := range []string{"name", "id", "sometimes_null"} {
-		if !has(byName[n], opExact) || !has(byName[n], opEmpty) {
-			t.Errorf("%q lost equality or is-empty", n)
+		if !has(byName[n], opExact) {
+			t.Errorf("%q lost equality", n)
 		}
+	}
+	// Is-empty is the mirror case: kept where blank means NULL, withheld for
+	// text where it would answer the opposite question (see the empty-family
+	// tests below).
+	if !has(byName["id"], opEmpty) {
+		t.Error("a numeric column should keep is-empty: blank means NULL there")
+	}
+	if has(byName["name"], opEmpty) {
+		t.Error("a text column must not be offered is-empty: IS NULL inverts it")
 	}
 }
 
@@ -338,5 +355,82 @@ func TestBuildFilterValuesAllowsARangeOnOneField(t *testing.T) {
 	}
 	if got.Get("filter[id]__gt") != "5" || got.Get("filter[id]__lt") != "10" {
 		t.Errorf("range lost: %v", got)
+	}
+}
+
+// NetBox stores a blank character field as "" rather than NULL, so translating
+// is-empty to IS NULL asks the opposite question. Measured on staging, where
+// every device has a blank serial: isnull=true matched 0 of 6,824,570 rows and
+// isnull=false matched all of them — so "is empty" found nothing where every
+// row qualified, and "has any value" found everything where none did.
+func TestFilterFieldsWithholdsTheEmptyFamilyFromTextColumns(t *testing.T) {
+	fields := []provider.Field{
+		{Name: "serial", Type: provider.FieldTypeString},
+		{Name: "tenant_id", Type: provider.FieldTypeNumber},
+	}
+	raw := map[string]bool{"serial": true, "tenant_id": true}
+	types := map[string]provider.FieldType{
+		"serial":    provider.FieldTypeString,
+		"tenant_id": provider.FieldTypeNumber,
+	}
+
+	byName := map[string][]string{}
+	for _, f := range filterFieldsFor(fields, raw, types) {
+		byName[f.Name] = f.Operators
+	}
+	has := func(ops []string, op string) bool {
+		for _, o := range ops {
+			if o == op {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, op := range []string{opEmpty, opNEmpty} {
+		if has(byName["serial"], op) {
+			t.Errorf("text column was offered %q; IS NULL answers the opposite question for a blank string", op)
+		}
+		if !has(byName["tenant_id"], op) {
+			t.Errorf("numeric column lost %q; blank really is NULL there", op)
+		}
+	}
+}
+
+// A saved dashboard predates the editor's current answer, so the combination
+// has to be refused at query time as well.
+func TestValidateFilterTypesRefusesTheEmptyFamilyOnTextColumns(t *testing.T) {
+	types := map[string]provider.FieldType{
+		"serial":    provider.FieldTypeString,
+		"tenant_id": provider.FieldTypeNumber,
+	}
+
+	for _, op := range []string{opEmpty, opNEmpty} {
+		err := validateFilterTypes([]provider.Filter{{Field: "serial", Operator: op}}, types)
+		if err == nil {
+			t.Fatalf("want a refusal for %q on a text column", op)
+		}
+		var unsupported *UnsupportedFilterError
+		if !errors.As(err, &unsupported) {
+			t.Fatalf("want *UnsupportedFilterError, got %T", err)
+		}
+		// The message has to say what to do instead, since the operator is in
+		// the editor for every other column type.
+		if !strings.Contains(unsupported.Reason, "empty string") {
+			t.Errorf("reason should explain the blank-string mismatch: %q", unsupported.Reason)
+		}
+
+		if err := validateFilterTypes([]provider.Filter{{Field: "tenant_id", Operator: op}}, types); err != nil {
+			t.Errorf("%q on a numeric column must be allowed: %v", op, err)
+		}
+	}
+}
+
+// A column whose type was never established is not treated as text, so the
+// empty family stays available rather than disappearing on a sparse column.
+func TestEmptyFamilyAllowedWhenTypeIsUnknown(t *testing.T) {
+	types := map[string]provider.FieldType{"mystery": provider.FieldType("")}
+	if err := validateFilterTypes([]provider.Filter{{Field: "mystery", Operator: opEmpty}}, types); err != nil {
+		t.Errorf("an untyped column should not be refused is-empty: %v", err)
 	}
 }

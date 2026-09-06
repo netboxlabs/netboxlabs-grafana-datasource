@@ -858,3 +858,38 @@ func TestChoiceValueAliasSurvivesAnEarlierRealValueColumn(t *testing.T) {
 		}
 	}
 }
+
+// A provisioned dashboard's YAML can store " -name ", which the frontend
+// normalizes and displays as name descending. Untrimmed, the "-" prefix was not
+// even seen, so a stored descending sort on a perfectly ordinary stored column
+// was reported as derived and dropped, and the panel came back unsorted.
+func TestOrderingIsNormalizedBeforeItIsValidated(t *testing.T) {
+	for _, stored := range []string{" -name ", "  name", "-name", " name "} {
+		f := newFakeService()
+		f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+		p := newTestProvider(t, f)
+
+		res, err := p.Query(context.Background(), provider.QuerySpec{
+			ObjectType: "dcim/devices",
+			Ordering:   stored,
+		})
+		if err != nil {
+			t.Fatalf("%q: %v", stored, err)
+		}
+		if len(res.Notes) != 0 {
+			t.Errorf("%q: name is a stored column and must sort, got notes %v", stored, res.Notes)
+		}
+		r, ok := f.requestWith("dcim/devices", "sort")
+		if !ok {
+			t.Errorf("%q: no sort was pushed down", stored)
+			continue
+		}
+		want := "name"
+		if strings.Contains(stored, "-") {
+			want = "-name"
+		}
+		if got := r.query.Get("sort"); got != want {
+			t.Errorf("%q: sort=%q, want %q", stored, got, want)
+		}
+	}
+}

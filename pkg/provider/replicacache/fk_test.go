@@ -2,6 +2,7 @@ package replicacache
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -597,5 +598,83 @@ func TestNullColumnsSurviveADiscoveryFailure(t *testing.T) {
 	}
 	if len(res.Warnings) == 0 {
 		t.Error("the columns that DID need discovery must still be reported missing")
+	}
+}
+
+// Three shapes a *_id column can hold, and they need three different answers.
+func TestForeignKeyValuesAreClassifiedNotJustParsed(t *testing.T) {
+	// A number that is not an identifier is a malformed row, not "no
+	// relationship" — read as null it would become a legitimate-looking column
+	// that an alert-table query counts as a real row.
+	for _, bad := range []interface{}{float64(0), float64(1.5), float64(-3)} {
+		f := newFakeService()
+		f.entities["dcim/devices"] = []map[string]interface{}{
+			{"id": float64(1), "name": "CORE-1", "site_id": bad},
+		}
+		p := newTestProvider(t, f)
+		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+		if err == nil {
+			t.Errorf("site_id %#v was accepted as a relationship", bad)
+			continue
+		}
+		if !errors.Is(err, errMalformedFK) {
+			t.Errorf("site_id %#v: want errMalformedFK, got %v", bad, err)
+		}
+	}
+
+	// A STRING means the column is not a foreign key at all. NetBox has
+	// CharFields whose names end in _id — circuits.ProviderNetwork.service_id
+	// holds the provider's own service identifier — and deriving a "service"
+	// column of nils from one invents a relationship that does not exist.
+	f := newFakeService()
+	f.entities["circuits/provider-networks"] = []map[string]interface{}{
+		{"id": float64(1), "name": "NET-1", "service_id": "SVC-9", "provider_id": nil},
+	}
+	p := newTestProvider(t, f)
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "circuits/provider-networks"})
+	if err != nil {
+		t.Fatalf("a text column that ends in _id is not an error: %v", err)
+	}
+	for _, c := range res.Columns {
+		if c == "service" {
+			t.Errorf("invented a service relationship from a text column: %v", res.Columns)
+		}
+	}
+	// A genuinely null FK still gets its column.
+	var hasProvider bool
+	for _, c := range res.Columns {
+		if c == "provider" {
+			hasProvider = true
+		}
+	}
+	if !hasProvider {
+		t.Errorf("provider_id is null, which is a real null relationship: %v", res.Columns)
+	}
+}
+
+// A plugin's schema is arbitrary and third-party, so a unique basename
+// elsewhere in the deployment is not evidence about it. The fallback that earns
+// its keep across NetBox's own apps would resolve a plugin's role_id to
+// ipam/roles purely because that is the only "roles" model anyone serves.
+func TestPluginForeignKeysAreNotGuessedAcrossApps(t *testing.T) {
+	known := map[string]bool{
+		"plugins/acme/widgets": true,
+		"ipam/roles":           true,
+		"dcim/devices":         true,
+		"dcim/device-roles":    true,
+	}
+	if got, ok := fkTarget("plugins/acme/widgets", "role", known); ok {
+		t.Errorf("resolved a plugin's role to %q on basename uniqueness alone", got)
+	}
+	// A same-plugin target is still found, since that IS evidence.
+	known["plugins/acme/roles"] = true
+	if got, ok := fkTarget("plugins/acme/widgets", "role", known); !ok || got != "plugins/acme/roles" {
+		t.Errorf("fkTarget = %q,%v; want plugins/acme/roles", got, ok)
+	}
+	// And NetBox's own apps keep the fallback that measured 33 right to 1 wrong.
+	if got, ok := fkTarget("dcim/devices", "tenant", map[string]bool{
+		"dcim/devices": true, "tenancy/tenants": true,
+	}); !ok || got != "tenancy/tenants" {
+		t.Errorf("fkTarget = %q,%v; want tenancy/tenants", got, ok)
 	}
 }

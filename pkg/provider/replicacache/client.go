@@ -180,6 +180,7 @@ var (
 	errMalformedEnvelope  = errors.New(`response envelope is missing "count" or "results"`)
 	errMalformedRow       = errors.New("result row is not an object")
 	errRowWithoutID       = errors.New("result row has no usable id")
+	errMalformedFK        = errors.New("relationship id is not a usable identifier")
 	errInconsistentCount  = errors.New("page holds more rows than its reported total")
 	errCursorNotAdvancing = errors.New("pagination cursor repeated")
 	errEmptyDiscovery     = errors.New("API description lists no object types")

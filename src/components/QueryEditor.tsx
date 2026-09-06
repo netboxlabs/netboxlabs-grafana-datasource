@@ -186,21 +186,42 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   const filterFieldOptions = filterFieldOptionsFrom(filterFields, fieldOptions);
   const schemaMode = filterFields.length > 0;
 
-  // Sorting is a closed vocabulary, unlike every other picker on this form. The
-  // rest are built from the object type's schema; this one CANNOT be, because
-  // an unknown ordering field is not harmlessly ignored by NetBox — some raise a
-  // 500 that ends the query, and dcim/sites' `device_count` is a schema column
-  // that does exactly that once the `?fields=` projection is in play. So the
-  // options are the measured allow-list for THIS object type and nothing else,
-  // and a type with no entry gets no control rather than an empty dropdown.
-  const orderingOptions: Array<SelectableValue<string>> = useMemo(
-    () => orderingFieldsFor(query.objectType).map((f) => ({ label: f, value: f })),
-    [query.objectType]
-  );
+  const settings = datasource.datasourceInstanceSettings?.jsonData;
+  const cacheMode = settings?.mode === 'replica-cache';
+
   // Read back through the same helpers the writer uses, so a stored '-name'
   // (or a provisioned ' -name ') shows as its field plus a direction.
   const sortField = orderingField(query.ordering);
   const sortDescending = orderingIsDescending(query.ordering);
+
+  // Sorting is a closed vocabulary in NetBox mode, unlike every other picker on
+  // this form. The rest are built from the object type's schema; that one
+  // CANNOT be, because an unknown ordering field is not harmlessly ignored by
+  // NetBox — some raise a 500 that ends the query, and dcim/sites'
+  // `device_count` is a schema column that does exactly that once the
+  // `?fields=` projection is in play. So the options are the measured
+  // allow-list for THIS object type and nothing else, and a type with no entry
+  // gets no control rather than an empty dropdown.
+  //
+  // None of that reasoning is about replica-cache. There the sortable set is
+  // the STORED columns, which the backend already publishes as the filterable
+  // set — filterFieldsFor restricts it to exactly the raw columns — so the
+  // options come from the schema like every other picker. The allow-list was
+  // wrong for it in both directions: dcim/racks and every plugin model have no
+  // entry and so got no sort control at all, while dcim/devices offered site
+  // and role, which are derived and which the backend drops with a note.
+  //
+  // A sort already stored is kept in the list even when the schema has not
+  // arrived yet, or no longer has that column, so the control does not vanish
+  // from under a saved panel.
+  const orderingOptions: Array<SelectableValue<string>> = useMemo(() => {
+    const names = cacheMode ? filterFields.map((f) => f.name) : orderingFieldsFor(query.objectType);
+    if (cacheMode && sortField && !names.includes(sortField)) {
+      names.push(sortField);
+      names.sort();
+    }
+    return names.map((f) => ({ label: f, value: f }));
+  }, [cacheMode, filterFields, query.objectType, sortField]);
   // Fast paging walks by cursor, and NetBox refuses ?ordering= together with
   // ?start= ("Ordering cannot be specified in conjunction with cursor
   // pagination"), so a sort cannot reach a query that takes that walk.
@@ -215,8 +236,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   // from it — and the value survives a mode switch, so a datasource that had
   // fast paging on before being pointed at the cache arrived with sorting
   // disabled for a limit that does not apply.
-  const settings = datasource.datasourceInstanceSettings?.jsonData;
-  const fastPaging = settings?.mode !== 'replica-cache' && settings?.fastPagingNoTotals === true;
+  const fastPaging = !cacheMode && settings?.fastPagingNoTotals === true;
   // The setting alone is not the condition — the cursor walk is, and an
   // alert-table query never takes it. pkg/plugin/query.go's alertTable branch
   // leaves AllowUncounted false (only the plain objects branch sets it, and only

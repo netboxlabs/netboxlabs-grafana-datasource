@@ -230,3 +230,66 @@ func TestPageContradictingItsOwnCountIsRejected(t *testing.T) {
 		t.Errorf("total=%d rows=%d, want 500 and 1", res.Total, len(res.Rows))
 	}
 }
+
+// Pages that individually agree with their own count can still contradict each
+// other. Two one-row pages each reporting count 1 hand back two rows for a
+// total of one, and the truncation guard only looks for the opposite
+// inequality, so an alert would evaluate the extra row as authoritative.
+func TestPagesThatContradictEachOtherAreRejected(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		body := `{"count": 1, "results": [{"id": 1, "name": "A"}], "next_cursor": "c2"}`
+		if n > 1 {
+			body = `{"count": 1, "results": [{"id": 2, "name": "B"}]}`
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Limit: 100})
+	if err == nil {
+		t.Fatal("two rows for a total of one must be refused")
+	}
+	if !errors.Is(err, errInconsistentCount) {
+		t.Errorf("want errInconsistentCount, got %v", err)
+	}
+}
+
+// The first page's total goes stale BY DESIGN: this mirrors a database being
+// written to, cursor paging does not freeze a snapshot, and rows inserted
+// mid-walk legitimately push the running count past a total that was correct
+// when it was read. The later pages' own counts have grown to cover them, so
+// this must NOT be refused — validating against the first total rather than the
+// largest would turn ordinary concurrent writes into a query failure.
+func TestGrowingTotalMidWalkIsNotAContradiction(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		body := `{"count": 1, "results": [{"id": 1, "name": "A"}], "next_cursor": "c2"}`
+		if n > 1 {
+			// Two rows were inserted while we walked, so the count has grown.
+			body = `{"count": 3, "results": [{"id": 2, "name": "B"}, {"id": 3, "name": "C"}]}`
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Limit: 100})
+	if err != nil {
+		t.Fatalf("a growing count is a concurrent write, not a contradiction: %v", err)
+	}
+	if len(res.Rows) != 3 {
+		t.Errorf("rows = %d, want 3", len(res.Rows))
+	}
+	// Total stays the first page's answer: it and len(Rows) answer different
+	// questions, and recomputing it from the rows would report a truncated page
+	// as the whole population.
+	if res.Total != 1 {
+		t.Errorf("total = %d, want the first page's 1", res.Total)
+	}
+}

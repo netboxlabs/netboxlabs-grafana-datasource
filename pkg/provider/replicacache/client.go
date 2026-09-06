@@ -343,10 +343,14 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 	}
 
 	var (
-		rows   []json.RawMessage
-		total  int
-		cursor string
-		first  = true
+		rows []json.RawMessage
+		// total is the first page's count, which is what Result.Total carries.
+		// maxTotal is the largest count any page reported, which is what the
+		// rows are validated against — see the check below the append.
+		total    int
+		maxTotal int
+		cursor   string
+		first    = true
 	)
 	for len(rows) < limit {
 		want := limit - len(rows)
@@ -369,7 +373,31 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 			total = *page.Count
 			first = false
 		}
+		if n := *page.Count; n > maxTotal {
+			maxTotal = n
+		}
 		rows = append(rows, page.rows()...)
+
+		// Pages that individually agree with their own count can still
+		// contradict each other: two one-row pages each reporting count 1 hand
+		// back two rows for a total of one, and the truncation guard only looks
+		// for the opposite inequality, so an alert would evaluate the extra row
+		// as authoritative.
+		//
+		// The comparison is against the LARGEST count seen, not the first. The
+		// first page's total goes stale by design: this mirrors a database being
+		// written to, cursor paging does not freeze a snapshot, and rows
+		// inserted mid-walk legitimately push the running count past a total
+		// that was correct when it was read. In that case the later pages' own
+		// counts have grown to cover them, so the check passes. A service
+		// contradicting itself has no such growth, and is refused.
+		if len(rows) > maxTotal {
+			return nil, 0, &TransportError{
+				Op:      "reading response from " + truncate(c.base+"/v1/"+entity),
+				Err:     errInconsistentCount,
+				Message: "Replica cache returned more rows than any page's total said existed. The service is reachable but answered with something unexpected.",
+			}
+		}
 
 		// A page that comes back empty or without a cursor is the end of the
 		// result set. Both conditions are needed: the service omits the cursor on

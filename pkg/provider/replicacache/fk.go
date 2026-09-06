@@ -557,7 +557,7 @@ func toInt(v interface{}) (int, bool) {
 		return n, n > 0
 	case json.Number:
 		i, err := n.Int64()
-		if err != nil || i <= 0 || i > math.MaxInt32 {
+		if err != nil || i <= 0 {
 			return 0, false
 		}
 		return int(i), true
@@ -565,8 +565,16 @@ func toInt(v interface{}) (int, bool) {
 	return 0, false
 }
 
+// maxExactID is the largest integer a float64 holds exactly. Ids arrive through
+// encoding/json as float64, so this is the representation's own limit rather
+// than a chosen one: past it the value that came back is not the value that was
+// sent, and accepting it would silently identify a different object. NetBox
+// primary keys are 64-bit, so a smaller cap — int32, as this first had — would
+// reject legitimate ids on a large instance.
+const maxExactID = 1 << 53
+
 func fromFloat(f float64) (int, bool) {
-	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) || f <= 0 || f > math.MaxInt32 {
+	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) || f <= 0 || f > maxExactID {
 		return 0, false
 	}
 	return int(f), true

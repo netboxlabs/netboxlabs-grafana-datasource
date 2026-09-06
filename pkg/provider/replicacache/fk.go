@@ -253,6 +253,14 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	// and the names appear; a hung one costs a few seconds once rather than a
 	// full HTTP timeout per query, and the result degrades honestly. Rows are
 	// complete and correct as ids either way; only the names are missing.
+	// Nothing to resolve means nothing to wait for. An empty result, or a
+	// projection of scalar columns only, has no *_id to target — and paying the
+	// discovery budget to discover that would add seconds to a query that was
+	// never going to use the answer.
+	if !hasResolvableFK(rows) {
+		return nil, nil
+	}
+
 	known, ok := p.entitySetSoon(discoveryWaitBudget)
 	if !ok {
 		return nil, []string{"Related names could not be added yet: the list of available object types is still being read. Columns such as \"site\" and \"role\" are missing from this result; the matching *_id columns still hold the values, and a refresh should resolve them."}
@@ -428,4 +436,21 @@ func toInt(v interface{}) (int, bool) {
 		return int(i), err == nil
 	}
 	return 0, false
+}
+
+// hasResolvableFK reports whether any row carries a column that could name a
+// related object. It is deliberately cheap and permissive: a false positive
+// costs one discovery lookup, while a false negative would silently drop the
+// resolved names.
+func hasResolvableFK(rows []map[string]interface{}) bool {
+	for _, row := range rows {
+		for col, v := range row {
+			if base, ok := strings.CutSuffix(col, "_id"); ok && base != "" {
+				if _, isNum := toInt(v); isNum {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

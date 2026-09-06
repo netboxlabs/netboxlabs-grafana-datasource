@@ -3,6 +3,7 @@ package replicacache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -162,6 +163,17 @@ func (e *TransportError) Classification() *provider.UpstreamError {
 	return &provider.UpstreamError{Kind: provider.ErrorKindUpstream, Detail: detail}
 }
 
+// maxBodyBytes caps a single response. The same 64 MiB the NetBox client uses.
+// A var so that a test can lower it rather than allocate the real limit.
+var maxBodyBytes int64 = 64 << 20
+
+// errOversizedBody and errMissingCount are the protocol violations the client
+// refuses outright, kept as sentinels so tests can name what they assert.
+var (
+	errOversizedBody = errors.New("response exceeds 64 MiB")
+	errMissingCount  = errors.New(`response envelope has no "count"`)
+)
+
 // errorBody is the service's failure shape: {"error": "unknown column: foo"}.
 type errorBody struct {
 	Error string `json:"error"`
@@ -169,8 +181,14 @@ type errorBody struct {
 
 // listPage is one page of a list response. Rows stay as raw JSON so that key
 // order survives into the flattened output.
+// Count is a pointer so that an envelope missing the field is distinguishable
+// from one reporting zero rows. The difference matters: Total feeds the count
+// query's single number and the "showing N of M" truncation notice, which is
+// suppressed when Total is zero. Decoded as a plain int, a proxy or error page
+// answering {"results":[...]} would silently present a truncated table as the
+// whole population.
 type listPage struct {
-	Count      int               `json:"count"`
+	Count      *int              `json:"count"`
 	NextCursor string            `json:"next_cursor"`
 	Results    []json.RawMessage `json:"results"`
 }
@@ -200,11 +218,21 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out interfa
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	// Read one byte past the cap so that an oversized body is rejected rather
+	// than silently truncated into a parse error. Matches the NetBox client's
+	// limit; without it a single upstream response could exhaust the backend.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
 		// A body that stops mid-read is the same class of failure: the service
 		// never finished answering.
 		return &TransportError{Op: "reading response from " + truncate(raw), Err: err}
+	}
+	if int64(len(body)) > maxBodyBytes {
+		return &TransportError{
+			Op:      "reading response from " + truncate(raw),
+			Err:     errOversizedBody,
+			Message: "Replica cache returned a response larger than 64 MiB. Narrow the query with filters or a smaller limit.",
+		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		apiErr := &APIError{Status: resp.StatusCode, URL: raw, Body: snippet(body)}
@@ -248,6 +276,16 @@ func (c *Client) listOnce(ctx context.Context, entity string, q url.Values, curs
 	// the API.
 	if err := c.get(ctx, "/v1/"+entity, params, &page); err != nil {
 		return listPage{}, err
+	}
+	if page.Count == nil {
+		// Valid JSON in the wrong shape — an intermediary's error page, or a
+		// different service behind the URL. Accepting it would report zero for
+		// count queries and quietly drop the truncation notice.
+		return listPage{}, &TransportError{
+			Op:      "reading response from " + truncate(c.base+"/v1/"+entity),
+			Err:     errMissingCount,
+			Message: "Replica cache returned a response in an unexpected shape. Check that the replica-cache URL points at the service and not at a proxy or error page.",
+		}
 	}
 	return page, nil
 }
@@ -293,7 +331,7 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 			return nil, 0, err
 		}
 		if first {
-			total = page.Count
+			total = *page.Count
 			first = false
 		}
 		rows = append(rows, page.Results...)

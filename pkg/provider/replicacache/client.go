@@ -176,14 +176,15 @@ var maxBodyBytes int64 = 64 << 20
 // errOversizedBody and errMissingCount are the protocol violations the client
 // refuses outright, kept as sentinels so tests can name what they assert.
 var (
-	errOversizedBody      = errors.New("response exceeds 64 MiB")
-	errMalformedEnvelope  = errors.New(`response envelope is missing "count" or "results"`)
-	errMalformedRow       = errors.New("result row is not an object")
-	errRowWithoutID       = errors.New("result row has no usable id")
-	errMalformedFK        = errors.New("relationship id is not a usable identifier")
-	errInconsistentCount  = errors.New("page holds more rows than its reported total")
-	errCursorNotAdvancing = errors.New("pagination cursor repeated")
-	errEmptyDiscovery     = errors.New("API description lists no object types")
+	errOversizedBody         = errors.New("response exceeds 64 MiB")
+	errMalformedEnvelope     = errors.New(`response envelope is missing "count" or "results"`)
+	errMalformedRow          = errors.New("result row is not an object")
+	errRowWithoutID          = errors.New("result row has no usable id")
+	errMalformedFK           = errors.New("relationship id is not a usable identifier")
+	errMalformedCustomFields = errors.New("custom field data could not be read")
+	errInconsistentCount     = errors.New("page holds more rows than its reported total")
+	errCursorNotAdvancing    = errors.New("pagination cursor repeated")
+	errEmptyDiscovery        = errors.New("API description lists no object types")
 )
 
 // errorBody is the service's failure shape: {"error": "unknown column: foo"}.

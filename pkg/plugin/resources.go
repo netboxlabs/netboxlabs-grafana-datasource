@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"net/http"
 	"strconv"
 	"strings"
@@ -173,9 +174,20 @@ func writeError(w http.ResponseWriter, status int, err error) {
 
 // writeProviderError logs the raw provider error (sanitized) and writes the
 // user-facing mapped message, so raw NetBox API errors aren't surfaced.
+// writeProviderError renders a provider failure for the resource routes, which
+// variable queries and the query editor's preview both use.
+//
+// The status comes from the same classification the data path uses. It was
+// hardcoded to 502, which told a caller their own input was a gateway failure —
+// so an unsupported filter or a mistyped object type read as "the upstream is
+// broken, try again" on the one path where the user can actually fix it.
 func writeProviderError(w http.ResponseWriter, err error) {
 	log.DefaultLogger.Warn("netbox resource error", "detail", sanitizeLog(err.Error()))
-	writeError(w, http.StatusBadGateway, errMsg(queryErrorMessage(err)))
+	status := http.StatusBadGateway
+	if queryErrorStatus(err) == backend.StatusBadRequest {
+		status = http.StatusBadRequest
+	}
+	writeError(w, status, errMsg(queryErrorMessage(err)))
 }
 
 type errMsg string

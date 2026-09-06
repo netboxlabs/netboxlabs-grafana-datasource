@@ -573,34 +573,44 @@ func fieldType(name string, v interface{}) provider.FieldType {
 	case float64, int, json.Number:
 		return provider.FieldTypeNumber
 	}
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return provider.FieldTypeString
+	}
+	// A value carrying a date, a time and a zone is a timestamp whatever the
+	// column is called. NetBox stores no free text in that shape, and column
+	// names cannot be enumerated: the 4.4 schema has DateTimeFields named
+	// completed, started, scheduled, read, last_login, last_sync, last_synced,
+	// merged_time, data_synced and date_joined, none of which any name rule
+	// would have guessed. The value decides.
+	if _, err := time.Parse(time.RFC3339, s); err == nil {
+		return provider.FieldTypeTime
+	}
+	// A bare YYYY-MM-DD is genuinely ambiguous — a serial or an asset tag can
+	// look like one — so here the column name still has to agree.
 	if isTimeColumn(name) {
-		if s, ok := v.(string); ok {
-			// Both shapes: NetBox DateTimeFields serialize as RFC3339, plain
-			// DateFields as YYYY-MM-DD. Missing the second left columns such as
-			// circuits.termination_date classified as text and offered ILIKE.
-			for _, layout := range []string{time.RFC3339, time.DateOnly} {
-				if _, err := time.Parse(layout, s); err == nil {
-					return provider.FieldTypeTime
-				}
-			}
+		if _, err := time.Parse(time.DateOnly, s); err == nil {
+			return provider.FieldTypeTime
 		}
 	}
 	return provider.FieldTypeString
 }
 
-// isTimeColumn names the columns whose string values are dates or timestamps.
+// isTimeColumn reports whether a column's name agrees that a bare YYYY-MM-DD
+// value is a date. Only the ambiguous date-without-a-zone case consults it;
+// a full RFC3339 value is a timestamp on its own evidence.
 //
-// Gated on the name as well as the format, so a text column that happens to
-// hold something date-shaped keeps its text operators. The suffix rule catches
-// the DateField columns a fixed list cannot enumerate — termination_date,
-// install_date and whatever a deployment adds next — without claiming every
-// string that parses as a date.
+// The affixes catch the DateField columns a fixed list cannot enumerate —
+// termination_date, install_date, date_added — without claiming every string
+// that happens to parse as a date.
 func isTimeColumn(name string) bool {
 	switch name {
 	case "created", "last_updated", "last_used", "time", "expires":
 		return true
 	}
-	return strings.HasSuffix(name, "_date") || strings.HasSuffix(name, "_at")
+	return strings.HasSuffix(name, "_date") ||
+		strings.HasSuffix(name, "_at") ||
+		strings.HasPrefix(name, "date_")
 }
 
 // FilterFields advertises every column with the operator set the backend

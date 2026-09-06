@@ -692,3 +692,73 @@ func TestMalformedResponseNamesTheCache(t *testing.T) {
 		t.Errorf("we did reach it; the wording should not say otherwise: %q", u.Detail)
 	}
 }
+
+// Column names cannot be enumerated. Every name here is a real NetBox 4.4
+// date or date-time field that no naming rule would have guessed — checked
+// against the 4.4.10 OpenAPI schema — and classifying them as text advertises
+// ILIKE, which this backend then pushes at a timestamp column.
+func TestTimestampValuesDecideRegardlessOfColumnName(t *testing.T) {
+	f := newFakeService()
+	f.entities["core/jobs"] = []map[string]interface{}{{
+		"id":        float64(1),
+		"scheduled": "2026-05-06T17:34:30.696190Z",
+		"started":   "2026-05-06T17:34:31.000000Z",
+		"completed": "2026-05-06T17:35:02.100000Z",
+		// DataSource.last_synced, Branch.last_sync, Notification.read,
+		// User.last_login — all DateTimeFields, none name-guessable.
+		"last_synced": "2026-05-06T17:35:02.100000Z",
+		"last_sync":   "2026-05-06T17:35:02.100000Z",
+		"read":        "2026-05-06T17:35:02.100000Z",
+		"last_login":  "2026-05-06T17:35:02.100000Z",
+		"merged_time": "2026-05-06T17:35:02.100000Z",
+		// Aggregate.date_added is a plain DateField: ambiguous on its own, so
+		// the name still has to agree — and the date_ prefix is how it does.
+		"date_added": "2026-01-02",
+		// Text that looks date-ish must keep its text operators: no zone, no T.
+		"description": "2026-05-06 cutover",
+		"name":        "2026-01-02",
+	}}
+	p := newTestProvider(t, f)
+
+	fields, err := p.Fields(context.Background(), "core/jobs")
+	if err != nil {
+		t.Fatalf("Fields: %v", err)
+	}
+	byName := map[string]provider.FieldType{}
+	for _, fl := range fields {
+		byName[fl.Name] = fl.Type
+	}
+	for _, c := range []string{
+		"scheduled", "started", "completed", "last_synced",
+		"last_sync", "read", "last_login", "merged_time", "date_added",
+	} {
+		if byName[c] != provider.FieldTypeTime {
+			t.Errorf("%s typed %q, want time", c, byName[c])
+		}
+	}
+	if byName["description"] != provider.FieldTypeString {
+		t.Errorf("description typed %q, want string", byName["description"])
+	}
+
+	// And the consequence that matters: no ILIKE offered on a timestamp.
+	ffs, err := p.FilterFields(context.Background(), "core/jobs")
+	if err != nil {
+		t.Fatalf("FilterFields: %v", err)
+	}
+	timestamps := map[string]bool{
+		"scheduled": true, "started": true, "completed": true,
+		"last_synced": true, "last_sync": true, "read": true,
+		"last_login": true, "merged_time": true, "date_added": true,
+	}
+	for _, ff := range ffs {
+		if !timestamps[ff.Name] {
+			continue
+		}
+		for _, op := range ff.Operators {
+			switch op {
+			case opIContns, opIStarts, opIEnds, opIExact:
+				t.Errorf("%s is a timestamp but advertises the text operator %q", ff.Name, op)
+			}
+		}
+	}
+}

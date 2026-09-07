@@ -182,6 +182,7 @@ var (
 	errRowWithoutID          = errors.New("result row has no usable id")
 	errMalformedFK           = errors.New("relationship id is not a usable identifier")
 	errDuplicateRow          = errors.New("the same object id appeared twice")
+	errRowWithoutField       = errors.New("row is missing the column it was projected onto")
 	errMalformedCustomFields = errors.New("custom field data could not be read")
 	errInconsistentCount     = errors.New("page holds more rows than its reported total")
 	errCursorNotAdvancing    = errors.New("pagination cursor repeated")

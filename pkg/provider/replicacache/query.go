@@ -326,8 +326,18 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 		if aliasOfPresentColumn(f, rows) {
 			continue
 		}
+		// A count is zero, not null. The shared contract gives an empty list a
+		// _count of float64(0), and an all-null column is typed as strings by
+		// buildFrame — so a threshold or numeric transformation that worked in
+		// NetBox mode would stop working here, which is the kind of silent
+		// difference this whole mode is supposed to avoid. Unset and empty are
+		// different things in NetBox, but for a COUNT they mean the same one.
+		var unset interface{}
+		if strings.HasSuffix(f, "_count") {
+			unset = float64(0)
+		}
 		for _, row := range rows {
-			row[f] = nil
+			row[f] = unset
 		}
 		added = append(added, f)
 	}

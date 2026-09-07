@@ -1111,3 +1111,76 @@ func TestValueRowWithANullFieldIsAnAnswer(t *testing.T) {
 		t.Errorf("got %v, want just ABC", got)
 	}
 }
+
+// A timestamp claim has to hold across the whole sample. One RFC3339-looking
+// value in a text column would otherwise type it as time, and the damage is not
+// cosmetic: filterFieldsFor then offers is-empty, which this backend answers
+// with IS NULL, and NetBox stores a blank text field as "" — so the filter
+// returns the exact opposite population while looking healthy.
+func TestATimestampClaimMustHoldAcrossTheSample(t *testing.T) {
+	f := newFakeService()
+	f.entities["plugins/acme/widgets"] = []map[string]interface{}{
+		// The first non-null value looks like a timestamp; the rest are prose.
+		{"id": float64(1), "note": "2026-05-06T17:34:30.696190Z"},
+		{"id": float64(2), "note": "replaced the line card"},
+		{"id": float64(3), "note": "scheduled for refresh"},
+	}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	fields, err := p.Fields(ctx, "plugins/acme/widgets")
+	if err != nil {
+		t.Fatalf("Fields: %v", err)
+	}
+	for _, fl := range fields {
+		if fl.Name == "note" && fl.Type == provider.FieldTypeTime {
+			t.Error("a text column with one timestamp-shaped value is not a time column")
+		}
+	}
+
+	// The consequence that matters: is-empty must not be offered, because this
+	// backend answers it with IS NULL and blank text is "" rather than NULL.
+	ffs, err := p.FilterFields(ctx, "plugins/acme/widgets")
+	if err != nil {
+		t.Fatalf("FilterFields: %v", err)
+	}
+	for _, ff := range ffs {
+		if ff.Name != "note" {
+			continue
+		}
+		for _, op := range ff.Operators {
+			if op == opEmpty || op == opNEmpty {
+				t.Errorf("note advertises %q; on a text column that inverts the result", op)
+			}
+		}
+	}
+}
+
+// And a column that really is a timestamp in every sampled row keeps its type,
+// so the guard does not undo the value-led inference it protects.
+func TestAConsistentTimestampColumnIsStillTime(t *testing.T) {
+	f := newFakeService()
+	f.entities["core/jobs"] = []map[string]interface{}{
+		{"id": float64(1), "completed": "2026-05-06T17:34:30.696190Z"},
+		{"id": float64(2), "completed": "2026-05-07T09:00:00.000000Z"},
+		{"id": float64(3), "completed": nil},
+	}
+	p := newTestProvider(t, f)
+
+	fields, err := p.Fields(context.Background(), "core/jobs")
+	if err != nil {
+		t.Fatalf("Fields: %v", err)
+	}
+	var found bool
+	for _, fl := range fields {
+		if fl.Name == "completed" {
+			found = true
+			if fl.Type != provider.FieldTypeTime {
+				t.Errorf("completed typed %q, want time", fl.Type)
+			}
+		}
+	}
+	if !found {
+		t.Error("completed missing from the field list")
+	}
+}

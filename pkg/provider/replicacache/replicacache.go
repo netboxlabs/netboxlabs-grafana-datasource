@@ -814,8 +814,16 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	var out []string
 	for _, r := range raws {
 		var obj map[string]interface{}
-		if json.Unmarshal(r, &obj) != nil {
-			continue
+		if err := json.Unmarshal(r, &obj); err != nil {
+			// Skipping made an unreadable response look like a short list of
+			// values, which the editor then presents as authoritative — the
+			// same silence the query path refuses, in the one place a user is
+			// choosing what to filter on.
+			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: err, Message: rowShapeGuidance}
+		}
+		if obj == nil {
+			// A JSON null decodes without error and leaves the map nil.
+			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errMalformedRow, Message: rowShapeGuidance}
 		}
 		s := valueString(obj[field])
 		if s == "" || seen[s] {

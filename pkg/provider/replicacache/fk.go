@@ -60,23 +60,33 @@ var polymorphicFKs = map[string]bool{
 //
 // Every entry was found rather than guessed — the NetBox 4.4.10 schema was
 // searched for properties of type string whose name ends in _id, and this is
-// all seven. Value-type evidence catches most of them (a string is not a key),
-// but not when the column is null on every row of a page: there is nothing to
-// classify, so the column read as an all-null RELATIONSHIP and gained a
-// fabricated derived column that Fields then advertised to the editor.
+// all seven, paired with the model each belongs to. Value-type evidence catches
+// most of them (a string is not a key), but not when the column is null on
+// every row of a page: there is nothing to classify, so the column read as an
+// all-null RELATIONSHIP and gained a fabricated derived column that Fields then
+// advertised to the editor.
 //
-// Several would also resolve by convention if the value ever were numeric —
-// "service" finds ipam/services — so excluding them by name is what actually
-// closes the door.
+// Keyed by ENTITY, not by bare name. Several of these words would resolve by
+// convention if the value ever were numeric — "service" finds ipam/services —
+// so the exclusion has to be by name rather than by inference; but the fact
+// being recorded is about a specific NetBox model, and applying it globally
+// would suppress a legitimate plugins/acme/widgets.service_id pointing at
+// plugins/acme/services on the strength of what a core circuits model does.
 var notFKs = map[string]bool{
-	"facility": true, // Rack
-	"job":      true, // Job
-	"part":     true, // InventoryItem, InventoryItemTemplate
-	"request":  true, // ObjectChange
-	"schema":   true, // Branch
-	"service":  true, // ProviderNetwork
-	"xconnect": true, // CircuitTermination
+	"dcim/racks.facility":                    true,
+	"core/jobs.job":                          true,
+	"dcim/inventory-items.part":              true,
+	"dcim/inventory-item-templates.part":     true,
+	"core/object-changes.request":            true,
+	"extras/object-changes.request":          true,
+	"plugins/branching/branches.schema":      true,
+	"circuits/provider-networks.service":     true,
+	"circuits/circuit-terminations.xconnect": true,
 }
+
+// notAKey reports whether this entity's column is one of the text identifiers
+// above.
+func notAKey(entity, base string) bool { return notFKs[entity+"."+base] }
 
 // unexposedFKs point at tables replica-cache does not replicate at all (users,
 // config templates). Nothing can resolve them, so the raw id stays.
@@ -158,7 +168,7 @@ var selfFKs = map[string]bool{
 //	role_id on ipam/prefixes -> ipam/roles         (plain, same app)
 //	tenant_id on dcim/devices -> tenancy/tenants   (unique across apps)
 func fkTarget(entity, base string, known map[string]bool) (string, bool) {
-	if polymorphicFKs[base] || unexposedFKs[base] || notFKs[base] {
+	if polymorphicFKs[base] || unexposedFKs[base] || notAKey(entity, base) {
 		return "", false
 	}
 	// Overrides win over every derivation below, including the global-basename
@@ -362,8 +372,8 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	// projection of scalar columns only, has no *_id to target — and paying the
 	// discovery budget to discover that would add seconds to a query that was
 	// never going to use the answer.
-	if !hasResolvableFK(rows, want) {
-		return nullFKColumns(rows), nil
+	if !hasResolvableFK(entity, rows, want) {
+		return nullFKColumns(entity, rows), nil
 	}
 
 	known, ok := p.entitySetSoon(ctx, discoveryWaitBudget)
@@ -371,7 +381,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 		// The all-null columns still stand: they are derived from the rows
 		// alone and need nothing from discovery, so a projection of site and
 		// tenant should lose only the one that had ids to resolve.
-		return nullFKColumns(rows), []string{"Related names could not be added yet: the list of available object types is still being read. Columns such as \"site\" and \"role\" are missing from this result; the matching *_id columns still hold the values, and a refresh should resolve them."}
+		return nullFKColumns(entity, rows), []string{"Related names could not be added yet: the list of available object types is still being read. Columns such as \"site\" and \"role\" are missing from this result; the matching *_id columns still hold the values, and a refresh should resolve them."}
 	}
 
 	// Group the ids to resolve by target entity.
@@ -380,7 +390,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	for _, row := range rows {
 		for col, v := range row {
 			base, ok := strings.CutSuffix(col, "_id")
-			if !ok || base == "" || notFKs[base] || !wanted(want, base) {
+			if !ok || base == "" || notAKey(entity, base) || !wanted(want, base) {
 				continue
 			}
 			id, ok := toInt(v)
@@ -467,7 +477,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	}
 
 	// Apply, collecting new column names in a deterministic order.
-	added := nullFKColumns(rows)
+	added := nullFKColumns(entity, rows)
 	seen := map[string]bool{}
 	for _, c := range added {
 		seen[c] = true
@@ -670,12 +680,12 @@ func wanted(want map[string]bool, base string) bool {
 // "this device has no tenant" when the truth is "the tenant could not be read",
 // and that case has its own warning. All-null is different: there really is no
 // tenant, and saying so is the accurate answer as well as the compatible one.
-func nullFKColumns(rows []map[string]interface{}) []string {
+func nullFKColumns(entity string, rows []map[string]interface{}) []string {
 	bases := map[string]bool{}
 	for _, row := range rows {
 		for col, v := range row {
 			base, ok := strings.CutSuffix(col, "_id")
-			if !ok || base == "" || polymorphicFKs[base] || unexposedFKs[base] || notFKs[base] {
+			if !ok || base == "" || polymorphicFKs[base] || unexposedFKs[base] || notAKey(entity, base) {
 				continue
 			}
 			switch _, kind := classifyFKValue(v); kind {
@@ -746,11 +756,11 @@ func classifyFKValue(v interface{}) (int, fkValueKind) {
 	return 0, fkNotAKey
 }
 
-func hasResolvableFK(rows []map[string]interface{}, want map[string]bool) bool {
+func hasResolvableFK(entity string, rows []map[string]interface{}, want map[string]bool) bool {
 	for _, row := range rows {
 		for col, v := range row {
 			base, ok := strings.CutSuffix(col, "_id")
-			if !ok || base == "" || notFKs[base] || !wanted(want, base) {
+			if !ok || base == "" || notAKey(entity, base) || !wanted(want, base) {
 				continue
 			}
 			// The suffix alone is not enough. owner_id, created_by_id and

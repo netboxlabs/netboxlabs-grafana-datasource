@@ -914,3 +914,44 @@ func TestMalformedSampleRowNamesTheCache(t *testing.T) {
 		t.Errorf("guidance should name the cache: %q", u.Detail)
 	}
 }
+
+// Skipping a malformed value row made an unreadable response look like a short
+// list, which the editor presents as authoritative — the same silence the query
+// path refuses, in the one place a user is choosing what to filter on.
+func TestMalformedValueRowIsRejected(t *testing.T) {
+	for _, bad := range []string{
+		`{"count": 1, "results": ["CORE-1"]}`,
+		`{"count": 1, "results": [null]}`,
+	} {
+		// The schema sample is answered normally FIRST, so rawColumns succeeds
+		// and caches. That is what makes the value loop reachable at all: with a
+		// cold cache the malformed page is caught by the schema sample one level
+		// up, and this decoder never runs.
+		var n int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n++
+			w.Header().Set("Content-Type", "application/json")
+			// Two good answers first: the schema sample, then the warming
+			// value fetch. Only after rawColumns is cached does the value loop
+			// become the sole guard, which is the path under test.
+			if n <= 2 {
+				_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 1, "name": "CORE-1"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(bad))
+		}))
+		p := New(srv.URL, "t", "nb", srv.Client())
+		if _, err := p.FieldValues(context.Background(), "dcim/devices", "name", "", 100); err != nil {
+			t.Fatalf("the warming call must succeed: %v", err)
+		}
+		_, err := p.FieldValues(context.Background(), "dcim/devices", "name", "", 100)
+		srv.Close()
+		if err == nil {
+			t.Errorf("%s produced a value list from an unreadable response", bad)
+			continue
+		}
+		if u := provider.Classify(err); u == nil || !strings.Contains(u.Detail, "Replica cache") {
+			t.Errorf("%s: guidance should name the cache, got %+v", bad, u)
+		}
+	}
+}

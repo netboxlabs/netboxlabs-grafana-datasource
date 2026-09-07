@@ -397,7 +397,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	// discovery budget to discover that would add seconds to a query that was
 	// never going to use the answer.
 	if !hasResolvableFK(entity, rows, want) {
-		return nullFKColumns(entity, rows), nil
+		return nullFKColumns(entity, rows, p.cachedEntitySet), nil
 	}
 
 	known, ok := p.entitySetSoon(ctx, discoveryWaitBudget)
@@ -405,7 +405,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 		// The all-null columns still stand: they are derived from the rows
 		// alone and need nothing from discovery, so a projection of site and
 		// tenant should lose only the one that had ids to resolve.
-		return nullFKColumns(entity, rows), []string{"Related names could not be added yet: the list of available object types is still being read. Columns such as \"site\" and \"role\" are missing from this result; the matching *_id columns still hold the values, and a refresh should resolve them."}
+		return nullFKColumns(entity, rows, p.cachedEntitySet), []string{"Related names could not be added yet: the list of available object types is still being read. Columns such as \"site\" and \"role\" are missing from this result; the matching *_id columns still hold the values, and a refresh should resolve them."}
 	}
 
 	// Group the ids to resolve by target entity.
@@ -501,7 +501,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	}
 
 	// Apply, collecting new column names in a deterministic order.
-	added := nullFKColumns(entity, rows)
+	added := nullFKColumns(entity, rows, p.cachedEntitySet)
 	seen := map[string]bool{}
 	for _, c := range added {
 		seen[c] = true
@@ -704,21 +704,30 @@ func wanted(want map[string]bool, base string) bool {
 // "this device has no tenant" when the truth is "the tenant could not be read",
 // and that case has its own warning. All-null is different: there really is no
 // tenant, and saying so is the accurate answer as well as the compatible one.
-func nullFKColumns(entity string, rows []map[string]interface{}) []string {
-	// Not for a plugin's models. On NetBox's own, a *_id column that is null
-	// everywhere is a relationship unless it is one of the seven text
-	// identifiers named above — a list taken from the schema. A plugin can
-	// define anything and there is no such list, so the suffix alone would
-	// fabricate an "external" column for an ordinary nullable external_id, and
-	// Fields would advertise it until a row arrived carrying a string, at which
-	// point it would disappear. A column that comes and goes is worse than one
-	// that is consistently absent, and a panel selecting it is told so by the
-	// missing-column check rather than being handed nulls.
+func nullFKColumns(entity string, rows []map[string]interface{}, cachedSet func() (map[string]bool, bool)) []string {
+	// A plugin's models need a discovered target, not just the suffix. On
+	// NetBox's own, a *_id column that is null everywhere is a relationship
+	// unless it is one of the seven text identifiers named above — a list taken
+	// from the schema. A plugin can define anything and there is no such list,
+	// so the suffix alone fabricated an "external" column for an ordinary
+	// nullable external_id, which Fields advertised until a row carried a
+	// string and it vanished.
 	//
-	// Nothing is lost that could have been resolved: this synthesizes only
-	// where every value is null, so there was never an id to look up.
-	if strings.HasPrefix(entity, "plugins/") {
-		return nil
+	// The entity list settles it, and reading it here costs nothing: this is
+	// the ALREADY-CACHED set, never a fetch, the same accessor
+	// validateObjectType uses. plugins/acme/widgets.owner_id resolves to
+	// plugins/acme/owners and keeps its column; external_id resolves to nothing
+	// and gets none. Uncached, no plugin column is synthesized — conservative
+	// until the editor warms it, which it does when it populates its object-type
+	// dropdown.
+	plugin := strings.HasPrefix(entity, "plugins/")
+	var known map[string]bool
+	if plugin {
+		set, ok := cachedSet()
+		if !ok {
+			return nil
+		}
+		known = set
 	}
 	bases := map[string]bool{}
 	for _, row := range rows {
@@ -757,9 +766,15 @@ func nullFKColumns(entity string, rows []map[string]interface{}) []string {
 
 	out := make([]string, 0, len(bases))
 	for base, allNull := range bases {
-		if allNull {
-			out = append(out, base)
+		if !allNull {
+			continue
 		}
+		if plugin {
+			if _, ok := fkTarget(entity, base, known); !ok {
+				continue
+			}
+		}
+		out = append(out, base)
 	}
 	sort.Strings(out)
 	for _, base := range out {

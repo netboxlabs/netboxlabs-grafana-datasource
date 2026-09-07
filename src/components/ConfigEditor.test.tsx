@@ -399,3 +399,50 @@ describe('ConfigEditor url mirror on mode change', () => {
     );
   });
 });
+
+// In cache mode the NetBox URL field is the optional deep-link base, not the
+// address being queried, so editing it must leave the mirror on the cache URL —
+// otherwise correcting a link host silently relabels the datasource with the
+// service it does not talk to.
+it('keeps the mirror on the cache URL when the NetBox link base is edited', () => {
+  const onOptionsChange = jest.fn();
+  render(
+    <ConfigEditor
+      options={
+        {
+          jsonData: { mode: 'replica-cache', replicaCacheUrl: 'https://cache.example.com', url: '' },
+          secureJsonFields: {},
+          secureJsonData: {},
+          url: 'https://cache.example.com',
+        } as any
+      }
+      onOptionsChange={onOptionsChange}
+    />
+  );
+  fireEvent.change(screen.getByPlaceholderText('https://netbox.example.com'), {
+    target: { value: 'https://netbox.example.com' },
+  });
+  expect(onOptionsChange).toHaveBeenCalledWith(
+    expect.objectContaining({
+      url: 'https://cache.example.com',
+      jsonData: expect.objectContaining({ url: 'https://netbox.example.com' }),
+    })
+  );
+});
+
+// And in NetBox mode that field IS the queried address, so it still mirrors.
+it('still mirrors the NetBox URL in NetBox mode', () => {
+  const onOptionsChange = jest.fn();
+  render(
+    <ConfigEditor
+      options={{ jsonData: {}, secureJsonFields: {}, secureJsonData: {}, url: '' } as any}
+      onOptionsChange={onOptionsChange}
+    />
+  );
+  fireEvent.change(screen.getByPlaceholderText('https://netbox.example.com'), {
+    target: { value: 'https://netbox.example.com' },
+  });
+  expect(onOptionsChange).toHaveBeenCalledWith(
+    expect.objectContaining({ url: 'https://netbox.example.com' })
+  );
+});

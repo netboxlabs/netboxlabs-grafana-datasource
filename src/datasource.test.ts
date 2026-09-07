@@ -383,3 +383,49 @@ describe('metricFindQuery truncation', () => {
     ]);
   });
 });
+
+describe('branch variable in replica-cache mode', () => {
+  // The cache mirrors the main dataset only and refuses a branch-scoped query
+  // outright, so if it happens to replicate the branches table every schema it
+  // listed would be an option that breaks every panel selecting it.
+  it('offers only main, without relying on the endpoint being absent', async () => {
+    const ds = makeDS();
+    (ds as any).datasourceInstanceSettings = { jsonData: { mode: 'replica-cache' } };
+    const run = jest.fn().mockResolvedValue({
+      columns: ['schema_id', 'name'],
+      rows: [{ schema_id: 'schema_abc', name: 'feature-x' }],
+      total: 1,
+    });
+    (ds as any).runResourceQuery = run;
+
+    const out = await ds.metricFindQuery({
+      refId: 'v',
+      objectType: 'plugins/branching/branches',
+      valueField: 'schema_id',
+      textField: 'name',
+    });
+    expect(out).toEqual([{ text: 'main', value: 'main' }]);
+    // And it does not even ask: the answer cannot change what is offerable.
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('still lists real branches in NetBox mode', async () => {
+    const ds = makeDS();
+    (ds as any).datasourceInstanceSettings = { jsonData: {} };
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({
+      columns: ['schema_id', 'name'],
+      rows: [{ schema_id: 'schema_abc', name: 'feature-x' }],
+      total: 1,
+    });
+    const out = await ds.metricFindQuery({
+      refId: 'v',
+      objectType: 'plugins/branching/branches',
+      valueField: 'schema_id',
+      textField: 'name',
+    });
+    expect(out).toEqual([
+      { text: 'main', value: 'main' },
+      { text: 'feature-x (schema_abc)', value: 'schema_abc' },
+    ]);
+  });
+});

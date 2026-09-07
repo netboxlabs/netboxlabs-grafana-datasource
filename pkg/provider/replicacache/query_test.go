@@ -1593,3 +1593,39 @@ func TestCountEvidenceCanComeFromTheRowsInHand(t *testing.T) {
 		}
 	}
 }
+
+// A model can define BOTH a "service" custom field and a genuine one called
+// "service_count". The flattener emits cf_X_count only alongside cf_X for the
+// same object, so a row carrying the count without the base proves the name
+// came out of the blob literally — and NetBox shows an unset literal field as
+// null, not zero.
+func TestALiteralCountFieldBeatsTheBaseNameHeuristic(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		// Has the literal field and no "service" key: the discriminator.
+		{"id": float64(1), "name": "A", "custom_field_data": `{"service_count": "SLA-2"}`},
+		// Has a "service" key, which the base-name heuristic would latch onto.
+		{"id": float64(2), "name": "B", "custom_field_data": `{"service": "dns"}`},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "cf_service_count"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	for _, r := range res.Rows {
+		switch r["name"] {
+		case "A":
+			if r["cf_service_count"] != "SLA-2" {
+				t.Errorf("A: cf_service_count = %#v, want its literal value", r["cf_service_count"])
+			}
+		case "B":
+			if v, ok := r["cf_service_count"]; !ok || v != nil {
+				t.Errorf("B: cf_service_count = %#v (present %v), want null — the field is literal and unset", v, ok)
+			}
+		}
+	}
+}

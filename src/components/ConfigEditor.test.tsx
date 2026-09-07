@@ -3,6 +3,16 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { ConfigEditor, FAST_PAGING_TOOLTIP } from './ConfigEditor';
 import { NetBoxDataSourceOptions } from '../types';
 
+// @grafana/ui's Select menu (via ScrollIndicators) uses IntersectionObserver
+// to decide when to show scroll shadows; jsdom doesn't implement it, so opening
+// a Select's dropdown throws without this stub.
+class IntersectionObserverStub {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+(globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver = IntersectionObserverStub;
+
 function makeOptions(jsonData: Partial<NetBoxDataSourceOptions> = {}, overrides: Record<string, unknown> = {}) {
   return {
     id: 1,
@@ -321,6 +331,70 @@ describe('ConfigEditor url mirror', () => {
       expect.objectContaining({
         url: 'https://cache.example.com',
         jsonData: expect.objectContaining({ replicaCacheUrl: 'https://cache.example.com' }),
+      })
+    );
+  });
+});
+
+// Switching mode touches neither URL input, and the backfill effect only fires
+// on an EMPTY top-level url — so with both services configured, a switch left
+// the datasource list showing the address of the one no longer queried.
+describe('ConfigEditor url mirror on mode change', () => {
+  const both = {
+    url: 'https://netbox.example.com',
+    replicaCacheUrl: 'https://cache.example.com',
+  };
+
+  it('moves the mirror to the cache URL when switching to cache mode', async () => {
+    const onOptionsChange = jest.fn();
+    render(
+      <ConfigEditor
+        options={
+          {
+            jsonData: { mode: 'netbox', ...both },
+            secureJsonFields: {},
+            secureJsonData: {},
+            url: both.url,
+          } as any
+        }
+        onOptionsChange={onOptionsChange}
+      />
+    );
+    const mode = screen.getByLabelText('Mode') ?? screen.getAllByRole('combobox')[0];
+    fireEvent.keyDown(mode, { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByText('Replica cache'));
+
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: both.replicaCacheUrl,
+        jsonData: expect.objectContaining({ mode: 'replica-cache' }),
+      })
+    );
+  });
+
+  it('moves it back to the NetBox URL when switching away', async () => {
+    const onOptionsChange = jest.fn();
+    render(
+      <ConfigEditor
+        options={
+          {
+            jsonData: { mode: 'replica-cache', ...both },
+            secureJsonFields: {},
+            secureJsonData: {},
+            url: both.replicaCacheUrl,
+          } as any
+        }
+        onOptionsChange={onOptionsChange}
+      />
+    );
+    const mode = screen.getByLabelText('Mode') ?? screen.getAllByRole('combobox')[0];
+    fireEvent.keyDown(mode, { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByText('NetBox API'));
+
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: both.url,
+        jsonData: expect.objectContaining({ mode: 'netbox' }),
       })
     );
   });

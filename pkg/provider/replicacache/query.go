@@ -316,30 +316,42 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 	}
 	var added []string
 	for _, f := range selectedFields(spec) {
-		if !strings.HasPrefix(f, "cf_") || hasColumn(rows, f) {
-			continue
-		}
-		// Not an ALIAS whose base is present. cf_tier_id is absent because
-		// "gold" is not an identifier, not because the custom field is unset,
-		// and inventing it would put a column of nulls where the deliberate
-		// answer is no column at all.
-		if aliasOfPresentColumn(f, rows) {
+		if !strings.HasPrefix(f, "cf_") {
 			continue
 		}
 		// A count is zero, not null. The shared contract gives an empty list a
 		// _count of float64(0), and an all-null column is typed as strings by
 		// buildFrame — so a threshold or numeric transformation that worked in
-		// NetBox mode would stop working here, which is the kind of silent
-		// difference this whole mode is supposed to avoid. Unset and empty are
-		// different things in NetBox, but for a COUNT they mean the same one.
+		// NetBox mode would stop working here. Unset and empty are different
+		// things in NetBox, but for a COUNT they mean the same one.
+		isCount := strings.HasSuffix(f, "_count")
 		var unset interface{}
-		if strings.HasSuffix(f, "_count") {
+		if isCount {
 			unset = float64(0)
 		}
-		for _, row := range rows {
-			row[f] = unset
+		// Not an ALIAS whose base is present, unless it is that count. cf_tier_id
+		// is absent because "gold" is not an identifier, not because the custom
+		// field is unset, and inventing it would put a column of nulls where the
+		// deliberate answer is no column at all. A count is the exception: its
+		// base being present is exactly the mixed page this has to fill.
+		if !isCount && aliasOfPresentColumn(f, rows) {
+			continue
 		}
-		added = append(added, f)
+		// PER ROW, not once for the page. A mixed result — some objects with
+		// the field set, some without — already carries the column, so deciding
+		// existentially skipped the whole synthesis and left the unset rows
+		// without it, which is the difference the contract exists to remove.
+		existed := hasColumn(rows, f)
+		filled := false
+		for _, row := range rows {
+			if _, ok := row[f]; !ok {
+				row[f] = unset
+				filled = true
+			}
+		}
+		if filled && !existed {
+			added = append(added, f)
+		}
 	}
 	return added
 }
@@ -348,7 +360,9 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 // column that IS present. Those are absent on purpose — the value could not
 // support the alias — rather than because the source is unset.
 func aliasOfPresentColumn(name string, rows []map[string]interface{}) bool {
-	for _, suffix := range []string{"_id", "_slug", "_value", "_count"} {
+	// _count is deliberately absent: its base being present is the mixed-page
+	// case the caller must fill, not evidence that the alias was withheld.
+	for _, suffix := range []string{"_id", "_slug", "_value"} {
 		if base, ok := strings.CutSuffix(name, suffix); ok && hasColumn(rows, base) {
 			return true
 		}

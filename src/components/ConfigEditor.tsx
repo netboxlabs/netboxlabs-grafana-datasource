@@ -95,7 +95,17 @@ export function ConfigEditor(props: Props) {
   // somewhere other than this mirror, and jsonData.url stays the source of
   // truth. Because the guard needs an empty options.url, the write that lands
   // closes it — no render loop.
-  const mirroredUrl = jsonData.url ?? '';
+  // Unset means NetBox, matching the backend default in LoadPluginSettings.
+  // Declared before the URL mirror below, which needs it.
+  const mode: ProviderMode = jsonData.mode ?? 'netbox';
+  const isCache = mode === 'replica-cache';
+
+  // The address a datasource SHOWS should be the one it queries. In cache mode
+  // that is the replica-cache URL, not the optional NetBox link base: a cache
+  // datasource with no NetBox URL had a blank address in the datasource list,
+  // and one switched over from NetBox mode kept displaying the NetBox address
+  // it no longer talks to.
+  const mirroredUrl = (isCache ? jsonData.replicaCacheUrl : jsonData.url) ?? '';
   const topLevelUrl = options.url ?? '';
   useEffect(() => {
     if (mirroredUrl !== '' && topLevelUrl === '') {
@@ -134,10 +144,6 @@ export function ConfigEditor(props: Props) {
       secureJsonData: { ...secureJsonData, replicaCacheToken: '' },
     });
   };
-
-  // Unset means NetBox, matching the backend default in LoadPluginSettings.
-  const mode: ProviderMode = jsonData.mode ?? 'netbox';
-  const isCache = mode === 'replica-cache';
 
   return (
     <>
@@ -197,7 +203,13 @@ export function ConfigEditor(props: Props) {
                 width={40}
                 value={jsonData.replicaCacheUrl ?? ''}
                 placeholder="https://<id>.replica-cache.example.com"
-                onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ replicaCacheUrl: e.target.value })}
+                onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                  onOptionsChange({
+                    ...options,
+                    url: e.target.value,
+                    jsonData: { ...jsonData, replicaCacheUrl: e.target.value },
+                  })
+                }
               />
             </InlineField>
 

@@ -314,6 +314,10 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 	if err != nil || !raw["custom_field_data"] {
 		return nil
 	}
+	// The entity's known columns, from the same cached sample. cf_* names that
+	// appeared in ANY sampled row are here, which is the evidence the _count
+	// question below needs.
+	knownTypes, _ := p.columnTypes(ctx, spec.ObjectType)
 	var added []string
 	for _, f := range selectedFields(spec) {
 		if !strings.HasPrefix(f, "cf_") {
@@ -324,7 +328,17 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 		// buildFrame — so a threshold or numeric transformation that worked in
 		// NetBox mode would stop working here. Unset and empty are different
 		// things in NetBox, but for a COUNT they mean the same one.
-		isCount := strings.HasSuffix(f, "_count")
+		// A _count suffix is not proof that this is a list's derived count: a
+		// custom field can be NAMED service_count, and NetBox shows an unset one
+		// as null. So the base has to be a column this entity actually has —
+		// evidence from the schema sample, which is cached and needs no request.
+		// Without that, the suffix is treated as part of the field's own name.
+		isCount := false
+		if base, ok := strings.CutSuffix(f, "_count"); ok {
+			if _, known := knownTypes[base]; known {
+				isCount = true
+			}
+		}
 		var unset interface{}
 		if isCount {
 			unset = float64(0)

@@ -76,7 +76,13 @@ export function ConfigEditor(props: Props) {
   // would be a settings migration for every existing datasource, and this is
   // presentation only. It is deliberately NOT read anywhere server-side.
   const onUrlChange = (url: string) => {
-    onOptionsChange({ ...options, url, jsonData: { ...jsonData, url } });
+    // The top-level mirror follows the ACTIVE service. In cache mode this field
+    // is the optional deep-link base, not the address being queried, so editing
+    // it must leave the mirror on the cache URL — otherwise correcting a link
+    // host silently relabelled the datasource with the service it does not talk
+    // to. jsonData.url is written either way; that is where the link base lives.
+    const mirror = jsonData.mode === 'replica-cache' ? (options.url ?? '') : url;
+    onOptionsChange({ ...options, url: mirror, jsonData: { ...jsonData, url } });
   };
 
   // Every datasource configured before the mirror above existed has its address

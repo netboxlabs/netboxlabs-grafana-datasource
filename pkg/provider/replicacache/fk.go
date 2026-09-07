@@ -168,7 +168,31 @@ var selfFKs = map[string]bool{
 //	role_id on ipam/prefixes -> ipam/roles         (plain, same app)
 //	tenant_id on dcim/devices -> tenancy/tenants   (unique across apps)
 func fkTarget(entity, base string, known map[string]bool) (string, bool) {
-	if polymorphicFKs[base] || unexposedFKs[base] || notAKey(entity, base) {
+	// Polymorphic stays global. assigned_object, scope and parent_object name a
+	// NetBox-wide convention — the target is decided by a companion
+	// content-type column — and a plugin using one of those exact names is
+	// following that convention, so resolving it against a same-app model that
+	// happened to match would be the confidently-wrong-name failure this file
+	// works to avoid.
+	if polymorphicFKs[base] {
+		return "", false
+	}
+	if notAKey(entity, base) {
+		return "", false
+	}
+	// Unexposed is different, and applies to CORE models only. owner,
+	// created_by and last_updated_by are mixin fields pointing at users, and
+	// config_template at a table this service does not replicate — facts about
+	// NetBox, not about an arbitrary plugin, which may perfectly well have its
+	// own owners collection. Qualifying these by entity is not an option the way
+	// it was for the text identifiers: they appear on dozens of core models and
+	// the list would rot, so the split is core versus plugin.
+	//
+	// Safe because a plugin gets no global-basename fallback: only a same-app or
+	// owner-qualified candidate can match, which is evidence rather than
+	// coincidence. A plugin whose owner_id really does point at users finds no
+	// plugins/acme/owners and stays an id, as it should.
+	if unexposedFKs[base] && !strings.HasPrefix(entity, "plugins/") {
 		return "", false
 	}
 	// Overrides win over every derivation below, including the global-basename
@@ -685,7 +709,10 @@ func nullFKColumns(entity string, rows []map[string]interface{}) []string {
 	for _, row := range rows {
 		for col, v := range row {
 			base, ok := strings.CutSuffix(col, "_id")
-			if !ok || base == "" || polymorphicFKs[base] || unexposedFKs[base] || notAKey(entity, base) {
+			if !ok || base == "" || polymorphicFKs[base] || notAKey(entity, base) {
+				continue
+			}
+			if unexposedFKs[base] && !strings.HasPrefix(entity, "plugins/") {
 				continue
 			}
 			switch _, kind := classifyFKValue(v); kind {

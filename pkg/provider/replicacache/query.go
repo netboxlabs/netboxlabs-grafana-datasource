@@ -133,11 +133,16 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// and since the backstop covers key fields too, alert evaluation failed on
 	// it. projectColumns already unions the two; these are the last places that
 	// did not.
-	cols = append(cols, addChoiceValueAliases(selectedFields(spec), rows)...)
-	cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
-	cols = append(cols, p.addUnsetCustomFieldColumns(ctx, spec, rows)...)
 	var warnings []string
 	if !spec.CountOnly {
+		// All three build columns a count-only caller never reads: it takes
+		// Result.Total and nothing else. The third one also COSTS something —
+		// it consults rawColumns, which fetches a schema sample when the cache
+		// is cold, so an alert counting a multi-million-row table paid for a
+		// second list request to decorate rows it discards.
+		cols = append(cols, addChoiceValueAliases(selectedFields(spec), rows)...)
+		cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
+		cols = append(cols, p.addUnsetCustomFieldColumns(ctx, spec, rows)...)
 		if addDeepLinks(p.netboxURL, spec.ObjectType, rows) {
 			cols = append(cols, deepLinkColumn)
 		}

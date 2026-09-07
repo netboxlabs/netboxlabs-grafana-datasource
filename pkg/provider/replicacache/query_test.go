@@ -1419,3 +1419,50 @@ func TestCustomFieldProjectionIsCheckedBeforeItIsConsumed(t *testing.T) {
 		t.Errorf("want errRowWithoutField, got %v", err)
 	}
 }
+
+// null and {} are how the blob says "this object has no custom field values",
+// so a page where every matched object leaves one unset produced no cf_ key at
+// all — and the missing-column backstop then reported the field as one this
+// backend does not produce, which alert evaluation turns into an error. A rule
+// would fail merely because everything it matched left the field unset, which
+// is the healthy state of most such rules.
+func TestUnsetCustomFieldKeepsItsColumn(t *testing.T) {
+	for _, blob := range []interface{}{"{}", nil, ""} {
+		f := newFakeService()
+		f.entities["dcim/devices"] = []map[string]interface{}{
+			{"id": float64(1), "name": "CORE-1", "custom_field_data": blob},
+		}
+		p := newTestProvider(t, f)
+
+		res, err := p.Query(context.Background(), provider.QuerySpec{
+			ObjectType: "dcim/devices",
+			Fields:     []string{"name", "cf_tier"},
+		})
+		if err != nil {
+			t.Fatalf("%#v: %v", blob, err)
+		}
+		if len(res.Warnings) != 0 {
+			t.Errorf("%#v: an unset custom field is not a missing column: %v", blob, res.Warnings)
+		}
+		if v, ok := res.Rows[0]["cf_tier"]; !ok || v != nil {
+			t.Errorf("%#v: cf_tier = %#v (present %v), want a null value", blob, v, ok)
+		}
+	}
+
+	// An entity with no custom fields at all is different: a requested cf_* is
+	// genuinely a column this deployment cannot produce, and must still be
+	// reported rather than filled with nulls.
+	f := newFakeService()
+	f.entities["dcim/sites"] = []map[string]interface{}{{"id": float64(1), "name": "DC-1"}}
+	p := newTestProvider(t, f)
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/sites",
+		Fields:     []string{"name", "cf_tier"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Warnings) == 0 {
+		t.Error("an entity with no custom fields cannot produce cf_tier; that must be said")
+	}
+}

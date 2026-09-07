@@ -850,14 +850,16 @@ func TestTextIdentifierExclusionsAreScopedToTheirModel(t *testing.T) {
 	if cols := nullFKColumns("circuits/provider-networks", rows); len(cols) != 0 {
 		t.Errorf("core: fabricated %v from a text column", cols)
 	}
-	var found bool
-	for _, c := range nullFKColumns("plugins/acme/widgets", rows) {
-		if c == "service" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("a plugin's own all-null service relationship must keep its column")
+	// A plugin's all-null *_id gets NO derived column, and that assertion is the
+	// other way round from when this test was written. The reason is the one
+	// this whole table exists for: on NetBox's models the seven text
+	// identifiers are named, so anything else that is null everywhere is a
+	// relationship; a plugin can define anything and there is no such list, so
+	// the suffix alone would fabricate a column that vanishes the moment a row
+	// carries a string. Nothing resolvable is lost — every value is null, so
+	// there was never an id to look up.
+	if cols := nullFKColumns("plugins/acme/widgets", rows); len(cols) != 0 {
+		t.Errorf("a plugin's all-null _id is not evidence of a relationship: %v", cols)
 	}
 }
 
@@ -905,5 +907,32 @@ func TestPluginOwnedFKsStillJustifyDiscovery(t *testing.T) {
 	}
 	if !hasResolvableFK("plugins/acme/widgets", rows, nil) {
 		t.Error("a plugin's own owner_id may well be resolvable; discovery must run")
+	}
+}
+
+// The churn this prevents: a plugin's ordinary nullable external_id would gain
+// an "external" column while every sampled value was null, and lose it the
+// moment a row carried a string. A column that comes and goes is worse than one
+// consistently absent, and a panel selecting it is told so by the
+// missing-column check rather than being handed nulls.
+func TestAPluginsNullableIDDoesNotFabricateAColumn(t *testing.T) {
+	allNull := []map[string]interface{}{
+		{"id": float64(1), "external_id": nil},
+		{"id": float64(2), "external_id": nil},
+	}
+	if cols := nullFKColumns("plugins/acme/widgets", allNull); len(cols) != 0 {
+		t.Errorf("fabricated %v from an all-null plugin column", cols)
+	}
+	// The same shape on a NetBox model still gets its column: there the seven
+	// text identifiers are named, so anything else is a relationship.
+	core := []map[string]interface{}{{"id": float64(1), "tenant_id": nil}}
+	var found bool
+	for _, c := range nullFKColumns("dcim/devices", core) {
+		if c == "tenant" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("a core all-null relationship must keep its column")
 	}
 }

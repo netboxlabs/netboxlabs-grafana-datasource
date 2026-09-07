@@ -368,12 +368,20 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 		if isCount {
 			unset = float64(0)
 		}
-		// Not an ALIAS whose base is present, unless it is that count. cf_tier_id
-		// is absent because "gold" is not an identifier, not because the custom
-		// field is unset, and inventing it would put a column of nulls where the
-		// deliberate answer is no column at all. A count is the exception: its
-		// base being present is exactly the mixed page this has to fill.
-		if !isCount && aliasOfPresentColumn(f, rows) {
+		// ONLY the derived count is synthesized. A defined custom field is
+		// present in the blob even when unset — measured on a live instance,
+		// where every dcim/devices row carries the same six keys with three of
+		// them null — so flattening already gives it a column, and a cf_* that
+		// is absent from every row is one this deployment does not have:
+		// deleted, or mistyped in a saved query. Filling it with nulls hid that
+		// from the missing-column backstop and let an alert evaluate a column of
+		// nothing as authoritative.
+		//
+		// A count is different because it is DERIVED rather than a blob key: an
+		// object whose list is null produces no _count at all, so the mixed page
+		// genuinely needs filling and the base's presence is the evidence that
+		// it exists.
+		if !isCount {
 			continue
 		}
 		// PER ROW, not once for the page. A mixed result — some objects with
@@ -393,20 +401,6 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 		}
 	}
 	return added
-}
-
-// aliasOfPresentColumn reports whether a name is one of the derived forms of a
-// column that IS present. Those are absent on purpose — the value could not
-// support the alias — rather than because the source is unset.
-func aliasOfPresentColumn(name string, rows []map[string]interface{}) bool {
-	// _count is deliberately absent: its base being present is the mixed-page
-	// case the caller must fill, not evidence that the alias was withheld.
-	for _, suffix := range []string{"_id", "_slug", "_value"} {
-		if base, ok := strings.CutSuffix(name, suffix); ok && hasColumn(rows, base) {
-			return true
-		}
-	}
-	return false
 }
 
 func hasColumn(rows []map[string]interface{}, name string) bool {

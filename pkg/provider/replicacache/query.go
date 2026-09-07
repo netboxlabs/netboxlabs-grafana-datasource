@@ -123,11 +123,8 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		return nil, err
 	}
 
-	cols, rows, err := flattenRows(raws)
+	cols, rows, err := flattenRows(raws, projected)
 	if err != nil {
-		return nil, err
-	}
-	if err := checkProjection(projected, rows); err != nil {
 		return nil, err
 	}
 	// Both take Fields AND KeyFields. A join source is fetched but not displayed,
@@ -270,17 +267,19 @@ func addCustomFieldIDAliases(fields []string, rows []map[string]interface{}) []s
 // answer rather than the object having no value.
 //
 // A column PRESENT and null is untouched; that is an object with no value
-// there. And custom_field_data is exempt because flattenRows consumes it into
-// cf_* columns rather than leaving it on the row.
+// there.
+//
+// It runs on the objects as they ARRIVED, not on the flattened rows, because
+// custom_field_data does not survive flattening — it becomes cf_* columns — so
+// afterwards a row that omitted it is indistinguishable from one that carried
+// an empty blob, and the existential check downstream passes as soon as any
+// row supplies the cf_* column.
 func checkProjection(projected []string, rows []map[string]interface{}) error {
 	if len(projected) == 0 {
 		return nil
 	}
 	for _, row := range rows {
 		for _, col := range projected {
-			if col == "custom_field_data" {
-				continue
-			}
 			if _, ok := row[col]; !ok {
 				return &TransportError{
 					Op:      "reading " + col,
@@ -469,7 +468,7 @@ func withFields(q url.Values, cols []string) url.Values {
 // and so is the thing to check.
 const rowShapeGuidance = "Replica cache returned a result row that is not a usable object. The service is reachable but answered with something unexpected."
 
-func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, error) {
+func flattenRows(raws []json.RawMessage, projected []string) ([]string, []map[string]interface{}, error) {
 	var (
 		cols []string
 		seen = map[string]bool{}
@@ -540,6 +539,15 @@ func flattenRows(raws []json.RawMessage) ([]string, []map[string]interface{}, er
 			}
 		}
 		objs = append(objs, obj)
+	}
+
+	// Before anything is consumed. custom_field_data is gone from the flattened
+	// rows — it becomes cf_* columns — so a row that omitted it could not be
+	// told from one that carried an empty blob once flattening had run, and the
+	// existential check downstream passed as soon as ANY row supplied the cf_*
+	// column. Checked here, against the objects as they arrived.
+	if err := checkProjection(projected, objs); err != nil {
+		return nil, nil, err
 	}
 
 	// Whether a *_id column is a relationship is decided ACROSS the page, not

@@ -1384,3 +1384,38 @@ func TestProjectedNullsAreOrdinaryAnswers(t *testing.T) {
 		t.Errorf("rows = %d, want 2", len(res.Rows))
 	}
 }
+
+// custom_field_data does not survive flattening — it becomes cf_* columns — so
+// after flattening a row that omitted it cannot be told from one that carried
+// an empty blob, and the existential check passes as soon as ANY row supplies
+// the cf_* column. The projection is checked against the objects as they
+// arrived, which is the only place the distinction still exists.
+func TestCustomFieldProjectionIsCheckedBeforeItIsConsumed(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			// The schema sample, so a projection is built at all.
+			_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 1, "name": "a", "custom_field_data": "{\"owner\": 22}"}]}`))
+			return
+		}
+		// The first row supplies cf_owner; the second omits the blob entirely.
+		_, _ = w.Write([]byte(`{"count": 2, "results": [` +
+			`{"id": 1, "custom_field_data": "{\"owner\": 22}"},` +
+			`{"id": 2}]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"cf_owner"},
+	})
+	if err == nil {
+		t.Fatal("a row omitting the projected blob must not pass because another row carried it")
+	}
+	if !errors.Is(err, errRowWithoutField) {
+		t.Errorf("want errRowWithoutField, got %v", err)
+	}
+}

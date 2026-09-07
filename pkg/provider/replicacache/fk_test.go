@@ -779,15 +779,15 @@ func TestIdentifierLikeTextColumnsAreNeverRelationships(t *testing.T) {
 		{"id": float64(1), "name": "NET-1", "service_id": nil},
 		{"id": float64(2), "name": "NET-2", "service_id": nil},
 	}
-	for _, c := range nullFKColumns("circuits/provider-networks", rows) {
+	for _, c := range nullFKColumns("circuits/provider-networks", rows, testEntitySet) {
 		if c == "service" {
-			t.Errorf("fabricated a service relationship from an all-null text column: %v", nullFKColumns("circuits/provider-networks", rows))
+			t.Errorf("fabricated a service relationship from an all-null text column: %v", nullFKColumns("circuits/provider-networks", rows, testEntitySet))
 		}
 	}
 	// A real relationship that is null everywhere still gets its column.
 	rows = []map[string]interface{}{{"id": float64(1), "tenant_id": nil}}
 	var hasTenant bool
-	for _, c := range nullFKColumns("circuits/provider-networks", rows) {
+	for _, c := range nullFKColumns("circuits/provider-networks", rows, testEntitySet) {
 		if c == "tenant" {
 			hasTenant = true
 		}
@@ -847,19 +847,13 @@ func TestTextIdentifierExclusionsAreScopedToTheirModel(t *testing.T) {
 	}
 	// And the null-column synthesis follows the same scoping.
 	rows := []map[string]interface{}{{"id": float64(1), "service_id": nil}}
-	if cols := nullFKColumns("circuits/provider-networks", rows); len(cols) != 0 {
+	if cols := nullFKColumns("circuits/provider-networks", rows, testEntitySet); len(cols) != 0 {
 		t.Errorf("core: fabricated %v from a text column", cols)
 	}
-	// A plugin's all-null *_id gets NO derived column, and that assertion is the
-	// other way round from when this test was written. The reason is the one
-	// this whole table exists for: on NetBox's models the seven text
-	// identifiers are named, so anything else that is null everywhere is a
-	// relationship; a plugin can define anything and there is no such list, so
-	// the suffix alone would fabricate a column that vanishes the moment a row
-	// carries a string. Nothing resolvable is lost — every value is null, so
-	// there was never an id to look up.
-	if cols := nullFKColumns("plugins/acme/widgets", rows); len(cols) != 0 {
-		t.Errorf("a plugin's all-null _id is not evidence of a relationship: %v", cols)
+	// A plugin's all-null service_id gets no column here: the entity set has no
+	// plugins/acme/services for it to target, so the suffix is all there is.
+	if cols := nullFKColumns("plugins/acme/widgets", rows, testEntitySet); len(cols) != 0 {
+		t.Errorf("a plugin's all-null _id with no discoverable target is not a relationship: %v", cols)
 	}
 }
 
@@ -920,14 +914,38 @@ func TestAPluginsNullableIDDoesNotFabricateAColumn(t *testing.T) {
 		{"id": float64(1), "external_id": nil},
 		{"id": float64(2), "external_id": nil},
 	}
-	if cols := nullFKColumns("plugins/acme/widgets", allNull); len(cols) != 0 {
+	if cols := nullFKColumns("plugins/acme/widgets", allNull, testEntitySet); len(cols) != 0 {
 		t.Errorf("fabricated %v from an all-null plugin column", cols)
+	}
+
+	// But a plugin's GENUINE nullable relationship keeps its column, because the
+	// cached entity list has the target it points at. Suppressing every plugin
+	// _id took this with it.
+	owners := []map[string]interface{}{
+		{"id": float64(1), "owner_id": nil},
+		{"id": float64(2), "owner_id": nil},
+	}
+	var kept bool
+	for _, c := range nullFKColumns("plugins/acme/widgets", owners, testEntitySet) {
+		if c == "owner" {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Error("plugins/acme/owners is discoverable, so owner is a real relationship")
+	}
+
+	// With a cold entity list there is no evidence either way, and nothing is
+	// synthesized for a plugin until something warms it.
+	cold := func() (map[string]bool, bool) { return nil, false }
+	if cols := nullFKColumns("plugins/acme/widgets", owners, cold); len(cols) != 0 {
+		t.Errorf("with no entity list there is no evidence: %v", cols)
 	}
 	// The same shape on a NetBox model still gets its column: there the seven
 	// text identifiers are named, so anything else is a relationship.
 	core := []map[string]interface{}{{"id": float64(1), "tenant_id": nil}}
 	var found bool
-	for _, c := range nullFKColumns("dcim/devices", core) {
+	for _, c := range nullFKColumns("dcim/devices", core, testEntitySet) {
 		if c == "tenant" {
 			found = true
 		}
@@ -935,4 +953,16 @@ func TestAPluginsNullableIDDoesNotFabricateAColumn(t *testing.T) {
 	if !found {
 		t.Error("a core all-null relationship must keep its column")
 	}
+}
+
+// testEntitySet is the cached-entity-set accessor nullFKColumns consults for a
+// plugin model: warm, and containing the same-plugin target that distinguishes
+// a real relationship from a column that merely ends in _id.
+func testEntitySet() (map[string]bool, bool) {
+	return map[string]bool{
+		"plugins/acme/widgets": true,
+		"plugins/acme/owners":  true,
+		"dcim/devices":         true,
+		"tenancy/tenants":      true,
+	}, true
 }

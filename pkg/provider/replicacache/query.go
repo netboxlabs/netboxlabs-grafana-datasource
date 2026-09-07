@@ -125,8 +125,14 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
-	cols = append(cols, addChoiceValueAliases(spec.Fields, rows)...)
-	cols = append(cols, addCustomFieldIDAliases(spec.Fields, rows)...)
+	// Both take Fields AND KeyFields. A join source is fetched but not displayed,
+	// so an alias asked for only as a join key had its physical source projected
+	// in and then never built — applyJoinKeys produced an empty output column,
+	// and since the backstop covers key fields too, alert evaluation failed on
+	// it. projectColumns already unions the two; these are the last places that
+	// did not.
+	cols = append(cols, addChoiceValueAliases(selectedFields(spec), rows)...)
+	cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
 	var warnings []string
 	if !spec.CountOnly {
 		if addDeepLinks(p.netboxURL, spec.ObjectType, rows) {
@@ -285,7 +291,7 @@ func unresolvedRelationWarnings(spec provider.QuerySpec, cols []string, rows []m
 	// whether the value was built. Checking cols would have reported every join
 	// key as missing, and omitting them let a join announce an output column
 	// with an empty value on every row, silently.
-	for _, f := range append(append([]string{}, spec.Fields...), spec.KeyFields...) {
+	for _, f := range selectedFields(spec) {
 		if hasColumn(rows, f) {
 			continue
 		}
@@ -316,10 +322,18 @@ func wantedRelations(spec provider.QuerySpec) map[string]bool {
 		return nil
 	}
 	want := map[string]bool{}
-	for _, f := range append(append([]string{}, spec.Fields...), spec.KeyFields...) {
+	for _, f := range selectedFields(spec) {
 		want[strings.TrimSuffix(f, "_slug")] = true
 	}
 	return want
+}
+
+// selectedFields is every column the caller needs the value of: the ones it
+// asked to SEE plus the ones it reads to build a join key. Three separate
+// places have now had to learn that KeyFields count, so it is one function.
+func selectedFields(spec provider.QuerySpec) []string {
+	return append(append(make([]string, 0, len(spec.Fields)+len(spec.KeyFields)),
+		spec.Fields...), spec.KeyFields...)
 }
 
 // projectColumns maps the caller's requested columns onto the columns that
@@ -353,7 +367,7 @@ func (p *Provider) projectColumns(ctx context.Context, spec provider.QuerySpec) 
 	}
 
 	want := map[string]bool{}
-	for _, f := range append(append([]string{}, spec.Fields...), spec.KeyFields...) {
+	for _, f := range selectedFields(spec) {
 		switch {
 		case raw[f]:
 			want[f] = true

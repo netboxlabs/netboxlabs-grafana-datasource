@@ -1247,3 +1247,41 @@ func TestAnEmptyResultIsNotADegradation(t *testing.T) {
 		t.Errorf("an empty result is the healthy state of an alert, not a failure: %v", res.Warnings)
 	}
 }
+
+// A join source is fetched but not displayed, so an alias asked for only as a
+// join key had its physical source projected in and then never built:
+// applyJoinKeys produced an empty output column, and since the backstop covers
+// key fields too, alert evaluation failed on it.
+func TestAliasesAreBuiltForJoinKeySourcesToo(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{{
+		"id": float64(1), "name": "CORE-1", "status": "active",
+		"custom_field_data": `{"owning_tenant": 22}`,
+	}}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name"},
+		KeyFields:  []string{"status_value", "cf_owning_tenant_id"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	// The contract: KeyFields are guaranteed in Rows, not in Columns.
+	if got := res.Rows[0]["status_value"]; got != "active" {
+		t.Errorf("status_value = %#v, want active", got)
+	}
+	if got := res.Rows[0]["cf_owning_tenant_id"]; got != float64(22) {
+		t.Errorf("cf_owning_tenant_id = %#v, want 22", got)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("both key sources were built, so nothing is degraded: %v", res.Warnings)
+	}
+	// And they stay out of Columns: the caller reads them without displaying.
+	for _, c := range res.Columns {
+		if c == "status_value" || c == "cf_owning_tenant_id" {
+			t.Errorf("%q was announced, but it was only a join source: %v", c, res.Columns)
+		}
+	}
+}

@@ -3,6 +3,8 @@ package replicacache
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -1327,5 +1329,58 @@ func TestKeyOnlyJoinsAreValidatedUnderAllColumns(t *testing.T) {
 	}
 	if len(res.Warnings) != 0 {
 		t.Errorf("an unprojected healthy query has nothing to report: %v", res.Warnings)
+	}
+}
+
+// Per row, not existentially. A page answering fields=name with
+// [{"id":1,"name":"a"},{"id":2}] has the column somewhere, so an "is it
+// anywhere" test passes it and the second object becomes a blank cell — a
+// variable option silently dropped, or an alert label that lost its identity.
+func TestProjectedColumnsAreCheckedOnEveryRow(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			// The schema sample, so the projection is built at all.
+			_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 1, "name": "a", "status": "active"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"count": 2, "results": [{"id": 1, "name": "a"}, {"id": 2}]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name"},
+	})
+	if err == nil {
+		t.Fatal("a row missing a projected column must not become a blank cell")
+	}
+	if !errors.Is(err, errRowWithoutField) {
+		t.Errorf("want errRowWithoutField, got %v", err)
+	}
+}
+
+// A projected column that is PRESENT and null is an object with no value there,
+// which is an ordinary answer and must stay one.
+func TestProjectedNullsAreOrdinaryAnswers(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "serial": "ABC"},
+		{"id": float64(2), "name": "CORE-2", "serial": nil},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "serial"},
+	})
+	if err != nil {
+		t.Fatalf("a null value is an ordinary answer: %v", err)
+	}
+	if len(res.Rows) != 2 {
+		t.Errorf("rows = %d, want 2", len(res.Rows))
 	}
 }

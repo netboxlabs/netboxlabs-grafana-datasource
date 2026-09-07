@@ -825,6 +825,16 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 			// A JSON null decodes without error and leaves the map nil.
 			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errMalformedRow, Message: rowShapeGuidance}
 		}
+		if _, ok := toInt(obj["id"]); !ok {
+			// The same invariant the query path enforces, and it holds here for
+			// the same measured reason: the service returns id on every
+			// projection, even one that did not ask for it — `fields=serial`
+			// comes back as {id, serial}, and the projection above is exactly
+			// that shape. A row without one identifies no object, so offering
+			// its value would put something in the picker that nothing in the
+			// deployment corresponds to.
+			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errRowWithoutID, Message: rowShapeGuidance}
+		}
 		s := valueString(obj[field])
 		if s == "" || seen[s] {
 			continue

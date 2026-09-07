@@ -431,6 +431,22 @@ func (p *Provider) warmEntities() <-chan struct{} {
 // case correct and makes the bad case cost a fixed, small amount instead of a
 // full HTTP timeout — per refresh rather than per panel, since the refresh is
 // shared.
+// entitySetIfWarm returns the cached entity list, and when there is none starts
+// a refresh in the background without waiting for it.
+//
+// The waiting is what the callers of this cannot afford — they are on paths
+// that deliberately run without discovery — but never STARTING one leaves a
+// deployment that only ever evaluates alerts permanently cold, since nothing
+// else would fetch it. The current query answers conservatively; the next one
+// has the answer.
+func (p *Provider) entitySetIfWarm() (map[string]bool, bool) {
+	if set, ok := p.cachedEntitySet(); ok {
+		return set, true
+	}
+	p.warmEntities()
+	return nil, false
+}
+
 func (p *Provider) entitySetSoon(ctx context.Context, budget time.Duration) (map[string]bool, bool) {
 	if set, ok := p.cachedEntitySet(); ok {
 		return set, true

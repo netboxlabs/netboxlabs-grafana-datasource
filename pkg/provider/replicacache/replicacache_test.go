@@ -1209,3 +1209,59 @@ func TestMainIsTheUnbranchedDataset(t *testing.T) {
 		t.Error("a branch-scoped query must still be refused")
 	}
 }
+
+// A deployment that only evaluates alerts never opens the editor, so nothing
+// else fetches the entity list. With an all-null plugin relationship the query
+// path returns before entitySetSoon, so if this did not start a refresh the
+// list stayed cold forever and the column stayed missing forever.
+func TestAColdEntityListIsWarmedInTheBackground(t *testing.T) {
+	f := newFakeService()
+	f.entities["plugins/acme/widgets"] = []map[string]interface{}{
+		{"id": float64(1), "owner_id": nil},
+	}
+	f.entities["plugins/acme/owners"] = []map[string]interface{}{
+		{"id": float64(7), "name": "Acme"},
+	}
+	srv := f.start(t)
+	p := New(srv.URL, "t", "nb", srv.Client())
+	ctx := context.Background()
+
+	// First query: the list is cold, so the column is withheld rather than
+	// guessed — and the refresh starts.
+	res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "plugins/acme/widgets"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	for _, c := range res.Columns {
+		if c == "owner" {
+			t.Error("with a cold list there is no evidence; the column must be withheld")
+		}
+	}
+
+	// The warm runs in the background. Once it lands, the same query gets the
+	// column — without anything else having touched discovery.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := p.cachedEntitySet(); ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, ok := p.cachedEntitySet(); !ok {
+		t.Fatal("the cold path must start a refresh, or an alert-only deployment stays cold forever")
+	}
+
+	res, err = p.Query(ctx, provider.QuerySpec{ObjectType: "plugins/acme/widgets"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var found bool
+	for _, c := range res.Columns {
+		if c == "owner" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("plugins/acme/owners is discoverable now, so owner is a relationship: %v", res.Columns)
+	}
+}

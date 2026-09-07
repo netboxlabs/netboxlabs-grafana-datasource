@@ -131,7 +131,7 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
       branch?: string;
     },
     options?: Partial<BackendSrvRequest>
-  ): Promise<{ columns: string[]; rows: Array<Record<string, unknown>> }> {
+  ): Promise<{ columns: string[]; rows: Array<Record<string, unknown>>; warnings?: string[] }> {
     return this.postResource('query', body, options);
   }
 
@@ -158,7 +158,7 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     const isBranches = query.objectType === 'plugins/branching/branches';
     const out: MetricFindValue[] = isBranches ? [{ text: 'main', value: 'main' }] : [];
 
-    let res: { columns: string[]; rows: Array<Record<string, unknown>> };
+    let res: { columns: string[]; rows: Array<Record<string, unknown>>; warnings?: string[] };
     try {
       // For the branch probe, suppress Grafana's default error toast: on a NetBox
       // without netbox-branching the branches endpoint 404s, which is expected and
@@ -190,6 +190,19 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
         return out;
       }
       throw err;
+    }
+
+    // A degraded result is not a shorter list, it is a DIFFERENT one. The
+    // backend already says so — Result.Warnings is in this response body — and
+    // ignoring it here meant a lookup that could not read some of its site
+    // names produced a variable missing those options, which then silently
+    // rescoped every panel that depends on it. There is no warning surface on a
+    // Grafana variable, so the honest rendering is the error: a visible one on
+    // the variable beats an invisible filter on the whole dashboard.
+    if (res.warnings?.length) {
+      throw new Error(
+        `NetBox returned an incomplete list for this variable, so some options would be missing: ${res.warnings.join(' ')}`
+      );
     }
 
     const seen = new Set<string>(isBranches ? ['main'] : []);

@@ -803,7 +803,14 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	// that follows is authoritative — if the service is genuinely down, it fails
 	// there, with its own classified error, rather than here.
 	types, _ := p.columnTypes(ctx, objectType)
-	pushDown := q != "" && types[field] == provider.FieldTypeString
+	// Pushed down only when the text can be sent as a literal. buildFilterValues
+	// refuses a value carrying % or _ — the service has no escape syntax, so
+	// they would widen the match — and it splits on commas as a multi-value
+	// dashboard filter. Neither is right for a search box: typing CORE_SW is
+	// one literal name, and propagating the refusal replaced the suggestions
+	// with an error. The local matching below is the existing answer for a
+	// column that cannot be searched upstream, so it answers this too.
+	pushDown := q != "" && types[field] == provider.FieldTypeString && literalPushable(q)
 	var params url.Values
 	if pushDown {
 		var err error
@@ -858,6 +865,13 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// literalPushable reports whether a search box's text can go upstream as
+// written. A % or _ would be a wildcard there and a comma a value separator,
+// and none of the three means that in something a person is typing.
+func literalPushable(q string) bool {
+	return !strings.ContainsAny(q, "%_,")
 }
 
 func valueString(v interface{}) string {

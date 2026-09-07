@@ -1497,3 +1497,42 @@ func TestUnsetCustomFieldCountIsZeroNotNull(t *testing.T) {
 		t.Errorf("nothing is missing here: %v", res.Warnings)
 	}
 }
+
+// A mixed result — some objects with the custom field set, some without —
+// already carries the column, so deciding existentially skipped the synthesis
+// and left the unset rows without it. That is the cross-mode difference the
+// contract exists to remove, and it hits exactly the rows a threshold cares
+// about.
+func TestUnsetCustomFieldsAreFilledPerRow(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "custom_field_data": `{"services": ["dns","ntp"], "tier": "gold"}`},
+		{"id": float64(2), "name": "CORE-2", "custom_field_data": "{}"},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "cf_services_count", "cf_tier"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	byID := map[float64]map[string]interface{}{}
+	for _, r := range res.Rows {
+		byID[r["id"].(float64)] = r
+	}
+	if got := byID[1]["cf_services_count"]; got != float64(2) {
+		t.Errorf("populated row count = %#v, want 2", got)
+	}
+	// The row this finding is about: unset, and previously left with no column.
+	if got := byID[2]["cf_services_count"]; got != float64(0) {
+		t.Errorf("unset row count = %#v, want float64(0)", got)
+	}
+	if got := byID[1]["cf_tier"]; got != "gold" {
+		t.Errorf("cf_tier = %#v, want gold", got)
+	}
+	if v, ok := byID[2]["cf_tier"]; !ok || v != nil {
+		t.Errorf("unset cf_tier = %#v (present %v), want a null value", v, ok)
+	}
+}

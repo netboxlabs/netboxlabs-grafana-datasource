@@ -154,7 +154,20 @@ export function ConfigEditor(props: Props) {
             width={40}
             options={MODE_OPTIONS}
             value={mode}
-            onChange={(v) => onJsonChange({ mode: (v.value ?? 'netbox') as ProviderMode })}
+            onChange={(v) => {
+              // The mirror moves with the mode. Neither URL input is touched by
+              // this change, and the backfill effect below only fires on an
+              // EMPTY top-level url — so with both services configured, a
+              // switch left the datasource list showing the address of the one
+              // no longer being queried.
+              const next = (v.value ?? 'netbox') as ProviderMode;
+              const active = next === 'replica-cache' ? jsonData.replicaCacheUrl : jsonData.url;
+              onOptionsChange({
+                ...options,
+                url: active ?? '',
+                jsonData: { ...jsonData, mode: next },
+              });
+            }}
           />
         </InlineField>
 

@@ -795,7 +795,15 @@ func hasResolvableFK(entity string, rows []map[string]interface{}, want map[stri
 			// discovery returns, so counting them here bought a wait of up to
 			// the whole budget to learn something already known — on a
 			// projection of exactly those columns, every query paid it.
-			if polymorphicFKs[base] || unexposedFKs[base] {
+			if polymorphicFKs[base] {
+				continue
+			}
+			// Core-only, matching fkTarget. Applied globally here, the early
+			// exit ran BEFORE discovery, so a projected plugin query asking for
+			// plugins/acme/widgets.owner never reached the scoped logic at all:
+			// no discovery, no resolution, and a degradation warning that fails
+			// alert evaluation even though plugins/acme/owners is right there.
+			if unexposedFKs[base] && !strings.HasPrefix(entity, "plugins/") {
 				continue
 			}
 			if _, kind := classifyFKValue(v); kind == fkID {

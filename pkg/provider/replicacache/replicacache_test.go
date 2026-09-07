@@ -960,3 +960,29 @@ func TestMalformedValueRowIsRejected(t *testing.T) {
 		}
 	}
 }
+
+// The URL setting explicitly tolerates a trailing "/api", so a datasource
+// configured in NetBox mode and switched here carries it. Stored raw it made
+// "View in NetBox" open the REST response for the object rather than its page.
+func TestNetBoxURLIsNormalizedForDeepLinks(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	srv := f.start(t)
+
+	for _, base := range []string{
+		"https://netbox.example.com/api",
+		"https://netbox.example.com/api/",
+		"https://netbox.example.com/",
+		"  https://netbox.example.com  ",
+	} {
+		p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL(base))
+		res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+		if err != nil {
+			t.Fatalf("%q: %v", base, err)
+		}
+		link, _ := res.Rows[0][deepLinkColumn].(string)
+		if want := "https://netbox.example.com/dcim/devices/1/"; link != want {
+			t.Errorf("%q produced %q, want %q", base, link, want)
+		}
+	}
+}

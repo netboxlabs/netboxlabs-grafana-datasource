@@ -397,7 +397,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	// discovery budget to discover that would add seconds to a query that was
 	// never going to use the answer.
 	if !hasResolvableFK(entity, rows, want) {
-		return nullFKColumns(entity, rows, p.cachedEntitySet), nil
+		return nullFKColumns(entity, rows, p.entitySetIfWarm), nil
 	}
 
 	known, ok := p.entitySetSoon(ctx, discoveryWaitBudget)
@@ -405,7 +405,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 		// The all-null columns still stand: they are derived from the rows
 		// alone and need nothing from discovery, so a projection of site and
 		// tenant should lose only the one that had ids to resolve.
-		return nullFKColumns(entity, rows, p.cachedEntitySet), []string{"Related names could not be added yet: the list of available object types is still being read. Columns such as \"site\" and \"role\" are missing from this result; the matching *_id columns still hold the values, and a refresh should resolve them."}
+		return nullFKColumns(entity, rows, p.entitySetIfWarm), []string{"Related names could not be added yet: the list of available object types is still being read. Columns such as \"site\" and \"role\" are missing from this result; the matching *_id columns still hold the values, and a refresh should resolve them."}
 	}
 
 	// Group the ids to resolve by target entity.
@@ -501,7 +501,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	}
 
 	// Apply, collecting new column names in a deterministic order.
-	added := nullFKColumns(entity, rows, p.cachedEntitySet)
+	added := nullFKColumns(entity, rows, p.entitySetIfWarm)
 	seen := map[string]bool{}
 	for _, c := range added {
 		seen[c] = true
@@ -713,13 +713,16 @@ func nullFKColumns(entity string, rows []map[string]interface{}, cachedSet func(
 	// nullable external_id, which Fields advertised until a row carried a
 	// string and it vanished.
 	//
-	// The entity list settles it, and reading it here costs nothing: this is
-	// the ALREADY-CACHED set, never a fetch, the same accessor
-	// validateObjectType uses. plugins/acme/widgets.owner_id resolves to
-	// plugins/acme/owners and keeps its column; external_id resolves to nothing
-	// and gets none. Uncached, no plugin column is synthesized — conservative
-	// until the editor warms it, which it does when it populates its object-type
-	// dropdown.
+	// The entity list settles it, and reading it here costs nothing: the
+	// accessor returns the already-cached set and never waits for one.
+	// plugins/acme/widgets.owner_id resolves to plugins/acme/owners and keeps
+	// its column; external_id resolves to nothing and gets none.
+	//
+	// Uncached, no plugin column is synthesized and a refresh is started in the
+	// background, so the next query has the answer. Leaving that to something
+	// else — the editor populating its dropdown, a health check — left a
+	// deployment that only evaluates alerts permanently cold, and the column
+	// permanently missing.
 	plugin := strings.HasPrefix(entity, "plugins/")
 	var known map[string]bool
 	if plugin {

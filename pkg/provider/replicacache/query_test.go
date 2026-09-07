@@ -1082,17 +1082,41 @@ func TestARequestedRelationshipThatVanishesIsReported(t *testing.T) {
 		t.Errorf("site was requested and never appeared; that must be stated: %v", res.Warnings)
 	}
 
-	// A field this deployment simply does not have is the projection's
-	// business, not a degradation — no source column, no warning.
+	// A field with no source column at all is reported too. This assertion was
+	// the other way round when the backstop first landed — "the projection's
+	// business, not a degradation" — and that reasoning was wrong for the same
+	// reason everything else in this file is: absence is indistinguishable from
+	// emptiness, and alert evaluation reads an empty Warnings list as
+	// permission to run. A saved panel selecting a NetBox-computed column such
+	// as ipam/prefixes.utilization gets nothing here, and got no word about it.
 	res, err = p.Query(context.Background(), provider.QuerySpec{
 		ObjectType: "dcim/devices",
-		Fields:     []string{"name", "nonexistent"},
+		Fields:     []string{"name", "utilization"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var told bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "utilization") {
+			told = true
+		}
+	}
+	if !told {
+		t.Errorf("a column this backend cannot produce must be stated: %v", res.Warnings)
+	}
+
+	// And a query that got everything it asked for stays silent, or the
+	// warning becomes noise that hides the real ones.
+	res, err = p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "id"},
 	})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 	if len(res.Warnings) != 0 {
-		t.Errorf("a field with no source column is not a degradation: %v", res.Warnings)
+		t.Errorf("nothing was missing: %v", res.Warnings)
 	}
 }
 

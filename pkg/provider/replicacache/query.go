@@ -335,12 +335,29 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 		// Without that, the suffix is treated as part of the field's own name.
 		isCount := false
 		if base, ok := strings.CutSuffix(f, "_count"); ok {
-			// The schema sample is one source of evidence, not the only one: it
-			// is 20 unfiltered rows, so a sparse list custom field can be absent
-			// from it while the rows in hand carry it. Those rows are evidence
-			// too, and better evidence — they are the result being answered.
-			_, known := knownTypes[base]
-			isCount = known || hasColumn(rows, base)
+			// Direct evidence first. The flattener emits cf_X_count only
+			// ALONGSIDE cf_X for the same object, so a row carrying the count
+			// without the base proves the name came out of the blob literally —
+			// a custom field really called service_count, next to a separate
+			// one called service. NetBox shows an unset literal field as null,
+			// and the base-name heuristic alone would fill it with zero.
+			literal := false
+			for _, row := range rows {
+				_, hasCount := row[f]
+				_, hasBase := row[base]
+				if hasCount && !hasBase {
+					literal = true
+					break
+				}
+			}
+			// Otherwise the base's existence is the evidence. The schema sample
+			// is one source of it, not the only one: it is 20 unfiltered rows,
+			// so a sparse list custom field can be absent from it while the rows
+			// in hand carry it, and those rows are the result being answered.
+			if !literal {
+				_, known := knownTypes[base]
+				isCount = known || hasColumn(rows, base)
+			}
 		}
 		var unset interface{}
 		if isCount {

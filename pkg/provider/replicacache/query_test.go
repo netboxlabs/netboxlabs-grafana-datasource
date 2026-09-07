@@ -1421,50 +1421,62 @@ func TestCustomFieldProjectionIsCheckedBeforeItIsConsumed(t *testing.T) {
 	}
 }
 
-// null and {} are how the blob says "this object has no custom field values",
-// so a page where every matched object leaves one unset produced no cf_ key at
-// all — and the missing-column backstop then reported the field as one this
-// backend does not produce, which alert evaluation turns into an error. A rule
-// would fail merely because everything it matched left the field unset, which
-// is the healthy state of most such rules.
-func TestUnsetCustomFieldKeepsItsColumn(t *testing.T) {
-	for _, blob := range []interface{}{"{}", nil, ""} {
-		f := newFakeService()
-		f.entities["dcim/devices"] = []map[string]interface{}{
-			{"id": float64(1), "name": "CORE-1", "custom_field_data": blob},
-		}
-		p := newTestProvider(t, f)
-
-		res, err := p.Query(context.Background(), provider.QuerySpec{
-			ObjectType: "dcim/devices",
-			Fields:     []string{"name", "cf_tier"},
-		})
-		if err != nil {
-			t.Fatalf("%#v: %v", blob, err)
-		}
-		if len(res.Warnings) != 0 {
-			t.Errorf("%#v: an unset custom field is not a missing column: %v", blob, res.Warnings)
-		}
-		if v, ok := res.Rows[0]["cf_tier"]; !ok || v != nil {
-			t.Errorf("%#v: cf_tier = %#v (present %v), want a null value", blob, v, ok)
-		}
-	}
-
-	// An entity with no custom fields at all is different: a requested cf_* is
-	// genuinely a column this deployment cannot produce, and must still be
-	// reported rather than filled with nulls.
+// A DEFINED custom field is present in the blob even when unset — measured on a
+// live instance, where every dcim/devices row carries the same six keys with
+// three of them null. So flattening already gives it a column, and an alert
+// whose objects all leave it unset evaluates a real column of nulls rather than
+// erroring on a missing one.
+func TestADefinedButUnsetCustomFieldHasItsColumn(t *testing.T) {
 	f := newFakeService()
-	f.entities["dcim/sites"] = []map[string]interface{}{{"id": float64(1), "name": "DC-1"}}
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "custom_field_data": `{"tier": null}`},
+	}
 	p := newTestProvider(t, f)
+
 	res, err := p.Query(context.Background(), provider.QuerySpec{
-		ObjectType: "dcim/sites",
+		ObjectType: "dcim/devices",
 		Fields:     []string{"name", "cf_tier"},
 	})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if len(res.Warnings) == 0 {
-		t.Error("an entity with no custom fields cannot produce cf_tier; that must be said")
+	if len(res.Warnings) != 0 {
+		t.Errorf("the field is defined, so nothing is missing: %v", res.Warnings)
+	}
+	if v, ok := res.Rows[0]["cf_tier"]; !ok || v != nil {
+		t.Errorf("cf_tier = %#v (present %v), want a null value", v, ok)
+	}
+}
+
+// And a cf_* absent from EVERY row is one this deployment does not have —
+// deleted, or mistyped in a saved query. Synthesizing it hid that from the
+// missing-column backstop and let an alert evaluate a column of nothing as
+// authoritative.
+func TestAnUnknownCustomFieldIsReportedNotInvented(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "custom_field_data": `{"tier": "gold"}`},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "cf_deleted_field"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var told bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "cf_deleted_field") {
+			told = true
+		}
+	}
+	if !told {
+		t.Errorf("a custom field this deployment does not have must be stated: %v", res.Warnings)
+	}
+	if _, ok := res.Rows[0]["cf_deleted_field"]; ok {
+		t.Error("it must not be invented as a column of nulls")
 	}
 }
 
@@ -1487,11 +1499,20 @@ func TestUnsetCountNeedsEvidenceThatItIsDerived(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if v, ok := res.Rows[0]["cf_services_count"]; !ok || v != nil {
-		t.Errorf("cf_services_count = %#v (present %v), want null with no evidence it is derived", v, ok)
+	// With no "services" key anywhere, there is no list for this to be the count
+	// OF, and no literal field by that name either — so it is a column this
+	// deployment does not have, and saying so beats inventing it.
+	if _, ok := res.Rows[0]["cf_services_count"]; ok {
+		t.Error("with no evidence of a list, the count must not be invented")
 	}
-	if len(res.Warnings) != 0 {
-		t.Errorf("the column is still produced, so nothing is missing: %v", res.Warnings)
+	var told bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "cf_services_count") {
+			told = true
+		}
+	}
+	if !told {
+		t.Errorf("that must be reported: %v", res.Warnings)
 	}
 
 	// With the list present somewhere in the entity, the same column IS the
@@ -1523,9 +1544,11 @@ func TestUnsetCountNeedsEvidenceThatItIsDerived(t *testing.T) {
 // about.
 func TestUnsetCustomFieldsAreFilledPerRow(t *testing.T) {
 	f := newFakeService()
+	// Both rows carry both defined keys, which is what the service returns —
+	// unset shows as null rather than an absent key.
 	f.entities["dcim/devices"] = []map[string]interface{}{
 		{"id": float64(1), "name": "CORE-1", "custom_field_data": `{"services": ["dns","ntp"], "tier": "gold"}`},
-		{"id": float64(2), "name": "CORE-2", "custom_field_data": "{}"},
+		{"id": float64(2), "name": "CORE-2", "custom_field_data": `{"services": null, "tier": null}`},
 	}
 	p := newTestProvider(t, f)
 
@@ -1601,11 +1624,13 @@ func TestCountEvidenceCanComeFromTheRowsInHand(t *testing.T) {
 // null, not zero.
 func TestALiteralCountFieldBeatsTheBaseNameHeuristic(t *testing.T) {
 	f := newFakeService()
+	// Both defined keys on both rows, as the service returns them. The literal
+	// service_count and the list-derived cf_service_count claim the same column
+	// name, and the contract's key ordering settles it: "service" sorts first,
+	// its derived count lands, and the literal then overwrites it.
 	f.entities["dcim/devices"] = []map[string]interface{}{
-		// Has the literal field and no "service" key: the discriminator.
-		{"id": float64(1), "name": "A", "custom_field_data": `{"service_count": "SLA-2"}`},
-		// Has a "service" key, which the base-name heuristic would latch onto.
-		{"id": float64(2), "name": "B", "custom_field_data": `{"service": "dns"}`},
+		{"id": float64(1), "name": "A", "custom_field_data": `{"service": null, "service_count": "SLA-2"}`},
+		{"id": float64(2), "name": "B", "custom_field_data": `{"service": ["dns"], "service_count": null}`},
 	}
 	p := newTestProvider(t, f)
 

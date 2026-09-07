@@ -95,7 +95,16 @@ type Option func(*Provider)
 // carry a link back to the object in the NetBox UI. replica-cache serves
 // database rows and cannot produce that link itself.
 func WithNetBoxURL(base string) Option {
-	return func(p *Provider) { p.netboxURL = base }
+	// Normalized exactly as netbox.NewClient normalizes it, and for the same
+	// reason: the setting explicitly tolerates a trailing "/api", so a
+	// datasource configured in NetBox mode and then switched here carries that
+	// suffix. Stored raw it produced "View in NetBox" links to
+	// https://host/api/dcim/devices/<id>/ — the REST response for the object
+	// rather than its page.
+	return func(p *Provider) {
+		base = strings.TrimRight(strings.TrimSpace(base), "/")
+		p.netboxURL = strings.TrimSuffix(base, "/api")
+	}
 }
 
 // New builds a replica-cache provider. netboxID is the tenant identifier sent

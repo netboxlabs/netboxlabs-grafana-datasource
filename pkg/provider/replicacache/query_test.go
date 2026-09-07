@@ -1467,34 +1467,51 @@ func TestUnsetCustomFieldKeepsItsColumn(t *testing.T) {
 	}
 }
 
-// A count is zero, not null. The shared contract gives an empty list a _count
-// of float64(0), and buildFrame types an all-null column as strings — so a
-// threshold or numeric transformation that worked in NetBox mode would stop
-// working here, silently.
-func TestUnsetCustomFieldCountIsZeroNotNull(t *testing.T) {
+// A _count suffix is not proof that the column is a list's derived count: a
+// custom field can be NAMED service_count, and NetBox shows an unset one as
+// null. The evidence is whether the BASE is a column this entity has, taken
+// from the cached schema sample.
+func TestUnsetCountNeedsEvidenceThatItIsDerived(t *testing.T) {
+	// No object anywhere has "services", so cf_services is not a column of this
+	// entity and cf_services_count is read as a field named that way.
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{
 		{"id": float64(1), "name": "CORE-1", "custom_field_data": "{}"},
 	}
 	p := newTestProvider(t, f)
-
 	res, err := p.Query(context.Background(), provider.QuerySpec{
 		ObjectType: "dcim/devices",
-		Fields:     []string{"name", "cf_services_count", "cf_services"},
+		Fields:     []string{"name", "cf_services_count"},
 	})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if got := res.Rows[0]["cf_services_count"]; got != float64(0) {
-		t.Errorf("cf_services_count = %#v, want float64(0)", got)
-	}
-	// The non-count column stays null: unset is not the empty string, and the
-	// contract only promises a zero for the COUNT.
-	if v, ok := res.Rows[0]["cf_services"]; !ok || v != nil {
-		t.Errorf("cf_services = %#v (present %v), want a null value", v, ok)
+	if v, ok := res.Rows[0]["cf_services_count"]; !ok || v != nil {
+		t.Errorf("cf_services_count = %#v (present %v), want null with no evidence it is derived", v, ok)
 	}
 	if len(res.Warnings) != 0 {
-		t.Errorf("nothing is missing here: %v", res.Warnings)
+		t.Errorf("the column is still produced, so nothing is missing: %v", res.Warnings)
+	}
+
+	// With the list present somewhere in the entity, the same column IS the
+	// derived count and an unset row gets the numeric zero the contract
+	// promises.
+	f2 := newFakeService()
+	f2.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "custom_field_data": `{"services": ["dns"]}`},
+		{"id": float64(2), "name": "CORE-2", "custom_field_data": "{}"},
+	}
+	res, err = newTestProvider(t, f2).Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "cf_services_count"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	for _, r := range res.Rows {
+		if r["id"] == float64(2) && r["cf_services_count"] != float64(0) {
+			t.Errorf("unset row count = %#v, want float64(0)", r["cf_services_count"])
+		}
 	}
 }
 

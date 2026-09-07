@@ -516,7 +516,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 		rawCols[k] = true
 	}
 
-	cols, rows, err := flattenRows(raws)
+	cols, rows, err := flattenRows(raws, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -630,7 +630,7 @@ func (p *Provider) columnSample(ctx context.Context, objectType string) (fieldsC
 	for k := range obj {
 		rawCols[k] = true
 	}
-	cols, rows, err := flattenRows(raws)
+	cols, rows, err := flattenRows(raws, nil)
 	if err != nil {
 		return fieldsCacheEntry{}, err
 	}

@@ -629,3 +629,31 @@ func TestReplicaCacheHealthNamesTheMissingSetting(t *testing.T) {
 		})
 	}
 }
+
+// The clients trim, so an untrimmed check passed a whitespace-only value
+// through to be reported as an unreachable service or an upstream rejection —
+// an outage message for the configuration problem this check exists to name.
+func TestWhitespaceOnlySettingsAreMissing(t *testing.T) {
+	for _, tc := range []struct{ name, json, want string }{
+		{"blank url", `{"mode":"replica-cache","replicaCacheUrl":"   ","netboxId":"nb-1"}`, "replica-cache URL is missing"},
+		{"blank instance id", `{"mode":"replica-cache","replicaCacheUrl":"http://c","netboxId":"\t"}`, "NetBox instance ID is missing"},
+		{"blank netbox url", `{"url":" "}`, "NetBox URL is missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, err := NewDatasource(context.Background(), backend.DataSourceInstanceSettings{
+				JSONData:                []byte(tc.json),
+				DecryptedSecureJSONData: map[string]string{"replicaCacheToken": "t", "apiToken": "t"},
+			})
+			if err != nil {
+				t.Fatalf("NewDatasource: %v", err)
+			}
+			res, err := inst.(*Datasource).CheckHealth(context.Background(), &backend.CheckHealthRequest{})
+			if err != nil {
+				t.Fatalf("CheckHealth: %v", err)
+			}
+			if !strings.Contains(res.Message, tc.want) {
+				t.Errorf("message = %q, want it to name %q", res.Message, tc.want)
+			}
+		})
+	}
+}

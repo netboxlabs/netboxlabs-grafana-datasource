@@ -83,23 +83,28 @@ func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings bac
 // given, or "" when it can be reached. It mirrors newProvider's switch: a mode
 // added there needs its prerequisites added here, or Save & Test will check the
 // wrong ones.
+// Trimmed, because the clients trim: a whitespace-only URL becomes an empty
+// request URL and a whitespace-only instance id an empty tenant header, so an
+// untrimmed check passed the value through to be reported as an unreachable
+// service or an upstream rejection — an outage message for the configuration
+// problem this function exists to name.
 func missingSetting(cfg *models.PluginSettings) string {
 	switch cfg.Mode {
 	case models.ModeReplicaCache:
 		switch {
-		case cfg.ReplicaCacheURL == "":
+		case strings.TrimSpace(cfg.ReplicaCacheURL) == "":
 			return "replica-cache URL is missing"
-		case cfg.NetBoxID == "":
+		case strings.TrimSpace(cfg.NetBoxID) == "":
 			return "NetBox instance ID is missing"
-		case cfg.Secrets == nil || cfg.Secrets.ReplicaCacheToken == "":
+		case cfg.Secrets == nil || strings.TrimSpace(cfg.Secrets.ReplicaCacheToken) == "":
 			return "replica-cache token is missing"
 		}
 		return ""
 	default:
 		switch {
-		case cfg.URL == "":
+		case strings.TrimSpace(cfg.URL) == "":
 			return "NetBox URL is missing"
-		case cfg.Secrets == nil || cfg.Secrets.APIToken == "":
+		case cfg.Secrets == nil || strings.TrimSpace(cfg.Secrets.APIToken) == "":
 			return "API token is missing"
 		}
 		return ""

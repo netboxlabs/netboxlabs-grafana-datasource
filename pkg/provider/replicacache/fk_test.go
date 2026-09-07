@@ -243,7 +243,7 @@ func TestUnresolvableIDsDoNotJustifyDiscovery(t *testing.T) {
 		"scope_id":           float64(11),
 		"name":               "CORE-1",
 	}}
-	if hasResolvableFK(unresolvable, nil) {
+	if hasResolvableFK("dcim/devices", unresolvable, nil) {
 		t.Error("none of these can be resolved; discovery must not be waited on")
 	}
 
@@ -251,7 +251,7 @@ func TestUnresolvableIDsDoNotJustifyDiscovery(t *testing.T) {
 	withSite := []map[string]interface{}{{
 		"id": float64(1), "owner_id": float64(7), "site_id": float64(4001),
 	}}
-	if !hasResolvableFK(withSite, nil) {
+	if !hasResolvableFK("dcim/devices", withSite, nil) {
 		t.Error("site_id is resolvable, so discovery is worth waiting for")
 	}
 }
@@ -779,15 +779,15 @@ func TestIdentifierLikeTextColumnsAreNeverRelationships(t *testing.T) {
 		{"id": float64(1), "name": "NET-1", "service_id": nil},
 		{"id": float64(2), "name": "NET-2", "service_id": nil},
 	}
-	for _, c := range nullFKColumns(rows) {
+	for _, c := range nullFKColumns("circuits/provider-networks", rows) {
 		if c == "service" {
-			t.Errorf("fabricated a service relationship from an all-null text column: %v", nullFKColumns(rows))
+			t.Errorf("fabricated a service relationship from an all-null text column: %v", nullFKColumns("circuits/provider-networks", rows))
 		}
 	}
 	// A real relationship that is null everywhere still gets its column.
 	rows = []map[string]interface{}{{"id": float64(1), "tenant_id": nil}}
 	var hasTenant bool
-	for _, c := range nullFKColumns(rows) {
+	for _, c := range nullFKColumns("circuits/provider-networks", rows) {
 		if c == "tenant" {
 			hasTenant = true
 		}
@@ -826,5 +826,37 @@ func TestDuplicateDimensionIDsAreRejected(t *testing.T) {
 	// And nothing arbitrary was cached for that id.
 	if have, _ := p.fk.lookup("dcim/sites", []int{4001}); len(have) != 0 {
 		t.Errorf("a label from a contradictory response was cached: %v", have)
+	}
+}
+
+// The text-identifier exclusions are facts about specific NetBox models, so
+// applying them by bare name would suppress a legitimate plugin relationship on
+// the strength of what an unrelated core model does.
+func TestTextIdentifierExclusionsAreScopedToTheirModel(t *testing.T) {
+	known := map[string]bool{
+		"circuits/provider-networks": true, "ipam/services": true,
+		"plugins/acme/widgets": true, "plugins/acme/services": true,
+	}
+	// The core pair stays excluded.
+	if got, ok := fkTarget("circuits/provider-networks", "service", known); ok {
+		t.Errorf("core service_id resolved to %q; it is a text identifier", got)
+	}
+	// A plugin's own service_id is nobody else's business.
+	if got, ok := fkTarget("plugins/acme/widgets", "service", known); !ok || got != "plugins/acme/services" {
+		t.Errorf("fkTarget = %q,%v; want plugins/acme/services", got, ok)
+	}
+	// And the null-column synthesis follows the same scoping.
+	rows := []map[string]interface{}{{"id": float64(1), "service_id": nil}}
+	if cols := nullFKColumns("circuits/provider-networks", rows); len(cols) != 0 {
+		t.Errorf("core: fabricated %v from a text column", cols)
+	}
+	var found bool
+	for _, c := range nullFKColumns("plugins/acme/widgets", rows) {
+		if c == "service" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("a plugin's own all-null service relationship must keep its column")
 	}
 }

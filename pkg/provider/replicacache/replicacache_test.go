@@ -1031,3 +1031,31 @@ func TestAutocompleteFallsBackForUnpushableText(t *testing.T) {
 		t.Errorf("pushed %q, want %%CORE%%", got)
 	}
 }
+
+// Two rows sharing an id carry two values for one object, and only one can be
+// its own — offering both puts a value in the picker that filtering by it would
+// then match nothing. Deduplicating by the displayed value does not catch it:
+// the values differ, which is the problem.
+func TestDuplicateIDsInAutocompleteAreRejected(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			// The schema sample.
+			_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 1, "name": "CORE-1"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"count": 2, "results": [{"id": 1, "name": "CORE-1"}, {"id": 1, "name": "STALE"}]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.FieldValues(context.Background(), "dcim/devices", "name", "", 100)
+	if err == nil {
+		t.Fatal("two values for one object must not both be offered")
+	}
+	if !errors.Is(err, errDuplicateRow) {
+		t.Errorf("want errDuplicateRow, got %v", err)
+	}
+}

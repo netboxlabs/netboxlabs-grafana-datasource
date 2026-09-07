@@ -663,9 +663,32 @@ func typeColumns(cols []string, rows []map[string]interface{}) map[string]provid
 	types := make(map[string]provider.FieldType, len(cols))
 	for _, c := range cols {
 		types[c] = provider.FieldType("")
+		first := true
 		for _, row := range rows {
-			if v, ok := row[c]; ok && v != nil {
+			v, ok := row[c]
+			if !ok || v == nil {
+				continue
+			}
+			if first {
 				types[c] = fieldType(c, v)
+				first = false
+				continue
+			}
+			// A timestamp claim has to hold across the WHOLE sample, not rest on
+			// the first row that happened to be non-null. One RFC3339-looking
+			// value in a text column — a description, or anything on a plugin
+			// model — would otherwise type the column as time, and the damage is
+			// not cosmetic: filterFieldsFor then offers is-empty, which this
+			// backend answers with IS NULL, and NetBox stores a blank text field
+			// as "" — so the filter returns the exact opposite population while
+			// looking healthy. That is the inversion this provider already
+			// refuses elsewhere; here it would arrive through a wrong type.
+			//
+			// Only the time claim is retested. The others are not dangerous in
+			// this way, and re-deriving them per row would make a column of
+			// mixed shapes flip type on the sample's order.
+			if types[c] == provider.FieldTypeTime && fieldType(c, v) != provider.FieldTypeTime {
+				types[c] = provider.FieldTypeString
 				break
 			}
 		}

@@ -453,15 +453,29 @@ func TestEmptyFamilyRefusedWhenTypeIsUnknown(t *testing.T) {
 		}
 	}
 
-	// A confirmed non-text type still gets them.
+	// A confirmed non-text type still gets them. The time column is named for
+	// what it is, which for THIS operator is part of the evidence — see below.
 	ok := map[string]provider.FieldType{
-		"n": provider.FieldTypeNumber,
-		"b": provider.FieldTypeBoolean,
-		"t": provider.FieldTypeTime,
+		"vcpus":        provider.FieldTypeNumber,
+		"is_active":    provider.FieldTypeBoolean,
+		"last_updated": provider.FieldTypeTime,
 	}
 	for field := range ok {
 		if err := validateFilterTypes([]provider.Filter{{Field: field, Operator: opEmpty}}, ok); err != nil {
 			t.Errorf("is-empty on a confirmed %s column must be allowed: %v", ok[field], err)
+		}
+	}
+
+	// A column TYPED as time whose name does not agree does not get it. The
+	// type is inferred from values, and a text column whose sampled values all
+	// look like RFC3339 — contrived for NetBox's own models, but a plugin can
+	// define anything — would otherwise be handed an operator this backend
+	// answers with IS NULL, while blank text is stored as "": the exact
+	// opposite population, returned without an error.
+	valueOnly := map[string]provider.FieldType{"note": provider.FieldTypeTime}
+	for _, op := range []string{opEmpty, opNEmpty} {
+		if err := validateFilterTypes([]provider.Filter{{Field: "note", Operator: op}}, valueOnly); err == nil {
+			t.Errorf("%q on a time type with no corroborating name must be refused", op)
 		}
 	}
 }

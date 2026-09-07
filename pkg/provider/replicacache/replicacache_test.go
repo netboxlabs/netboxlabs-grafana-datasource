@@ -986,3 +986,48 @@ func TestNetBoxURLIsNormalizedForDeepLinks(t *testing.T) {
 		}
 	}
 }
+
+// A search box's text is one literal name. buildFilterValues refuses % and _
+// (no escape syntax upstream) and splits on commas as a multi-value dashboard
+// filter — neither of which is what someone typing CORE_SW means — so
+// propagating that refusal replaced the suggestions with an error.
+func TestAutocompleteFallsBackForUnpushableText(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE_SW-01"},
+		{"id": float64(2), "name": "CORE_SW-02"},
+		{"id": float64(3), "name": "EDGE-RTR-01"},
+	}
+	p := newTestProvider(t, f)
+
+	for _, q := range []string{"CORE_SW", "CORE_SW-0", "a,b"} {
+		if _, err := p.FieldValues(context.Background(), "dcim/devices", "name", q, 100); err != nil {
+			t.Errorf("%q: autocomplete must answer, not fail: %v", q, err)
+		}
+	}
+
+	// And it matches locally rather than returning everything.
+	got, err := p.FieldValues(context.Background(), "dcim/devices", "name", "CORE_SW", 100)
+	if err != nil {
+		t.Fatalf("FieldValues: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("got %v, want the two CORE_SW names", got)
+	}
+	for _, v := range got {
+		if !strings.Contains(v, "CORE_SW") {
+			t.Errorf("%q does not match the search", v)
+		}
+	}
+
+	// Ordinary text is still pushed down, so the wildcard fallback has not
+	// quietly become the only path.
+	if _, err := p.FieldValues(context.Background(), "dcim/devices", "name", "CORE", 100); err != nil {
+		t.Fatalf("FieldValues: %v", err)
+	}
+	if r, ok := f.requestWith("dcim/devices", "filter[name]__ilike"); !ok {
+		t.Error("an ordinary search should still be pushed down")
+	} else if got := r.query.Get("filter[name]__ilike"); got != "%CORE%" {
+		t.Errorf("pushed %q, want %%CORE%%", got)
+	}
+}

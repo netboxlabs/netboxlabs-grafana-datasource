@@ -860,3 +860,37 @@ func TestTextIdentifierExclusionsAreScopedToTheirModel(t *testing.T) {
 		t.Error("a plugin's own all-null service relationship must keep its column")
 	}
 }
+
+// unexposedFKs are facts about NetBox — owner and created_by point at users,
+// config_template at a table this service does not replicate — not about an
+// arbitrary plugin, which may perfectly well have its own owners collection.
+func TestUnexposedExclusionsApplyToCoreModelsOnly(t *testing.T) {
+	known := map[string]bool{
+		"dcim/devices": true, "plugins/acme/widgets": true,
+		"plugins/acme/owners": true, "ipam/ip-addresses": true,
+	}
+	// Core keeps the exclusion: a device's owner is a user, which is not here.
+	if got, ok := fkTarget("dcim/devices", "owner", known); ok {
+		t.Errorf("core owner resolved to %q; users are not replicated", got)
+	}
+	// A plugin's own owners collection is same-app evidence, not coincidence.
+	if got, ok := fkTarget("plugins/acme/widgets", "owner", known); !ok || got != "plugins/acme/owners" {
+		t.Errorf("fkTarget = %q,%v; want plugins/acme/owners", got, ok)
+	}
+	// And a plugin whose owner really is a user finds nothing, because the
+	// global-basename fallback does not apply to plugins.
+	thin := map[string]bool{"plugins/acme/widgets": true, "dcim/devices": true}
+	if got, ok := fkTarget("plugins/acme/widgets", "owner", thin); ok {
+		t.Errorf("resolved a plugin owner to %q with no same-app candidate", got)
+	}
+
+	// Polymorphic stays global: those names ARE the convention that says the
+	// target is decided by a content-type column, so a same-app model that
+	// happened to match would be a confidently wrong answer.
+	known["plugins/acme/scopes"] = true
+	for _, base := range []string{"assigned_object", "scope", "parent_object"} {
+		if got, ok := fkTarget("plugins/acme/widgets", base, known); ok {
+			t.Errorf("%s resolved to %q; its target is a content-type id", base, got)
+		}
+	}
+}

@@ -135,6 +135,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// did not.
 	cols = append(cols, addChoiceValueAliases(selectedFields(spec), rows)...)
 	cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
+	cols = append(cols, p.addUnsetCustomFieldColumns(ctx, spec, rows)...)
 	var warnings []string
 	if !spec.CountOnly {
 		if addDeepLinks(p.netboxURL, spec.ObjectType, rows) {
@@ -290,6 +291,59 @@ func checkProjection(projected []string, rows []map[string]interface{}) error {
 		}
 	}
 	return nil
+}
+
+// addUnsetCustomFieldColumns gives a requested cf_* column its null values when
+// no row has that custom field set.
+//
+// null and {} are how the blob says "this object has no custom field values",
+// so a page where every matched object leaves one unset produces no cf_ key at
+// all — and the missing-column backstop then reports the field as one this
+// backend does not produce, which alert evaluation turns into an error. A rule
+// would fail merely because everything it matched left the field unset, which
+// is the healthy state of most such rules.
+//
+// Gated on the entity actually having the blob. Where it does not, a requested
+// cf_* really is a column this deployment cannot produce, and the backstop is
+// right to say so.
+func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider.QuerySpec, rows []map[string]interface{}) []string {
+	if len(rows) == 0 {
+		return nil
+	}
+	raw, err := p.rawColumns(ctx, spec.ObjectType)
+	if err != nil || !raw["custom_field_data"] {
+		return nil
+	}
+	var added []string
+	for _, f := range selectedFields(spec) {
+		if !strings.HasPrefix(f, "cf_") || hasColumn(rows, f) {
+			continue
+		}
+		// Not an ALIAS whose base is present. cf_tier_id is absent because
+		// "gold" is not an identifier, not because the custom field is unset,
+		// and inventing it would put a column of nulls where the deliberate
+		// answer is no column at all.
+		if aliasOfPresentColumn(f, rows) {
+			continue
+		}
+		for _, row := range rows {
+			row[f] = nil
+		}
+		added = append(added, f)
+	}
+	return added
+}
+
+// aliasOfPresentColumn reports whether a name is one of the derived forms of a
+// column that IS present. Those are absent on purpose — the value could not
+// support the alias — rather than because the source is unset.
+func aliasOfPresentColumn(name string, rows []map[string]interface{}) bool {
+	for _, suffix := range []string{"_id", "_slug", "_value", "_count"} {
+		if base, ok := strings.CutSuffix(name, suffix); ok && hasColumn(rows, base) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasColumn(rows []map[string]interface{}, name string) bool {

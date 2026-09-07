@@ -231,7 +231,14 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out interfa
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
 	if err != nil {
-		return fmt.Errorf("building request: %w", err)
+		// A URL that will not parse fails here, before anything is sent, and
+		// unclassified it renders as "Cannot reach NetBox" — wrong twice over:
+		// nothing was attempted, and the setting at fault is the cache's own.
+		return &TransportError{
+			Op:      "building a request for " + truncate(raw),
+			Err:     err,
+			Message: "The replica-cache URL could not be used to build a request. Check it for typos — a stray percent sign or an unclosed bracket is enough.",
+		}
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("NBC-Netbox-ID", c.netboxID)

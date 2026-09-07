@@ -491,3 +491,43 @@ func TestDistinctObjectIDsWalkNormally(t *testing.T) {
 		t.Errorf("rows = %d, want 3", len(res.Rows))
 	}
 }
+
+// A URL that will not parse fails before anything is sent, and unclassified it
+// rendered as "Cannot reach NetBox" — wrong twice over: nothing was attempted,
+// and the setting at fault is the cache's own. NetBox may not even be
+// configured in this mode.
+func TestAMalformedCacheURLNamesTheCacheSetting(t *testing.T) {
+	for _, base := range []string{
+		"http://cache.example.com/%zz", // invalid percent escape
+		"http://[::1",                  // unclosed bracket
+		"http://exa mple.com",          // space in the host
+	} {
+		p := New(base, "t", "nb", http.DefaultClient)
+		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+		if err == nil {
+			t.Errorf("%q built a request", base)
+			continue
+		}
+		u := provider.Classify(err)
+		if u == nil {
+			t.Errorf("%q: unclassified, so it renders as a NetBox failure", base)
+			continue
+		}
+		if !strings.Contains(u.Detail, "replica-cache URL") {
+			t.Errorf("%q: guidance should name the setting at fault, got %q", base, u.Detail)
+		}
+	}
+}
+
+// A health check reaches the same guidance, since Save & Test is where a
+// mistyped URL is most likely to be discovered.
+func TestAMalformedCacheURLFailsHealthWithTheSameGuidance(t *testing.T) {
+	p := New("http://[::1", "t", "nb", http.DefaultClient)
+	_, err := p.HealthCheck(context.Background())
+	if err == nil {
+		t.Fatal("a malformed URL must fail the health check")
+	}
+	if u := provider.Classify(err); u == nil || !strings.Contains(u.Detail, "replica-cache URL") {
+		t.Errorf("guidance should name the setting at fault, got %+v", u)
+	}
+}

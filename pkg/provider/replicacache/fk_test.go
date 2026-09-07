@@ -748,3 +748,83 @@ func TestWirelessLinkEndpointsResolveToInterfaces(t *testing.T) {
 		t.Errorf("resolved interface_a on an unrelated model to %q", got)
 	}
 }
+
+// Columns whose names end in _id but which are NetBox CharFields holding
+// somebody else's identifier. Value-type evidence catches most of them — a
+// string is not a key — but not when the column is null on every row: there is
+// nothing to classify, so it read as an all-null relationship and gained a
+// fabricated derived column that Fields advertised to the editor.
+func TestIdentifierLikeTextColumnsAreNeverRelationships(t *testing.T) {
+	// All seven from the NetBox 4.4.10 schema, and the two that would resolve by
+	// convention if the door were left open.
+	known := map[string]bool{
+		"circuits/provider-networks": true, "ipam/services": true,
+		"dcim/racks": true, "core/jobs": true, "dcim/sites": true,
+	}
+	for _, tc := range []struct{ entity, base string }{
+		{"circuits/provider-networks", "service"},
+		{"dcim/racks", "facility"},
+		{"core/jobs", "job"},
+		{"dcim/inventory-items", "part"},
+		{"core/object-changes", "request"},
+		{"plugins/branching/branches", "schema"},
+		{"circuits/circuit-terminations", "xconnect"},
+	} {
+		if got, ok := fkTarget(tc.entity, tc.base, known); ok {
+			t.Errorf("%s.%s_id resolved to %q; it is a text identifier, not a key", tc.entity, tc.base, got)
+		}
+	}
+	// The null-everywhere case, which is the one value evidence cannot reach.
+	rows := []map[string]interface{}{
+		{"id": float64(1), "name": "NET-1", "service_id": nil},
+		{"id": float64(2), "name": "NET-2", "service_id": nil},
+	}
+	for _, c := range nullFKColumns(rows) {
+		if c == "service" {
+			t.Errorf("fabricated a service relationship from an all-null text column: %v", nullFKColumns(rows))
+		}
+	}
+	// A real relationship that is null everywhere still gets its column.
+	rows = []map[string]interface{}{{"id": float64(1), "tenant_id": nil}}
+	var hasTenant bool
+	for _, c := range nullFKColumns(rows) {
+		if c == "tenant" {
+			hasTenant = true
+		}
+	}
+	if !hasTenant {
+		t.Error("tenant is a real relationship and must keep its null column")
+	}
+}
+
+// A dimension response repeating a requested id let the last row win, storing
+// an arbitrary label in the SHARED cache — where a later query takes it without
+// another lookup or a warning, by which time the duplicate is gone and nothing
+// can tell that a choice was made.
+func TestDuplicateDimensionIDsAreRejected(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		deviceFixture(1, "CORE-1", 4001),
+		deviceFixture(2, "CORE-2", 4002),
+	}
+	// Two rows carrying the same id with different names.
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-ne"},
+		{"id": float64(4001), "name": "SOMEWHERE-ELSE", "slug": "else"},
+	}
+	f.ignoreIDFilterFor = "dcim/sites"
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		// The device rows are fine; a dead dimension degrades rather than fails.
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Warnings) == 0 {
+		t.Error("a contradictory dimension response must be reported, not resolved arbitrarily")
+	}
+	// And nothing arbitrary was cached for that id.
+	if have, _ := p.fk.lookup("dcim/sites", []int{4001}); len(have) != 0 {
+		t.Errorf("a label from a contradictory response was cached: %v", have)
+	}
+}

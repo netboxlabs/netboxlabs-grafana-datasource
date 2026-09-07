@@ -276,7 +276,13 @@ func hasColumn(rows []map[string]interface{}, name string) bool {
 // A blank column at least reads as a blank; a missing one a panel selected is
 // invisible.
 func unresolvedRelationWarnings(spec provider.QuerySpec, cols []string, rows []map[string]interface{}) []string {
-	if len(spec.Fields) == 0 || len(rows) == 0 {
+	// Both empty, not just Fields. "All columns" with a join mapping leaves
+	// Fields empty while KeyFields still names a source that has to exist, and
+	// skipping on Fields alone let applyJoinKeys announce an output column that
+	// was blank on every row with nothing to say why. With Fields empty the
+	// loop below sees only the key fields, which is right: every column the
+	// backend can produce is already present.
+	if (len(spec.Fields) == 0 && len(spec.KeyFields) == 0) || len(rows) == 0 {
 		// No rows is not a degradation. hasColumn is false for every field when
 		// there is nothing to observe a column in, so an ordinary empty result —
 		// an offline-device rule while nothing is offline — would report every

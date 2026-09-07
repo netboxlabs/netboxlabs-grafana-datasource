@@ -335,9 +335,12 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 		// Without that, the suffix is treated as part of the field's own name.
 		isCount := false
 		if base, ok := strings.CutSuffix(f, "_count"); ok {
-			if _, known := knownTypes[base]; known {
-				isCount = true
-			}
+			// The schema sample is one source of evidence, not the only one: it
+			// is 20 unfiltered rows, so a sparse list custom field can be absent
+			// from it while the rows in hand carry it. Those rows are evidence
+			// too, and better evidence — they are the result being answered.
+			_, known := knownTypes[base]
+			isCount = known || hasColumn(rows, base)
 		}
 		var unset interface{}
 		if isCount {

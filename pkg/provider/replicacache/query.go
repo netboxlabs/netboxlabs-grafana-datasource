@@ -256,16 +256,19 @@ func hasColumn(rows []map[string]interface{}, name string) bool {
 	return false
 }
 
-// unresolvedRelationWarnings reports a relationship the caller asked to SEE
-// that produced no column at all.
+// unresolvedRelationWarnings reports every column the caller asked for that the
+// result does not contain.
 //
-// Every silent path into that state has been closed one at a time; this is the
-// backstop for the ones nobody has thought of yet. The most recent was a page
-// whose site_id was a string in every row: no value proved the column was a
-// relationship, so it was accepted as text, and a request for "site" came back
-// with neither a column nor a word about why. A blank column at least reads as
-// a blank; a missing one a panel selected is invisible, and alert evaluation
-// treats warnings as failures precisely so it never runs on one.
+// Not only relationships. It first covered those alone, on the reasoning that a
+// field this deployment simply does not have is the projection's business
+// rather than a degradation — which was wrong for the same reason everything
+// else in this file is: absence is indistinguishable from emptiness. A saved
+// panel selecting a NetBox-computed column such as ipam/prefixes.utilization
+// gets nothing here, and nothing said so, while alert evaluation treats an
+// empty Warnings list as permission to run.
+//
+// A blank column at least reads as a blank; a missing one a panel selected is
+// invisible.
 func unresolvedRelationWarnings(spec provider.QuerySpec, cols []string, rows []map[string]interface{}) []string {
 	if len(spec.Fields) == 0 {
 		return nil
@@ -280,14 +283,16 @@ func unresolvedRelationWarnings(spec provider.QuerySpec, cols []string, rows []m
 		if hasColumn(rows, f) {
 			continue
 		}
-		base := strings.TrimSuffix(f, "_slug")
-		// Only when the SOURCE column is there. A field this deployment simply
-		// does not have is the projection's business, not a degradation.
-		if !hasColumn(rows, base+"_id") {
+		// A relationship names its source, because the id is still there and is
+		// what the reader can fall back on. Anything else can only say it is
+		// absent, which is the part that was missing.
+		if base := strings.TrimSuffix(f, "_slug"); hasColumn(rows, base+"_id") {
+			out = append(out, fmt.Sprintf(
+				"%q could not be built from %s_id, so the column is missing from this result; the id column still holds the value.", f, base))
 			continue
 		}
 		out = append(out, fmt.Sprintf(
-			"%q could not be built from %s_id, so the column is missing from this result; the id column still holds the value.", f, base))
+			"%q is not a column this backend produces for this object type, so it is missing from this result.", f))
 	}
 	return out
 }

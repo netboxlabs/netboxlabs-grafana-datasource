@@ -894,3 +894,16 @@ func TestUnexposedExclusionsApplyToCoreModelsOnly(t *testing.T) {
 		}
 	}
 }
+
+// hasResolvableFK runs BEFORE discovery, so applying the core-only exclusions
+// globally there defeated the scoping in fkTarget entirely: a projected plugin
+// query asking for plugins/acme/widgets.owner never reached it.
+func TestPluginOwnedFKsStillJustifyDiscovery(t *testing.T) {
+	rows := []map[string]interface{}{{"id": float64(1), "owner_id": float64(7)}}
+	if hasResolvableFK("dcim/devices", rows, nil) {
+		t.Error("a core owner_id points at users, which are not replicated")
+	}
+	if !hasResolvableFK("plugins/acme/widgets", rows, nil) {
+		t.Error("a plugin's own owner_id may well be resolvable; discovery must run")
+	}
+}

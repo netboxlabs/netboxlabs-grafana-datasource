@@ -1658,3 +1658,53 @@ func TestALiteralCountFieldUnsetBeatsTheDerivedOne(t *testing.T) {
 		t.Errorf("cf_service_count = %#v (present %v), want the literal field's null", v, ok)
 	}
 }
+
+// A count-only caller reads Result.Total and nothing else, so building derived
+// columns for it is waste — and one of the builders consults rawColumns, which
+// fetches a schema sample when the cache is cold. An alert counting a
+// multi-million-row table was paying for a second list request to decorate rows
+// it then discards.
+func TestACountOnlyQueryMakesOneRequest(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "custom_field_data": `{"tier": "gold"}`},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		CountOnly:  true,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if res.Total != 1 {
+		t.Errorf("total = %d, want 1", res.Total)
+	}
+	if n := f.countRequestsFor("dcim/devices"); n != 1 {
+		t.Errorf("made %d requests for a count; the first one already had the answer", n)
+	}
+}
+
+// And an ordinary query still gets its derived columns.
+func TestAnOrdinaryQueryStillGetsDerivedColumns(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "status": "active", "custom_field_data": `{"tier": "gold"}`},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "status_value", "cf_tier"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := res.Rows[0]["status_value"]; got != "active" {
+		t.Errorf("status_value = %#v, want active", got)
+	}
+	if got := res.Rows[0]["cf_tier"]; got != "gold" {
+		t.Errorf("cf_tier = %#v, want gold", got)
+	}
+}

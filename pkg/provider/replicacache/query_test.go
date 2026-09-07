@@ -1733,3 +1733,61 @@ func TestAnOrdinaryQueryStillGetsDerivedColumns(t *testing.T) {
 		t.Errorf("cf_tier = %#v, want gold", got)
 	}
 }
+
+// A slug comes from the object a foreign key points at, so an unset
+// relationship has none. The missing-column backstop could not tell that from a
+// slug that should have been built and was not, so it reported the legitimate
+// case as a degradation — and a rule whose objects all have no tenant failed
+// for having no tenant.
+func TestARequestedSlugSurvivesAnUnsetRelationship(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "tenant_id": nil},
+		{"id": float64(2), "name": "CORE-2", "tenant_id": nil},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "tenant", "tenant_slug"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("an unset relationship is not a degradation: %v", res.Warnings)
+	}
+	for _, col := range []string{"tenant", "tenant_slug"} {
+		if v, ok := res.Rows[0][col]; !ok || v != nil {
+			t.Errorf("%s = %#v (present %v), want a null value", col, v, ok)
+		}
+	}
+}
+
+// Where the relationship DOES carry ids, a missing slug means resolution failed
+// to produce one, and that is still worth reporting rather than filling in.
+func TestAMissingSlugIsStillReportedWhenTheRelationshipHasIDs(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast"}, // no slug on the dimension
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "site_slug"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var told bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "site_slug") {
+			told = true
+		}
+	}
+	if !told {
+		t.Errorf("the site resolved but has no slug; that must be stated: %v", res.Warnings)
+	}
+}

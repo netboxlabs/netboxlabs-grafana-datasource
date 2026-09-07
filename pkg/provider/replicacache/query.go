@@ -270,7 +270,13 @@ func hasColumn(rows []map[string]interface{}, name string) bool {
 // A blank column at least reads as a blank; a missing one a panel selected is
 // invisible.
 func unresolvedRelationWarnings(spec provider.QuerySpec, cols []string, rows []map[string]interface{}) []string {
-	if len(spec.Fields) == 0 {
+	if len(spec.Fields) == 0 || len(rows) == 0 {
+		// No rows is not a degradation. hasColumn is false for every field when
+		// there is nothing to observe a column in, so an ordinary empty result —
+		// an offline-device rule while nothing is offline — would report every
+		// requested column as missing, and degradationError turns that into a
+		// rule in Error rather than a healthy empty evaluation. The most common
+		// state of a working alert is the one this would have broken.
 		return nil
 	}
 	var out []string

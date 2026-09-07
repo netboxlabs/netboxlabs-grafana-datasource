@@ -305,3 +305,30 @@ describe('resource helpers', () => {
     expect(await ds.getBranchingInstalled()).toBe(true);
   });
 });
+
+describe('metricFindQuery degradation', () => {
+  // A degraded result is not a shorter list, it is a DIFFERENT one: a lookup
+  // that could not read some site names produces a variable missing those
+  // options, which silently rescopes every panel that depends on it.
+  it('refuses a degraded variable list instead of offering a partial one', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({
+      columns: ['site'],
+      rows: [{ site: 'DC-Northeast' }],
+      warnings: ['Related names from dcim/sites are missing for 3 of the 5 objects referenced here.'],
+    });
+    await expect(
+      ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'site' })
+    ).rejects.toThrow(/incomplete list/i);
+  });
+
+  it('returns the list when nothing was degraded', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest
+      .fn()
+      .mockResolvedValue({ columns: ['site'], rows: [{ site: 'DC-Northeast' }] });
+    expect(await ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'site' })).toEqual([
+      { text: 'DC-Northeast', value: 'DC-Northeast' },
+    ]);
+  });
+});

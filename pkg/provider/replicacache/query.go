@@ -148,6 +148,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		}
 		added, warns := p.resolveFKs(ctx, spec.ObjectType, rows, wantedRelations(spec))
 		cols = append(cols, added...)
+		cols = append(cols, addNullSlugColumns(spec, rows)...)
 		warnings = warns
 		warnings = append(warnings, unresolvedRelationWarnings(spec, cols, rows)...)
 	}
@@ -399,6 +400,44 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 		if filled && !existed {
 			added = append(added, f)
 		}
+	}
+	return added
+}
+
+// addNullSlugColumns gives a requested <base>_slug its null values when the
+// relationship is null on every row.
+//
+// A slug comes from the object a foreign key points at, so an unset
+// relationship has none — the same reason NetBox mode emits no slug for a null
+// tenant. But the missing-column backstop cannot tell that from a slug that
+// should have been built and was not, so it reported the legitimate case as a
+// degradation, which alert evaluation turns into an error. A rule whose objects
+// all have no tenant would fail for having no tenant.
+//
+// Only when asked for, and only when the base is there and null throughout:
+// where the base carries ids, a missing slug means resolution did not produce
+// one, and that IS worth reporting.
+func addNullSlugColumns(spec provider.QuerySpec, rows []map[string]interface{}) []string {
+	var added []string
+	for _, f := range selectedFields(spec) {
+		base, ok := strings.CutSuffix(f, "_slug")
+		if !ok || base == "" || hasColumn(rows, f) || !hasColumn(rows, base) {
+			continue
+		}
+		allNull := true
+		for _, row := range rows {
+			if v, present := row[base]; present && v != nil {
+				allNull = false
+				break
+			}
+		}
+		if !allNull {
+			continue
+		}
+		for _, row := range rows {
+			row[f] = nil
+		}
+		added = append(added, f)
 	}
 	return added
 }

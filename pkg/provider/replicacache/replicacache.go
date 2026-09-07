@@ -200,7 +200,13 @@ func (e *UnknownObjectTypeError) Classification() *provider.UpstreamError {
 // It is reachable: a saved or provisioned query keeps its branch when the
 // datasource behind it is switched to this mode.
 func rejectBranch(ctx context.Context) error {
-	if provider.BranchFromContext(ctx) == "" {
+	// "" and "main" both mean the unbranched dataset — the same sentinel the
+	// NetBox client honours, and the value the branch variable emits for its
+	// always-present first option. This mode mirrors exactly that dataset, so
+	// rejecting the word for it turned every panel driven by the documented
+	// variable into an error while it was pointed at the data we serve.
+	branch := strings.TrimSpace(provider.BranchFromContext(ctx))
+	if branch == "" || strings.EqualFold(branch, "main") {
 		return nil
 	}
 	return &UnsupportedError{

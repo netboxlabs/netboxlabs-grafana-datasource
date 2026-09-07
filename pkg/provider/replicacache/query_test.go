@@ -3,6 +3,7 @@ package replicacache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1551,5 +1552,44 @@ func TestUnsetCustomFieldsAreFilledPerRow(t *testing.T) {
 	}
 	if v, ok := byID[2]["cf_tier"]; !ok || v != nil {
 		t.Errorf("unset cf_tier = %#v (present %v), want a null value", v, ok)
+	}
+}
+
+// The schema sample is 20 unfiltered rows, so a sparse list custom field can be
+// absent from it while the rows in hand carry it. Those rows are evidence too,
+// and better evidence — they are the result being answered.
+func TestCountEvidenceCanComeFromTheRowsInHand(t *testing.T) {
+	f := newFakeService()
+	// The schema sample reads the FIRST sampleRows rows, so the sparse field has
+	// to sit beyond them for this to be the case the finding describes. Without
+	// that, the sample sees it and the fix is never exercised.
+	var devices []map[string]interface{}
+	for i := 1; i <= sampleRows+5; i++ {
+		devices = append(devices, map[string]interface{}{
+			"id": float64(i), "name": fmt.Sprintf("PLAIN-%02d", i), "custom_field_data": "{}",
+		})
+	}
+	devices = append(devices,
+		map[string]interface{}{"id": float64(100), "name": "RARE-1", "custom_field_data": `{"services": ["dns"]}`},
+		map[string]interface{}{"id": float64(101), "name": "RARE-2", "custom_field_data": "{}"},
+	)
+	f.entities["dcim/devices"] = devices
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "cf_services_count"},
+		Filters:    []provider.Filter{{Field: "name", Operator: "isw", Value: "RARE"}},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	for _, r := range res.Rows {
+		if r["name"] == "RARE-2" && r["cf_services_count"] != float64(0) {
+			t.Errorf("unset row count = %#v, want float64(0)", r["cf_services_count"])
+		}
+		if r["name"] == "RARE-1" && r["cf_services_count"] != float64(1) {
+			t.Errorf("populated row count = %#v, want 1", r["cf_services_count"])
+		}
 	}
 }

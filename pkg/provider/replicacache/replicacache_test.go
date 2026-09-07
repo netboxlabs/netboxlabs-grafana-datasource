@@ -1184,3 +1184,28 @@ func TestAConsistentTimestampColumnIsStillTime(t *testing.T) {
 		t.Error("completed missing from the field list")
 	}
 }
+
+// "" and "main" both mean the unbranched dataset — the sentinel the NetBox
+// client already honours, and the value the documented branch variable emits
+// for its always-present first option. This mode mirrors exactly that dataset,
+// so rejecting the word for it broke every panel driven by that variable while
+// it pointed at the data we serve.
+func TestMainIsTheUnbranchedDataset(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+
+	for _, branch := range []string{"main", "Main", "MAIN", " main "} {
+		ctx := provider.WithBranch(context.Background(), branch)
+		if _, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices"}); err != nil {
+			t.Errorf("branch %q means the main dataset: %v", branch, err)
+		}
+	}
+
+	// A real branch is still refused: the cache cannot answer it, and answering
+	// from main would look healthy while reporting the wrong data.
+	ctx := provider.WithBranch(context.Background(), "schema_abc")
+	if _, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices"}); err == nil {
+		t.Error("a branch-scoped query must still be refused")
+	}
+}

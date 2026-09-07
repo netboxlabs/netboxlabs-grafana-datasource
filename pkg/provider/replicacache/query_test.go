@@ -1285,3 +1285,47 @@ func TestAliasesAreBuiltForJoinKeySourcesToo(t *testing.T) {
 		}
 	}
 }
+
+// "All columns" leaves Fields empty while a join mapping still names a source
+// in KeyFields. Skipping validation on Fields alone let applyJoinKeys announce
+// an output column that was blank on every row with nothing to say why.
+func TestKeyOnlyJoinsAreValidatedUnderAllColumns(t *testing.T) {
+	f := newFakeService()
+	// site_id is text in every row, so "site" can never be built.
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "site_id": "4001"},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		KeyFields:  []string{"site"}, // Fields deliberately empty
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var warned bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "site") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("the join source never built and must be reported: %v", res.Warnings)
+	}
+
+	// And an all-columns query with no join mapping stays silent, since every
+	// column the backend can produce is already there.
+	f2 := newFakeService()
+	f2.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f2.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	res, err = newTestProvider(t, f2).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("an unprojected healthy query has nothing to report: %v", res.Warnings)
+	}
+}

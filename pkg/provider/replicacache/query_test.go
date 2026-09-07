@@ -1466,3 +1466,34 @@ func TestUnsetCustomFieldKeepsItsColumn(t *testing.T) {
 		t.Error("an entity with no custom fields cannot produce cf_tier; that must be said")
 	}
 }
+
+// A count is zero, not null. The shared contract gives an empty list a _count
+// of float64(0), and buildFrame types an all-null column as strings — so a
+// threshold or numeric transformation that worked in NetBox mode would stop
+// working here, silently.
+func TestUnsetCustomFieldCountIsZeroNotNull(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "CORE-1", "custom_field_data": "{}"},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "cf_services_count", "cf_services"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := res.Rows[0]["cf_services_count"]; got != float64(0) {
+		t.Errorf("cf_services_count = %#v, want float64(0)", got)
+	}
+	// The non-count column stays null: unset is not the empty string, and the
+	// contract only promises a zero for the COUNT.
+	if v, ok := res.Rows[0]["cf_services"]; !ok || v != nil {
+		t.Errorf("cf_services = %#v (present %v), want a null value", v, ok)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("nothing is missing here: %v", res.Warnings)
+	}
+}

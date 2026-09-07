@@ -827,6 +827,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	}
 	needle := strings.ToLower(q)
 	seen := map[string]bool{}
+	seenIDs := map[int]bool{}
 	var out []string
 	for _, r := range raws {
 		var obj map[string]interface{}
@@ -841,7 +842,20 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 			// A JSON null decodes without error and leaves the map nil.
 			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errMalformedRow, Message: rowShapeGuidance}
 		}
-		if _, ok := toInt(obj["id"]); !ok {
+		id, hasID := toInt(obj["id"])
+		if hasID {
+			// Same rule as every other consumer of these rows. Two rows sharing
+			// an id carry two values for one object, and only one can be its
+			// own — offering both puts a value in the picker that filtering by
+			// it would then match nothing. Deduplicating by the displayed value
+			// below does not catch this: the values differ, which is the
+			// problem.
+			if seenIDs[id] {
+				return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errDuplicateRow, Message: rowShapeGuidance}
+			}
+			seenIDs[id] = true
+		}
+		if !hasID {
 			// The same invariant the query path enforces, and it holds here for
 			// the same measured reason: the service returns id on every
 			// projection, even one that did not ask for it — `fields=serial`

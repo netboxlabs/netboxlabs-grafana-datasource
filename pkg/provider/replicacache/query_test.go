@@ -1221,3 +1221,29 @@ func TestObjectCustomFieldExposesItsID(t *testing.T) {
 		}
 	}
 }
+
+// No rows is not a degradation. hasColumn is false for every field when there
+// is nothing to observe a column in, so an ordinary empty result — an
+// offline-device rule while nothing is offline — reported every requested
+// column as missing, and degradationError turns that into a rule in Error
+// rather than a healthy empty evaluation.
+func TestAnEmptyResultIsNotADegradation(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "site", "status"},
+		Filters:    []provider.Filter{{Field: "status", Operator: "", Value: "offline"}},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Rows) != 0 {
+		t.Fatalf("this filter should match nothing, got %d rows", len(res.Rows))
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("an empty result is the healthy state of an alert, not a failure: %v", res.Warnings)
+	}
+}

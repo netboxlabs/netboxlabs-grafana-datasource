@@ -922,6 +922,11 @@ func TestMalformedValueRowIsRejected(t *testing.T) {
 	for _, bad := range []string{
 		`{"count": 1, "results": ["CORE-1"]}`,
 		`{"count": 1, "results": [null]}`,
+		// Object-shaped but identifying no object. The projection asks for one
+		// field and the service returns id beside it regardless, so a row
+		// without one is malformed and its value belongs to nothing.
+		`{"count": 1, "results": [{"name": "ghost"}]}`,
+		`{"count": 1, "results": [{"id": 0, "name": "ghost"}]}`,
 	} {
 		// The schema sample is answered normally FIRST, so rawColumns succeeds
 		// and caches. That is what makes the value loop reachable at all: with a

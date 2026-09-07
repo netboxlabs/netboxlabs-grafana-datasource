@@ -3,7 +3,12 @@ import { Alert, InlineField, Select, Input, Stack, Button, IconButton } from '@g
 import { SelectableValue } from '@grafana/data';
 import { DataSource } from '../datasource';
 import { getTemplateSrv } from '@grafana/runtime';
-import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, BRANCH_FIELD_DISABLED_TOOLTIP } from '../hooks/useBranchingInstalled';
+import {
+  useBranchingInstalled,
+  BRANCH_FIELD_TOOLTIP,
+  BRANCH_FIELD_DISABLED_TOOLTIP,
+  BRANCH_FIELD_RETAINED_TOOLTIP,
+} from '../hooks/useBranchingInstalled';
 import { FieldOption, FilterRow, NetBoxVariableQuery, ObjectTypeOption, validateFilters } from '../types';
 
 interface Props {
@@ -14,7 +19,13 @@ interface Props {
 
 export function VariableQueryEditor({ query, onChange, datasource }: Props) {
   const branchingInstalled = useBranchingInstalled(datasource);
-  const branchDisabled = branchingInstalled === false;
+  // Same exception as QueryEditor: disabled when branching is unavailable,
+  // EXCEPT when the query already carries a branch. A saved variable keeps its
+  // branch when its datasource is switched to a backend that has none, and the
+  // backend then rejects every refresh and says to clear it — advice that
+  // needs the only control able to do so to be live.
+  const branchRetained = (query.branch ?? '') !== '';
+  const branchDisabled = branchingInstalled === false && !branchRetained;
   const [objectTypes, setObjectTypes] = useState<ObjectTypeOption[]>([]);
   const [fields, setFields] = useState<string[]>([]);
 
@@ -55,7 +66,13 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
         label="Branch"
         labelWidth={16}
         disabled={branchDisabled}
-        tooltip={branchDisabled ? BRANCH_FIELD_DISABLED_TOOLTIP : BRANCH_FIELD_TOOLTIP}
+        tooltip={
+          branchDisabled
+            ? BRANCH_FIELD_DISABLED_TOOLTIP
+            : branchingInstalled === false
+              ? BRANCH_FIELD_RETAINED_TOOLTIP
+              : BRANCH_FIELD_TOOLTIP
+        }
       >
         <Input
           id="variable-branch"

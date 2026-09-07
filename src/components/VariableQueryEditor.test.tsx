@@ -117,3 +117,16 @@ it('attributes a variable filter row message to that row only, not to every row'
   expect(within(row0).getByText(/isn't applied/i)).toBeInTheDocument();
   expect(within(row1).queryByText(/isn't applied/i)).not.toBeInTheDocument();
 });
+
+// A saved variable keeps its branch when its datasource is switched to a
+// backend that has none. The backend then rejects every refresh and says to
+// clear it — advice that needs the only control able to do so to be live. This
+// exception reached QueryEditor first and missed its sibling here.
+it('keeps the Branch field editable when the variable still carries one', async () => {
+  const ds = { ...dsMock, uid: 'ds-var-retained', getBranchingInstalled: jest.fn().mockResolvedValue(false) };
+  render(
+    <VariableQueryEditor query={{ refId: 'A', branch: 'schema_abc' } as any} onChange={jest.fn()} datasource={ds} />
+  );
+  const input = await screen.findByDisplayValue('schema_abc');
+  await waitFor(() => expect(input).not.toBeDisabled());
+});

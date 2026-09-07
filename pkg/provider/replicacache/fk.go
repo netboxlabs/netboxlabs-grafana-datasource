@@ -54,6 +54,30 @@ var polymorphicFKs = map[string]bool{
 	"parent_object":   true,
 }
 
+// notFKs are columns whose names end in _id but which are not foreign keys at
+// all: NetBox CharFields holding somebody else's identifier, like a rack's
+// facility id or a provider network's service id.
+//
+// Every entry was found rather than guessed — the NetBox 4.4.10 schema was
+// searched for properties of type string whose name ends in _id, and this is
+// all seven. Value-type evidence catches most of them (a string is not a key),
+// but not when the column is null on every row of a page: there is nothing to
+// classify, so the column read as an all-null RELATIONSHIP and gained a
+// fabricated derived column that Fields then advertised to the editor.
+//
+// Several would also resolve by convention if the value ever were numeric —
+// "service" finds ipam/services — so excluding them by name is what actually
+// closes the door.
+var notFKs = map[string]bool{
+	"facility": true, // Rack
+	"job":      true, // Job
+	"part":     true, // InventoryItem, InventoryItemTemplate
+	"request":  true, // ObjectChange
+	"schema":   true, // Branch
+	"service":  true, // ProviderNetwork
+	"xconnect": true, // CircuitTermination
+}
+
 // unexposedFKs point at tables replica-cache does not replicate at all (users,
 // config templates). Nothing can resolve them, so the raw id stays.
 var unexposedFKs = map[string]bool{
@@ -134,7 +158,7 @@ var selfFKs = map[string]bool{
 //	role_id on ipam/prefixes -> ipam/roles         (plain, same app)
 //	tenant_id on dcim/devices -> tenancy/tenants   (unique across apps)
 func fkTarget(entity, base string, known map[string]bool) (string, bool) {
-	if polymorphicFKs[base] || unexposedFKs[base] {
+	if polymorphicFKs[base] || unexposedFKs[base] || notFKs[base] {
 		return "", false
 	}
 	// Overrides win over every derivation below, including the global-basename
@@ -356,7 +380,7 @@ func (p *Provider) resolveFKs(ctx context.Context, entity string, rows []map[str
 	for _, row := range rows {
 		for col, v := range row {
 			base, ok := strings.CutSuffix(col, "_id")
-			if !ok || base == "" || !wanted(want, base) {
+			if !ok || base == "" || notFKs[base] || !wanted(want, base) {
 				continue
 			}
 			id, ok := toInt(v)
@@ -527,6 +551,15 @@ func (p *Provider) fetchRelated(ctx context.Context, entity string, ids []int) (
 				// nothing to say why.
 				return nil, &TransportError{Op: "reading a " + entity + " row", Err: errMalformedRow, Message: rowShapeGuidance}
 			}
+			if id, ok := toInt(obj["id"]); ok {
+				// Same rule as the main rows. Letting the last one win stored an
+				// arbitrary label in the SHARED cache, where a later query takes
+				// it without another lookup or a warning — the duplicate is gone
+				// by then, so nothing can even tell that a choice was made.
+				if _, dup := out[id]; dup {
+					return nil, &TransportError{Op: "reading a " + entity + " row", Err: errDuplicateRow, Message: rowShapeGuidance}
+				}
+			}
 			id, ok := toInt(obj["id"])
 			if !ok {
 				// Being object-shaped is not enough: without an id there is
@@ -642,7 +675,7 @@ func nullFKColumns(rows []map[string]interface{}) []string {
 	for _, row := range rows {
 		for col, v := range row {
 			base, ok := strings.CutSuffix(col, "_id")
-			if !ok || base == "" || polymorphicFKs[base] || unexposedFKs[base] {
+			if !ok || base == "" || polymorphicFKs[base] || unexposedFKs[base] || notFKs[base] {
 				continue
 			}
 			switch _, kind := classifyFKValue(v); kind {
@@ -717,7 +750,7 @@ func hasResolvableFK(rows []map[string]interface{}, want map[string]bool) bool {
 	for _, row := range rows {
 		for col, v := range row {
 			base, ok := strings.CutSuffix(col, "_id")
-			if !ok || base == "" || !wanted(want, base) {
+			if !ok || base == "" || notFKs[base] || !wanted(want, base) {
 				continue
 			}
 			// The suffix alone is not enough. owner_id, created_by_id and

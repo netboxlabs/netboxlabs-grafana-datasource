@@ -1629,3 +1629,32 @@ func TestALiteralCountFieldBeatsTheBaseNameHeuristic(t *testing.T) {
 		}
 	}
 }
+
+// A literal custom field named service_count, DEFINED but unset, beside a
+// populated list-valued service. The two claim the same column name, and the
+// resolution is the shared contract's ordering: sorted keys put "service"
+// first, so its derived count lands and the literal null then overwrites it —
+// the same answer NetBox mode reaches through the same contract.
+//
+// It works because the service carries every defined custom field in the blob,
+// unset ones as an explicit null (measured on a live instance: all rows of
+// dcim/devices carry the same six keys, three of them null). Pinned here
+// because the behaviour depends on that ordering, which is easy to disturb.
+func TestALiteralCountFieldUnsetBeatsTheDerivedOne(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "A", "custom_field_data": `{"service": ["dns","ntp"], "service_count": null}`},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{
+		ObjectType: "dcim/devices",
+		Fields:     []string{"name", "cf_service_count"},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if v, ok := res.Rows[0]["cf_service_count"]; !ok || v != nil {
+		t.Errorf("cf_service_count = %#v (present %v), want the literal field's null", v, ok)
+	}
+}

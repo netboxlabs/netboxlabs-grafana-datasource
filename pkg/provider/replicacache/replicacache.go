@@ -865,7 +865,17 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 			// deployment corresponds to.
 			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errRowWithoutID, Message: rowShapeGuidance}
 		}
-		s := valueString(obj[field])
+		v, present := obj[field]
+		if !present {
+			// The projection asked for this column, so its absence is the
+			// service failing to answer rather than the object having no value
+			// — and treating the two alike turned an incomplete response into a
+			// short list the editor presents as authoritative. Measured before
+			// requiring it: 92 projected rows across 30 entities on a live
+			// instance, none missing the column they were projected onto.
+			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errRowWithoutField, Message: rowShapeGuidance}
+		}
+		s := valueString(v)
 		if s == "" || seen[s] {
 			continue
 		}

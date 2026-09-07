@@ -1059,3 +1059,55 @@ func TestDuplicateIDsInAutocompleteAreRejected(t *testing.T) {
 		t.Errorf("want errDuplicateRow, got %v", err)
 	}
 }
+
+// The projection asked for the column, so its absence is the service failing to
+// answer rather than the object having no value — and treating the two alike
+// turned an incomplete response into a short list the editor presents as
+// authoritative.
+func TestValueRowMissingTheProjectedFieldIsRejected(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 1, "name": "CORE-1"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"count": 2, "results": [{"id": 1, "name": "CORE-1"}, {"id": 2}]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.FieldValues(context.Background(), "dcim/devices", "name", "", 100)
+	if err == nil {
+		t.Fatal("a row without the projected column must not be read as a value-less object")
+	}
+	if !errors.Is(err, errRowWithoutField) {
+		t.Errorf("want errRowWithoutField, got %v", err)
+	}
+}
+
+// A column that is PRESENT and null is an object with no value there, which is
+// an ordinary answer and must stay one.
+func TestValueRowWithANullFieldIsAnAnswer(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 1, "serial": "ABC"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"count": 2, "results": [{"id": 1, "serial": "ABC"}, {"id": 2, "serial": null}]}`))
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	got, err := p.FieldValues(context.Background(), "dcim/devices", "serial", "", 100)
+	if err != nil {
+		t.Fatalf("a null value is an ordinary answer: %v", err)
+	}
+	if len(got) != 1 || got[0] != "ABC" {
+		t.Errorf("got %v, want just ABC", got)
+	}
+}

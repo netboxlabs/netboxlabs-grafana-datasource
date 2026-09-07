@@ -158,6 +158,16 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     const isBranches = query.objectType === 'plugins/branching/branches';
     const out: MetricFindValue[] = isBranches ? [{ text: 'main', value: 'main' }] : [];
 
+    // In replica-cache mode the list stops at "main", and does NOT depend on
+    // the endpoint being absent. The cache mirrors the main dataset only and
+    // refuses a branch-scoped query outright — so if it happens to replicate
+    // the branches table (its discovery accepts plugin paths), every schema it
+    // listed would be an option that breaks every panel selecting it. Offering
+    // only the one that works is the honest list, not a degraded one.
+    if (isBranches && this.datasourceInstanceSettings?.jsonData?.mode === 'replica-cache') {
+      return out;
+    }
+
     let res: { columns: string[]; rows: Array<Record<string, unknown>>; warnings?: string[]; total?: number };
     try {
       // For the branch probe, suppress Grafana's default error toast: on a NetBox

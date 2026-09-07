@@ -131,7 +131,7 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
       branch?: string;
     },
     options?: Partial<BackendSrvRequest>
-  ): Promise<{ columns: string[]; rows: Array<Record<string, unknown>>; warnings?: string[] }> {
+  ): Promise<{ columns: string[]; rows: Array<Record<string, unknown>>; warnings?: string[]; total?: number }> {
     return this.postResource('query', body, options);
   }
 
@@ -158,7 +158,7 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     const isBranches = query.objectType === 'plugins/branching/branches';
     const out: MetricFindValue[] = isBranches ? [{ text: 'main', value: 'main' }] : [];
 
-    let res: { columns: string[]; rows: Array<Record<string, unknown>>; warnings?: string[] };
+    let res: { columns: string[]; rows: Array<Record<string, unknown>>; warnings?: string[]; total?: number };
     try {
       // For the branch probe, suppress Grafana's default error toast: on a NetBox
       // without netbox-branching the branches endpoint 404s, which is expected and
@@ -202,6 +202,27 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     if (res.warnings?.length) {
       throw new Error(
         `NetBox returned an incomplete list for this variable, so some options would be missing: ${res.warnings.join(' ')}`
+      );
+    }
+
+    // Rows that do not cover the match count mean we did not read every object,
+    // and therefore cannot claim to have seen every distinct value. Measured on
+    // a 6.8M-device instance: a `site` variable over devices reads the first
+    // 1,000 devices and finds ONE distinct site, out of 4,030 that exist —
+    // every panel scoped by it would then show a single site while looking like
+    // the whole estate. Total counts matching objects rather than options, so
+    // it cannot say the list IS short; it can only say we are not entitled to
+    // call it complete, which is the part that matters.
+    //
+    // The message says what to do, because the fix is usually to ask the object
+    // type that owns the field instead of deriving it from a larger one.
+    const total = res.total ?? 0;
+    const rows = res.rows ?? [];
+    if (total > rows.length) {
+      throw new Error(
+        `This variable read ${rows.length.toLocaleString()} of ${total.toLocaleString()} matching ${
+          query.objectType
+        }, so its options may be missing values. Query the object type that owns this field directly, or add filters to bring the match count under the limit.`
       );
     }
 

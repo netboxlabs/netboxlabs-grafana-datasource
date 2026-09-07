@@ -41,6 +41,8 @@ export const MODE_TOOLTIP = [
   'the REST API cannot answer a panel in time.',
   'It cannot serve annotations, IP enrichment or topology, and those queries fail with an',
   'explanation rather than returning nothing.',
+  'Choice columns also read as their stored value rather than their label —',
+  'status is "active", not "Active" — because the labels live in NetBox and not in the mirror.',
 ].join(' ');
 
 const MODE_OPTIONS: Array<{ label: string; value: ProviderMode; description: string }> = [
@@ -48,7 +50,8 @@ const MODE_OPTIONS: Array<{ label: string; value: ProviderMode; description: str
   {
     label: 'Replica cache',
     value: 'replica-cache',
-    description: 'Columnar mirror for very large instances. No annotations, IP enrichment or topology.',
+    description:
+      'Columnar mirror for very large instances. No annotations, IP enrichment or topology; choice columns read as stored values.',
   },
 ];
 

@@ -292,3 +292,36 @@ describe('ConfigEditor fast paging visibility', () => {
     expect(screen.getByText('Fast paging')).toBeInTheDocument();
   });
 });
+
+// The address a datasource SHOWS should be the one it queries. In cache mode
+// that is the replica-cache URL, not the optional NetBox link base — a cache
+// datasource with no NetBox URL had a blank address in the datasource list, and
+// one switched over from NetBox mode kept displaying the address it no longer
+// talks to.
+describe('ConfigEditor url mirror', () => {
+  it('mirrors the replica-cache URL in cache mode', () => {
+    const onOptionsChange = jest.fn();
+    render(
+      <ConfigEditor
+        options={
+          {
+            jsonData: { mode: 'replica-cache', replicaCacheUrl: '' },
+            secureJsonFields: {},
+            secureJsonData: {},
+            url: '',
+          } as any
+        }
+        onOptionsChange={onOptionsChange}
+      />
+    );
+    fireEvent.change(screen.getByPlaceholderText('https://<id>.replica-cache.example.com'), {
+      target: { value: 'https://cache.example.com' },
+    });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: 'https://cache.example.com',
+        jsonData: expect.objectContaining({ replicaCacheUrl: 'https://cache.example.com' }),
+      })
+    );
+  });
+});

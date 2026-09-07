@@ -332,3 +332,54 @@ describe('metricFindQuery degradation', () => {
     ]);
   });
 });
+
+describe('metricFindQuery truncation', () => {
+  // Measured on a 6.8M-device instance: a `site` variable over devices reads
+  // the first 1,000 devices and finds ONE distinct site out of 4,030 that
+  // exist. Every panel scoped by it would show a single site while looking
+  // like the whole estate.
+  it('refuses a list that did not cover the match count', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({
+      columns: ['site'],
+      rows: [{ site: 'DC-Northeast' }],
+      total: 6824570,
+    });
+    await expect(
+      ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'site' })
+    ).rejects.toThrow(/may be missing values/i);
+  });
+
+  it('names what to do about it', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest
+      .fn()
+      .mockResolvedValue({ columns: ['site'], rows: [{ site: 'A' }], total: 4030 });
+    await expect(
+      ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'site' })
+    ).rejects.toThrow(/Query the object type that owns this field/i);
+  });
+
+  it('accepts a list that covers every matching object', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({
+      columns: ['name'],
+      rows: [{ name: 'a' }, { name: 'b' }],
+      total: 2,
+    });
+    expect(await ds.metricFindQuery({ refId: 'v', objectType: 'dcim/sites', valueField: 'name' })).toEqual([
+      { text: 'a', value: 'a' },
+      { text: 'b', value: 'b' },
+    ]);
+  });
+
+  it('accepts a source that reports no total at all', async () => {
+    // Result.Total is documented as 0 when the source cannot report one, so an
+    // absent total must not be read as "zero matches, therefore truncated".
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({ columns: ['name'], rows: [{ name: 'a' }] });
+    expect(await ds.metricFindQuery({ refId: 'v', objectType: 'dcim/sites', valueField: 'name' })).toEqual([
+      { text: 'a', value: 'a' },
+    ]);
+  });
+});

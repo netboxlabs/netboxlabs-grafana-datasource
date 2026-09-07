@@ -254,10 +254,25 @@ var nullOperators = map[string]bool{
 // that cannot be typed, and it is also exactly the case where IS NULL would
 // later miss the "" rows. Treating unknown as safe reproduced the inversion
 // this gate exists to prevent, on the columns most likely to hit it.
-func blankSafe(t provider.FieldType) bool {
+func blankSafe(name string, t provider.FieldType) bool {
 	switch t {
-	case provider.FieldTypeNumber, provider.FieldTypeBoolean, provider.FieldTypeTime:
+	case provider.FieldTypeNumber, provider.FieldTypeBoolean:
 		return true
+	case provider.FieldTypeTime:
+		// A timestamp gets is-empty only when the NAME agrees as well. The type
+		// is inferred from values, and values alone can be wrong in the one
+		// direction that matters here: a text column whose sampled values all
+		// look like RFC3339 — contrived for NetBox's own models, but a plugin
+		// can define anything — would otherwise be offered an operator this
+		// backend answers with IS NULL, while blank text is stored as "", so
+		// the filter returns the exact opposite population and looks healthy.
+		//
+		// Corroboration is required only for this operator, not for the type.
+		// Value-led typing still suppresses ILIKE on the eleven NetBox
+		// date-time columns no naming rule finds — that is what it was for —
+		// and this withholds the one operator whose failure is silent and
+		// inverted rather than visible.
+		return isTimeColumn(name)
 	}
 	return false
 }
@@ -308,7 +323,7 @@ func filterFieldsFor(fields []provider.Field, raw map[string]bool, types map[str
 			}
 			// The mirror of the rule above: a text match needs text, and an
 			// is-empty check needs a column where blank means NULL.
-			if nullOperators[op] && !blankSafe(types[f.Name]) {
+			if nullOperators[op] && !blankSafe(f.Name, types[f.Name]) {
 				continue
 			}
 			ops = append(ops, op)
@@ -374,7 +389,7 @@ func validateFilterTypes(filters []provider.Filter, types map[string]provider.Fi
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 				Reason: "a text match needs a text column, and this backend applies it to any column without checking — returning either a server error or, worse, every row unfiltered"}
 		}
-		if nullOperators[op] && !blankSafe(t) {
+		if nullOperators[op] && !blankSafe(f.Field, t) {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 				Reason: "this backend answers is-empty with IS NULL, but NetBox stores a blank text field as an empty string, so the result would be the exact opposite of what was asked. There is no equivalent here — an equality filter with an empty value is dropped, as it is in NetBox mode, so it would return every row — use NetBox mode for this filter"}
 		}

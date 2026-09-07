@@ -705,6 +705,21 @@ func wanted(want map[string]bool, base string) bool {
 // and that case has its own warning. All-null is different: there really is no
 // tenant, and saying so is the accurate answer as well as the compatible one.
 func nullFKColumns(entity string, rows []map[string]interface{}) []string {
+	// Not for a plugin's models. On NetBox's own, a *_id column that is null
+	// everywhere is a relationship unless it is one of the seven text
+	// identifiers named above — a list taken from the schema. A plugin can
+	// define anything and there is no such list, so the suffix alone would
+	// fabricate an "external" column for an ordinary nullable external_id, and
+	// Fields would advertise it until a row arrived carrying a string, at which
+	// point it would disappear. A column that comes and goes is worse than one
+	// that is consistently absent, and a panel selecting it is told so by the
+	// missing-column check rather than being handed nulls.
+	//
+	// Nothing is lost that could have been resolved: this synthesizes only
+	// where every value is null, so there was never an id to look up.
+	if strings.HasPrefix(entity, "plugins/") {
+		return nil
+	}
 	bases := map[string]bool{}
 	for _, row := range rows {
 		for col, v := range row {

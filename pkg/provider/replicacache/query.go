@@ -110,9 +110,11 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	}
 
 	// Projection. Ask only for the columns needed to build what was requested.
+	var projected []string
 	if !spec.CountOnly {
 		if cols, ok := p.projectColumns(ctx, spec); ok {
 			q = withFields(q, cols)
+			projected = cols
 		}
 	}
 
@@ -123,6 +125,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 
 	cols, rows, err := flattenRows(raws)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkProjection(projected, rows); err != nil {
 		return nil, err
 	}
 	// Both take Fields AND KeyFields. A join source is fetched but not displayed,
@@ -251,6 +256,41 @@ func addCustomFieldIDAliases(fields []string, rows []map[string]interface{}) []s
 		}
 	}
 	return added
+}
+
+// checkProjection verifies that EVERY row carries the columns the projection
+// asked the service for.
+//
+// Per row, not existentially: a page answering fields=name with
+// [{"id":1,"name":"a"},{"id":2}] has the column somewhere, so an "is it
+// anywhere" test passes it, and the second object becomes a blank cell — a
+// variable option silently dropped, or an alert label that lost its identity.
+// FieldValues already refuses exactly this, and it is the same protocol
+// violation: the column was requested, so its absence is the service failing to
+// answer rather than the object having no value.
+//
+// A column PRESENT and null is untouched; that is an object with no value
+// there. And custom_field_data is exempt because flattenRows consumes it into
+// cf_* columns rather than leaving it on the row.
+func checkProjection(projected []string, rows []map[string]interface{}) error {
+	if len(projected) == 0 {
+		return nil
+	}
+	for _, row := range rows {
+		for _, col := range projected {
+			if col == "custom_field_data" {
+				continue
+			}
+			if _, ok := row[col]; !ok {
+				return &TransportError{
+					Op:      "reading " + col,
+					Err:     errRowWithoutField,
+					Message: rowShapeGuidance,
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func hasColumn(rows []map[string]interface{}, name string) bool {

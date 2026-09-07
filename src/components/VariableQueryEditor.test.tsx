@@ -7,10 +7,21 @@ jest.mock('@grafana/runtime', () => ({
   getTemplateSrv: () => ({ replace: (s: string) => (s === '$branch' ? 'td5smq0f' : s) }),
 }));
 
+// @grafana/ui's Select menu (via ScrollIndicators) uses IntersectionObserver to
+// decide when to show scroll shadows; jsdom doesn't implement it, so opening a
+// Select's dropdown throws without this stub. Same reason as QueryEditor.test.
+class IntersectionObserverStub {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+(globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver = IntersectionObserverStub;
+
 const dsMock = {
   uid: 'ds-variable-editor',
   getObjectTypes: jest.fn().mockResolvedValue([]),
   getFields: jest.fn().mockResolvedValue([]),
+  getFilterFields: jest.fn().mockResolvedValue([]),
   getBranchingInstalled: jest.fn().mockResolvedValue(true),
 } as any;
 
@@ -129,4 +140,35 @@ it('keeps the Branch field editable when the variable still carries one', async 
   );
   const input = await screen.findByDisplayValue('schema_abc');
   await waitFor(() => expect(input).not.toBeDisabled());
+});
+
+// The filter picker must offer FILTERABLE columns, not selectable ones. Fields
+// includes what the backend synthesizes — site, cf_* — which replica-cache
+// answers with HTTP 400 when one arrives as filter[site]__eq.
+it('offers the filterable columns in the filter picker, not the synthesized ones', async () => {
+  const ds = {
+    ...dsMock,
+    uid: 'ds-var-filterfields',
+    // "site" is synthesized by the backend, so it is selectable but NOT
+    // filterable: replica-cache answers filter[site]__eq with HTTP 400.
+    getFields: jest.fn().mockResolvedValue([{ name: 'name' }, { name: 'site' }]),
+    getFilterFields: jest.fn().mockResolvedValue([{ name: 'name', operators: [''] }]),
+  } as any;
+  render(
+    <VariableQueryEditor
+      query={{ refId: 'A', objectType: 'dcim/devices', filters: [{ field: '', operator: '', value: '' }] } as any}
+      onChange={jest.fn()}
+      datasource={ds}
+    />
+  );
+  await waitFor(() => expect(ds.getFilterFields).toHaveBeenCalledWith('dcim/devices', undefined));
+
+  // The filter row's picker is the last combobox on the form, and its menu
+  // renders in a portal, so the options are asserted at screen level. Nothing
+  // else is open, so what appears is this picker's list.
+  const boxes = screen.getAllByRole('combobox');
+  fireEvent.keyDown(boxes[boxes.length - 1], { key: 'ArrowDown' });
+
+  await waitFor(() => expect(screen.queryAllByText('name').length).toBeGreaterThan(0));
+  expect(screen.queryAllByText('site')).toHaveLength(0);
 });

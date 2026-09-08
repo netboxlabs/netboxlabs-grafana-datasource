@@ -31,6 +31,7 @@ func isTruncated(res *provider.Result) bool {
 const (
 	nounObjects = "matching objects"
 	nounIPs     = "requested IPs"
+	nounDevices = "matching devices"
 )
 
 // resultNotices describes how a result relates to the truth:
@@ -122,17 +123,24 @@ func truncationError(res *provider.Result, requestedLimit int, noun string) stri
 	if !isTruncated(res) {
 		return ""
 	}
-	if res.MaxRows <= 0 {
+	return truncationMessage(len(res.Rows), res.Total, res.MaxRows, noun)
+}
+
+// truncationMessage is the wording every truncated alert query shares, kept in
+// one place so a second producer cannot drift from it. Callers decide whether
+// they are truncated; this only phrases it.
+func truncationMessage(returned, total, maxRows int, noun string) string {
+	if maxRows <= 0 {
 		// No reported ceiling, so the "max N" advice would be a made-up number.
 		return fmt.Sprintf(
 			"Alert query returned %s of %s %s, so it would alert on an incomplete result. "+
 				"Raise the row limit or add filters so every match fits.",
-			thousands(len(res.Rows)), thousands(res.Total), noun)
+			thousands(returned), thousands(total), noun)
 	}
 	return fmt.Sprintf(
 		"Alert query returned %s of %s %s, so it would alert on an incomplete result. "+
 			"Raise the row limit (max %s) or add filters so every match fits.",
-		thousands(len(res.Rows)), thousands(res.Total), noun, thousands(res.MaxRows))
+		thousands(returned), thousands(total), noun, thousands(maxRows))
 }
 
 // capInfo returns the result's row cap, or nil when there is nothing to report.

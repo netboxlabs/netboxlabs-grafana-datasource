@@ -55,6 +55,10 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     switch (query.queryType) {
       case 'annotations':
       case 'topology':
+      case 'topology-edges':
+        // Both topology shapes scope themselves with filters rather than an
+        // object type, so requiring one would drop every newly created query
+        // before it reached the backend.
         return true;
       case 'ip-enrichment':
         return !!query.ips && query.ips.trim().length > 0;

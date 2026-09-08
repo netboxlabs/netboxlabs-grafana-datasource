@@ -110,7 +110,9 @@ describe('metricFindQuery', () => {
   it('re-throws (does not swallow) errors for non-branch variables', async () => {
     const ds = makeDS();
     (ds as any).runResourceQuery = jest.fn().mockRejectedValue(new Error('boom'));
-    await expect(ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'name' })).rejects.toThrow('boom');
+    await expect(ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'name' })).rejects.toThrow(
+      'boom'
+    );
   });
 
   it('suppresses the global error toast for the branch probe (branching may be absent -> expected 404)', async () => {
@@ -177,6 +179,10 @@ describe('filterQuery', () => {
     const ds = makeDS();
     expect(ds.filterQuery({ refId: 'A', queryType: 'annotations' })).toBe(true);
     expect(ds.filterQuery({ refId: 'A', queryType: 'topology' })).toBe(true);
+    // Both topology shapes scope themselves with filters, not an object type.
+    // Requiring one dropped every newly created edges query in the frontend,
+    // before the backend ever saw it — the query simply did nothing.
+    expect(ds.filterQuery({ refId: 'A', queryType: 'topology-edges' })).toBe(true);
     expect(ds.filterQuery({ refId: 'A', queryType: 'ip-enrichment', ips: '10.0.0.1' })).toBe(true);
     expect(ds.filterQuery({ refId: 'A', queryType: 'ip-enrichment', ips: '' })).toBe(false);
     expect(ds.filterQuery({ refId: 'A', objectType: 'dcim/devices' })).toBe(true);

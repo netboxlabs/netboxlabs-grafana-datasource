@@ -262,7 +262,7 @@ func TestBatchedQueriesStayWithinTheByteBudget(t *testing.T) {
 			devIDs[i] = fmt.Sprintf("%d", i+1)
 		}
 		p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
-		if _, err := p.fetchEdgeRows(context.Background(), "dcim/interfaces",
+		if _, _, err := p.fetchEdgeRows(context.Background(), "dcim/interfaces",
 			url.Values{"connected": []string{"true"}}, devIDs); err != nil {
 			t.Fatalf("fetchEdgeRows: %v", err)
 		}

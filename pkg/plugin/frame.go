@@ -236,8 +236,8 @@ func buildNodeGraphFrames(g *provider.Graph) data.Frames {
 	for i, node := range g.Nodes {
 		ids[i] = node.ID
 		titles[i] = node.Title
-		subs[i] = node.SubTitle
-		stats[i] = node.MainStat
+		subs[i] = node.Site
+		stats[i] = node.Role
 		colors[i] = statusColor(node.Status)
 		urls[i] = node.URL
 		if node.URL == "" {

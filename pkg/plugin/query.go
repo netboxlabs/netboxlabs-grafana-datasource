@@ -18,10 +18,11 @@ import (
 
 // queryType discriminates the kinds of query the editor can issue.
 const (
-	queryTypeObjects      = "objects"
-	queryTypeAnnotations  = "annotations"
-	queryTypeIPEnrichment = "ip-enrichment"
-	queryTypeTopology     = "topology"
+	queryTypeObjects       = "objects"
+	queryTypeAnnotations   = "annotations"
+	queryTypeIPEnrichment  = "ip-enrichment"
+	queryTypeTopology      = "topology"
+	queryTypeTopologyEdges = "topology-edges"
 )
 
 // queryModel is the JSON shape sent by the frontend query/variable/annotation
@@ -154,10 +155,42 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 		frame.Meta.Notices = append(frame.Meta.Notices, resultNotices(res, qm.Limit, nounIPs)...)
 		return backend.DataResponse{Frames: data.Frames{frame}}
 
-	case queryTypeTopology:
-		graph, err := d.provider.Topology(ctx, provider.TopologySpec{Filters: qm.Filters, Limit: qm.Limit, ConnectedOnly: qm.ConnectedOnly, Connections: qm.Connections})
+	case queryTypeTopology, queryTypeTopologyEdges:
+		graph, err := d.provider.Topology(ctx, provider.TopologySpec{
+			Filters: qm.Filters, Limit: qm.Limit,
+			ConnectedOnly: qm.ConnectedOnly, Connections: qm.Connections,
+			// The edges table answers "who are this device's neighbours", so a
+			// link leaving the filtered set still names a real one. The node
+			// graph wants it dropped instead, so nothing dangles off the picture.
+			IncludeBoundaryPeers: qm.QueryType == queryTypeTopologyEdges,
+		})
 		if err != nil {
 			return queryErrorResponse(err)
+		}
+		if qm.QueryType == queryTypeTopologyEdges {
+			// A truncated traversal is not a smaller answer to this question, it is
+			// a wrong one: the missing devices take their links with them, so a
+			// device can appear to have lost its only healthy upstream. The
+			// suppression recipe reads exactly that and would silence an alert that
+			// should have paged. Refused for the same reason, and in the same
+			// words, as the object and IP-enrichment alert paths.
+			if fromAlert {
+				if msg := graphTruncationError(graph); msg != "" {
+					return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+				}
+				// Edge-set gaps are refused too, and separately: a device whose
+				// links could not all be read looks less connected than it is,
+				// which reads as "no working path" and silences a page. Same
+				// reason degradationError exists on the object path.
+				if msg := graphDegradationError(graph); msg != "" {
+					return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+				}
+			}
+			// No link rewriting: the edges table carries no URLs. It is data for a
+			// join, not something a user clicks.
+			frame := buildTopologyEdgesFrame(graph)
+			frame.RefID = q.RefID
+			return backend.DataResponse{Frames: data.Frames{frame}}
 		}
 		rewriteGraphLinks(graph, d.provider.BaseURL(), d.cfg.PublicURL)
 		frames := buildNodeGraphFrames(graph)

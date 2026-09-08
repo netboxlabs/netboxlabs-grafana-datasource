@@ -635,3 +635,42 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
     expect(ORDERING_DISABLED_TOOLTIP.length).toBeLessThan(FAST_PAGING_TOOLTIP.length);
   });
 });
+
+// The edges shape runs the same traversal as the node-graph one and takes the
+// same controls; only the output differs. Gating them on `queryType ===
+// 'topology'` alone would leave the new type with no way to scope its device
+// set — an unfiltered fleet-wide query on an alert path.
+describe('QueryEditor — Topology edges', () => {
+  it('offers the traversal controls, as the node-graph topology query does', () => {
+    setup({ queryType: 'topology-edges', objectType: undefined });
+    expect(screen.getByText(/Connections/i)).toBeInTheDocument();
+    expect(screen.getByText(/Connected only/i)).toBeInTheDocument();
+  });
+
+  it('labels its filters as device filters and can scope the device set', () => {
+    setup({
+      queryType: 'topology-edges',
+      objectType: undefined,
+      filters: [{ field: 'site', operator: '', value: 'AMS1' }],
+    });
+    // "Device filter" rather than plain "Filter": the rows scope the devices the
+    // traversal starts from, not an object query.
+    expect(screen.getByText(/Device filter/i)).toBeInTheDocument();
+  });
+});
+
+// The edges query returns a joinable table, not node/edge frames. Telling the
+// user to reach for the Node Graph visualisation would send them to one that
+// cannot render it.
+describe('QueryEditor — Topology edges guidance', () => {
+  it('points at a table and the alert recipe, not the node graph', () => {
+    setup({ queryType: 'topology-edges', objectType: undefined });
+    expect(screen.getByText(/Table visualization/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Node\s*Graph visualization/i)).not.toBeInTheDocument();
+  });
+
+  it('still points the node-graph query at the node graph', () => {
+    setup({ queryType: 'topology', objectType: undefined });
+    expect(screen.getByText(/Node\s*Graph visualization/i)).toBeInTheDocument();
+  });
+});

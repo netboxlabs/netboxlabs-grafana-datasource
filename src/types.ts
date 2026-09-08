@@ -13,7 +13,7 @@ export interface FilterRow {
   value: string;
 }
 
-export type QueryType = 'objects' | 'ip-enrichment' | 'topology' | 'annotations';
+export type QueryType = 'objects' | 'ip-enrichment' | 'topology' | 'topology-edges' | 'annotations';
 
 /** One source→output join-key mapping with an optional value transform. */
 export interface JoinKeyMapping {
@@ -230,17 +230,10 @@ export const IP_CONTEXT_FIELD_GROUPS: Array<{
   },
   {
     label: 'Device',
-    options: [
-      'name',
-      'role',
-      'platform',
-      'device_type',
-      'site',
-      'location',
-      'rack',
-      'tenant',
-      'status',
-    ].map((f) => ({ label: `device_${f}`, value: `device_${f}` })),
+    options: ['name', 'role', 'platform', 'device_type', 'site', 'location', 'rack', 'tenant', 'status'].map((f) => ({
+      label: `device_${f}`,
+      value: `device_${f}`,
+    })),
   },
   {
     label: 'Virtual machine',

@@ -3,7 +3,9 @@ package netbox
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -45,12 +47,20 @@ func buildFilterValues(filters []provider.Filter) url.Values {
 // cable paths (default — patch panels and circuits resolve to the far device)
 // or raw physical cables, plus wireless links in both views.
 func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*provider.Graph, error) {
+	// Clamped to the ceiling rather than reset to the default, matching Query.
+	// Treating an over-limit request like an unset one sent a caller asking for
+	// 5,000 devices back to 1,000 — and the truncation refusal then advises
+	// raising the limit "(max 10,000)", so following the advice changed nothing
+	// and the rule failed again for a reason the message had denied.
 	limit := spec.Limit
-	if limit <= 0 || limit > MaxLimit {
-		limit = 1000
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > MaxLimit {
+		limit = MaxLimit
 	}
 
-	devRows, _, err := p.fetchRows(ctx, "dcim/devices", buildFilterValues(spec.Filters), limit)
+	devRows, total, err := p.fetchRows(ctx, "dcim/devices", buildFilterValues(spec.Filters), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -63,36 +73,15 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 	// them, so the emitted edge order is unchanged.
 	nodeIDs := make([]string, 0, len(devRows))
 	for _, raw := range devRows {
-		var d struct {
-			ID   int    `json:"id"`
-			Name string `json:"name"`
-			Site struct {
-				Name string `json:"name"`
-			} `json:"site"`
-			Role struct {
-				Name string `json:"name"`
-			} `json:"role"`
-			Status struct {
-				Value string `json:"value"`
-			} `json:"status"`
-			DisplayURL string `json:"display_url"`
-		}
-		if json.Unmarshal(raw, &d) != nil || d.ID == 0 {
+		n, ok := deviceNode(raw)
+		if !ok {
 			continue
 		}
-		id := strconv.Itoa(d.ID)
-		if !inSet[id] {
-			inSet[id] = true
-			nodeIDs = append(nodeIDs, id)
+		if !inSet[n.ID] {
+			inSet[n.ID] = true
+			nodeIDs = append(nodeIDs, n.ID)
 		}
-		nodes = append(nodes, provider.GraphNode{
-			ID:       id,
-			Title:    d.Name,
-			SubTitle: d.Site.Name,
-			MainStat: d.Role.Name,
-			Status:   d.Status.Value,
-			URL:      d.DisplayURL,
-		})
+		nodes = append(nodes, n)
 	}
 
 	// Links dedup by identity — the sorted interface-ID pair — NOT by device
@@ -104,19 +93,48 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 	// path between the same devices survives. The physical view is strictly
 	// raw: one edge per cable, plus the wireless-link edges.
 	seen := map[string]bool{}
-	edges := p.wirelessEdges(ctx, inSet, seen)
+	// Completeness of the EDGE set is tracked separately from the device limit.
+	// A missing link is invisible in the output — the device is still listed,
+	// merely looking less connected than it is — so a caller reasoning about
+	// neighbours has to be told, or it will read the gap as fact.
+	var warnings []string
+	edges, wirelessIncomplete := p.wirelessEdges(ctx, inSet, seen, spec.IncludeBoundaryPeers)
+	if wirelessIncomplete {
+		warnings = append(warnings, "Wireless links could not be read in full, so some devices may show fewer connections than they have.")
+	}
 	if spec.Connections == "physical" {
-		physical, err := p.physicalEdges(ctx, inSet, nodeIDs)
+		physical, capped, err := p.physicalEdges(ctx, inSet, nodeIDs, spec.IncludeBoundaryPeers)
 		if err != nil {
 			return nil, err
+		}
+		if capped {
+			warnings = append(warnings, "Some cables could not be read: a device has more links than one request can return, so its remaining connections are missing.")
 		}
 		edges = append(edges, physical...)
 	} else {
-		logical, err := p.logicalEdges(ctx, inSet, nodeIDs, seen)
+		logical, capped, err := p.logicalEdges(ctx, inSet, nodeIDs, seen, spec.IncludeBoundaryPeers)
 		if err != nil {
 			return nil, err
 		}
+		if capped {
+			warnings = append(warnings, "Some links could not be read: a device has more connections than one request can return, so its remaining connections are missing.")
+		}
 		edges = append(edges, logical...)
+	}
+
+	// Peers outside the filtered set have no node yet, so their name, role and
+	// site are unknown. Fetch them, or the edge that names them is unusable.
+	if spec.IncludeBoundaryPeers {
+		peerNodes, missingPeers, err := p.boundaryPeerNodes(ctx, inSet, edges)
+		if err != nil {
+			return nil, err
+		}
+		if missingPeers > 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"%d connected device(s) could not be read, so links to them are missing; a device may have a working path that is not shown.",
+				missingPeers))
+		}
+		nodes = append(nodes, peerNodes...)
 	}
 
 	connected := map[string]bool{}
@@ -124,6 +142,11 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 		connected[e.Source] = true
 		connected[e.Target] = true
 	}
+
+	// Measured BEFORE pruning: dropping an isolated device is a deliberate,
+	// complete answer, so counting it as truncation would fail every alert whose
+	// filters happen to match one unconnected device.
+	fetched := len(devRows)
 
 	if spec.ConnectedOnly {
 		kept := nodes[:0]
@@ -135,7 +158,14 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 		nodes = kept
 	}
 
-	return &provider.Graph{Nodes: nodes, Edges: edges}, nil
+	return &provider.Graph{
+		Nodes:    nodes,
+		Edges:    edges,
+		Total:    total,
+		Fetched:  fetched,
+		MaxRows:  MaxLimit,
+		Warnings: warnings,
+	}, nil
 }
 
 // deviceScopeParam is the query parameter that restricts an edge endpoint to a
@@ -187,9 +217,11 @@ const deviceScopeParam = "device_id"
 // emitted edge order — which is observable in the node graph — unchanged on an
 // instance small enough for one batch, i.e. every instance the old code was
 // already right about.
-func (p *Provider) fetchEdgeRows(ctx context.Context, objectType string, base url.Values, deviceIDs []string) ([]json.RawMessage, error) {
+// fetchEdgeRows returns the edge rows for a device set, and whether it had to
+// drop any links to stay inside the row cap.
+func (p *Provider) fetchEdgeRows(ctx context.Context, objectType string, base url.Values, deviceIDs []string) (_ []json.RawMessage, capped bool, _ error) {
 	if len(deviceIDs) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	// Through queryBatcher, not chunkByBudget directly: base is a fixed parameter
@@ -213,7 +245,7 @@ func (p *Provider) fetchEdgeRows(ctx context.Context, objectType string, base ur
 
 		rows, total, err := p.fetchRows(ctx, objectType, batcher.query(ids), MaxLimit)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if total > len(rows) {
 			if len(ids) > 1 {
@@ -225,10 +257,14 @@ func (p *Provider) fetchEdgeRows(ctx context.Context, objectType string, base ur
 				"topology: edge lookup hit the row cap for a single device; some links are missing",
 				"endpoint", logSafe(objectType), "device_id", ids[0], "read", len(rows), "reported", total, "cap", MaxLimit,
 			)
+			// Also reported to the caller. A log line is enough for an operator
+			// looking at a diagram; it is not enough for an alert rule deciding
+			// whether a device still has a working path, which cannot see logs.
+			capped = true
 		}
 		out = append(out, rows...)
 	}
-	return out, nil
+	return out, capped, nil
 }
 
 // termination is a cable termination; interface and panel-port (front/rear)
@@ -242,16 +278,32 @@ type termination struct {
 	} `json:"object"`
 }
 
-func deviceFromTerminations(ts []termination) string {
+// devicesFromTerminations returns every DISTINCT device a cable end lands on,
+// in termination order.
+//
+// A cable end is a list because one cable can terminate on several ports — a
+// breakout is the common case. Taking only the first device silently discards
+// the rest, and a discarded peer may be the healthy upstream: the suppression
+// recipe then reads the remaining down peer as the whole neighbour set and
+// stops a page. Returning them all costs one edge per real connection, which is
+// also what the node graph should have been drawing.
+func devicesFromTerminations(ts []termination) []string {
+	var out []string
+	seen := map[string]bool{}
 	for _, t := range ts {
 		switch t.ObjectType {
 		case "dcim.interface", "dcim.frontport", "dcim.rearport":
-			if t.Object.Device.ID != 0 {
-				return strconv.Itoa(t.Object.Device.ID)
+			if t.Object.Device.ID == 0 {
+				continue
+			}
+			id := strconv.Itoa(t.Object.Device.ID)
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, id)
 			}
 		}
 	}
-	return ""
+	return out
 }
 
 // linkKey is a link's identity: the sorted pair of its end-interface IDs.
@@ -273,10 +325,10 @@ func linkKey(a, b int) string {
 // an IN-SET device can start an edge — the `!inSet[a]` test below already threw
 // every other row away, so scoping loses nothing and is what stops the row cap
 // truncating the fetch to an unrelated slice of the database.
-func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, deviceIDs []string, seen map[string]bool) ([]provider.GraphEdge, error) {
-	rows, err := p.fetchEdgeRows(ctx, "dcim/interfaces", url.Values{"connected": {"true"}}, deviceIDs)
+func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, deviceIDs []string, seen map[string]bool, keepBoundary bool) (_ []provider.GraphEdge, capped bool, _ error) {
+	rows, capped, err := p.fetchEdgeRows(ctx, "dcim/interfaces", url.Values{"connected": {"true"}}, deviceIDs)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var edges []provider.GraphEdge
 	for _, raw := range rows {
@@ -306,7 +358,7 @@ func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, devi
 				continue
 			}
 			b := strconv.Itoa(ep.Device.ID)
-			if a == b || !inSet[a] || !inSet[b] {
+			if a == b || !edgeInScope(inSet, a, b, keepBoundary) {
 				continue
 			}
 			k := linkKey(i.ID, ep.ID)
@@ -317,7 +369,7 @@ func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, devi
 			edges = append(edges, provider.GraphEdge{ID: "p" + k, Source: a, Target: b, Kind: "path"})
 		}
 	}
-	return edges, nil
+	return edges, capped, nil
 }
 
 // physicalEdges derives one edge per raw cable — parallel cables between the
@@ -331,10 +383,10 @@ func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, devi
 // NetBox id — which is the identity of a cable, so this can never merge two
 // distinct parallel cables, and on a node set small enough for one batch (where
 // NetBox returns each cable once) it removes nothing at all.
-func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool, deviceIDs []string) ([]provider.GraphEdge, error) {
-	rows, err := p.fetchEdgeRows(ctx, "dcim/cables", url.Values{}, deviceIDs)
+func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool, deviceIDs []string, keepBoundary bool) (_ []provider.GraphEdge, capped bool, _ error) {
+	rows, capped, err := p.fetchEdgeRows(ctx, "dcim/cables", url.Values{}, deviceIDs)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var edges []provider.GraphEdge
 	seenCable := map[int]bool{}
@@ -347,18 +399,29 @@ func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool, dev
 		if json.Unmarshal(raw, &c) != nil {
 			continue
 		}
-		a := deviceFromTerminations(c.A)
-		b := deviceFromTerminations(c.B)
-		if a == "" || b == "" || a == b || !inSet[a] || !inSet[b] {
-			continue
-		}
 		if seenCable[c.ID] {
 			continue
 		}
 		seenCable[c.ID] = true
-		edges = append(edges, provider.GraphEdge{ID: strconv.Itoa(c.ID), Source: a, Target: b, Kind: "cable"})
+
+		// Every cross pair, not just the first: a multi-termination cable
+		// connects each device on one end to each device on the other, and
+		// dropping any of them hides a real neighbour.
+		for _, a := range devicesFromTerminations(c.A) {
+			for _, b := range devicesFromTerminations(c.B) {
+				if a == b || !edgeInScope(inSet, a, b, keepBoundary) {
+					continue
+				}
+				id := strconv.Itoa(c.ID)
+				if len(c.A) > 1 || len(c.B) > 1 {
+					// Edge ids must stay unique once one cable yields several.
+					id += "-" + a + "-" + b
+				}
+				edges = append(edges, provider.GraphEdge{ID: id, Source: a, Target: b, Kind: "cable"})
+			}
+		}
 	}
-	return edges, nil
+	return edges, capped, nil
 }
 
 // wirelessEdges links the two ends of each NetBox wireless link, marking the
@@ -376,10 +439,19 @@ func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool, dev
 // cables), so it is left as it was rather than paid for speculatively. The
 // residual is the same in kind: an instance with more than MaxLimit wireless
 // links can lose wireless edges outside the first 10,000.
-func (p *Provider) wirelessEdges(ctx context.Context, inSet map[string]bool, seen map[string]bool) []provider.GraphEdge {
-	rows, _, err := p.fetchRows(ctx, "wireless/wireless-links", url.Values{}, MaxLimit)
+// wirelessEdges returns wireless links, and whether the set is incomplete —
+// either because the lookup failed or because it hit the row cap.
+//
+// It previously returned nil on error, which is right for a diagram (draw what
+// you have) and wrong for an alert rule: a device whose healthy path is
+// wireless would appear to have only its failing wired upstream.
+func (p *Provider) wirelessEdges(ctx context.Context, inSet map[string]bool, seen map[string]bool, keepBoundary bool) (_ []provider.GraphEdge, incomplete bool) {
+	rows, total, err := p.fetchRows(ctx, "wireless/wireless-links", url.Values{}, MaxLimit)
 	if err != nil {
-		return nil
+		return nil, true
+	}
+	if total > len(rows) {
+		incomplete = true
 	}
 	var edges []provider.GraphEdge
 	for _, raw := range rows {
@@ -402,7 +474,7 @@ func (p *Provider) wirelessEdges(ctx context.Context, inSet map[string]bool, see
 			continue
 		}
 		a, b := strconv.Itoa(wl.A.Device.ID), strconv.Itoa(wl.B.Device.ID)
-		if a == b || !inSet[a] || !inSet[b] {
+		if a == b || !edgeInScope(inSet, a, b, keepBoundary) {
 			continue
 		}
 		k := linkKey(wl.A.ID, wl.B.ID)
@@ -412,5 +484,104 @@ func (p *Provider) wirelessEdges(ctx context.Context, inSet map[string]bool, see
 		seen[k] = true
 		edges = append(edges, provider.GraphEdge{ID: "w" + strconv.Itoa(wl.ID), Source: a, Target: b, Kind: "wireless"})
 	}
-	return edges
+	return edges, incomplete
+}
+
+// edgeInScope decides whether an edge belongs in the result.
+//
+// The node-graph view keeps only edges with BOTH ends inside the filtered set,
+// so nothing dangles off the picture. A caller asking about a device's
+// neighbours needs the opposite: an edge with one end in scope names a real
+// neighbour, and dropping it hides exactly the peer that might be healthy —
+// which for the suppression recipe reads as "no working path" and silences a
+// page. Per-site filtering, which that recipe recommends, is precisely when a
+// link leaves the set.
+func edgeInScope(inSet map[string]bool, a, b string, keepBoundary bool) bool {
+	if keepBoundary {
+		return inSet[a] || inSet[b]
+	}
+	return inSet[a] && inSet[b]
+}
+
+// boundaryPeerNodes fetches the devices that edges reference but the filter did
+// not select, so a row naming them carries their name, role and site.
+func (p *Provider) boundaryPeerNodes(ctx context.Context, inSet map[string]bool, edges []provider.GraphEdge) (_ []provider.GraphNode, missingPeers int, _ error) {
+	missing := map[string]bool{}
+	for _, e := range edges {
+		for _, id := range []string{e.Source, e.Target} {
+			if id != "" && !inSet[id] {
+				missing[id] = true
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return nil, 0, nil
+	}
+	ids := make([]string, 0, len(missing))
+	for id := range missing {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	batcher := newQueryBatcher("id", url.Values{})
+	var out []provider.GraphNode
+	for _, chunk := range batcher.chunk(ids) {
+		rows, _, err := p.fetchRows(ctx, "dcim/devices", batcher.query(chunk), MaxLimit)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, raw := range rows {
+			if n, ok := deviceNode(raw); ok {
+				n.Boundary = true
+				out = append(out, n)
+			}
+		}
+	}
+
+	// A peer that does not come back — hidden by object permissions, or deleted
+	// between the edge lookup and this one — takes its edge with it, because the
+	// frame cannot name an endpoint it has no device for. That silently removes
+	// a neighbour, and a removed neighbour may be the healthy one, so the caller
+	// has to be told rather than handed a quietly shorter answer.
+	resolved := make(map[string]bool, len(out))
+	for _, n := range out {
+		resolved[n.ID] = true
+	}
+	for id := range missing {
+		if !resolved[id] {
+			missingPeers++
+		}
+	}
+	return out, missingPeers, nil
+}
+
+// deviceNode decodes one dcim/devices row into a graph node. Shared by the
+// filtered device set and the boundary-peer fetch so the two cannot decode the
+// same object differently.
+func deviceNode(raw json.RawMessage) (provider.GraphNode, bool) {
+	var d struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+		Site struct {
+			Name string `json:"name"`
+		} `json:"site"`
+		Role struct {
+			Name string `json:"name"`
+		} `json:"role"`
+		Status struct {
+			Value string `json:"value"`
+		} `json:"status"`
+		DisplayURL string `json:"display_url"`
+	}
+	if json.Unmarshal(raw, &d) != nil || d.ID == 0 {
+		return provider.GraphNode{}, false
+	}
+	return provider.GraphNode{
+		ID:     strconv.Itoa(d.ID),
+		Title:  d.Name,
+		Site:   d.Site.Name,
+		Role:   d.Role.Name,
+		Status: d.Status.Value,
+		URL:    d.DisplayURL,
+	}, true
 }

@@ -90,7 +90,17 @@ const QUERY_TYPES: Array<SelectableValue<QueryType>> = [
     description: 'Resolve IPs to their NetBox device, interface and address record (longest-prefix fallback)',
   },
   { label: 'Topology', value: 'topology', description: 'Devices + cables as a node graph' },
+  {
+    label: 'Topology edges',
+    value: 'topology-edges',
+    description:
+      'The same links as joinable rows (device, peer, roles) — for alert rules that ask whether a neighbour is also down',
+  },
 ];
+
+/** Both topology shapes run the same traversal and take the same controls; only
+ *  the output differs (node graph vs joinable rows). */
+const isTopologyQuery = (t?: QueryType) => t === 'topology' || t === 'topology-edges';
 
 export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) {
   const queryType: QueryType = query.queryType ?? 'objects';
@@ -122,7 +132,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   // with 29 names the frame never contains — every suggestion silently derived an
   // empty join key — so there is nothing to fetch here.
   const fieldType =
-    queryType === 'ip-enrichment' ? undefined : queryType === 'topology' ? 'dcim/devices' : query.objectType;
+    queryType === 'ip-enrichment' ? undefined : isTopologyQuery(queryType) ? 'dcim/devices' : query.objectType;
 
   useEffect(() => {
     let active = true;
@@ -202,7 +212,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   const addFilter = () => update({ filters: [...filters, { field: '', operator: '', value: '' }] });
   const removeFilter = (i: number) => update({ filters: filters.filter((_, idx) => idx !== i) });
 
-  const filterLabel = queryType === 'topology' ? 'Device filter' : 'Filter';
+  const filterLabel = isTopologyQuery(queryType) ? 'Device filter' : 'Filter';
 
   return (
     <Stack gap={1} direction="column">
@@ -215,7 +225,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
           onChange={(v) => {
             const qt = v?.value ?? 'objects';
             update(
-              qt === 'topology' ? { queryType: qt, connectedOnly: query.connectedOnly ?? true } : { queryType: qt }
+              isTopologyQuery(qt) ? { queryType: qt, connectedOnly: query.connectedOnly ?? true } : { queryType: qt }
             );
             onRunQuery();
           }}
@@ -291,11 +301,12 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
         </>
       )}
 
-      {queryType === 'topology' && (
+      {isTopologyQuery(queryType) && (
         <>
           <div style={{ opacity: 0.75, fontSize: 12, marginLeft: 4 }}>
-            Returns NetBox devices as nodes and inter-device links as edges, colored by device status. Use the Node
-            Graph visualization. Filter the device set below (e.g. site or role).
+            {queryType === 'topology-edges'
+              ? 'Returns each link as a row (device, peer, and both roles) for joining in an alert rule — see Recipe D in docs/ALERTING.md. Use a Table visualization. Filter the device set below; the filter must cover every device the rule evaluates.'
+              : 'Returns NetBox devices as nodes and inter-device links as edges, colored by device status. Use the Node Graph visualization. Filter the device set below (e.g. site or role).'}
           </div>
           <InlineField
             label="Connections"
@@ -329,7 +340,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
       )}
 
       {/* Filters — for objects and topology */}
-      {(queryType === 'objects' || queryType === 'topology') &&
+      {(queryType === 'objects' || isTopologyQuery(queryType)) &&
         filters.map((f, i) => (
           <Stack key={i} gap={0} direction="column">
             <Stack gap={1} direction="row" alignItems="flex-end">
@@ -399,7 +410,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
               ))}
           </Stack>
         ))}
-      {(queryType === 'objects' || queryType === 'topology') && (
+      {(queryType === 'objects' || isTopologyQuery(queryType)) && (
         <Stack gap={1} direction="row">
           <Button variant="secondary" size="sm" icon="plus" onClick={addFilter}>
             Add filter

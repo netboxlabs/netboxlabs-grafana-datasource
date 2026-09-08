@@ -292,18 +292,41 @@ type TopologySpec struct {
 	// cable paths, so patch panels and circuits resolve to the far device) or
 	// "physical" (raw cables; panels appear as nodes).
 	Connections string
+	// IncludeBoundaryPeers keeps links whose far end lies OUTSIDE the filtered
+	// device set, adding that peer as a node.
+	//
+	// The node-graph view wants the opposite: an edge leaving the filtered set
+	// is drawn dangling, so it is dropped. A caller asking "does this device
+	// have a healthy neighbour?" cannot accept that, because the dropped
+	// neighbour may be the healthy one — and per-site filtering, which the
+	// suppression recipe recommends, is exactly when a link leaves the set.
+	IncludeBoundaryPeers bool
 }
 
 // GraphNode is a device in the topology graph.
 type GraphNode struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	SubTitle string `json:"subTitle"`
-	MainStat string `json:"mainStat"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// Site and Role are the device's NetBox context. They are named for what
+	// they ARE, not for the node-graph slots they happen to fill: the
+	// topology-edges query emits them as data columns, and a column whose
+	// meaning is "whatever we currently show as the node subtitle" would change
+	// under a presentation edit. buildNodeGraphFrames maps them to the panel's
+	// subTitle/mainStat.
+	Site string `json:"site"`
+	Role string `json:"role"`
 	// Status drives node color (e.g. "active", "offline", "failed").
 	Status string `json:"status"`
 	// URL is the device's NetBox page (display_url); empty if unavailable.
 	URL string `json:"url,omitempty"`
+	// Boundary marks a node pulled in because a link reached it, NOT because it
+	// matched the filter. Its own links were never traversed, so only the links
+	// it shares with in-scope devices are known.
+	//
+	// The distinction is load-bearing for anything reasoning about neighbours: a
+	// boundary node looks like a device with exactly one connection, and
+	// treating that as its full neighbour set concludes it has no other path.
+	Boundary bool `json:"boundary,omitempty"`
 }
 
 // GraphEdge is a link between two devices.
@@ -320,6 +343,40 @@ type GraphEdge struct {
 type Graph struct {
 	Nodes []GraphNode `json:"nodes"`
 	Edges []GraphEdge `json:"edges"`
+	// Total is the number of devices matching the spec's filters as the source
+	// reported it, independent of Limit. 0 when the source cannot report one.
+	//
+	// It exists because a truncated graph is not a smaller answer, it is a
+	// DIFFERENT one: edges are discovered from the devices that were retained,
+	// so a device inside the slice can keep one neighbour and lose another that
+	// fell outside it. A caller reasoning about a device's neighbours — the
+	// topology-edges suppression recipe does exactly that — would draw a
+	// confident, wrong conclusion with nothing to show for it.
+	Total int `json:"total"`
+	// Fetched is how many matching devices the traversal actually retrieved,
+	// BEFORE any presentation pruning (ConnectedOnly) and excluding boundary
+	// peers pulled in from outside the filter.
+	//
+	// Truncation is Fetched < Total, and it is a separate number from
+	// len(Nodes) precisely because those two adjustments move len(Nodes) for
+	// reasons that are not truncation: dropping an isolated device is a
+	// deliberate, complete answer, and adding a boundary peer is extra
+	// information rather than missing information.
+	Fetched int `json:"fetched"`
+	// MaxRows is the device ceiling that applied to this traversal, as the
+	// provider enforced it. 0 means the provider does not report one. Same
+	// contract as Result.MaxRows.
+	MaxRows int `json:"maxRows,omitempty"`
+	// Warnings reports that the EDGE set is incomplete for reasons other than
+	// the device limit: a link lookup that failed, or one that hit the row cap
+	// for a single device and dropped the remainder.
+	//
+	// Same contract and the same reason as Result.Warnings. A missing link is
+	// invisible in the output — the device is still there, simply looking less
+	// connected than it is — and for the suppression recipe that reads as "this
+	// device has no healthy upstream", which silences a page. Each entry is a
+	// complete, user-facing sentence.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Provider is the enrichment backend the datasource depends on.

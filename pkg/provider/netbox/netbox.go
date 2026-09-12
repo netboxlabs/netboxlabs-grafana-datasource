@@ -99,6 +99,16 @@ type Provider struct {
 	// branch must cache separately — mirroring the fields cache.
 	schemaByBranch map[string]schemaCacheEntry
 
+	// customFieldsByBranch caches the custom-field type index (see
+	// customFieldTypes) keyed the same way, for the same reason: a branch can
+	// define custom fields main does not.
+	customFieldsByBranch map[string]customFieldTypesEntry
+	// customFieldsFlightByBranch is the in-progress definition fetch per branch,
+	// the sole writer of customFieldsByBranch (see customFieldsFlight).
+	customFieldsFlightByBranch map[string]*customFieldsFlight
+	// customFieldsWaitOverride shortens customFieldsWaitBudget; tests only.
+	customFieldsWaitOverride time.Duration
+
 	// branchingInstalled caches whether netbox-branching is installed — an
 	// instance-wide, branch-invariant property, so a single value + expiry
 	// suffices (no per-branch map). Only conclusive probes are cached; the
@@ -586,7 +596,18 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		notes = append(notes, n)
 	}
 
-	return &provider.Result{Columns: columns, Rows: flatRows, Total: total, Notes: notes, Warnings: warnings, Capped: capped, MaxRows: MaxLimit}, nil
+	// A custom field set on no row in this result has nothing for the frame
+	// builder to infer a type from, so it would fall back to a string column of
+	// '' — and flip to a nullable number the moment one row is set. The field's
+	// DEFINITION knows the type on both days; declare it so the column is the
+	// same type whatever the rows hold (see provider.Result.ColumnTypes). Only
+	// the all-null custom-field columns are asked about: values decide the
+	// rest, and the restriction is what keeps the index's unknown-column rule
+	// exact. A result is not cached, so whether the declaration is settled
+	// does not matter here: an unsettled one is an untyped refresh, no more.
+	columnTypes, _, _ := p.declaredCustomFieldTypes(ctx, allNullCustomFieldColumns(columns, flatRows))
+
+	return &provider.Result{Columns: columns, Rows: flatRows, Total: total, Notes: notes, Warnings: warnings, Capped: capped, MaxRows: MaxLimit, ColumnTypes: columnTypes}, nil
 }
 
 // projectionRejected reports whether a failed list request is worth repeating
@@ -1197,11 +1218,36 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 		return nil, err
 	}
 	var fields []provider.Field
+	// A list whose custom-field types were read off the definition index is
+	// bound by that index. cacheable is false when the index was a stand-in
+	// (still in flight when this sample was typed, so an unset custom field
+	// fell back to string): such a list is returned but not stored, and the
+	// next call reads the settled index. expiry is pulled in to the index's
+	// own when the index was consulted: a failure NetBox gave is settled for a
+	// minute, not for cacheTTL, and a list cached past that point would keep
+	// offering string operators after the retry that repairs the index.
+	cacheable := true
+	expiry := time.Now().Add(cacheTTL)
 	if len(rows) > 0 {
 		cols, vals, err := flattenObject(rows[0])
 		if err == nil {
+			// The sample is one object, so a custom field it leaves unset would be
+			// typed as string here and offered string operators in the editor; the
+			// field's definition knows better. Values still win when present.
+			declared, settled, validUntil := p.declaredCustomFieldTypes(ctx, allNullCustomFieldColumns(cols, []map[string]interface{}{vals}))
 			for _, c := range cols {
-				fields = append(fields, provider.Field{Name: c, Type: inferType(c, vals[c])})
+				t := inferType(c, vals[c])
+				if vals[c] == nil && strings.HasPrefix(c, cfPrefix) {
+					if d, ok := declared[c]; ok {
+						t = d
+					}
+					if !settled {
+						cacheable = false
+					} else if validUntil.Before(expiry) {
+						expiry = validUntil
+					}
+				}
+				fields = append(fields, provider.Field{Name: c, Type: t})
 			}
 		}
 	}
@@ -1212,9 +1258,11 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 		}
 	}
 
-	p.mu.Lock()
-	p.fields[cacheKey] = fieldsCacheEntry{fields: fields, expiry: time.Now().Add(cacheTTL)}
-	p.mu.Unlock()
+	if cacheable {
+		p.mu.Lock()
+		p.fields[cacheKey] = fieldsCacheEntry{fields: fields, expiry: expiry}
+		p.mu.Unlock()
+	}
 	return fields, nil
 }
 
@@ -1990,6 +2038,28 @@ func (p *Provider) readObjectTypeIDs(ctx context.Context) (map[string]int, error
 		return nil, fmt.Errorf("fetch object types: %s returned no usable rows", objectTypesEndpoint)
 	}
 	return ids, nil
+}
+
+// allNullCustomFieldColumns returns the cf_* columns among columns that hold
+// nil in every row — the only columns a type declaration can matter for.
+func allNullCustomFieldColumns(columns []string, rows []map[string]interface{}) []string {
+	var out []string
+	for _, c := range columns {
+		if !strings.HasPrefix(c, cfPrefix) {
+			continue
+		}
+		allNull := true
+		for _, r := range rows {
+			if v, ok := r[c]; ok && v != nil {
+				allNull = false
+				break
+			}
+		}
+		if allNull {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func projectColumns(have, want []string) []string {

@@ -6,6 +6,34 @@ Initial release of the NetBox data source for Grafana.
 
 - Compatibility statement: NetBox ≥ 4.2 (validated 4.2 → 4.6 via `demo/compat-check.sh`),
   Grafana ≥ 12.3.
+- **Custom-field columns are typed from their definition.** A `cf_*` column
+  was typed by scanning its values, so a custom field set on no row in a
+  result — every field, on the day it is created — had nothing to scan and
+  fell back to a string column of empty strings, then flipped to a nullable
+  number the moment one row was set. An alert rule comparing a metric against
+  that column read `''` as 0 and fired the whole fleet: measured at 14 of 15
+  devices on the demo stack. The data source now reads the custom-field
+  definitions once per branch and declares Integer and Decimal fields as
+  numbers and Boolean fields as booleans, so an unpopulated field arrives as a
+  numeric column of nulls and `COALESCE` does what it says. The field picker
+  reports the same type. Values still win where present, and a token that
+  cannot read `extras` gets the old inference, logged once. Text, date and
+  select fields are unchanged: their values already type as strings.
+- **Alerting: thresholds that differ by device role, carried from NetBox**
+  (`docs/alerting/thresholds-by-role.md`). One rule, one `COALESCE` — device
+  override, then role default, then a literal — with the threshold as an Integer
+  custom field so a change is a NetBox edit rather than a Grafana one. Explains
+  the two-hop join the role's field needs, why the expression is wrapped in
+  `NULLIF` and `CAST` anyway, and why the field must be Integer.
+- **Alerting: don't alert on devices that are being retired**
+  (`docs/alerting/lifecycle-suppression.md`). NetBox `status` as the suppression
+  signal, for both NetBox-native rules (one `status not …` filter row; a
+  comma-separated value is a list) and metric rules (the status in the rule's
+  `CASE`, carried as a label). Names the default set and says plainly that
+  `offline` is a choice. Measured why the suppression belongs in the `CASE` and
+  not the `WHERE`: a device with no NetBox record has a `NULL` status, `NULL NOT
+  IN` is `NULL`, and `WHERE` drops it — silently unmonitored — where the `CASE`
+  form keeps it firing as `unknown`.
 - Object queries now ask NetBox to serialize only the properties the query
   actually reads (`?fields=`), instead of fetching whole objects and discarding
   most of them client-side. The result is unchanged — same columns, rows,

@@ -227,9 +227,11 @@ pay nothing extra. See the [Prefix & IP utilization recipe](./docs/RECIPES.md#pr
 ## Alerting
 
 Alert on NetBox state itself: object counts ("fewer than N active devices"),
-per-object conditions with context labels (offline devices, hot prefixes), and
-"who do I page?" contact resolution. The full guide, including how to put
-NetBox context onto alert labels, annotations and notifications, is
+per-object conditions with context labels (offline devices, hot prefixes),
+"who do I page?" contact resolution, metric thresholds that differ by device
+role, read from a NetBox custom field, and suppression of devices NetBox says
+are being retired. The full guide, including how to put NetBox context onto
+alert labels, annotations and notifications, is
 [docs/ALERTING.md](./docs/ALERTING.md).
 
 ## Grafana Cloud

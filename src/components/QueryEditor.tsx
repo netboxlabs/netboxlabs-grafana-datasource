@@ -305,7 +305,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
         <>
           <div style={{ opacity: 0.75, fontSize: 12, marginLeft: 4 }}>
             {queryType === 'topology-edges'
-              ? 'Returns each link as a row (device, peer, and both roles) for joining in an alert rule — see Recipe D in docs/ALERTING.md. Use a Table visualization. Filter the device set below; the filter must cover every device the rule evaluates.'
+              ? 'Returns each link as a row (device, peer, and both roles) for joining in an alert rule — see docs/alerting/topology-suppression.md. Use a Table visualization. Filter the device set below; the filter must cover every device the rule evaluates.'
               : 'Returns NetBox devices as nodes and inter-device links as edges, colored by device status. Use the Node Graph visualization. Filter the device set below (e.g. site or role).'}
           </div>
           <InlineField

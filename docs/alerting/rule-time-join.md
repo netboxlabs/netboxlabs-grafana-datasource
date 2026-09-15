@@ -125,6 +125,15 @@ unreachable. The join yields nothing and the rule produces no instances, so set
 `execErrState` to `Error` (not `OK`) and alert on rule health, or a NetBox outage
 reads as "nothing is down".
 
+**Give the rule a pending period.** The condition side of this join is a
+metric, so it is noisy at scrape resolution and `for: 0s` pages on a single
+sample; `for` of at least two evaluation intervals, and `keepFiringFor` to hold
+a resolve, are the floor — see
+["Pending period and flap damping"](../ALERTING.md#pending-period-and-flap-damping).
+Remember that the labels this join adds define identity: a device whose site,
+role or tenant changes in NetBox becomes a new instance and starts Pending
+again.
+
 ## Cutting the cost: record the NetBox side once
 
 Every rule using the join above queries NetBox on every evaluation, and nothing

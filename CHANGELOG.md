@@ -6,6 +6,16 @@ Initial release of the NetBox data source for Grafana.
 
 - Compatibility statement: NetBox ≥ 4.2 (validated 4.2 → 4.6 via `demo/compat-check.sh`),
   Grafana ≥ 12.3.
+- **Alerting: pending period and flap damping** (`docs/ALERTING.md`). A new
+  section on `for` and `keepFiringFor`, with the measured reason zero is the
+  wrong default for a metric-backed rule and why a NetBox-state rule needs
+  less; each metric recipe now says what its rule should carry, and notes
+  that a label change restarts the pending period because it is a new
+  instance. The provisioned examples no longer ship `for: 0s`: both wait one
+  extra evaluation (`for` equal to their interval), and the offline-devices
+  rule keeps firing for five minutes. Also noted: the file provisioner takes
+  `keepFiringFor`, the HTTP API `keep_firing_for`, and the wrong spelling is
+  silently dropped.
 - **Custom-field columns are typed from their definition.** A `cf_*` column
   was typed by scanning its values, so a custom field set on no row in a
   result — every field, on the day it is created — had nothing to scan and

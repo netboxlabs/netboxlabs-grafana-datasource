@@ -84,7 +84,11 @@ firing `offline` instance resolves and a Normal `decommissioning` one appears,
 the property described under ["Labels vs annotations"](../ALERTING.md#labels-vs-annotations) and in the
 rule-time join's [fallback note](rule-time-join.md). If you would rather the suppression not touch identity, drop
 `netbox_status` from the `SELECT` and `GROUP BY`; the `CASE` reads
-`B.status_value` either way.
+`B.status_value` either way. Either way, give the rule the pending period and
+keep-firing the metric side needs — see
+["Pending period and flap damping"](../ALERTING.md#pending-period-and-flap-damping);
+with the label kept, a status change also restarts the pending period for
+that device, because it is a new instance.
 
 ## Validation
 

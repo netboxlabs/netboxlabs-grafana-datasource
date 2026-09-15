@@ -13,7 +13,11 @@ groups:
         # so the datasource returns the row count as a number that Threshold can
         # evaluate directly — no Reduce node needed.
         condition: C
-        for: 0s
+        # A count of NetBox state changes only when someone edits NetBox, so
+        # one extra evaluation is enough to ride out an edit in progress (a
+        # device deleted and re-added, a bulk import mid-way). See
+        # docs/ALERTING.md, "Pending period and flap damping".
+        for: 1m
         noDataState: NoData
         execErrState: Error
         data:

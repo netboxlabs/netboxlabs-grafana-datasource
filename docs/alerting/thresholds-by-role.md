@@ -87,6 +87,17 @@ Measured on the demo stack with Spine at 80, Leaf at 95 and one spine
 overridden to 10: fifteen instances, three distinct thresholds, and only the
 overridden spine firing.
 
+**Put the threshold where the baseline is not, and set a pending period.** A
+threshold is a line through a noisy signal, and a number that lands inside a
+device's normal band flaps on every evaluation — on the demo, a spine's CPU
+sits at 34 ± 2 and a threshold of 34 is crossed nineteen times in ten minutes.
+`for` of at least two evaluation intervals and a `keepFiringFor` are the floor
+for this rule, per
+["Pending period and flap damping"](../ALERTING.md#pending-period-and-flap-damping).
+And because `netbox_threshold` is a label, editing a threshold in NetBox starts
+every affected device's instance in Pending again: expect one pending period
+of quiet after each change, not a rule that broke.
+
 ## Every wrapper in that expression is load-bearing
 
 The obvious worry is a `NULL` threshold making the comparison false, so the

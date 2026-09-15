@@ -12,7 +12,17 @@ groups:
         # constant 1 per matching row, thresholded > 0 — one alert instance
         # per offline device, carrying its NetBox context as labels.
         condition: C
-        for: 0s
+        # Pending period and keep-firing (see docs/ALERTING.md, "Pending period
+        # and flap damping"): for equal to the 1m interval means a device must
+        # be offline on two consecutive evaluations before it pages (the first
+        # starts Pending, the second fires), and it stays paged for five
+        # minutes after it last matched, so a status that toggles does not
+        # resolve and page again on every flip. NetBox status is a step
+        # function, so the pending period is one interval; the keep-firing is
+        # what absorbs a toggle. Note the spelling: the file provisioner takes
+        # keepFiringFor, the HTTP provisioning API keep_firing_for.
+        for: 1m
+        keepFiringFor: 5m
         noDataState: OK
         execErrState: Error
         annotations:

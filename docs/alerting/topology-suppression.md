@@ -18,7 +18,11 @@ Three queries, the same shape as the [rule-time join](rule-time-join.md):
 - **B** — NetBox, query type **Topology edges**, with the same **Device filter**
   and **Limit** discipline as any other alert-facing query. The **Limit** matters
   more here than elsewhere: see below.
-- **C** — SQL expression, **Format: Alerting**
+- **C** — SQL expression, **Format: Alerting**, with a pending period: the
+  condition is a metric, and this rule's whole purpose is to page for the one
+  device that matters, so it must not page for a single lost sample either —
+  `for` of at least two evaluation intervals, per
+  ["Pending period and flap damping"](../ALERTING.md#pending-period-and-flap-damping)
 
 **B** returns one row per *ordered* pair, so every device can look up its own
 neighbours:

@@ -48,6 +48,71 @@ Grafana treats the two very differently:
 
 Rule of thumb: *route on labels, read annotations.*
 
+## Pending period and flap damping
+
+A rule fires on the evaluation where its condition first holds, and resolves on
+the first where it does not. Two settings put a floor under each edge:
+
+- **Pending period** (`for`) — the condition must hold on every evaluation for
+  this long before the instance fires. Until then it is *Pending*, which is
+  visible in the rule's state view and notifies no one. Count it in
+  evaluations: the first matching evaluation starts the clock, so `for` equal
+  to the interval fires on the **second** consecutive match and `for` of two
+  intervals on the **third**.
+- **Keep firing for** (`keepFiringFor` in a provisioning file,
+  `keep_firing_for` on the HTTP API — the other spelling is silently dropped
+  and reads back as `0s`) — once firing, the instance stays firing this long
+  after the condition last held. A condition that toggles inside that window
+  does not resolve and page again.
+
+Both default to zero, and zero is the wrong default for anything **metric-
+backed**. A metric is noisy at scrape resolution: on the demo stack,
+`device_cpu_percent` for one spine sits at 34 ± 2 over ten minutes, and a
+threshold placed at that median is crossed nineteen times in the window — with
+`for: 0s` and a 10s interval that is a page and a resolve roughly every minute,
+against a device doing nothing unusual. The same threshold five points away is
+crossed zero times. So: put the number where the baseline is not, and give the
+rule a pending period of **at least two evaluation intervals** so a single
+sample cannot page. Measured on that spine with its threshold set to its own
+median and the rule evaluating every 10s, over eight minutes: with `for: 0s`
+the instance fired six times and resolved five — eleven notifications; with
+`for: 30s` and `keep_firing_for: 1m` it fired once and never resolved, the
+pending period absorbing three short bursts and the keep-firing carrying it
+through two dips. Read as a strip of evaluations (`.` Normal, `P` Pending,
+`A` Alerting, `R` Recovering):
+
+```
+for 0s:           ...AA....AAAAAA........AAAAAA....AAAAAAAAAAAAAAAAAA......AAAAAAAA....AAAAAAAAAAA
+for 30s, keep 1m: ..PP....PPPPPP........PPPPPP....PPPPPPAAAAAAAAAAAARRRRRRAAAAAAAARRRRAAAAAAAAAAA
+```
+
+Rules on **NetBox state** need less. A status or a count changes when someone
+edits NetBox, and stays changed: a step function, not a signal. One extra
+evaluation (`for` equal to the interval) rides out an edit in progress — a
+device deleted and re-added, a bulk import half-way — and that is enough. What
+those rules want instead is the keep-firing side: a status that is toggled
+back and forth should page once, not once per flip.
+
+Two things specific to the recipes here:
+
+- **A pending period restarts when identity changes.** The recipes put
+  NetBox context on the alert as labels, and a label whose value changes makes
+  a *new* instance (see above). A threshold edited in NetBox, a status that
+  changes, a device that drifts to `unknown`: each starts a fresh instance in
+  Pending, so the rule is quiet for one full pending period after the change
+  even if the condition held throughout. That is the price of routable labels,
+  and it is worth knowing before an operator reads it as a rule that stopped
+  working.
+- **The NetBox side does not flap on its own.** Every recipe's NetBox query is
+  a snapshot of the record; if a rule built on one flaps, the metric is
+  flapping, or `execErrState` is turning a NetBox outage into state changes.
+  Look there before lengthening `for`.
+
+The provisioned examples under `provisioning/alerting/` carry the values this
+suggests: at their 1m interval, the offline-devices rule `for: 1m` (fires on
+the second consecutive match) with `keepFiringFor: 5m`, the count rule
+`for: 1m`.
+
 ## Recipes
 
 Each recipe is a page of its own. The first two need only the NetBox data

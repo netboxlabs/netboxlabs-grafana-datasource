@@ -13,9 +13,15 @@ Initial release of the NetBox data source for Grafana.
   that a label change restarts the pending period because it is a new
   instance. The provisioned examples no longer ship `for: 0s`: both wait one
   extra evaluation (`for` equal to their interval), and the offline-devices
-  rule keeps firing for five minutes. Also noted: the file provisioner takes
-  `keepFiringFor`, the HTTP API `keep_firing_for`, and the wrong spelling is
-  silently dropped.
+  rule holds a device's instance for six missing evaluations (a count, not a
+  duration: six guarantees a five-minute floor at the 1m interval, five would
+  only guarantee four) — measured: keep-firing does not apply to a row a
+  filter removed, the missing-series setting does — while the count rule,
+  whose one number is always there, keeps firing for five minutes. Also noted: the file provisioner takes
+  `keepFiringFor`, the HTTP API `keep_firing_for`, while missing-series is
+  the reverse (`missing_series_evals_to_resolve` in the file,
+  `missingSeriesEvalsToResolve` on the API), and the wrong spelling is
+  silently dropped either way.
 - **Custom-field columns are typed from their definition.** A `cf_*` column
   was typed by scanning its values, so a custom field set on no row in a
   result — every field, on the day it is created — had nothing to scan and

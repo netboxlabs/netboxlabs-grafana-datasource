@@ -15,9 +15,15 @@ groups:
         condition: C
         # A count of NetBox state changes only when someone edits NetBox, so
         # one extra evaluation is enough to ride out an edit in progress (a
-        # device deleted and re-added, a bulk import mid-way). See
-        # docs/ALERTING.md, "Pending period and flap damping".
+        # device deleted and re-added, a bulk import mid-way). A count-only
+        # query always returns its one number, zero included, so when the
+        # condition clears this instance is evaluated to false rather than
+        # lost -- which is why keep-firing (not the missing-series setting
+        # the offline-devices rule needs) is the hold here: a count that dips
+        # and recovers within five minutes pages once. See docs/ALERTING.md,
+        # "Pending period and flap damping".
         for: 1m
+        keepFiringFor: 5m
         noDataState: NoData
         execErrState: Error
         data:

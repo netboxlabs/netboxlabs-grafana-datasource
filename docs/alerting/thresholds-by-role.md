@@ -94,9 +94,15 @@ sits at 34 ± 2 and a threshold of 34 is crossed nineteen times in ten minutes.
 `for` of at least two evaluation intervals and a `keepFiringFor` are the floor
 for this rule, per
 ["Pending period and flap damping"](../ALERTING.md#pending-period-and-flap-damping).
-And because `netbox_threshold` is a label, editing a threshold in NetBox starts
-every affected device's instance in Pending again: expect one pending period
-of quiet after each change, not a rule that broke.
+And because `netbox_threshold` is a label, editing a threshold in NetBox is an
+identity change: the device's old instance stays in the state it had reached
+(still paging if it was Alerting) until missing-series handling removes it,
+while a new instance begins and rises only if the metric still exceeds the new
+number. Raise a threshold above the current reading and the new instance stays
+Normal and silent; edit it while still exceeded and expect a brief overlap of
+the old Alerting instance and the new Pending one. See the label-change note
+under ["Pending period and flap damping"](../ALERTING.md#pending-period-and-flap-damping);
+read it as expected, not as a rule that broke.
 
 ## Every wrapper in that expression is load-bearing
 

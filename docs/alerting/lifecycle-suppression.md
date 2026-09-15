@@ -79,16 +79,33 @@ nobody has recorded. The `CASE` form also leaves a Normal instance behind for
 every suppressed device, with its status on it, so "why is this one quiet" is
 answerable from the rule's state view rather than from memory.
 
-Because `netbox_status` is a label, a status change is an identity change: the
-firing `offline` instance resolves and a Normal `decommissioning` one appears,
-the property described under ["Labels vs annotations"](../ALERTING.md#labels-vs-annotations) and in the
-rule-time join's [fallback note](rule-time-join.md). If you would rather the suppression not touch identity, drop
+Because `netbox_status` is a label, a status change is an identity change: a
+new `decommissioning` instance appears (Normal, since it is suppressed) while
+the firing `offline` one keeps firing until missing-series handling resolves
+it a couple of evaluations later — the two overlap briefly rather than one
+replacing the other. This is the property described under ["Labels vs
+annotations"](../ALERTING.md#labels-vs-annotations), in the label-change note
+under ["Pending period and flap damping"](../ALERTING.md#pending-period-and-flap-damping),
+and in the rule-time join's [fallback note](rule-time-join.md). If you would rather the suppression not touch identity, drop
 `netbox_status` from the `SELECT` and `GROUP BY`; the `CASE` reads
-`B.status_value` either way. Either way, give the rule the pending period and
-keep-firing the metric side needs — see
-["Pending period and flap damping"](../ALERTING.md#pending-period-and-flap-damping);
-with the label kept, a status change also restarts the pending period for
-that device, because it is a new instance.
+`B.status_value` either way.
+
+This is a rule-time join, so it emits a row per device with the `CASE` as a
+0/1 value — the row is always present and the condition is *evaluated*, not
+filtered away — so **keep-firing** is the hold for ordinary recovery, not the
+missing-series setting the alert-table variant needs (see ["Pending period and
+flap damping"](../ALERTING.md#pending-period-and-flap-damping)). Dropping
+`netbox_status` leaves only that: a stable `device` row whose value flips 1→0,
+held by keep-firing. Keeping `netbox_status` adds one more edge — a status
+change ends the old label set's row, so *that* identity resolves by
+missing-series while the new one is evaluated fresh: Pending if the device is
+still firing under its new status, Normal if the new status suppresses it (the
+`offline` → `decommissioning` case above). So set keep-firing when you drop the
+label, and both keep-firing and missing-series when you keep it — in one
+dialect, since their spellings are reversed and the odd one out is dropped
+silently: `keepFiringFor` + `missing_series_evals_to_resolve` in a provisioning
+file, or `keep_firing_for` + `missingSeriesEvalsToResolve` on the HTTP API (see
+["Pending period and flap damping"](../ALERTING.md#pending-period-and-flap-damping)).
 
 ## Validation
 

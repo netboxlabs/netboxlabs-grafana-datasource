@@ -12,17 +12,25 @@ groups:
         # constant 1 per matching row, thresholded > 0 — one alert instance
         # per offline device, carrying its NetBox context as labels.
         condition: C
-        # Pending period and keep-firing (see docs/ALERTING.md, "Pending period
-        # and flap damping"): for equal to the 1m interval means a device must
-        # be offline on two consecutive evaluations before it pages (the first
-        # starts Pending, the second fires), and it stays paged for five
-        # minutes after it last matched, so a status that toggles does not
-        # resolve and page again on every flip. NetBox status is a step
-        # function, so the pending period is one interval; the keep-firing is
-        # what absorbs a toggle. Note the spelling: the file provisioner takes
-        # keepFiringFor, the HTTP provisioning API keep_firing_for.
+        # Pending period and missing-series hold (see docs/ALERTING.md,
+        # "Pending period and flap damping"): for equal to the 1m interval
+        # means a device must be offline on two consecutive evaluations before
+        # it pages (the first starts Pending, the second fires). A device that
+        # stops being offline does not evaluate to false here -- the status
+        # filter removes its ROW, so Grafana sees a missing series and, by
+        # default, resolves it after two missing evaluations; keep_firing_for
+        # never applies to a row that is gone (measured). The hold for a
+        # filter-shaped rule is missing_series_evals_to_resolve. It is a COUNT
+        # of missing evaluations, not a duration: six here, and because a
+        # recovery can land just before an evaluation, six guarantees at least
+        # five minutes of hold at the 1m interval (five would only guarantee
+        # four). So a device toggled back within ~five minutes does not resolve
+        # and page again. Spelling: this key is snake_case in a provisioning
+        # file and camelCase (missingSeriesEvalsToResolve) on the HTTP API --
+        # the reverse of keepFiringFor / keep_firing_for. The wrong one is
+        # dropped silently.
         for: 1m
-        keepFiringFor: 5m
+        missing_series_evals_to_resolve: 6
         noDataState: OK
         execErrState: Error
         annotations:

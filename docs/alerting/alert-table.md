@@ -16,9 +16,12 @@ produces exactly that shape.
 4. Enable **Alert table**. Leave **Value field** empty: every matching row
    emits `value = 1` (alert on existence).
 5. Condition: Threshold, `IS ABOVE 0` on the query, with `for` equal to the
-   evaluation interval and a `keepFiringFor` of a few minutes — NetBox state is
-   a step function, so one extra evaluation rides out an edit in progress and
-   the keep-firing absorbs a status toggled back and forth (see
+   evaluation interval and `missing_series_evals_to_resolve` of a few
+   evaluations — NetBox state is a step function, so one extra evaluation
+   rides out an edit in progress, and because this rule is a *filter*, a
+   device whose status clears has no row at all rather than a false
+   condition: the missing-series hold is what absorbs a toggle here, not
+   keep-firing (see
    ["Pending period and flap damping"](../ALERTING.md#pending-period-and-flap-damping)).
    One firing instance per offline device, labeled
    `name=…, site=…, role=…, tenant=…`.

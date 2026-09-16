@@ -29,6 +29,9 @@ docker-compose dev Grafana.
 
 - Add or update tests for behavior you change. E2E tests (`npm run e2e`) run in CI.
 - Update the README/docs when you change user-facing behavior.
+- Keep links in `README.md` absolute. The plugin catalog renders the packaged README on
+  grafana.com, where relative paths do not resolve, and the validator treats a relative
+  link as an error.
 
 ## License
 

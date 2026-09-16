@@ -181,7 +181,7 @@ Initial release of the NetBox data source for Grafana.
   exact + longest-prefix) with real screenshots.
 - Grafana Cloud readiness: upstream HTTP client built from the Grafana SDK
   (`backend/httpclient`) so Private Data Source Connect (PDC), proxy and TLS settings are
-  honored; real (non-placeholder) logo; publishing/Cloud checklist in `docs/PUBLISHING.md`.
+  honored; real (non-placeholder) logo.
 - Go + Jest unit tests and Playwright e2e smoke tests.
 - `demo/`: one-command demo stack (`demo/run.sh`) — bundled, seeded real NetBox +
   Prometheus + Loki + synthetic telemetry + Grafana with provisioned datasources, dashboard

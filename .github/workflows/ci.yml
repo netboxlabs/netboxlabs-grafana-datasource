@@ -121,6 +121,10 @@ jobs:
           echo "archive=${GRAFANA_PLUGIN_ARTIFACT}" >> $GITHUB_OUTPUT
 
       - name: Package plugin
+        # Submit this artifact to the catalog. The archive's top-level directory must be the
+        # plugin id, which is why it is read from dist/plugin.json rather than hardcoded. A
+        # hand-made zip of a copied dist/ gets that directory name wrong and is rejected
+        # (no-ident-root-dir).
         id: package-plugin
         run: |
           mv dist ${PLUGIN_ID}
@@ -130,6 +134,9 @@ jobs:
           PLUGIN_ID: ${{ steps.metadata.outputs.plugin-id }}
 
       - name: Check plugin.json
+        # Scoped to one analyzer, so a green run here does NOT mean the archive would pass
+        # the catalog. Link and archive-structure problems are invisible to this step. Run
+        # the full validator by hand before a submission; the gate is zero error findings.
         run: |
           docker run --pull=always \
             -v $PWD/${ARCHIVE}:/archive.zip \

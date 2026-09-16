@@ -48,3 +48,8 @@ ci/
 .eslintcache
 
 .DS_Store
+
+# Plugin archives and unpacked copies produced when packaging for the catalog.
+*.zip
+/grafana-netboxlabs-datasource/
+/netboxlabs-grafana-datasource*/

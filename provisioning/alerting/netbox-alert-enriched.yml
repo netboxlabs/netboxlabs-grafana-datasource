@@ -46,7 +46,7 @@ groups:
             model:
               refId: A
               datasource:
-                type: netboxlabs-datasource
+                type: grafana-netboxlabs-datasource
                 uid: netboxlabs-netbox-alerting
               queryType: objects
               objectType: dcim/devices

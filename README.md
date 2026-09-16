@@ -9,7 +9,7 @@ data source brings that context into Grafana so you can join it onto metrics and
 from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"` into
 "leaf1, an Arista switch in DM-Akron, rack R-12, owned by the NetEng team."
 
-![Enrichment dashboard](./screenshots/hero.png)
+![Enrichment dashboard](https://raw.githubusercontent.com/netboxlabs/netboxlabs-grafana-datasource/main/screenshots/hero.png)
 
 ## Features
 
@@ -19,7 +19,7 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
 - **Configurable join keys.** Per query, derive extra key columns (rename + transform:
   lowercase, strip-domain, IP-host, interface-short-name, regex) so a NetBox field matches your metric label with
   no extra Grafana transforms. Add several to reuse one query different ways. See
-  [docs/JOIN-KEYS.md](./docs/JOIN-KEYS.md).
+  [docs/JOIN-KEYS.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/JOIN-KEYS.md).
 - **IP enrichment (address, device and longest-prefix match).** Resolve arbitrary observed
   IPs to their NetBox address record, the interface it's assigned to, and the owning
   device — including whether it's that device's primary IP — falling back to the
@@ -47,7 +47,7 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
   survives the join, so an enriched metrics table stays clickable through to NetBox.
 - **Correlations (Explore drill-downs).** Provision links from any Prometheus/Loki series
   into a NetBox query, device to inventory, IP to longest-prefix context. The demo ships
-  them; recipes in [docs/CORRELATIONS.md](docs/CORRELATIONS.md).
+  them; recipes in [docs/CORRELATIONS.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/CORRELATIONS.md).
 - **Secure & backend-based.** API token stored in Grafana's encrypted secret store; all
   upstream calls happen server-side. Works with NetBox **v1 and v2** API tokens.
 
@@ -61,7 +61,7 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
 - **Grafana 12.3 or later** (the plugin's `grafanaDependency`; e2e-tested against
   12.3 → 13.1 and nightly in CI).
 
-Re-verify any NetBox version locally with [`demo/compat-check.sh`](demo/compat-check.sh).
+Re-verify any NetBox version locally with [`demo/compat-check.sh`](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/demo/compat-check.sh).
 
 ## Configuration
 
@@ -144,7 +144,7 @@ and is the simplest way to get predictable query performance at that scale.
 apiVersion: 1
 datasources:
   - name: NetBox
-    type: netboxlabs-datasource
+    type: grafana-netboxlabs-datasource
     access: proxy
     jsonData:
       url: ${NETBOX_URL}
@@ -210,8 +210,8 @@ NetBox context.
 
 Step-by-step recipes for Prometheus/SNMP metrics, Loki logs, flows by IP (exact and
 longest-prefix match), plus variables, annotations and deep links, live in
-[docs/RECIPES.md](./docs/RECIPES.md). The join-key transform reference is
-[docs/JOIN-KEYS.md](./docs/JOIN-KEYS.md).
+[docs/RECIPES.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/RECIPES.md). The join-key transform reference is
+[docs/JOIN-KEYS.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/JOIN-KEYS.md).
 
 > Want a sandbox with everything pre-wired? See [Demo](#demo) below.
 > `./demo/run.sh` brings up a real NetBox plus Prometheus, Loki and synthetic telemetry, all
@@ -222,7 +222,7 @@ longest-prefix match), plus variables, annotations and deep links, live in
 Prefixes and IP ranges expose three opt-in columns (`utilization`, `used`,
 `available`) that the backend computes to match the figure NetBox's own UI
 shows. They appear only when added to Return fields, so ordinary IPAM queries
-pay nothing extra. See the [Prefix & IP utilization recipe](./docs/RECIPES.md#prefix--ip-utilization).
+pay nothing extra. See the [Prefix & IP utilization recipe](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/RECIPES.md#prefix--ip-utilization).
 
 ## Alerting
 
@@ -232,7 +232,7 @@ per-object conditions with context labels (offline devices, hot prefixes),
 role, read from a NetBox custom field, and suppression of devices NetBox says
 are being retired. The full guide, including how to put NetBox context onto
 alert labels, annotations and notifications, is
-[docs/ALERTING.md](./docs/ALERTING.md).
+[docs/ALERTING.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/ALERTING.md).
 
 ## Grafana Cloud
 
@@ -246,8 +246,7 @@ plugin catalog and signed by Grafana (Cloud cannot load private/unsigned plugins
   honored automatically. No plugin changes are needed by the customer.
 
 The backend ships binaries for `linux/amd64` and `linux/arm64` (Cloud) plus the full
-catalog target matrix (darwin/windows/arm). See [docs/PUBLISHING.md](./docs/PUBLISHING.md)
-for the catalog/signing checklist.
+catalog target matrix (darwin/windows/arm).
 
 ## Branches (netbox-branching)
 
@@ -282,13 +281,13 @@ in a `golang:1.26` container instead.
 
 - **Full mode** (self-contained): `./demo/run.sh` installs npm dependencies and builds the
   plugin if needed, then brings up a real, seeded NetBox (a multi-site fabric), Prometheus,
-  Loki, synthetic telemetry, and Grafana at [http://localhost:3001](http://localhost:3001)
+  Loki, synthetic telemetry, and Grafana at `http://localhost:3001`
   (anonymous admin) with the dashboard above pre-provisioned. First run additionally builds
   the frontend and both backend binaries (a few minutes, mostly Go module/image downloads);
   after that, NetBox seeding is the only wait, about 2-3 min.
 
-  Once it is up: NetBox is at [http://localhost:8000](http://localhost:8000) (sign in
-  `admin` / `admin`), and Grafana is at [http://localhost:3001](http://localhost:3001)
+  Once it is up: NetBox is at `http://localhost:8000` (sign in
+  `admin` / `admin`), and Grafana is at `http://localhost:3001`
   (anonymous admin, no login). The demo's pre-provisioned API token is
   `0123456789abcdef0123456789abcdef01234567`.
 - **Fast / bring-your-own-NetBox mode**: point the stack at your own NetBox instead of the
@@ -299,7 +298,7 @@ in a `golang:1.26` container instead.
   (Equivalent, if the plugin is already built: the same env vars with
   `docker compose -f demo/docker-compose.yaml up`.)
 - **Just want the dashboard?** Import
-  [demo/netbox-demo-dashboard.json](./demo/netbox-demo-dashboard.json) into any Grafana
+  [demo/netbox-demo-dashboard.json](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/demo/netbox-demo-dashboard.json) into any Grafana
   (**Dashboards → Import**). It prompts for your NetBox, Prometheus and Loki datasources.
 
 **Teardown.** Tear the demo stack down with `./demo/run.sh down` (works for both full and
@@ -315,7 +314,7 @@ bring-your-own modes, and needs no env vars or setup):
 ## Development
 
 The datasource never imports a NetBox client directly. It depends only on the small
-[`provider.Provider`](./pkg/provider/provider.go) interface. Today the only
+[`provider.Provider`](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/pkg/provider/provider.go) interface. Today the only
 implementation is the **NetBox REST API**. A second backend, a high-volume enrichment
 projection of NetBox for NetBox Cloud/Enterprise, is planned, and slots in behind the
 same interface as a drop-in rather than a rewrite.
@@ -361,10 +360,10 @@ interpreter, not the binary itself).
 - **Found a bug or want a feature?** [Open an issue](https://github.com/netboxlabs/netboxlabs-grafana-datasource/issues/new/choose)
   using the matching template. The version and environment fields it asks for are what we
   need to reproduce a problem.
-- **Want to contribute?** See [CONTRIBUTING.md](./CONTRIBUTING.md).
-- **Security issue?** Report privately per [SECURITY.md](./SECURITY.md), not via a public
+- **Want to contribute?** See [CONTRIBUTING.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/CONTRIBUTING.md).
+- **Security issue?** Report privately per [SECURITY.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/SECURITY.md), not via a public
   issue.
 
 ## License
 
-Apache-2.0. See [LICENSE](./LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/LICENSE).

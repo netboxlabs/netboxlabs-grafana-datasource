@@ -29,6 +29,7 @@ type fakeProvider struct {
 	ipResult          *provider.Result
 	ipRow             map[string]interface{} // when set, ResolveIPs projects it onto the requested fields
 	ipFields          []string               // captured by ResolveIPs for passthrough asserts
+	ipsSeen           []string               // captured by ResolveIPs: the IPs it was asked to resolve
 	graph             *provider.Graph
 	topoSpec          provider.TopologySpec // captured by Topology for passthrough asserts
 	querySpec         provider.QuerySpec    // captured by Query for passthrough asserts
@@ -78,7 +79,8 @@ func (f *fakeProvider) Changes(context.Context, provider.ChangeSpec) ([]provider
 // (netbox.project). Returning a fixed result regardless of the fields would make
 // any test about which fields were requested pass for the wrong reason: the
 // column would be there because the fake always supplies it.
-func (f *fakeProvider) ResolveIPs(_ context.Context, _ []string, fields []string, _ int) (*provider.Result, error) {
+func (f *fakeProvider) ResolveIPs(_ context.Context, ips []string, fields []string, _ int) (*provider.Result, error) {
+	f.ipsSeen = slices.Clone(ips)
 	f.ipFields = slices.Clone(fields)
 	if f.ipRow == nil {
 		return f.ipResult, nil

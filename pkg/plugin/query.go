@@ -84,6 +84,9 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err))
 	}
 
+	// Once, here, so no branch below can forget it (see dropAllFilters).
+	qm.Filters = dropAllFilters(qm.Filters)
+
 	// Scope every request this query makes to the selected branch (no-op when empty).
 	ctx = provider.WithBranch(ctx, qm.Branch)
 
@@ -103,7 +106,10 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		return backend.DataResponse{Frames: data.Frames{frame}}
 
 	case queryTypeIPEnrichment:
-		ips := splitList(qm.IPs)
+		// The list IS the input here, so All has nothing to drop and resolves
+		// nothing — the same as an empty list — rather than asking NetBox for an
+		// address called $__all. Same token, same meaning as on a filter row.
+		ips := slices.DeleteFunc(splitList(qm.IPs), func(ip string) bool { return ip == allFilterValue })
 		if len(ips) == 0 {
 			return backend.DataResponse{}
 		}
@@ -366,6 +372,42 @@ func queryOrdering(ordering string, c consumer) string {
 		return ""
 	}
 	return ordering
+}
+
+// allFilterValue is Grafana's own token for a variable's "All" option. A filter
+// row whose value is exactly this means "do not filter on this field".
+const allFilterValue = "$__all"
+
+// dropAllFilters removes the filter rows whose value is "All".
+//
+// It is opt-in, by whoever writes the query. Grafana expands All into every
+// option of the variable, which the provider turns into repeated NetBox
+// parameters: on a few hundred sites, a URL long enough to be refused and a slow
+// query, to say nothing. A dashboard author who knows the variable lists
+// everything sets its Custom all value to this token and the row goes away
+// instead. A caller with no variables to expand — a backend posting to
+// /api/ds/query — sends it for the same reason.
+//
+// It is NOT inferred from a variable being set to All, because All does not
+// always mean everything: for a chained variable ("sites in $region") or a
+// hand-written list it means every option on offer, and dropping the row would
+// silently widen the panel from that subset to the whole inventory.
+//
+// The operator is not consulted: All is the absence of a filter, whichever way
+// the row would have compared. The token has to be the whole value. Grafana never
+// produces it as one element of a list, so a list containing it is malformed,
+// and that must not be what turns a filtered query into an unfiltered one.
+func dropAllFilters(filters []provider.Filter) []provider.Filter {
+	if filters == nil {
+		return nil
+	}
+	out := make([]provider.Filter, 0, len(filters))
+	for _, f := range filters {
+		if strings.TrimSpace(f.Value) != allFilterValue {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // splitList parses a free-form list separated by commas, whitespace or newlines.

@@ -40,7 +40,8 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
 - **Dynamic object-type discovery.** Object types are discovered from the live NetBox API,
   both core models and plugin-provided models (e.g. BGP, custom objects), with no code changes.
 - **Template variables.** Drive `site` / `device` / `role` / `tenant` dropdowns from NetBox
-  and filter every panel on the dashboard. Multi-value variables become OR filters.
+  and filter every panel on the dashboard. Multi-value variables become OR filters; a
+  Custom all value of `$__all` makes **All** send no filter at all.
 - **Annotations.** Overlay NetBox change-log events (who changed what, when) on any
   time-series panel using Grafana's `time/title/text/tags` convention.
 - **Deep links.** Every row links straight back to the NetBox object page, and the link

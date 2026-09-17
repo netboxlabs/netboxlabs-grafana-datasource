@@ -40,8 +40,8 @@ groups:
               type: sql
               datasource: { type: __expr__, uid: __expr__ }
               # Required on a rule that was not created in the rule editor, which
-              # adds it for you: without it evaluation fails with "unexpected row
-              # length". See docs/ALERTING.md.
+              # adds it for you: without it evaluation fails with "unexpected field
+              # length: 3 instead of 1". See docs/alerting/rule-time-join.md.
               format: alerting
               # The SQL expression IS the condition. Grafana refuses one as the
               # input to a threshold or reduce ("sql expressions can not be the

@@ -74,7 +74,7 @@ func TestQuery_AlertTable_UtilizationOverTheOldRowCapStillReturnsRows(t *testing
 		RefID: "A",
 		JSON: []byte(`{"queryType":"objects","objectType":"ipam/prefixes","alertTable":true,` +
 			`"valueField":"utilization","fields":["prefix","utilization"],"limit":1000}`),
-	}, true)
+	}, consumerAlert)
 
 	if resp.Error != nil {
 		t.Fatalf("alert query errored instead of returning rows: %v", resp.Error)

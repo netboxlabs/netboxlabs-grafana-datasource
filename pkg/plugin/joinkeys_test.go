@@ -199,7 +199,7 @@ func TestQuery_Objects_RequestsJoinKeySources(t *testing.T) {
 				Total:   1,
 			}}
 			d := newTestDatasource(fp)
-			resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, false)
+			resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, consumerDashboard)
 			if resp.Error != nil {
 				t.Fatalf("unexpected error: %v", resp.Error)
 			}

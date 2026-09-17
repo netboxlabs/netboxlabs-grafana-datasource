@@ -22,7 +22,7 @@ func TestQuery_OrderingReachesTheProvider(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"objects","objectType":"dcim/devices","ordering":"-name","limit":100}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -38,7 +38,7 @@ func TestQuery_NoOrderingAsksForNone(t *testing.T) {
 	d := newTestDatasource(fp)
 	if resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`),
-	}, false); resp.Error != nil {
+	}, consumerDashboard); resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
 	if fp.querySpec.Ordering != "" {
@@ -76,7 +76,7 @@ func TestQuery_AlertEvaluationDoesNotPayForASort(t *testing.T) {
 				Total:   1,
 			}}
 			d := newTestDatasource(fp)
-			resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, true)
+			resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, consumerAlert)
 			if resp.Error != nil {
 				t.Fatalf("unexpected error: %v", resp.Error)
 			}
@@ -100,7 +100,7 @@ func TestQuery_AlertEvaluationDoesNotPayForASort(t *testing.T) {
 				Total:   1,
 			}}
 			d := newTestDatasource(fp)
-			if resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, false); resp.Error != nil {
+			if resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, consumerDashboard); resp.Error != nil {
 				t.Fatalf("unexpected error: %v", resp.Error)
 			}
 			if fp.querySpec.Ordering != "status" {
@@ -117,7 +117,7 @@ func TestQuery_CountNeverCarriesASort(t *testing.T) {
 	d := newTestDatasource(fp)
 	if resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices","count":true,"ordering":"name"}`),
-	}, false); resp.Error != nil {
+	}, consumerDashboard); resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
 	if fp.querySpec.Ordering != "" {
@@ -140,7 +140,7 @@ func TestQuery_OrderingNoteReachesTheFrame(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"objects","objectType":"dcim/sites","ordering":"device_count","limit":100}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}

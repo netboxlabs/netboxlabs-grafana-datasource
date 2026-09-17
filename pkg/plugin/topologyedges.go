@@ -31,21 +31,22 @@ func graphTruncated(g *provider.Graph) bool {
 
 // graphTruncationError is the alert-path refusal for an incomplete traversal,
 // worded exactly as the object and IP-enrichment paths word theirs.
-func graphTruncationError(g *provider.Graph) string {
+func graphTruncationError(c consumer, g *provider.Graph) string {
 	if !graphTruncated(g) {
 		return ""
 	}
-	return truncationMessage(g.Fetched, g.Total, g.MaxRows, nounDevices)
+	return truncationMessage(c, g.Fetched, g.Total, g.MaxRows, nounDevices)
 }
 
 // graphDegradationError is the alert-path refusal for an incomplete EDGE set,
 // which is a different failure from too few devices: every device is present,
 // but one of them is missing links it really has.
-func graphDegradationError(g *provider.Graph) string {
+func graphDegradationError(c consumer, g *provider.Graph) string {
 	if g == nil || len(g.Warnings) == 0 {
 		return ""
 	}
-	return "Alert query returned an incomplete set of links, so it would alert on a device that may have a working path it cannot see. " +
+	v := c.voice()
+	return v.subject + " returned an incomplete set of links, so " + v.links + ". " +
 		strings.Join(g.Warnings, " ")
 }
 

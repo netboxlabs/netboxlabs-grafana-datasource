@@ -119,28 +119,33 @@ func resultNotices(res *provider.Result, requestedLimit int, noun string) []data
 // noun names what Total counts for this query type, exactly as it does for
 // resultNotices: an ip-enrichment Total counts requested IPs, most of which may
 // match no object at all, so the objects wording would be false there.
-func truncationError(res *provider.Result, requestedLimit int, noun string) string {
+//
+// Unlike resultNotices it takes no requested limit: the refusal quotes what came
+// back against what matched, and the advice to raise the limit holds whatever
+// it was set to.
+func truncationError(c consumer, res *provider.Result, noun string) string {
 	if !isTruncated(res) {
 		return ""
 	}
-	return truncationMessage(len(res.Rows), res.Total, res.MaxRows, noun)
+	return truncationMessage(c, len(res.Rows), res.Total, res.MaxRows, noun)
 }
 
 // truncationMessage is the wording every truncated alert query shares, kept in
 // one place so a second producer cannot drift from it. Callers decide whether
 // they are truncated; this only phrases it.
-func truncationMessage(returned, total, maxRows int, noun string) string {
+func truncationMessage(c consumer, returned, total, maxRows int, noun string) string {
+	v := c.voice()
 	if maxRows <= 0 {
 		// No reported ceiling, so the "max N" advice would be a made-up number.
 		return fmt.Sprintf(
-			"Alert query returned %s of %s %s, so it would alert on an incomplete result. "+
+			"%s returned %s of %s %s, so %s. "+
 				"Raise the row limit or add filters so every match fits.",
-			thousands(returned), thousands(total), noun)
+			v.subject, thousands(returned), thousands(total), noun, v.truncated)
 	}
 	return fmt.Sprintf(
-		"Alert query returned %s of %s %s, so it would alert on an incomplete result. "+
+		"%s returned %s of %s %s, so %s. "+
 			"Raise the row limit (max %s) or add filters so every match fits.",
-		thousands(returned), thousands(total), noun, thousands(maxRows))
+		v.subject, thousands(returned), thousands(total), noun, v.truncated, thousands(maxRows))
 }
 
 // capInfo returns the result's row cap, or nil when there is nothing to report.
@@ -193,26 +198,27 @@ func capNoticeText(c *provider.Cap) string {
 // unmeasured prefix does not merely drop out of the rule, it evaluates as 0%
 // utilized: a threshold rule watching for >90% would report those rows as fine.
 // Returns "" when nothing was capped.
-func capError(res *provider.Result) string {
+func capError(who consumer, res *provider.Result) string {
 	c := capInfo(res)
 	if c == nil {
 		return ""
 	}
+	v := who.voice()
 	// Nothing measured at all: the upstream could not answer even one row's
 	// lookups inside the query's budget. The rule must still fail, but the number
 	// to lower the limit to would be zero — advice that cannot be followed, on the
 	// result whose reader most needs a next step. Say what is left to try instead.
 	if c.Measured == 0 {
 		return fmt.Sprintf(
-			"Alert query measured %s for none of its %s rows, so every row would evaluate as zero rather than as the values it holds. "+
+			"%s measured %s for none of its %s rows, so all of them %s. "+
 				"NetBox answered too slowly for even one row to be measured in the time this datasource allows: add filters, raise the datasource timeout, or deselect those columns.",
-			andList(c.Columns), thousands(c.Rows))
+			v.subject, andList(c.Columns), thousands(c.Rows), v.unmeasured)
 	}
 	return fmt.Sprintf(
-		"Alert query measured %s for %s of its %s rows, so the other %s would evaluate as zero rather than as the values they hold. "+
+		"%s measured %s for %s of its %s rows, so the other %s %s. "+
 			"Lower the row limit to %s or fewer, or add filters so every row is measured.",
-		andList(c.Columns), thousands(c.Measured), thousands(c.Rows),
-		thousands(c.Rows-c.Measured), thousands(c.Measured))
+		v.subject, andList(c.Columns), thousands(c.Measured), thousands(c.Rows),
+		thousands(c.Rows-c.Measured), v.unmeasured, thousands(c.Measured))
 }
 
 // andList renders a column list as prose: "utilization, used and available".
@@ -240,12 +246,36 @@ func andList(items []string) string {
 // The provider's own sentences are quoted verbatim: only it knows which columns
 // a given hop fills, and they are already written to be user-facing and free of
 // upstream URLs and response bodies.
-func degradationError(res *provider.Result) string {
+func degradationError(c consumer, res *provider.Result) string {
 	if res == nil || len(res.Warnings) == 0 {
 		return ""
 	}
-	return "Alert query returned a degraded result, so it would alert on data that is missing for a reason the numbers cannot show. " +
+	v := c.voice()
+	return v.subject + " returned a degraded result, so " + v.degraded + ". " +
 		strings.Join(res.Warnings, " ")
+}
+
+// resultRefusal is the one place a strict consumer's three refusals are applied,
+// so no branch can run two of them, or run them in a different order. It returns
+// the first reason res must not be handed over, or "" when it is complete.
+//
+// The order is the message the reader gets, so it goes from the most actionable
+// dial to the least. Truncation first: raise the limit or add filters. Then the
+// cap, BEFORE degradation — a capped result is not a degraded one and must not be
+// reported as one: nothing failed, the values present are correct, and the fix is
+// the row limit the author already controls. Reporting it as degradation is what
+// sent a 200-row utilization rule on a healthy NetBox to Error state. Degradation
+// last: a lookup hop failed, so a column is blank because we could not ask — a
+// blank numeric field evaluates as absent, and a rule watching prefixes over 90%
+// would simply stop firing, looking exactly like prefixes that came back under it.
+func resultRefusal(c consumer, res *provider.Result, noun string) string {
+	if msg := truncationError(c, res, noun); msg != "" {
+		return msg
+	}
+	if msg := capError(c, res); msg != "" {
+		return msg
+	}
+	return degradationError(c, res)
 }
 
 // thousands formats n with comma separators (104231 -> "104,231") so large

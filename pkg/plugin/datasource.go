@@ -99,11 +99,96 @@ func (d *Datasource) Dispose() {}
 // QueryData handles multiple queries and returns multiple responses.
 func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
 	response := backend.NewQueryDataResponse()
-	fromAlert := isAlertRequest(req)
+	c := requestConsumer(req)
 	for _, q := range req.Queries {
-		response.Responses[q.RefID] = d.query(ctx, q, fromAlert)
+		response.Responses[q.RefID] = d.query(ctx, q, c)
 	}
 	return response, nil
+}
+
+// consumer says what will read a query's frames. It decides one thing: whether a
+// partial result may be returned with its gap stated in a frame notice, or has to
+// be refused because nothing downstream would ever show that notice.
+type consumer int
+
+const (
+	// consumerDashboard is a panel, Explore or a variable: the frame reaches a
+	// reader with its notices intact, so partial beats none.
+	consumerDashboard consumer = iota
+	// consumerExpression is a query whose frame feeds a server-side expression.
+	consumerExpression
+	// consumerAlert is an alert-rule evaluation (see isAlertRequest).
+	consumerAlert
+)
+
+// strict reports whether a partial result must fail instead of carrying a notice.
+func (c consumer) strict() bool { return c != consumerDashboard }
+
+// refusalVoice is how a refused partial result is worded for whoever asked: the
+// subject, and the consequence clause of each refusal, written out in full for
+// each reader rather than assembled from swapped verbs, because "alert on a
+// device" and "compute on a device" are not the same sentence with one word
+// changed.
+type refusalVoice struct {
+	subject    string // what failed, as the reader knows it
+	truncated  string // …returned N of M, so <truncated>
+	degraded   string // …returned a degraded result, so <degraded>
+	links      string // …returned an incomplete set of links, so <links>
+	unmeasured string // …measured X for N of M rows, so the other K <unmeasured>
+}
+
+// voice addresses the refusal to its reader. Someone whose dashboard panel broke
+// has no alert rule to go and look for, so the expression path says so; every
+// other strict path is a rule being evaluated, previewed or written — the
+// alertTable shape refuses for a dashboard consumer too — and keeps the alert
+// wording.
+func (c consumer) voice() refusalVoice {
+	if c == consumerExpression {
+		return refusalVoice{
+			subject:    "Query feeding an expression",
+			truncated:  "the expression would compute on an incomplete result",
+			degraded:   "the expression would compute on data that is missing for a reason the numbers cannot show",
+			links:      "the expression would see a device as less connected than it is",
+			unmeasured: "would reach the expression blank instead of with the values they hold",
+		}
+	}
+	return refusalVoice{
+		subject:    "Alert query",
+		truncated:  "it would alert on an incomplete result",
+		degraded:   "it would alert on data that is missing for a reason the numbers cannot show",
+		links:      "it would alert on a device that may have a working path it cannot see",
+		unmeasured: "would evaluate as zero rather than as the values they hold",
+	}
+}
+
+// fromExprHeader is the header Grafana sets on a query whose result feeds a
+// server-side expression (SQL, math, reduce). The frontend adds it to any panel
+// request that contains an expression, and a backend calling /api/ds/query can
+// send it for the same purpose.
+//
+// It matters for the reason FromAlert does: expressions drop the input frame's
+// meta.notices, so a truncated result reaches the panel as a plausible wrong
+// number with nothing to say it is partial.
+const fromExprHeader = "X-Grafana-From-Expr"
+
+// requestConsumer classifies a QueryData call. Alert wins when both are set — a
+// rule with a SQL expression carries both, and alert is the stricter reading.
+//
+// Unlike FromAlert (see isAlertRequest), the expression header IS forwarded with
+// the "http_" prefix, so the SDK accessor is the right way to read it and a
+// direct lookup of the bare name would find nothing. Verified against
+// grafana-plugin-sdk-go v0.296.4 and live against Grafana 13.
+func requestConsumer(req *backend.QueryDataRequest) consumer {
+	if req == nil {
+		return consumerDashboard
+	}
+	if isAlertRequest(req) {
+		return consumerAlert
+	}
+	if strings.EqualFold(strings.TrimSpace(req.GetHTTPHeader(fromExprHeader)), "true") {
+		return consumerExpression
+	}
+	return consumerDashboard
 }
 
 // fromAlertHeader is the key Grafana puts in QueryDataRequest.Headers when the

@@ -73,12 +73,12 @@ type queryModel struct {
 
 // query executes a single query and returns its data response.
 //
-// fromAlert says this call is an alert-rule evaluation (see isAlertRequest). It
-// is an explicit parameter rather than something read back out of the context so
-// that every future call site is forced by the compiler to state which it is:
-// getting it wrong in the silent direction means alerting on data the query
-// itself knows is incomplete.
-func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert bool) backend.DataResponse {
+// c says what will read the frames (see consumer and requestConsumer). It is an
+// explicit parameter rather than something read back out of the context so that
+// every future call site is forced by the compiler to state which it is: getting
+// it wrong in the silent direction means alerting, or computing an expression, on
+// data the query itself knows is incomplete.
+func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer) backend.DataResponse {
 	var qm queryModel
 	if err := json.Unmarshal(q.JSON, &qm); err != nil {
 		return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err))
@@ -125,21 +125,18 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 		// therefore fail rather than evaluate on a partial or degraded answer,
 		// which is what the objects branch already does via its alertTable flag.
 		// Dashboards keep the opposite policy — partial beats none, with the gap
-		// stated in a notice — which is exactly why this is gated on fromAlert
+		// stated in a notice — which is exactly why this is gated on the consumer
 		// and not applied unconditionally.
-		if fromAlert {
-			if msg := truncationError(res, qm.Limit, nounIPs); msg != "" {
-				return backend.ErrDataResponse(backend.StatusBadRequest, msg)
-			}
-			// ResolveIPs caps nothing today, so this cannot fire from here. It is
-			// wired anyway because the alternative is the bug this fix exists for
-			// in reverse: an alert-facing path that silently ignores a new
-			// Result field is exactly how a deliberate cap ended up evaluating as
-			// a column of zeroes.
-			if msg := capError(res); msg != "" {
-				return backend.ErrDataResponse(backend.StatusBadRequest, msg)
-			}
-			if msg := degradationError(res); msg != "" {
+		//
+		// An expression is the same reader as a rule here: it drops meta.notices
+		// too, so c.strict() covers both (see consumer).
+		if c.strict() {
+			// ResolveIPs caps nothing today, so the cap check inside cannot fire from
+			// here. It runs anyway because the alternative is the bug this exists
+			// for in reverse: a strict path that silently ignores a new Result field
+			// is exactly how a deliberate cap ended up evaluating as a column of
+			// zeroes.
+			if msg := resultRefusal(c, res, nounIPs); msg != "" {
 				return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 			}
 		}
@@ -173,16 +170,17 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 			// device can appear to have lost its only healthy upstream. The
 			// suppression recipe reads exactly that and would silence an alert that
 			// should have paged. Refused for the same reason, and in the same
-			// words, as the object and IP-enrichment alert paths.
-			if fromAlert {
-				if msg := graphTruncationError(graph); msg != "" {
+			// words, as the object and IP-enrichment alert paths. A SQL join reads
+			// this table the same way, so an expression is refused as well.
+			if c.strict() {
+				if msg := graphTruncationError(c, graph); msg != "" {
 					return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 				}
 				// Edge-set gaps are refused too, and separately: a device whose
 				// links could not all be read looks less connected than it is,
 				// which reads as "no working path" and silences a page. Same
 				// reason degradationError exists on the object path.
-				if msg := graphDegradationError(graph); msg != "" {
+				if msg := graphDegradationError(c, graph); msg != "" {
 					return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 				}
 			}
@@ -236,7 +234,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 			Filters:    qm.Filters,
 			Fields:     fields,
 			KeyFields:  joinKeySources(qm.JoinKeys),
-			Ordering:   queryOrdering(qm.Ordering, fromAlert),
+			Ordering:   queryOrdering(qm.Ordering, c),
 			Limit:      qm.Limit,
 		})
 		if err != nil {
@@ -246,26 +244,13 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 			return backend.ErrDataResponse(backend.StatusBadRequest,
 				fmt.Sprintf("value field %q not found in results — add it to Return fields", qm.ValueField))
 		}
-		// Grafana alert evaluation cannot see frame notices, so a truncated alert
-		// result must fail loudly instead of alerting on an arbitrary subset.
-		if msg := truncationError(res, qm.Limit, nounObjects); msg != "" {
-			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
-		}
-		// A capped result is not a degraded one and must not be reported as one:
-		// nothing failed, the values present are correct, and the fix is the row
-		// limit the rule author already controls. Checked before the degradation
-		// branch so the message the user gets names the dial that works — this is
-		// the whole content of the bug: a 200-row utilization rule on a healthy
-		// NetBox was told its data was degraded and sent to Error state.
-		if msg := capError(res); msg != "" {
-			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
-		}
-		// Same reason, different gap: the objects query now degrades as well as
-		// truncates. A utilization column whose child lookups failed comes back
-		// blank, alert evaluation drops meta.notices, and a blank numeric field
-		// evaluates as absent — so a rule watching prefixes over 90% would simply
-		// stop firing, looking exactly like prefixes that came back under 90%.
-		if msg := degradationError(res); msg != "" {
+		// Grafana alert evaluation cannot see frame notices, so an alert-shaped
+		// result that is truncated, capped or degraded must fail loudly instead of
+		// alerting on an arbitrary subset or on values that were never measured.
+		// Unconditional, unlike the other branches: asking for this shape is
+		// asking for a rule's input, whoever is asking. See resultRefusal for the
+		// three checks and why they run in that order.
+		if msg := resultRefusal(c, res, nounObjects); msg != "" {
 			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 		}
 		applyJoinKeys(res, qm.JoinKeys)
@@ -283,7 +268,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 		// fetches only the selected fields would otherwise never have fetched.
 		// See joinKeySources.
 		KeyFields: joinKeySources(qm.JoinKeys),
-		Ordering:  queryOrdering(qm.Ordering, fromAlert),
+		Ordering:  queryOrdering(qm.Ordering, c),
 		Limit:     qm.Limit,
 		// A DASHBOARD table is the one thing that can present a result with no
 		// match count: a missing Total costs it the "showing 100 of N" notice and
@@ -293,22 +278,25 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 		// whether the rule fires at all. Not set on the count or alert-table
 		// branches above, deliberately.
 		//
-		// And not set for an alert evaluation here either, which is why fromAlert
-		// is read. The alertTable flag is the rule author's choice of frame
+		// And not set for an alert evaluation here either, which is why the
+		// consumer is read. The alertTable flag is the rule author's choice of frame
 		// SHAPE, not a statement about who is asking: an ordinary objects query
 		// is a perfectly valid alert-rule query (the editor defaults alertTable
 		// to false), and with fast paging on it used to reach this line and
 		// evaluate the 100 lowest-ID rows with Total 0 — an arbitrary subset
 		// reported as "nothing matched", the truncation guard blind because it
 		// compares against that same zero, and the gap stated only in a frame
-		// notice, which alert evaluation drops. Gating on fromAlert is what makes
+		// notice, which alert evaluation drops. Gating on the consumer is what makes
 		// "alert rules are unaffected by fast paging" — README, the config
 		// switch, models.PluginSettings — true of EVERY rule rather than only the
 		// two shapes above. It costs an alert rule on a multi-million-row model
 		// the count it was skipping; that is the same trade the count and
 		// alert-table paths already make, and correctness is the side it is made
 		// on.
-		AllowUncounted: !fromAlert,
+		//
+		// An expression-consumed query is in the same position: its truncation
+		// guard below reads Total, so it needs the real count as well.
+		AllowUncounted: !c.strict(),
 	})
 	if err != nil {
 		return queryErrorResponse(err)
@@ -322,29 +310,24 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 	// row whose utilization was never measured evaluates as 0% (buildAlertFrame
 	// coerces a missing value) and a "utilization > 90" rule silently stops firing.
 	//
-	// capError BEFORE degradationError, mirroring the alertTable branch: a cap is
-	// not a failure, and its message names the dial the rule author can actually
-	// turn — lower the row limit — rather than telling them their NetBox is
-	// degraded when nothing went wrong.
+	// resultRefusal runs the same three checks, in the same order, as the
+	// alertTable branch.
 	//
-	// Only for alerting. A dashboard keeps partial-beats-none: it shows the same
-	// gap as a frame notice below and a partial answer there is useful.
-	if fromAlert {
-		// Truncation first, for the same reason cap precedes degradation: it names
-		// the most actionable dial. This branch sets AllowUncounted false for an
-		// alert evaluation precisely so Total is a real count here — reading it is
-		// what makes that worth paying for. Without this, an alert on the editor's
-		// DEFAULT query shape evaluates whatever subset the row limit happened to
-		// return: measured live, limit 2 against 4 matching prefixes evaluated two
+	// Only for a strict consumer. A dashboard keeps partial-beats-none: it shows
+	// the same gap as a frame notice below and a partial answer there is useful.
+	//
+	// A query feeding an expression is strict for the alert's reason exactly: the
+	// expression drops meta.notices. Measured live, a SQL join over dcim/devices
+	// at limit 5 of 15 put "AMS1: 5" on the panel with no notice anywhere.
+	if c.strict() {
+		// This branch sets AllowUncounted false for a strict consumer precisely so
+		// Total is a real count here — reading it is what makes that worth paying
+		// for. Without the truncation check, an alert on the editor's DEFAULT query
+		// shape evaluates whatever subset the row limit happened to return:
+		// measured live, limit 2 against 4 matching prefixes evaluated two
 		// instances and dropped an 86%-utilized prefix entirely, so a
 		// "utilization > 90" rule never fired and nothing anywhere said why.
-		if msg := truncationError(res, qm.Limit, nounObjects); msg != "" {
-			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
-		}
-		if msg := capError(res); msg != "" {
-			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
-		}
-		if msg := degradationError(res); msg != "" {
+		if msg := resultRefusal(c, res, nounObjects); msg != "" {
 			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 		}
 	}
@@ -374,8 +357,12 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, fromAlert b
 // It mirrors AllowUncounted's polarity for the same reason. A future row-returning
 // branch that forgets this helper sends the sort, which costs speed; one that
 // forgot to drop it in the other direction would have cost an alert its answer.
-func queryOrdering(ordering string, fromAlert bool) string {
-	if fromAlert {
+//
+// An expression-consumed query keeps its sort. It is strict about completeness
+// for the alert's reason (see consumer), but the same frame may still be drawn
+// in the panel beside the expression's output, where row order shows.
+func queryOrdering(ordering string, c consumer) string {
+	if c == consumerAlert {
 		return ""
 	}
 	return ordering

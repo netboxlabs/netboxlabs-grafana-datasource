@@ -31,12 +31,12 @@ groups:
             relativeTimeRange:
               from: 600
               to: 0
-            datasourceUid: netboxlabs-netbox-alerting
+            datasourceUid: netboxlabs-netbox
             model:
               refId: A
               datasource:
                 type: grafana-netboxlabs-datasource
-                uid: netboxlabs-netbox-alerting
+                uid: netboxlabs-netbox
               queryType: objects
               objectType: dcim/devices
               count: true

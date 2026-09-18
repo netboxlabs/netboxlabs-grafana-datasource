@@ -150,14 +150,28 @@ from the [alert-table recipe](alert-table.md) already emits the exact shape a re
 column, the rest labels):
 
 - Query **A** — NetBox, **Objects**, `dcim/devices`, **Alert table** enabled,
-  return fields `name`, `site`, `role`, `tenant`, **Limit** above the fleet size
+  return field `tenant_slug`, and four **join keys**: `name → device`,
+  `id → netbox_id`, `site_slug → site`, `role_slug → role`; **Limit** above the
+  fleet size
 - Record: metric `netbox_device_info`, from `A`, target the Prometheus data source
 
-That yields one series per device in Prometheus:
+The join keys do the label design. Each one names the label after the metric
+label it will be joined on (`device`) or after a key that survives a rename
+(`netbox_id`, the slugs — see [JOIN-KEYS.md](../JOIN-KEYS.md)); a join key's
+source column is read but not emitted, so only the return fields and the
+join-key outputs become labels. That yields one series per device, with nothing
+to `label_replace` later:
 
 ```
-netbox_device_info{name="AMS1-leaf-01", site="AMS1", role="Leaf", tenant="…"} 1
+netbox_device_info{device="AMS1-leaf-01", netbox_id="7", site="ams1", role="leaf", tenant_slug="grafana-demo"} 1
 ```
+
+The demo ships this rule provisioned — `provisioning/alerting/netbox-device-info.yml`
+— and it is the copy to start from. Two spellings to get right when provisioning
+your own: the target data source is `targetDatasourceUid` in a provisioning file
+and `target_datasource_uid` on the HTTP API (the same split as `keepFiringFor` /
+`keep_firing_for`), and the wrong one is dropped silently — the rule then fails
+with `remote write failed: data source uid not specified and no default set`.
 
 Alert rules then never touch NetBox. They are plain PromQL — no SQL expression,
 no `Alerting` format, no cell limit, no feature toggle. Build the rule the
@@ -168,12 +182,15 @@ ordinary Grafana way, three steps:
 - **C** — **Threshold**, `IS ABOVE 0` on **B**, set as the rule's condition
 
 ```promql
-  (device_up < bool 1) * on(device) group_left(site, role, tenant)
-    label_replace(netbox_device_info, "device", "$1", "name", "(.*)")
+  (device_up < bool 1) * on(device) group_left(site, role, tenant_slug) netbox_device_info
 or
-  (device_up < bool 1) unless on(device)
-    label_replace(netbox_device_info, "device", "$1", "name", "(.*)")
+  (device_up < bool 1) unless on(device) netbox_device_info
 ```
+
+Verified on the demo: 15 devices, one down, exactly one instance fires, carrying
+`site`, `role` and `tenant_slug`. Dashboards join the same way — `device_cpu_percent
+* on(device) group_left(site, role) netbox_device_info` enriches every series, and
+`avg by (site) (…)` aggregates without a SQL expression or a cell limit in sight.
 
 > **Instant, and reduce before you threshold.** Unlike the SQL variant — where
 > the expression must itself be the condition — this is a normal Prometheus
@@ -195,8 +212,7 @@ or
 > matching the SQL variant, after which exactly the right instance fires. Apply
 > it to **both** arms — the fallback arm needs it just as much.
 
-`label_replace` aligns the recorded `name` label with the metric's `device`
-label. The `or … unless` half is the same safeguard as the `LEFT JOIN` above:
+The `or … unless` half is the same safeguard as the `LEFT JOIN` above:
 without it, `group_left` is an inner join and any device missing from the
 recorded inventory stops alerting. Do not simplify it to a bare `or device_up` —
 the enriched series carry extra labels, so their label sets never match the plain
@@ -216,15 +232,13 @@ ones and every device comes back twice.
 > device. Check before relying on it:
 >
 > ```promql
-> count by (device) (
->   label_replace(netbox_device_info, "device", "$1", "name", "(.*)")
-> ) > 1
+> count by (device) (netbox_device_info) > 1
 > ```
 >
 > Any result means you cannot key on name. Either join on something genuinely
 > unique that both sides carry — an IP address is usually the best candidate —
 > or collapse the duplicates deliberately with
-> `topk by (device) (1, label_replace(…))`, understanding that the surviving
+> `topk by (device) (1, netbox_device_info)`, understanding that the surviving
 > series' site and role are then arbitrary among the duplicates. Silently wrong
 > context is its own hazard; prefer the unique key.
 >
@@ -238,9 +252,13 @@ ones and every device comes back twice.
 > two alert instances for one device rather than an error — but it is still
 > wrong, and the same check applies.
 
-One more consequence of the two-arm form: if the recording rule stops (it fails
-loudly, but it does stop — see the Limit note above), the recorded series age out
-of Prometheus and every device falls through to the fallback arm. Alerts keep
+One more consequence of the two-arm form: if the recording rule stops, the
+recorded series age out of Prometheus and every device falls through to the
+fallback arm. It does stop, and loudly: with the Limit below the fleet size the
+rule goes to `Error` with `Alert query returned 5 of 15 matching objects, so it
+would alert on an incomplete result…` (the wording is alerting's, because a
+recording rule is evaluated as one) and nothing is written — measured, the last
+sample simply ages. A recorded subset would have been far worse than none. Alerts keep
 firing, which is the point, but they lose their context labels and therefore
 their routing. Alert on the recording rule's own health so that degradation is
 visible rather than inferred from suddenly-unrouted pages.
@@ -289,7 +307,10 @@ target falls back to `default_datasource_uid` in the `[recording_rules]`
 section of the configuration.
 
 For an alert keyed by **IP** rather than device name — flow records, for example
-— point query **B** at `ipam/ip-addresses` and give it a **join key** of
+— the [IP-only metrics recipe](ip-only-metrics.md) is the direct route: the
+**NetBox scope** source of the IP-enrichment query returns one row per address
+under a prefix, VRF or tenant, already resolved to its device, VM and interface.
+The older form below still works: point query **B** at `ipam/ip-addresses` and give it a **join key** of
 `address` → `src_ip` with the **IP host** transform (`iphost` when provisioning
 as JSON), which drops the mask so `10.112.128.1/24` matches a label of
 `10.112.128.1`. The join key renames the column in the returned frame, so the SQL

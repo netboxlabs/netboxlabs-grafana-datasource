@@ -27,6 +27,24 @@
   connection refused, timed out, certificate not verified, response not JSON)
   with what to check; the raw error stays in the Grafana server log.
 
+- **Recording NetBox into Prometheus, validated and shipped.** The "record the
+  NetBox side once" recipe in `docs/alerting/rule-time-join.md` is now backed
+  by a provisioned Grafana-managed recording rule in the demo
+  (`provisioning/alerting/netbox-device-info.yml`) that writes
+  `netbox_device_info{device, netbox_id, site, role, tenant_slug} 1` per
+  device. The labels come from join keys — `name → device`, `id → netbox_id`,
+  `site_slug → site`, `role_slug → role` — so they match metric labels and
+  survive a rename, and a join key's source is not emitted, so no
+  `label_replace` is needed on the PromQL side. Measured on the demo: the
+  `group_left` joins work, a Limit below the fleet size fails the rule and
+  stops writing rather than recording a subset, and two prerequisites fail
+  unhelpfully without the recipe's notes: the Prometheus data source must
+  declare `prometheusType: Prometheus` (Grafana otherwise writes to Mimir's
+  `/api/v1/push` and every write 404s — now set in `datasources.yml`) and the
+  demo's Prometheus now runs with `--web.enable-remote-write-receiver`. The
+  target data source is `targetDatasourceUid` in a provisioning file and
+  `target_datasource_uid` on the API; the wrong spelling is dropped silently.
+
 - **IP enrichment has a second source: a NetBox scope.** The query took its
   IPs as input, which an alert rule cannot supply — rules have no variables and
   one query cannot read another's output — so a rule over an IP-only metric

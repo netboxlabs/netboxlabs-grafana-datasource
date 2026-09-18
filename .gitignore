@@ -51,5 +51,5 @@ ci/
 
 # Plugin archives and unpacked copies produced when packaging for the catalog.
 *.zip
-/grafana-netboxlabs-datasource/
+/netboxlabs-netbox-datasource/
 /netboxlabs-grafana-datasource*/

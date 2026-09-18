@@ -28,11 +28,11 @@
       "type": "table",
       "title": "Devices in $site",
       "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
-      "datasource": { "type": "grafana-netboxlabs-datasource", "uid": "netboxlabs-netbox" },
+      "datasource": { "type": "netboxlabs-netbox-datasource", "uid": "netboxlabs-netbox" },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "grafana-netboxlabs-datasource", "uid": "netboxlabs-netbox" },
+          "datasource": { "type": "netboxlabs-netbox-datasource", "uid": "netboxlabs-netbox" },
           "queryType": "objects",
           "objectType": "dcim/devices",
           "filters": [{ "field": "site", "operator": "", "value": "$site" }],

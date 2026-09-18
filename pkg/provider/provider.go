@@ -410,6 +410,12 @@ type Provider interface {
 	// value-equality join cannot handle.
 	ResolveIPs(ctx context.Context, ips []string, fields []string, limit int) (*Result, error)
 
+	// ResolveScope is ResolveIPs for every address NetBox holds under filters
+	// (ipam/ip-addresses filters), one row per distinct host, bounded by limit.
+	// It is the alert-rule path: a rule cannot supply an IP list, but it can join
+	// a metric's IP against this table in a SQL expression.
+	ResolveScope(ctx context.Context, filters []Filter, fields []string, limit int) (*Result, error)
+
 	// Topology returns a device/link graph for the node-graph visualization.
 	Topology(ctx context.Context, spec TopologySpec) (*Graph, error)
 

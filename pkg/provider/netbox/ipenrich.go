@@ -1570,39 +1570,15 @@ func project(row map[string]interface{}, fields []string) map[string]interface{}
 // documented Grafana join on "ip" requires unique keys — with match_count
 // reporting how many address records matched.
 func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string, limit int) (*provider.Result, error) {
-	if len(fields) == 0 {
-		fields = defaultIPEnrichFields
-	}
-	// "ip" is the documented Grafana join key (docs/RECIPES.md joins panels on
-	// it). A caller-supplied field list that omits it would otherwise ship a
-	// frame with no join key at all, so it is force-included rather than left
-	// to the caller to remember.
-	hasIP := false
-	for _, f := range fields {
-		if f == "ip" {
-			hasIP = true
-			break
-		}
-	}
-	if !hasIP {
-		fields = append([]string{"ip"}, fields...)
-	}
-
-	// An unset limit falls back to defaultLimit, exactly as Query() does — not
-	// to MaxLimit. When a prefix_* column is selected the fallback below issues
-	// one ?contains= request per unmatched IP and cannot be batched (contains
-	// takes a single value), so the limit is a request-count ceiling here in a
-	// way it is not for a batched object query. runPrefixFallback runs those
+	// The limit matters more here than for a batched object query: when a
+	// prefix_* column is selected the fallback below issues one ?contains=
+	// request per unmatched IP and cannot be batched (contains takes a single
+	// value), so it is a request-count ceiling. runPrefixFallback runs those
 	// requests prefixFallbackWorkers at a time rather than one at a time, which
 	// cuts the wall clock by that factor but leaves the count — and the load
 	// NetBox sees — proportional to the limit. A caller that really wants more
 	// still gets it, up to MaxLimit.
-	if limit <= 0 {
-		limit = defaultLimit
-	}
-	if limit > MaxLimit {
-		limit = MaxLimit
-	}
+	fields, limit = normalizeIPEnrichArgs(fields, limit)
 
 	// Dedupe preserving input order. requested counts every distinct IP the
 	// caller asked about; wanted is what the limit allows us to answer. Total
@@ -1628,6 +1604,90 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 	}
 
 	return p.enrichHosts(ctx, wanted, addrs, fields, requested)
+}
+
+// ResolveScope answers "whose IPs are these?" for every address NetBox holds
+// under the given filters, instead of for a list the caller supplies. It exists
+// for alert rules: a rule has no variables and cannot feed one query's output to
+// another, so it cannot hand ResolveIPs the IPs a metric carries — but it can
+// join the metric's IP against a table of every address in a prefix, VRF or
+// tenant inside a SQL expression.
+//
+// The filters are ipam/ip-addresses filters, sent exactly as an objects query
+// would send them (buildFilterValues), so the editor's schema-aware rows drive
+// this directly. The listing is one paged request bounded by limit (defaultLimit
+// when unset, MaxLimit at most). One row per DISTINCT host: an address held in
+// two VRFs is one row whose match_count says two, which is what a join wants —
+// two rows would fan the metric out. Everything after the listing is
+// enrichHosts, unchanged from the list path.
+//
+// Total is the number of distinct hosts when the listing was complete, and
+// NetBox's reported record count when it was not: the host count of a scope that
+// was cut off is unknowable, and the reported count is at least as large as the
+// rows, so a cut-off scope always reads as truncated — which a strict consumer
+// then refuses rather than joining on a subset.
+//
+// A failed listing is an error, not a degraded result. On the list path a failed
+// batch blanks its own IPs and the rest of the table stands; here the listing is
+// the row set, and there is nothing to stand.
+func (p *Provider) ResolveScope(ctx context.Context, filters []provider.Filter, fields []string, limit int) (*provider.Result, error) {
+	fields, limit = normalizeIPEnrichArgs(fields, limit)
+
+	raws, total, err := p.fetchRows(ctx, "ipam/ip-addresses", buildFilterValues(filters), limit)
+	if err != nil {
+		return nil, err
+	}
+
+	addrs := addressLookup{
+		byHost: make(map[string][]json.RawMessage, len(raws)),
+		failed: map[string]bool{},
+	}
+	var hosts []string
+	for _, raw := range raws {
+		var o struct {
+			Address string `json:"address"`
+		}
+		if json.Unmarshal(raw, &o) != nil {
+			continue
+		}
+		h := canonicalIP(o.Address)
+		if _, seen := addrs.byHost[h]; !seen {
+			hosts = append(hosts, h)
+		}
+		addrs.byHost[h] = append(addrs.byHost[h], raw)
+	}
+
+	// A cut-off listing can also cut a host's own records in two (NetBox orders
+	// addresses by network, mask and host, so one host's records need not even
+	// be adjacent), so match_count and the pick may be made over a subset for
+	// any host in it. That is not repaired here: the result reads as truncated,
+	// which a strict consumer refuses outright and a dashboard is told about.
+	reported := len(hosts)
+	if total > len(raws) {
+		reported = total
+	}
+	return p.enrichHosts(ctx, hosts, addrs, fields, reported)
+}
+
+// normalizeIPEnrichArgs applies the argument rules ResolveIPs and ResolveScope
+// share: an empty field list means the default set, "ip" is always a column
+// (it is the documented Grafana join key — docs/RECIPES.md joins panels on it —
+// and a frame without it has no join key at all), and the limit falls back to
+// defaultLimit when unset and is clamped to MaxLimit, exactly as Query() does.
+func normalizeIPEnrichArgs(fields []string, limit int) ([]string, int) {
+	if len(fields) == 0 {
+		fields = defaultIPEnrichFields
+	}
+	if !slices.Contains(fields, "ip") {
+		fields = append([]string{"ip"}, fields...)
+	}
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > MaxLimit {
+		limit = MaxLimit
+	}
+	return fields, limit
 }
 
 // enrichHosts is the half of an ip-enrichment query that does not care where

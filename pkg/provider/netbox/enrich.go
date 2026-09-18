@@ -14,6 +14,14 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
+// FiltersNarrow reports whether at least one of filters would reach NetBox as a
+// query parameter — the rule buildFilterValues applies, exposed so a caller can
+// ask "does this filter set narrow anything?" without duplicating it: a row with
+// no field or a blank value is dropped, an empty-family operator needs no value.
+func FiltersNarrow(filters []provider.Filter) bool {
+	return len(buildFilterValues(filters)) > 0
+}
+
 // buildFilterValues turns provider filters into NetBox query params, expanding
 // CSV values (from multi-value variables) into repeated params (OR).
 func buildFilterValues(filters []provider.Filter) url.Values {

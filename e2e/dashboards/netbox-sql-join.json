@@ -22,7 +22,7 @@
         {
           "refId": "NB",
           "hide": true,
-          "datasource": { "type": "grafana-netboxlabs-datasource", "uid": "netboxlabs-netbox-alerting" },
+          "datasource": { "type": "grafana-netboxlabs-datasource", "uid": "netboxlabs-netbox" },
           "queryType": "objects",
           "objectType": "dcim/devices",
           "fields": ["name", "site_slug", "status"],

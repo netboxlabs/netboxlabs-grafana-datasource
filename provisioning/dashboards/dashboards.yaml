@@ -2,6 +2,10 @@ apiVersion: 1
 providers:
   - name: NetBox demo
     type: file
+    # The same folder the provisioned alert rules live in (they must have one),
+    # so the dashboard browser shows one NetBox folder rather than the demo
+    # dashboard at the root next to a folder that looks empty.
+    folder: NetBox
     allowUiUpdates: true
     options:
       path: /etc/grafana/provisioning/dashboards

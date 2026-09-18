@@ -10,6 +10,7 @@ import {
   IconButton,
   TextArea,
   InlineSwitch,
+  RadioButtonGroup,
 } from '@grafana/ui';
 import { QueryEditorProps, SelectableValue } from '@grafana/data';
 import { getTemplateSrv } from '@grafana/runtime';
@@ -133,6 +134,12 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   // empty join key — so there is nothing to fetch here.
   const fieldType =
     queryType === 'ip-enrichment' ? undefined : isTopologyQuery(queryType) ? 'dcim/devices' : query.objectType;
+  const isScope = queryType === 'ip-enrichment' && query.ipSource === 'scope';
+  // Filter rows are bound to a NetBox object type. For a scope-sourced
+  // ip-enrichment query that is ipam/ip-addresses, even though the result's own
+  // columns (fieldType) are still this plugin's closed vocabulary.
+  const filterType = isScope ? 'ipam/ip-addresses' : fieldType;
+  const showsFilters = queryType === 'objects' || isTopologyQuery(queryType) || isScope;
 
   useEffect(() => {
     let active = true;
@@ -147,12 +154,12 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   useEffect(() => {
     let active = true;
     const branch = query.branch ? getTemplateSrv().replace(query.branch) : undefined;
-    const p = fieldType ? datasource.getFilterFields(fieldType, branch) : Promise.resolve<FilterField[]>([]);
+    const p = filterType ? datasource.getFilterFields(filterType, branch) : Promise.resolve<FilterField[]>([]);
     p.then((ff) => active && setFilterFields(ff)).catch(() => active && setFilterFields([]));
     return () => {
       active = false;
     };
-  }, [datasource, fieldType, query.branch]);
+  }, [datasource, filterType, query.branch]);
 
   const typeOptions: Array<SelectableValue<string>> = useMemo(
     () => objectTypes.map((t) => ({ label: t.label, value: t.value, description: t.value })),
@@ -224,9 +231,18 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
           value={QUERY_TYPES.find((o) => o.value === queryType)}
           onChange={(v) => {
             const qt = v?.value ?? 'objects';
-            update(
-              isTopologyQuery(qt) ? { queryType: qt, connectedOnly: query.connectedOnly ?? true } : { queryType: qt }
-            );
+            // Filter rows are bound to a NetBox model: dcim/devices for objects
+            // and topology, ipam/ip-addresses for a scope-sourced ip-enrichment
+            // query. Rows written for one must not survive into the other —
+            // NetBox ignores an unknown filter parameter and returns
+            // everything, which for a scope is the whole address table under
+            // the limit, with nothing to refuse. Objects ↔ topology keep theirs.
+            const modelChanges = (qt === 'ip-enrichment') !== (queryType === 'ip-enrichment');
+            update({
+              queryType: qt,
+              ...(isTopologyQuery(qt) ? { connectedOnly: query.connectedOnly ?? true } : {}),
+              ...(modelChanges ? { filters: [] } : {}),
+            });
             onRunQuery();
           }}
         />
@@ -273,19 +289,56 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
       {queryType === 'ip-enrichment' && (
         <>
           <InlineField
-            label="IPs"
+            label="Source"
             labelWidth={20}
-            grow
-            tooltip="IPs to resolve (comma/space/newline separated). Supports $variables — e.g. a query variable of source IPs from your flow data."
+            tooltip="IP list: resolve the IPs you give (or a variable of them). NetBox scope: every address NetBox holds under the filters below — for alert rules, which cannot supply an IP list but can join a metric's IP against this table in a SQL expression."
           >
-            <TextArea
-              rows={3}
-              value={query.ips ?? ''}
-              placeholder="10.0.0.5, 192.0.2.10  or  $flow_src_ips"
-              onChange={(e) => update({ ips: e.currentTarget.value })}
-              onBlur={() => onRunQuery()}
+            <RadioButtonGroup<'list' | 'scope'>
+              options={[
+                { label: 'IP list', value: 'list' },
+                { label: 'NetBox scope', value: 'scope' },
+              ]}
+              value={query.ipSource ?? 'list'}
+              onChange={(v) => {
+                // Each source owns its input; stale IPs on a scope query would
+                // be misleading in the saved JSON, and stale filters on a list
+                // query would be sent to nothing. Not run here: a scope with no
+                // filter row is the whole address table (filterQuery holds it
+                // back until a row has a field; the value's onBlur runs it).
+                update(
+                  v === 'scope'
+                    ? {
+                        ipSource: v,
+                        ips: undefined,
+                        filters: [],
+                        // prefix_* can never fill on a scope query (the pickers
+                        // stop offering it), so a stale selection goes too — as a
+                        // context field and as a join-key source, which would
+                        // otherwise derive an empty column on every row.
+                        contextFields: query.contextFields?.filter((f) => !f.startsWith('prefix_')),
+                        joinKeys: query.joinKeys?.filter((k) => !k.source.startsWith('prefix_')),
+                      }
+                    : { ipSource: v, filters: [] }
+                );
+              }}
             />
           </InlineField>
+          {!isScope && (
+            <InlineField
+              label="IPs"
+              labelWidth={20}
+              grow
+              tooltip="IPs to resolve (comma/space/newline separated). Supports $variables — e.g. a query variable of source IPs from your flow data."
+            >
+              <TextArea
+                rows={3}
+                value={query.ips ?? ''}
+                placeholder="10.0.0.5, 192.0.2.10  or  $flow_src_ips"
+                onChange={(e) => update({ ips: e.currentTarget.value })}
+                onBlur={() => onRunQuery()}
+              />
+            </InlineField>
+          )}
           <InlineField
             label="Context fields"
             labelWidth={20}
@@ -293,7 +346,10 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             tooltip="Columns to return alongside each IP: identity, longest-matching prefix, the address record, the interface it's assigned to, and the owning device or virtual machine"
           >
             <MultiSelect
-              options={IP_CONTEXT_FIELD_GROUPS}
+              // Every scope row has an address record, and the prefix hop runs
+              // only for IPs that have none, so prefix_* can never fill on a
+              // scope query: not offered rather than offered and always blank.
+              options={isScope ? IP_CONTEXT_FIELD_GROUPS.filter((g) => g.label !== 'Prefix') : IP_CONTEXT_FIELD_GROUPS}
               value={(query.contextFields ?? DEFAULT_IP_CONTEXT_FIELDS).map((f) => ({ label: f, value: f }))}
               onChange={(vals) => update({ contextFields: vals.map((v) => v.value!).filter(Boolean) })}
             />
@@ -339,8 +395,8 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
         </>
       )}
 
-      {/* Filters — for objects and topology */}
-      {(queryType === 'objects' || isTopologyQuery(queryType)) &&
+      {/* Filters — for objects, topology, and a scope-sourced ip-enrichment query */}
+      {showsFilters &&
         filters.map((f, i) => (
           <Stack key={i} gap={0} direction="column">
             <Stack gap={1} direction="row" alignItems="flex-end">
@@ -410,7 +466,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
               ))}
           </Stack>
         ))}
-      {(queryType === 'objects' || isTopologyQuery(queryType)) && (
+      {showsFilters && (
         <Stack gap={1} direction="row">
           <Button variant="secondary" size="sm" icon="plus" onClick={addFilter}>
             Add filter
@@ -560,7 +616,13 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
           // pkg/plugin.ipEnrichFields). Narrowing this list to the selection was
           // the alternative, and it answers "join on device_name" with "you may
           // not" for a request that is both expressible and cheap to honour.
-          fieldOptions={queryType === 'ip-enrichment' ? IP_CONTEXT_FIELD_OPTIONS : fieldOptions}
+          fieldOptions={
+            isScope
+              ? IP_CONTEXT_FIELD_OPTIONS.filter((o) => !o.value.startsWith('prefix_'))
+              : queryType === 'ip-enrichment'
+                ? IP_CONTEXT_FIELD_OPTIONS
+                : fieldOptions
+          }
           onChange={(joinKeys) => update({ joinKeys })}
           onRunQuery={onRunQuery}
         />

@@ -188,6 +188,32 @@ describe('filterQuery', () => {
     expect(ds.filterQuery({ refId: 'A', objectType: 'dcim/devices' })).toBe(true);
     expect(ds.filterQuery({ refId: 'A' })).toBe(false);
   });
+
+  it('runs a scope-sourced ip-enrichment query once it has a filter row, and never a list-sourced one without IPs', () => {
+    const ds = makeDS();
+    const parent = [{ field: 'parent', operator: '', value: '10.0.0.0/24' }];
+    expect(ds.filterQuery({ refId: 'A', queryType: 'ip-enrichment', ipSource: 'scope', filters: parent })).toBe(true);
+    expect(
+      ds.filterQuery({ refId: 'A', queryType: 'ip-enrichment', ipSource: 'scope', ips: '', filters: parent })
+    ).toBe(true);
+    // No filter row yet: not run, or it would list the whole address table.
+    expect(ds.filterQuery({ refId: 'A', queryType: 'ip-enrichment', ipSource: 'scope' })).toBe(false);
+    expect(
+      ds.filterQuery({
+        refId: 'A',
+        queryType: 'ip-enrichment',
+        ipSource: 'scope',
+        filters: [{ field: '', operator: '', value: '' }],
+      })
+    ).toBe(false);
+    // A field with no value yet is dropped by the backend, so it narrows nothing either.
+    const blank = [{ field: 'parent', operator: '', value: '' }];
+    expect(ds.filterQuery({ refId: 'A', queryType: 'ip-enrichment', ipSource: 'scope', filters: blank })).toBe(false);
+    // An empty-family operator needs no value.
+    const isEmpty = [{ field: 'tenant', operator: 'empty', value: '' }];
+    expect(ds.filterQuery({ refId: 'A', queryType: 'ip-enrichment', ipSource: 'scope', filters: isEmpty })).toBe(true);
+    expect(ds.filterQuery({ refId: 'A', queryType: 'ip-enrichment', ipSource: 'list', ips: '' })).toBe(false);
+  });
 });
 
 describe('resource helpers', () => {

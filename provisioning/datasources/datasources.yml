@@ -38,6 +38,14 @@ datasources:
     access: proxy
     isDefault: false
     url: http://prometheus:9090
+    jsonData:
+      # A Grafana-managed recording rule that targets this data source remote
+      # writes to it, and the write path depends on what the data source says
+      # it is: plain Prometheus takes /api/v1/write, Mimir /api/v1/push. Left
+      # unset, Grafana 13 assumes Mimir and every write 404s (measured). The
+      # demo's Prometheus needs --web.enable-remote-write-receiver as well.
+      prometheusType: Prometheus
+      prometheusVersion: 3.1.0
     # Correlations add Explore drill-downs from telemetry into NetBox queries
     # (they render in Explore table/logs views, not on dashboard panels).
     # $$ escapes provisioning-time env interpolation: Grafana must receive the

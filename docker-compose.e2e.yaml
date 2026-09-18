@@ -37,6 +37,7 @@ services:
       - ./provisioning/alerting/netbox-object-count.yml:/etc/grafana/provisioning-e2e/alerting/netbox-object-count.yml:ro
       - ./provisioning/alerting/netbox-alert-enriched.yml:/etc/grafana/provisioning-e2e/alerting/netbox-alert-enriched.yml:ro
       - ./e2e/provisioning/alerting/netbox-sql-join.yml:/etc/grafana/provisioning-e2e/alerting/netbox-sql-join.yml:ro
+      - ./e2e/provisioning/alerting/netbox-ip-scope-join.yml:/etc/grafana/provisioning-e2e/alerting/netbox-ip-scope-join.yml:ro
     depends_on:
       - netbox-stub
 

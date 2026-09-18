@@ -1,0 +1,51 @@
+# e2e only: an alert rule whose condition joins a flow metric's source IP
+# against every address in a NetBox prefix (ip-enrichment, scope source).
+# tests/ipScope.spec.ts asserts its health and lastError, not firing state.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: netbox-ip-scope-join
+    folder: NetBox
+    interval: 10s
+    rules:
+      - uid: netbox-ip-scope-join
+        title: Flow source outside the managed prefix (scope join)
+        condition: J
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: F
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: e2e-testdata
+            model:
+              refId: F
+              datasource: { type: grafana-testdata-datasource, uid: e2e-testdata }
+              scenarioId: csv_content
+              csvContent: "src_ip,bps\n10.0.0.1,500\n10.0.0.2,300\n203.0.113.7,900"
+          - refId: IPS
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: netboxlabs-netbox
+            model:
+              refId: IPS
+              datasource: { type: netboxlabs-netbox-datasource, uid: netboxlabs-netbox }
+              queryType: ip-enrichment
+              ipSource: scope
+              filters:
+                - { field: parent, operator: '', value: 10.0.0.0/24 }
+              contextFields: [ip, device_name]
+              limit: 1000
+          - refId: J
+            datasourceUid: __expr__
+            model:
+              refId: J
+              type: sql
+              datasource: { type: __expr__, uid: __expr__ }
+              format: alerting
+              # One instance per flow whose source is NOT in the scope. COALESCE
+              # is load-bearing: on Grafana 13.0.2 a LEFT JOIN that leaves a NULL
+              # string column fails the expression with HTTP 500.
+              expression: >-
+                SELECT F.src_ip AS src_ip, COALESCE(IPS.device_name, '') AS device, F.bps AS bps
+                FROM F LEFT JOIN IPS ON F.src_ip = IPS.ip
+                WHERE IPS.ip IS NULL

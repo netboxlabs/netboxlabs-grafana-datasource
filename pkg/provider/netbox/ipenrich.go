@@ -1588,6 +1588,59 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 		fields = append([]string{"ip"}, fields...)
 	}
 
+	// An unset limit falls back to defaultLimit, exactly as Query() does — not
+	// to MaxLimit. When a prefix_* column is selected the fallback below issues
+	// one ?contains= request per unmatched IP and cannot be batched (contains
+	// takes a single value), so the limit is a request-count ceiling here in a
+	// way it is not for a batched object query. runPrefixFallback runs those
+	// requests prefixFallbackWorkers at a time rather than one at a time, which
+	// cuts the wall clock by that factor but leaves the count — and the load
+	// NetBox sees — proportional to the limit. A caller that really wants more
+	// still gets it, up to MaxLimit.
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > MaxLimit {
+		limit = MaxLimit
+	}
+
+	// Dedupe preserving input order. requested counts every distinct IP the
+	// caller asked about; wanted is what the limit allows us to answer. Total
+	// is the former so a clamped query reports as truncated.
+	seen := map[string]bool{}
+	var wanted []string
+	requested := 0
+	for _, ip := range ips {
+		ip = strings.TrimSpace(ip)
+		if ip == "" || seen[ip] {
+			continue
+		}
+		seen[ip] = true
+		requested++
+		if len(wanted) < limit {
+			wanted = append(wanted, ip)
+		}
+	}
+
+	addrs, err := p.fetchAddressRecords(ctx, wanted)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.enrichHosts(ctx, wanted, addrs, fields, requested)
+}
+
+// enrichHosts is the half of an ip-enrichment query that does not care where
+// the address records came from: pick one record per host, run the device, VM
+// and prefix hops the selected columns ask for, build and project the rows,
+// and turn each hop's gaps into notices. ResolveIPs feeds it the records it
+// fetched for the caller's IPs; ResolveScope feeds it the records it listed
+// under the caller's filters. hosts is the row order and the row key
+// (row["ip"]), addrs the records by canonical host, fields the final column
+// list (normalised by the caller: non-empty, "ip" present), and total what the
+// Result reports as Total — the two callers mean different things by it, and
+// only they know which.
+func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addressLookup, fields []string, total int) (*provider.Result, error) {
 	// Two of the three hops exist only to fill one namespaced column group, and
 	// project() below drops whatever the caller did not select — so a hop for an
 	// unselected group is work whose entire output is thrown away. Deciding here,
@@ -1629,49 +1682,10 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 	wantVM := wantPrimaryIP
 	wantPrefix := wantsGroup(fields, "prefix_")
 
-	// An unset limit falls back to defaultLimit, exactly as Query() does — not
-	// to MaxLimit. When a prefix_* column is selected the fallback below issues
-	// one ?contains= request per unmatched IP and cannot be batched (contains
-	// takes a single value), so the limit is a request-count ceiling here in a
-	// way it is not for a batched object query. runPrefixFallback runs those
-	// requests prefixFallbackWorkers at a time rather than one at a time, which
-	// cuts the wall clock by that factor but leaves the count — and the load
-	// NetBox sees — proportional to the limit. A caller that really wants more
-	// still gets it, up to MaxLimit.
-	if limit <= 0 {
-		limit = defaultLimit
-	}
-	if limit > MaxLimit {
-		limit = MaxLimit
-	}
-
-	// Dedupe preserving input order. requested counts every distinct IP the
-	// caller asked about; wanted is what the limit allows us to answer. Total
-	// is the former so a clamped query reports as truncated.
-	seen := map[string]bool{}
-	var wanted []string
-	requested := 0
-	for _, ip := range ips {
-		ip = strings.TrimSpace(ip)
-		if ip == "" || seen[ip] {
-			continue
-		}
-		seen[ip] = true
-		requested++
-		if len(wanted) < limit {
-			wanted = append(wanted, ip)
-		}
-	}
-
-	addrs, err := p.fetchAddressRecords(ctx, wanted)
-	if err != nil {
-		return nil, err
-	}
-
-	picked := make(map[string]json.RawMessage, len(wanted))
+	picked := make(map[string]json.RawMessage, len(hosts))
 	var deviceIDs, vmIDs []int
 	seenDev, seenVM := map[int]bool{}, map[int]bool{}
-	for _, ip := range wanted {
+	for _, ip := range hosts {
 		best := pickAddress(addrs.byHost[canonicalIP(ip)])
 		if best == nil {
 			continue
@@ -1739,8 +1753,8 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 	// match_count column — the only place it would otherwise be visible.
 	ambiguous := 0
 
-	built := make([]map[string]interface{}, 0, len(wanted))
-	for _, ip := range wanted {
+	built := make([]map[string]interface{}, 0, len(hosts))
+	for _, ip := range hosts {
 		row := map[string]interface{}{"ip": ip}
 		cands := addrs.byHost[canonicalIP(ip)]
 		best, hasBest := picked[ip]
@@ -1877,7 +1891,7 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 
 	return &provider.Result{
 		MaxRows: MaxLimit,
-		Columns: fields, Rows: rows, Total: requested,
+		Columns: fields, Rows: rows, Total: total,
 		Warnings: warnings, Notes: notes,
 		ColumnTypes: declaredColumnTypes(fields),
 	}, nil

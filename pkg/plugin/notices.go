@@ -32,6 +32,10 @@ const (
 	nounObjects = "matching objects"
 	nounIPs     = "requested IPs"
 	nounDevices = "matching devices"
+	// nounScope is what Total counts for a scope-sourced ip-enrichment query:
+	// address records NetBox holds under the filters. Not "requested IPs" —
+	// nothing was requested — and not objects.
+	nounScope = "addresses in the scope"
 )
 
 // resultNotices describes how a result relates to the truth:

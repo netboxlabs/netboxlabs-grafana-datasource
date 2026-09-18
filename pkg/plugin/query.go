@@ -14,6 +14,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 // queryType discriminates the kinds of query the editor can issue.
@@ -24,6 +25,10 @@ const (
 	queryTypeTopology      = "topology"
 	queryTypeTopologyEdges = "topology-edges"
 )
+
+// ipSourceScope is the IPSource value that lists a NetBox scope instead of
+// resolving a caller-supplied IP list.
+const ipSourceScope = "scope"
 
 // queryModel is the JSON shape sent by the frontend query/variable/annotation
 // editors.
@@ -57,6 +62,12 @@ type queryModel struct {
 	// IPs (for ip-enrichment) is a free-form list of IPs separated by commas,
 	// whitespace or newlines; supports interpolated $variables.
 	IPs string `json:"ips"`
+	// IPSource (for ip-enrichment) says where the addresses come from: "list"
+	// (or empty) resolves the IPs in IPs; "scope" lists every address NetBox
+	// holds under Filters (ipam/ip-addresses filters) and enriches those. Scope
+	// is the alert-rule path — a rule cannot supply an IP list, but it can join a
+	// metric's IP against this table in a SQL expression.
+	IPSource string `json:"ipSource"`
 	// ContextFields (for ip-enrichment) selects which context columns to
 	// return (see IPEnrichColumns).
 	ContextFields []string `json:"contextFields"`
@@ -106,13 +117,6 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		return backend.DataResponse{Frames: data.Frames{frame}}
 
 	case queryTypeIPEnrichment:
-		// The list IS the input here, so All has nothing to drop and resolves
-		// nothing — the same as an empty list — rather than asking NetBox for an
-		// address called $__all. Same token, same meaning as on a filter row.
-		ips := slices.DeleteFunc(splitList(qm.IPs), func(ip string) bool { return ip == allFilterValue })
-		if len(ips) == 0 {
-			return backend.DataResponse{}
-		}
 		// A join key's source has to be in the REQUEST, not just in the editor:
 		// ResolveIPs projects each row down to the fields asked for, so a source
 		// outside the context selection was gone before applyJoinKeys could read
@@ -120,7 +124,36 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		// the fields fetched only for that, dropped again below so the join does
 		// not silently add a column to the table. See ipEnrichFields.
 		fields, joinOnly := ipEnrichFields(qm.ContextFields, qm.JoinKeys)
-		res, err := d.provider.ResolveIPs(ctx, ips, fields, qm.Limit)
+		var res *provider.Result
+		var err error
+		noun := nounIPs
+		if qm.IPSource == ipSourceScope {
+			// The filter rows are the scope. $__all rows are already gone
+			// (dropAllFilters ran before the switch), so "All" narrows nothing here
+			// either. Total counts address records, so the notices say so.
+			//
+			// A scope with no effective filter is the whole ipam/ip-addresses
+			// table, up to the row cap, on every evaluation — never what a rule
+			// meant, and the editor holds such a query back. A provisioned rule or
+			// an API caller has no editor, so it is refused here too, and the list
+			// path's "nothing to resolve" empty response would be the wrong answer:
+			// silence is how a rule over an unscoped table would fail.
+			if !netbox.FiltersNarrow(qm.Filters) {
+				return backend.ErrDataResponse(backend.StatusBadRequest,
+					"A NetBox scope needs at least one filter with a value — a prefix (parent), VRF or tenant — or it is the whole address table. A filter set to All ($__all) narrows nothing.")
+			}
+			noun = nounScope
+			res, err = d.provider.ResolveScope(ctx, qm.Filters, fields, qm.Limit)
+		} else {
+			// The list IS the input here, so All has nothing to drop and resolves
+			// nothing — the same as an empty list — rather than asking NetBox for an
+			// address called $__all. Same token, same meaning as on a filter row.
+			ips := slices.DeleteFunc(splitList(qm.IPs), func(ip string) bool { return ip == allFilterValue })
+			if len(ips) == 0 {
+				return backend.DataResponse{}
+			}
+			res, err = d.provider.ResolveIPs(ctx, ips, fields, qm.Limit)
+		}
 		if err != nil {
 			return queryErrorResponse(err)
 		}
@@ -142,7 +175,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			// for in reverse: a strict path that silently ignores a new Result field
 			// is exactly how a deliberate cap ended up evaluating as a column of
 			// zeroes.
-			if msg := resultRefusal(c, res, nounIPs); msg != "" {
+			if msg := resultRefusal(c, res, noun); msg != "" {
 				return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 			}
 		}
@@ -152,10 +185,10 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		frame := buildFrame("ip-enrichment", res, d.provider.BaseURL())
 		frame.RefID = q.RefID
 		// Tell the user when this is only part of the answer. buildFrame always sets
-		// Meta, so appending here is safe. nounIPs, not nounObjects: an
-		// ip-enrichment Total counts the IPs that were asked about, not objects
-		// that matched — plenty of them match nothing.
-		frame.Meta.Notices = append(frame.Meta.Notices, resultNotices(res, qm.Limit, nounIPs)...)
+		// Meta, so appending here is safe. Not nounObjects: a list query's Total
+		// counts the IPs that were asked about, not objects that matched — plenty
+		// of them match nothing — and a scope query's counts address records.
+		frame.Meta.Notices = append(frame.Meta.Notices, resultNotices(res, qm.Limit, noun)...)
 		return backend.DataResponse{Frames: data.Frames{frame}}
 
 	case queryTypeTopology, queryTypeTopologyEdges:

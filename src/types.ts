@@ -65,6 +65,11 @@ export interface NetBoxQuery extends DataQuery {
   objectTypes?: string[];
   /** For ip-enrichment: IPs (comma/space/newline separated; supports $variables). */
   ips?: string;
+  /** For ip-enrichment: where the addresses come from. 'list' (default)
+   * resolves `ips`; 'scope' lists every address NetBox holds under `filters`
+   * (ipam/ip-addresses filters) — the alert-rule path, which cannot supply an
+   * IP list but can join a metric's IP against this table in a SQL expression. */
+  ipSource?: 'list' | 'scope';
   /** For ip-enrichment: which context columns to return — prefix, address,
    * interface and device (see IP_CONTEXT_FIELD_GROUPS), not prefix alone. */
   contextFields?: string[];
@@ -589,7 +594,7 @@ function op(f: FilterRow): string {
  * must count as NOT emitting here too. Used by both validation passes below
  * so they can't drift apart on what "blank" means.
  */
-function emitsParam(f: FilterRow): boolean {
+export function emitsParam(f: FilterRow): boolean {
   return EMPTY_FAMILY_OPERATORS.includes(op(f)) || (f.value ?? '').split(',').some((v) => v.trim() !== '');
 }
 

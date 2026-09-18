@@ -30,6 +30,12 @@ type fakeProvider struct {
 	ipRow             map[string]interface{} // when set, ResolveIPs projects it onto the requested fields
 	ipFields          []string               // captured by ResolveIPs for passthrough asserts
 	ipsSeen           []string               // captured by ResolveIPs: the IPs it was asked to resolve
+	ipCalls           int                    // how many times ResolveIPs ran
+	scopeResult       *provider.Result       // returned by ResolveScope
+	scopeFilters      []provider.Filter      // captured by ResolveScope
+	scopeFields       []string               // captured by ResolveScope
+	scopeLimit        int                    // captured by ResolveScope
+	scopeCalls        int                    // how many times ResolveScope ran
 	graph             *provider.Graph
 	topoSpec          provider.TopologySpec // captured by Topology for passthrough asserts
 	querySpec         provider.QuerySpec    // captured by Query for passthrough asserts
@@ -80,6 +86,7 @@ func (f *fakeProvider) Changes(context.Context, provider.ChangeSpec) ([]provider
 // any test about which fields were requested pass for the wrong reason: the
 // column would be there because the fake always supplies it.
 func (f *fakeProvider) ResolveIPs(_ context.Context, ips []string, fields []string, _ int) (*provider.Result, error) {
+	f.ipCalls++
 	f.ipsSeen = slices.Clone(ips)
 	f.ipFields = slices.Clone(fields)
 	if f.ipRow == nil {
@@ -90,6 +97,14 @@ func (f *fakeProvider) ResolveIPs(_ context.Context, ips []string, fields []stri
 		row[c] = f.ipRow[c]
 	}
 	return &provider.Result{Columns: slices.Clone(fields), Rows: []map[string]interface{}{row}, Total: 1}, nil
+}
+func (f *fakeProvider) ResolveScope(_ context.Context, filters []provider.Filter, fields []string, limit int) (*provider.Result, error) {
+	f.scopeCalls++
+	f.scopeFilters, f.scopeFields, f.scopeLimit = slices.Clone(filters), slices.Clone(fields), limit
+	if f.queryErr != nil {
+		return nil, f.queryErr
+	}
+	return f.scopeResult, nil
 }
 func (f *fakeProvider) Topology(_ context.Context, spec provider.TopologySpec) (*provider.Graph, error) {
 	f.topoSpec = spec

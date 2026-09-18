@@ -1,0 +1,41 @@
+{
+  "uid": "netbox-ip-scope",
+  "title": "NetBox IP scope join (e2e)",
+  "schemaVersion": 39,
+  "tags": ["e2e"],
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Flows labelled with NetBox device (scope join)",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
+      "datasource": { "type": "datasource", "uid": "-- Mixed --" },
+      "targets": [
+        {
+          "refId": "F",
+          "hide": true,
+          "datasource": { "type": "grafana-testdata-datasource", "uid": "e2e-testdata" },
+          "scenarioId": "csv_content",
+          "csvContent": "src_ip,bps\n10.0.0.1,500\n10.0.0.2,300\n203.0.113.7,900"
+        },
+        {
+          "refId": "IPS",
+          "hide": true,
+          "datasource": { "type": "netboxlabs-netbox-datasource", "uid": "netboxlabs-netbox" },
+          "queryType": "ip-enrichment",
+          "ipSource": "scope",
+          "filters": [{ "field": "parent", "operator": "", "value": "10.0.0.0/24" }],
+          "contextFields": ["ip", "device_name", "interface_name"],
+          "limit": 1000
+        },
+        {
+          "refId": "J",
+          "datasource": { "type": "__expr__", "uid": "__expr__" },
+          "type": "sql",
+          "expression": "SELECT F.src_ip AS src_ip, F.bps AS bps, COALESCE(IPS.device_name, '') AS device, COALESCE(IPS.interface_name, '') AS interface FROM F LEFT JOIN IPS ON F.src_ip = IPS.ip ORDER BY F.src_ip"
+        }
+      ]
+    }
+  ]
+}

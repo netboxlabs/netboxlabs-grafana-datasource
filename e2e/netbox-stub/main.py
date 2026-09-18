@@ -14,6 +14,7 @@ name (e.g. http://netbox-stub:8080).
 No external dependencies — standard library only. Configure the port with PORT
 (default 8080).
 """
+import ipaddress
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,6 +35,7 @@ DEVICES = {
             "name": "leaf1",
             "site": {"id": 2, "name": "dc1", "slug": "dc1"},
             "status": {"value": "active", "label": "Active"},
+            "primary_ip4": {"id": 101, "address": "10.0.0.1/24"},
             "interface_count": 48,
         },
         {
@@ -59,6 +61,34 @@ CHANGES = {
         }
     ],
 }
+
+# Address records for the ip-enrichment scope path: two addresses of leaf1 (one
+# its primary IP, one not) in 10.0.0.0/24, one unassigned address there, and
+# one address outside it. The device hop reads DEVICES by id; leaf1 (id 1) is
+# given a primary_ip4 above so is_primary_ip has something to answer.
+IP_ADDRESSES = [
+    {"id": 101, "address": "10.0.0.1/24", "status": {"value": "active", "label": "Active"},
+     "assigned_object_type": "dcim.interface", "assigned_object_id": 11,
+     "assigned_object": {"id": 11, "name": "Ethernet1", "device": {"id": 1, "name": "leaf1"}}},
+    {"id": 102, "address": "10.0.0.2/24", "status": {"value": "active", "label": "Active"},
+     "assigned_object_type": "dcim.interface", "assigned_object_id": 12,
+     "assigned_object": {"id": 12, "name": "Loopback0", "device": {"id": 1, "name": "leaf1"}}},
+    {"id": 103, "address": "10.0.0.9/24", "status": {"value": "reserved", "label": "Reserved"},
+     "assigned_object_type": None, "assigned_object_id": None, "assigned_object": None},
+    {"id": 104, "address": "10.9.9.9/24", "status": {"value": "active", "label": "Active"},
+     "assigned_object_type": None, "assigned_object_id": None, "assigned_object": None},
+]
+
+
+def _in_parent(address, parent):
+    try:
+        return ipaddress.ip_interface(address).ip in ipaddress.ip_network(parent, strict=False)
+    except ValueError:
+        # NetBox answers a malformed parent with HTTP 400; matching nothing is
+        # the closest a stub with one status code gets, and it keeps the
+        # handler thread alive.
+        return False
+
 
 EMPTY_LIST = {"count": 0, "next": None, "results": []}
 
@@ -125,6 +155,17 @@ class Handler(BaseHTTPRequestHandler):
                 rows = [d for d in DEVICES["results"] if d["site"]["slug"] in sites]
                 return self._send({"count": len(rows), "next": None, "results": rows})
             return self._send(DEVICES)
+        if path == "/api/ipam/ip-addresses/":
+            # parent= (prefix scope) and address= (the list path's lookup),
+            # repeated params OR'd, as NetBox does. Count follows the rows.
+            q = parse_qs(urlsplit(self.path).query)
+            rows = IP_ADDRESSES
+            if q.get("parent"):
+                rows = [a for a in rows if any(_in_parent(a["address"], p) for p in q["parent"])]
+            if q.get("address"):
+                wanted = {x.split("/")[0] for x in q["address"]}
+                rows = [a for a in rows if a["address"].split("/")[0] in wanted]
+            return self._send({"count": len(rows), "next": None, "results": rows})
         if path == "/api/core/object-changes/":
             return self._send(CHANGES)
         # Any other list endpoint: an empty, well-formed page.

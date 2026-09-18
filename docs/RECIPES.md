@@ -341,6 +341,11 @@ the containing prefixes aren't in NetBox, or the variable is empty (check its
 reference in
 [JOIN-KEYS.md](./JOIN-KEYS.md).
 
+> **In an alert rule** there is no variable to feed the IPs in. Use the query's
+> **NetBox scope** source instead — every address under a prefix, VRF or tenant —
+> and join the metric's IP against it in a SQL expression:
+> [Alerts on IP-only metrics](alerting/ip-only-metrics.md).
+
 ## Prefix & IP utilization
 
 Prefixes and IP ranges expose three extra columns: `utilization` (percent used, 0 to

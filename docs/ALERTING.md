@@ -191,4 +191,5 @@ The last is the fallback for when the join does not fit.
 | [Don't page for the leaves when the spine is down](alerting/topology-suppression.md) | devices behind a failed upstream should not page while the upstream is the incident |
 | [Thresholds that differ by device role](alerting/thresholds-by-role.md) | the number the rule compares against lives in NetBox, per role, with per-device overrides |
 | [Don't alert on devices that are being retired](alerting/lifecycle-suppression.md) | NetBox `status` should decide what is worth paging for |
+| [Alerts on IP-only metrics](alerting/ip-only-metrics.md) | the metric carries only an IP, and the rule should know whose it is |
 | [Post-alert enrichment](alerting/post-alert-enrichment.md) | the context belongs in annotations rather than labels, or the join is too large to run on every evaluation |

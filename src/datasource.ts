@@ -10,6 +10,7 @@ import {
   NetBoxQuery,
   NetBoxVariableQuery,
   ObjectTypeOption,
+  emitsParam,
 } from './types';
 import { NetBoxVariableSupport } from './variables';
 import { AnnotationQueryEditor } from './components/AnnotationQueryEditor';
@@ -61,6 +62,12 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
         // before it reached the backend.
         return true;
       case 'ip-enrichment':
+        // A scope query has no IPs by construction, and runs once it has a
+        // filter row with a field: with none it would list the whole
+        // ipam/ip-addresses table on every refresh of a half-built query.
+        if (query.ipSource === 'scope') {
+          return (query.filters ?? []).some((f) => !!f.field && emitsParam(f));
+        }
         return !!query.ips && query.ips.trim().length > 0;
       default:
         return !!query.objectType;

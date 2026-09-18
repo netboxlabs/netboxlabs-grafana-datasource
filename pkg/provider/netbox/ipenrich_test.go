@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -4252,4 +4253,162 @@ func TestResolveIPs_PrefixFallbackCauseFollowsInputOrder(t *testing.T) {
 	if !strings.Contains(res.Warnings[0], "all 2 IPs") {
 		t.Errorf("warning %q must count both failures", res.Warnings[0])
 	}
+}
+
+// scopeServer serves ipam/ip-addresses under a parent filter, plus the device
+// hop, the way a NetBox does. It records the query it was asked so a test can
+// assert the filters reached NetBox as-is.
+func scopeServer(t *testing.T, records string, count int) (*httptest.Server, *url.Values) {
+	t.Helper()
+	var seen url.Values
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, count, records)
+	})
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"id":7,"name":"leaf1","primary_ip4":{"id":1,"address":"10.0.0.1/24"}}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, &seen
+}
+
+const scopeRecords = `
+	{"id":1,"address":"10.0.0.1/24","status":{"value":"active"},"assigned_object_type":"dcim.interface","assigned_object_id":11,"assigned_object":{"id":11,"name":"eth0","device":{"id":7,"name":"leaf1"}}},
+	{"id":2,"address":"10.0.0.2/24","status":{"value":"active"},"assigned_object_type":null,"assigned_object_id":null,"assigned_object":null},
+	{"id":3,"address":"10.0.0.2/24","status":{"value":"active"},"assigned_object_type":null,"assigned_object_id":null,"assigned_object":null,"vrf":{"id":5,"name":"blue"}}`
+
+func TestResolveScope_OneRowPerHostFromTheFilteredListing(t *testing.T) {
+	srv, seen := scopeServer(t, scopeRecords, 3)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	res, err := p.ResolveScope(context.Background(),
+		[]provider.Filter{{Field: "parent", Value: "10.0.0.0/24"}},
+		[]string{"ip", "match_count", "device_name", "is_primary_ip"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The filter rows reach NetBox as the same parameters an objects query sends.
+	if got := (*seen).Get("parent"); got != "10.0.0.0/24" {
+		t.Errorf("NetBox saw parent=%q, want 10.0.0.0/24", got)
+	}
+	// Three records, two distinct hosts: one row each, in listing order.
+	if got := ipsOf(res); !slices.Equal(got, []string{"10.0.0.1", "10.0.0.2"}) {
+		t.Errorf("rows = %v, want one per distinct host in listing order", got)
+	}
+	if res.Rows[1]["match_count"] != float64(2) {
+		t.Errorf("10.0.0.2 is held twice in the scope (two VRFs); match_count = %v, want 2", res.Rows[1]["match_count"])
+	}
+	// The device hop ran exactly as it does for a list query.
+	if res.Rows[0]["device_name"] != "leaf1" || res.Rows[0]["is_primary_ip"] != true {
+		t.Errorf("row 0 = %v, want device_name leaf1 and is_primary_ip true", res.Rows[0])
+	}
+	// Complete listing: Total is the number of rows, so nothing reads as truncated.
+	if res.Total != 2 {
+		t.Errorf("Total = %d, want 2 (distinct hosts) for a complete listing", res.Total)
+	}
+	if !slices.Equal(res.Columns, []string{"ip", "match_count", "device_name", "is_primary_ip"}) {
+		t.Errorf("Columns = %v", res.Columns)
+	}
+}
+
+func TestResolveScope_CutOffListingReadsAsTruncated(t *testing.T) {
+	// NetBox reports 5,000 matches but the page (limit 2) carries two records.
+	srv, _ := scopeServer(t, scopeRecords[:strings.LastIndex(scopeRecords, ",\n")], 5000)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	res, err := p.ResolveScope(context.Background(), []provider.Filter{{Field: "parent", Value: "10.0.0.0/8"}}, []string{"ip"}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(res.Rows))
+	}
+	// The distinct-host count of the whole scope is unknowable from a cut-off
+	// page, so Total is NetBox's record count: strictly more than the rows, which
+	// is what makes a strict consumer refuse it.
+	if res.Total != 5000 {
+		t.Errorf("Total = %d, want 5000 (the reported count) for a cut-off listing", res.Total)
+	}
+	if res.MaxRows != MaxLimit {
+		t.Errorf("MaxRows = %d, want %d", res.MaxRows, MaxLimit)
+	}
+}
+
+// pagingScopeServer serves n synthetic addresses, honouring limit= and offset=
+// the way NetBox pages, so the limit can be tested by what comes back rather
+// than by the request parameter (fetchList sends min(limit, pageSize) per page,
+// so the parameter alone says nothing about the clamp).
+func pagingScopeServer(t *testing.T, n int) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		var recs []string
+		for i := offset; i < n && len(recs) < limit; i++ {
+			recs = append(recs, fmt.Sprintf(`{"id":%d,"address":"10.%d.%d.%d/32","assigned_object":null}`, i+1, (i>>16)&255, (i>>8)&255, i&255))
+		}
+		// fetchList follows the server's next link rather than computing offsets
+		// itself, so the page after this one has to be named here.
+		next := "null"
+		if offset+limit < n {
+			next = fmt.Sprintf("%q", fmt.Sprintf("http://%s/api/ipam/ip-addresses/?limit=%d&offset=%d", r.Host, limit, offset+limit))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":%s,"results":[%s]}`, n, next, strings.Join(recs, ","))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestResolveScope_DefaultsAndCaps(t *testing.T) {
+	// More addresses than the default limit: an unset limit reads defaultLimit
+	// records and reports the whole count, so the result reads as truncated.
+	p := New(pagingScopeServer(t, defaultLimit+5).URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveScope(context.Background(), nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != defaultLimit || res.Total != defaultLimit+5 {
+		t.Errorf("limit 0: rows=%d total=%d, want %d and %d", len(res.Rows), res.Total, defaultLimit, defaultLimit+5)
+	}
+	// nil fields → the default column set, "ip" first, same as ResolveIPs.
+	if res.Columns[0] != "ip" || len(res.Columns) != len(DefaultIPEnrichFields()) {
+		t.Errorf("Columns = %v, want the default ip-enrichment set", res.Columns)
+	}
+	// An explicit limit below the page size is sent as-is.
+	srv, seen := scopeServer(t, scopeRecords, 3)
+	p = New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	if _, err := p.ResolveScope(context.Background(), nil, nil, 50); err != nil {
+		t.Fatal(err)
+	}
+	if got := (*seen).Get("limit"); got != "50" {
+		t.Errorf("limit 50: NetBox saw limit=%s", got)
+	}
+}
+
+func TestResolveScope_ListingFailureIsAnError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(500) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	// Unlike a list query, where one failed batch degrades its own IPs, the scope
+	// listing IS the row set: nothing can be answered without it.
+	if _, err := p.ResolveScope(context.Background(), nil, []string{"ip"}, 10); err == nil {
+		t.Fatal("a failed scope listing must be an error, not an empty table")
+	}
+}
+
+func ipsOf(res *provider.Result) []string {
+	out := make([]string, 0, len(res.Rows))
+	for _, r := range res.Rows {
+		out = append(out, r["ip"].(string))
+	}
+	return out
 }

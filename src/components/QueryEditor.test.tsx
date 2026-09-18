@@ -674,3 +674,121 @@ describe('QueryEditor — Topology edges guidance', () => {
     expect(screen.getByText(/Node\s*Graph visualization/i)).toBeInTheDocument();
   });
 });
+
+describe('ip-enrichment source', () => {
+  // The module-level datasource mock accumulates calls across the file's earlier
+  // tests (one of them asserts getFilterFields('ipam/prefixes', …)), so the
+  // not-called assertion below needs a clean slate. clearAllMocks keeps the
+  // mockResolvedValue implementations the mount effects depend on.
+  beforeEach(() => jest.clearAllMocks());
+
+  it('defaults to the IP list: IPs box shown, no filter rows', async () => {
+    setup({ queryType: 'ip-enrichment' });
+    expect(await screen.findByRole('radio', { name: 'IP list' })).toBeChecked();
+    expect(screen.getByPlaceholderText(/10\.0\.0\.5/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Add filter/ })).not.toBeInTheDocument();
+    expect(datasource.getFilterFields).not.toHaveBeenCalled();
+  });
+
+  it('in scope mode hides the IPs box and offers filter rows for ipam/ip-addresses', async () => {
+    setup({ queryType: 'ip-enrichment', ipSource: 'scope' });
+    expect(await screen.findByRole('radio', { name: 'NetBox scope' })).toBeChecked();
+    expect(screen.queryByPlaceholderText(/10\.0\.0\.5/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Add filter/ })).toBeInTheDocument();
+    expect(datasource.getFilterFields).toHaveBeenCalledWith('ipam/ip-addresses', undefined);
+  });
+
+  it('in scope mode the join-key source picker does not offer prefix_* columns', async () => {
+    setup({
+      queryType: 'ip-enrichment',
+      ipSource: 'scope',
+      joinKeys: [{ source: '', output: '', transform: 'none' }],
+    });
+    // Open the source picker of the one join-key row and read its options,
+    // scoped to the menu (the same names appear as context-field chips).
+    const picker = await screen.findByLabelText('join-key-source-0');
+    fireEvent.focus(picker);
+    fireEvent.keyDown(picker, { key: 'ArrowDown', keyCode: 40, code: 'ArrowDown' });
+    const menu = within(await screen.findByRole('listbox'));
+    expect(menu.getByText('device_name')).toBeInTheDocument();
+    expect(menu.getByText('ip')).toBeInTheDocument();
+    expect(menu.queryByText('prefix_scope')).not.toBeInTheDocument();
+    expect(menu.queryByText('prefix_prefix')).not.toBeInTheDocument();
+  });
+
+  it("switching source clears the other source's input", async () => {
+    const { onChange, onRunQuery } = setup({
+      queryType: 'ip-enrichment',
+      ips: '10.0.0.1',
+      contextFields: ['ip', 'prefix_prefix', 'device_name'],
+      joinKeys: [
+        { source: 'prefix_prefix', output: 'net', transform: 'none' },
+        { source: 'device_name', output: 'instance', transform: 'lower' },
+      ],
+    });
+    fireEvent.click(await screen.findByRole('radio', { name: 'NetBox scope' }));
+    // prefix_* can never fill on a scope query, so it leaves with the IPs —
+    // as a context field and as a join-key source, which would otherwise
+    // derive an empty column on every row.
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        ipSource: 'scope',
+        ips: undefined,
+        filters: [],
+        contextFields: ['ip', 'device_name'],
+        joinKeys: [{ source: 'device_name', output: 'instance', transform: 'lower' }],
+      })
+    );
+    // Not run on the toggle: with no filter row yet, that would list the whole
+    // ipam/ip-addresses table. The filter value's onBlur runs it once there is one.
+    expect(onRunQuery).not.toHaveBeenCalled();
+  });
+});
+
+describe('query type change and filters', () => {
+  // Filter rows are bound to a NetBox model: dcim/devices for objects and
+  // topology, ipam/ip-addresses for a scope-sourced ip-enrichment query. Rows
+  // written for one model must not survive into the other — NetBox ignores an
+  // unknown filter parameter and returns everything, which for a scope is the
+  // whole address table under the limit, with no truncation to refuse.
+  async function pickQueryType(label: string) {
+    const select = await screen.findByLabelText('Query type');
+    fireEvent.focus(select);
+    fireEvent.keyDown(select, { key: 'ArrowDown', keyCode: 40, code: 'ArrowDown' });
+    fireEvent.click(within(await screen.findByRole('listbox')).getByText(label));
+  }
+
+  it('clears device filters when the query becomes an ip-enrichment query', async () => {
+    const { onChange } = setup({
+      queryType: 'objects',
+      objectType: 'dcim/devices',
+      filters: [{ field: 'site', operator: '', value: 'dc1' }],
+    });
+    await pickQueryType('IP enrichment');
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ queryType: 'ip-enrichment', filters: [] }));
+  });
+
+  it.each([
+    ['Objects', 'objects'],
+    ['Topology', 'topology'],
+  ])('clears scope filters when a scope query becomes %s', async (label, queryType) => {
+    const { onChange } = setup({
+      queryType: 'ip-enrichment',
+      ipSource: 'scope',
+      filters: [{ field: 'parent', operator: '', value: '10.0.0.0/24' }],
+    });
+    await pickQueryType(label);
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ queryType, filters: [] }));
+  });
+
+  it('keeps filters between objects and topology, which share the device model', async () => {
+    const { onChange } = setup({
+      queryType: 'objects',
+      objectType: 'dcim/devices',
+      filters: [{ field: 'site', operator: '', value: 'dc1' }],
+    });
+    await pickQueryType('Topology');
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ queryType: 'topology' }));
+    expect(onChange.mock.calls.at(-1)![0].filters).toEqual([{ field: 'site', operator: '', value: 'dc1' }]);
+  });
+});

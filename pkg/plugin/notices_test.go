@@ -161,10 +161,10 @@ func TestResultNotices(t *testing.T) {
 }
 
 func TestTruncationError(t *testing.T) {
-	if msg := truncationError(res(4, 4), 100, nounObjects); msg != "" {
+	if msg := truncationError(consumerAlert, res(4, 4), nounObjects); msg != "" {
 		t.Errorf("complete result returned error %q, want empty", msg)
 	}
-	msg := truncationError(res(100, 104231), 100, nounObjects)
+	msg := truncationError(consumerAlert, res(100, 104231), nounObjects)
 	if msg == "" {
 		t.Fatal("truncated alert result must produce an error message")
 	}
@@ -211,10 +211,10 @@ func TestCapNotice(t *testing.T) {
 // only remedy offered ("re-run the query") could never work.
 func TestCapIsNotADegradation(t *testing.T) {
 	r := capped(200, 150)
-	if msg := degradationError(r); msg != "" {
+	if msg := degradationError(consumerAlert, r); msg != "" {
 		t.Errorf("a capped result is not degraded, got %q", msg)
 	}
-	msg := capError(r)
+	msg := capError(consumerAlert, r)
 	if msg == "" {
 		t.Fatal("a capped alert result must produce an error message")
 	}
@@ -233,7 +233,7 @@ func TestCapIsNotADegradation(t *testing.T) {
 // instruction that cannot be followed, on the one result where they most need a
 // usable next step. The error still fires; only the impossible number goes.
 func TestCapError_NothingMeasured(t *testing.T) {
-	msg := capError(capped(200, 0))
+	msg := capError(consumerAlert, capped(200, 0))
 	if msg == "" {
 		t.Fatal("a result with nothing measured must still fail an alert query")
 	}
@@ -263,7 +263,7 @@ func TestCapError_NothingToReport(t *testing.T) {
 	}
 	for name, r := range cases {
 		t.Run(name, func(t *testing.T) {
-			if msg := capError(r); msg != "" {
+			if msg := capError(consumerAlert, r); msg != "" {
 				t.Errorf("capError = %q, want empty", msg)
 			}
 			for _, n := range resultNotices(r, 100, nounObjects) {
@@ -331,7 +331,7 @@ func TestCapErrorIsPreferredOverDegradation(t *testing.T) {
 		Capped:   &provider.Cap{Columns: []string{"utilization"}, Measured: 150, Rows: 200},
 		Warnings: []string{"Utilization is blank for 9 rows because the extra NetBox lookups failed."},
 	}
-	cap, deg := capError(res), degradationError(res)
+	cap, deg := capError(consumerAlert, res), degradationError(consumerAlert, res)
 	if cap == "" {
 		t.Fatal("capError must report a cap that is present")
 	}
@@ -361,7 +361,7 @@ func TestNoticesWhenProviderReportsNoCeiling(t *testing.T) {
 		}
 	}
 
-	msg := truncationError(r, 999999, nounObjects)
+	msg := truncationError(consumerAlert, r, nounObjects)
 	if msg == "" {
 		t.Fatal("a truncated result must still fail an alert query")
 	}

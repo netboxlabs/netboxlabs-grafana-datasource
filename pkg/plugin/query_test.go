@@ -24,7 +24,7 @@ func TestQuery_Objects_TruncationNotice(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":1}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -50,7 +50,7 @@ func TestQuery_Objects_CompleteResultHasNoNotice(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`),
-	}, false)
+	}, consumerDashboard)
 	if n := resp.Frames[0].Meta.Notices; len(n) != 0 {
 		t.Errorf("complete result should carry no notices, got %+v", n)
 	}
@@ -66,7 +66,7 @@ func TestQuery_AlertTable_TruncationIsAnError(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"objects","objectType":"dcim/devices","alertTable":true,"limit":1}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error == nil {
 		t.Fatal("a truncated alertTable query must error, not alert on a subset")
 	}
@@ -82,7 +82,7 @@ func TestQuery_Count_NeverErrorsOnLargeTotal(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"objects","objectType":"dcim/devices","count":true}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("count query must not error: %v", resp.Error)
 	}
@@ -98,7 +98,7 @@ func TestQuery_IPEnrichment_TruncationNotice(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"ip-enrichment","ips":"10.0.0.1","limit":1}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -124,7 +124,7 @@ func TestQuery_IPEnrichment_CompleteResultHasNoNotice(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"ip-enrichment","ips":"10.0.0.1","limit":100}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -155,7 +155,7 @@ func TestQuery_IPEnrichment_DegradationNotice(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"ip-enrichment","ips":"10.0.0.1","limit":100}`),
-	}, false)
+	}, consumerDashboard)
 	// Degrading, not failing: the rows must still arrive.
 	if resp.Error != nil {
 		t.Fatalf("a degraded result must not fail the query: %v", resp.Error)
@@ -196,7 +196,7 @@ func TestQuery_IPEnrichment_TruncationAndDegradationCoexist(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"ip-enrichment","ips":"10.0.0.1","limit":1}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -243,7 +243,7 @@ func TestQuery_Objects_DegradationNotice(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -314,7 +314,7 @@ func TestQuery_IPEnrichment_AlertEvaluationFailsOnPartialResult(t *testing.T) {
 
 			t.Run("alert evaluation fails", func(t *testing.T) {
 				d := newTestDatasource(&fakeProvider{ipResult: tc.result})
-				resp := d.query(context.Background(), q, true)
+				resp := d.query(context.Background(), q, consumerAlert)
 				if resp.Error == nil {
 					t.Fatal("an alert query on an incomplete result must fail, not evaluate silently")
 				}
@@ -330,7 +330,7 @@ func TestQuery_IPEnrichment_AlertEvaluationFailsOnPartialResult(t *testing.T) {
 
 			t.Run("dashboard still gets the rows plus a notice", func(t *testing.T) {
 				d := newTestDatasource(&fakeProvider{ipResult: tc.result})
-				resp := d.query(context.Background(), q, false)
+				resp := d.query(context.Background(), q, consumerDashboard)
 				if resp.Error != nil {
 					t.Fatalf("a dashboard query must keep partial-beats-none: %v", resp.Error)
 				}
@@ -363,7 +363,7 @@ func TestQuery_IPEnrichment_AlertEvaluationPassesCleanResults(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"ip-enrichment","ips":"10.20.0.1,10.99.99.99","limit":100}`),
-	}, true)
+	}, consumerAlert)
 	if resp.Error != nil {
 		t.Fatalf("a complete result must evaluate, notes and all: %v", resp.Error)
 	}
@@ -419,7 +419,7 @@ func TestQuery_IPEnrichment_JoinKeySourceOutsideTheSelection(t *testing.T) {
 		JSON: []byte(`{"queryType":"ip-enrichment","ips":"10.20.0.1","limit":100,` +
 			`"contextFields":["ip","prefix_cidr"],` +
 			`"joinKeys":[{"source":"device_name","output":"dev_key","transform":"none"}]}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -460,7 +460,7 @@ func TestQuery_IPEnrichment_JoinKeySourceThatIsSelectedStaysAColumn(t *testing.T
 		JSON: []byte(`{"queryType":"ip-enrichment","ips":"10.20.0.1","limit":100,` +
 			`"contextFields":["ip","device_name"],` +
 			`"joinKeys":[{"source":"device_name","output":"device","transform":"lower"}]}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -489,7 +489,7 @@ func TestQuery_IPEnrichment_JoinKeySourceUnderTheDefaultSelection(t *testing.T) 
 		RefID: "A",
 		JSON: []byte(`{"queryType":"ip-enrichment","ips":"10.20.0.1","limit":100,` +
 			`"joinKeys":[{"source":"prefix_cidr","output":"subnet","transform":"none"}]}`),
-	}, false)
+	}, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -604,7 +604,7 @@ func TestQuery_TotalRequirementIsStatedPerPath(t *testing.T) {
 				Total:   1,
 			}}
 			d := newTestDatasource(fp)
-			resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, false)
+			resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, consumerDashboard)
 			if resp.Error != nil {
 				t.Fatalf("unexpected error: %v", resp.Error)
 			}
@@ -643,7 +643,7 @@ func TestQuery_AlertTable_CapSaysLowerTheLimit(t *testing.T) {
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A",
 		JSON:  []byte(`{"queryType":"objects","objectType":"ipam/prefixes","alertTable":true,"valueField":"utilization","limit":1000}`),
-	}, true)
+	}, consumerAlert)
 	if resp.Error == nil {
 		t.Fatal("a capped alertTable query must error: the blank rows evaluate as 0, not as absent")
 	}
@@ -694,7 +694,7 @@ func TestQuery_AlertEvaluationNeverGivesUpTheTotal(t *testing.T) {
 				Total:   1,
 			}}
 			d := newTestDatasource(fp)
-			resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, true)
+			resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, consumerAlert)
 			if resp.Error != nil {
 				t.Fatalf("unexpected error: %v", resp.Error)
 			}
@@ -711,7 +711,7 @@ func TestQuery_AlertEvaluationNeverGivesUpTheTotal(t *testing.T) {
 		d := newTestDatasource(fp)
 		if resp := d.query(context.Background(), backend.DataQuery{
 			RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`),
-		}, false); resp.Error != nil {
+		}, consumerDashboard); resp.Error != nil {
 			t.Fatalf("unexpected error: %v", resp.Error)
 		}
 		if !fp.querySpec.AllowUncounted {
@@ -798,7 +798,7 @@ func TestQuery_Objects_AlertEvaluationFailsOnPartialResult(t *testing.T) {
 
 			t.Run("alert evaluation fails", func(t *testing.T) {
 				d := newTestDatasource(&fakeProvider{result: tc.result})
-				resp := d.query(context.Background(), q, true)
+				resp := d.query(context.Background(), q, consumerAlert)
 				if resp.Error == nil {
 					t.Fatal("an alert query on an unmeasured or degraded result must fail, not evaluate blanks as zeroes")
 				}
@@ -819,7 +819,7 @@ func TestQuery_Objects_AlertEvaluationFailsOnPartialResult(t *testing.T) {
 
 			t.Run("dashboard still gets the rows plus a notice", func(t *testing.T) {
 				d := newTestDatasource(&fakeProvider{result: tc.result})
-				resp := d.query(context.Background(), q, false)
+				resp := d.query(context.Background(), q, consumerDashboard)
 				if resp.Error != nil {
 					t.Fatalf("a dashboard query must keep partial-beats-none: %v", resp.Error)
 				}
@@ -862,7 +862,7 @@ func TestQuery_Objects_AlertEvaluationRejectsATruncatedResult(t *testing.T) {
 		resp := d.query(context.Background(), backend.DataQuery{
 			RefID: "A",
 			JSON:  []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`),
-		}, true)
+		}, consumerAlert)
 		if resp.Error == nil {
 			t.Fatal("an alert query on 100 of 5,000 matches must fail, not evaluate an arbitrary subset")
 		}
@@ -876,7 +876,7 @@ func TestQuery_Objects_AlertEvaluationRejectsATruncatedResult(t *testing.T) {
 		resp := d.query(context.Background(), backend.DataQuery{
 			RefID: "A",
 			JSON:  []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`),
-		}, false)
+		}, consumerDashboard)
 		if resp.Error != nil {
 			t.Fatalf("dashboard must keep partial-beats-none: %v", resp.Error)
 		}

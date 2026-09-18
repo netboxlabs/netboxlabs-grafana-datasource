@@ -1,0 +1,45 @@
+{
+  "uid": "netbox-all-variable",
+  "title": "NetBox filter on a variable set to All (e2e)",
+  "schemaVersion": 39,
+  "tags": ["e2e"],
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "site",
+        "type": "custom",
+        "query": "dc1,dc2",
+        "multi": true,
+        "includeAll": true,
+        "allValue": "$__all",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] },
+        "options": [
+          { "selected": true, "text": "All", "value": "$__all" },
+          { "selected": false, "text": "dc1", "value": "dc1" },
+          { "selected": false, "text": "dc2", "value": "dc2" }
+        ]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Devices in $site",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
+      "datasource": { "type": "grafana-netboxlabs-datasource", "uid": "netboxlabs-netbox-alerting" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-netboxlabs-datasource", "uid": "netboxlabs-netbox-alerting" },
+          "queryType": "objects",
+          "objectType": "dcim/devices",
+          "filters": [{ "field": "site", "operator": "", "value": "$site" }],
+          "fields": ["name", "site_slug"],
+          "limit": 100
+        }
+      ]
+    }
+  ]
+}

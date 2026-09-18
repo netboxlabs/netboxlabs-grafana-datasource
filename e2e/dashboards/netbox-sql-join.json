@@ -1,0 +1,40 @@
+{
+  "uid": "netbox-sql-join",
+  "title": "NetBox SQL-expression join (e2e)",
+  "schemaVersion": 39,
+  "tags": ["e2e"],
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Device CPU joined to NetBox site (SQL expression)",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
+      "datasource": { "type": "datasource", "uid": "-- Mixed --" },
+      "targets": [
+        {
+          "refId": "CPU",
+          "hide": true,
+          "datasource": { "type": "grafana-testdata-datasource", "uid": "e2e-testdata" },
+          "scenarioId": "csv_content",
+          "csvContent": "device,cpu\nleaf1,41\nleaf2,87\nghost9,5"
+        },
+        {
+          "refId": "NB",
+          "hide": true,
+          "datasource": { "type": "grafana-netboxlabs-datasource", "uid": "netboxlabs-netbox-alerting" },
+          "queryType": "objects",
+          "objectType": "dcim/devices",
+          "fields": ["name", "site_slug", "status"],
+          "limit": 100
+        },
+        {
+          "refId": "J",
+          "datasource": { "type": "__expr__", "uid": "__expr__" },
+          "type": "sql",
+          "expression": "SELECT CPU.device AS device, CPU.cpu AS cpu, NB.site_slug AS site FROM CPU JOIN NB ON CPU.device = NB.name ORDER BY CPU.device"
+        }
+      ]
+    }
+  ]
+}

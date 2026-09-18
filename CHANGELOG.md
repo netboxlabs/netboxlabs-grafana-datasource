@@ -6,6 +6,33 @@ Initial release of the NetBox data source for Grafana.
 
 - Compatibility statement: NetBox ≥ 4.2 (validated 4.2 → 4.6 via `demo/compat-check.sh`),
   Grafana ≥ 12.3.
+- **A NetBox query that feeds an expression fails on a partial result.** A
+  server-side expression (SQL, math, reduce) drops its input frame's notices, as
+  alert evaluation does, so a NetBox result cut off by its row limit reached the
+  panel as a plausible wrong number: a SQL join at limit 5 over 15 devices
+  reported `AMS1: 5` and said nothing. Queries marked `X-Grafana-From-Expr`, which
+  Grafana's frontend sets on every panel that contains an expression and a
+  backend calling `/api/ds/query` can set itself, now refuse a truncated, capped
+  or degraded result in the objects, IP-enrichment and topology-edges queries,
+  with a message that names the gap. Plain dashboard queries are unchanged:
+  partial beats none, with a notice. One caveat: the browser sets the header
+  for the whole panel, so a NetBox table drawn directly in a panel that also
+  holds an expression is held to the same standard, and it also gets a full
+  count rather than fast paging. Raise its Limit or give it a panel of its
+  own. See "Joining in a SQL expression" in `docs/RECIPES.md`.
+- **`$__all` as a filter value means no filter.** A variable set to All is
+  expanded into every option as a repeated NetBox parameter, which on a large
+  variable is a very long URL and a slow query to say nothing. A filter row whose
+  value is exactly `$__all` is now dropped instead, in panel queries and in the
+  query resource behind chained variables, so a dashboard author can set a
+  variable's Custom all value to `$__all` and a caller outside the browser can
+  say All without a variable to expand. Opt-in by design: All is every option
+  *on offer*, which for a chained or hand-written variable is not everything.
+- e2e coverage for the SQL-expression path (a panel join, the truncation
+  refusal, and an alert rule whose condition is the join) and for `$__all`
+  surviving interpolation as a Custom all value. The e2e stack now assembles
+  its own provisioning root instead of layering files over the shared one,
+  which left empty stubs behind that the dev stack then failed to parse.
 - **Alerting: pending period and flap damping** (`docs/ALERTING.md`). A new
   section on `for` and `keepFiringFor`, with the measured reason zero is the
   wrong default for a metric-backed rule and why a NetBox-state rule needs

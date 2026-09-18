@@ -174,7 +174,7 @@ func TestGraphTruncationErrorMatchesTheOtherAlertPaths(t *testing.T) {
 	g := fabric()
 	g.Total, g.Fetched, g.MaxRows = 40, 4, 10000
 
-	msg := graphTruncationError(g)
+	msg := graphTruncationError(consumerAlert, g)
 	if msg == "" {
 		t.Fatal("want a refusal for a truncated traversal")
 	}
@@ -186,7 +186,7 @@ func TestGraphTruncationErrorMatchesTheOtherAlertPaths(t *testing.T) {
 
 	complete := fabric()
 	complete.Total, complete.Fetched = 4, 4
-	if graphTruncationError(complete) != "" {
+	if graphTruncationError(consumerAlert, complete) != "" {
 		t.Error("an untruncated graph must produce no refusal")
 	}
 }
@@ -224,7 +224,7 @@ func TestQuery_TopologyEdgesRefusesTruncationForAlerts(t *testing.T) {
 
 	q := backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"topology-edges","limit":4}`)}
 
-	resp := d.query(context.Background(), q, true)
+	resp := d.query(context.Background(), q, consumerAlert)
 	if resp.Error == nil {
 		t.Fatal("an alert evaluation must refuse an incomplete traversal")
 	}
@@ -237,7 +237,7 @@ func TestQuery_TopologyEdgesRefusesTruncationForAlerts(t *testing.T) {
 	}
 
 	// A dashboard keeps partial-beats-none, with the gap stated on the frame.
-	resp = d.query(context.Background(), q, false)
+	resp = d.query(context.Background(), q, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("a dashboard query must still render: %v", resp.Error)
 	}
@@ -255,7 +255,7 @@ func TestQuery_TopologyEdgesAllowsCompleteTraversalForAlerts(t *testing.T) {
 
 	resp := d.query(context.Background(), backend.DataQuery{
 		RefID: "A", JSON: []byte(`{"queryType":"topology-edges","limit":100}`),
-	}, true)
+	}, consumerAlert)
 	if resp.Error != nil {
 		t.Fatalf("a complete traversal must be usable by an alert rule: %v", resp.Error)
 	}
@@ -276,7 +276,7 @@ func TestConnectedOnlyPruningIsNotTruncation(t *testing.T) {
 	if graphTruncated(g) {
 		t.Error("pruning isolated devices is not truncation: every match was fetched")
 	}
-	if msg := graphTruncationError(g); msg != "" {
+	if msg := graphTruncationError(consumerAlert, g); msg != "" {
 		t.Errorf("an alert must not be refused over display pruning: %s", msg)
 	}
 }
@@ -303,7 +303,7 @@ func TestQuery_TopologyEdgesRefusesDegradedEdgesForAlerts(t *testing.T) {
 
 	q := backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"topology-edges","limit":100}`)}
 
-	resp := d.query(context.Background(), q, true)
+	resp := d.query(context.Background(), q, consumerAlert)
 	if resp.Error == nil {
 		t.Fatal("an alert evaluation must refuse an incomplete link set")
 	}
@@ -312,7 +312,7 @@ func TestQuery_TopologyEdgesRefusesDegradedEdgesForAlerts(t *testing.T) {
 	}
 
 	// Dashboards still render, with the gap as a warning notice.
-	resp = d.query(context.Background(), q, false)
+	resp = d.query(context.Background(), q, consumerDashboard)
 	if resp.Error != nil {
 		t.Fatalf("a dashboard query must still render: %v", resp.Error)
 	}
@@ -331,7 +331,7 @@ func TestQuery_TopologyEdgesAsksForBoundaryPeers(t *testing.T) {
 	d := newTestDatasource(fp)
 	d.query(context.Background(), backend.DataQuery{
 		RefID: "A", JSON: []byte(`{"queryType":"topology-edges","limit":100}`),
-	}, false)
+	}, consumerDashboard)
 	if !fp.topoSpec.IncludeBoundaryPeers {
 		t.Error("the edges query must keep links whose far end is outside the filter")
 	}
@@ -340,7 +340,7 @@ func TestQuery_TopologyEdgesAsksForBoundaryPeers(t *testing.T) {
 	d2 := newTestDatasource(fp2)
 	d2.query(context.Background(), backend.DataQuery{
 		RefID: "A", JSON: []byte(`{"queryType":"topology","limit":100}`),
-	}, false)
+	}, consumerDashboard)
 	if fp2.topoSpec.IncludeBoundaryPeers {
 		t.Error("the node graph must not draw links dangling outside the filter")
 	}
@@ -400,7 +400,7 @@ func TestTruncationMessageQuotesTheFetchedCount(t *testing.T) {
 	g.Total, g.Fetched, g.MaxRows = 40, 7, 10000
 	g.Nodes = g.Nodes[:1] // pruned for display, plus boundary peers elsewhere
 
-	msg := graphTruncationError(g)
+	msg := graphTruncationError(consumerAlert, g)
 	if !strings.Contains(msg, "7 of 40") {
 		t.Errorf("want the fetched count in the message, got: %s", msg)
 	}

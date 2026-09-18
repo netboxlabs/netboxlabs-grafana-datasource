@@ -377,11 +377,82 @@ marked-utilized child ranges, a container prefix is measured by child-prefix cov
 and an IP range by its child-IP count. It's computed only when a utilization field is
 requested (a few extra NetBox calls per row), so ordinary IPAM queries are unaffected.
 
+## Joining in a SQL expression
+
+The recipes above join in the browser, with a panel transformation. A Grafana
+**SQL expression** runs the same join on the server instead, which is what you
+want when nothing is going to run a transformation: a backend that posts a
+dashboard's queries to `/api/ds/query`, or an alert rule (that case has a page of
+its own, [NetBox context on metric alerts](alerting/rule-time-join.md), which also
+covers the `sqlExpressions` feature toggle and the dialect).
+
+Three queries, with the two inputs hidden so the panel draws only the join:
+
+- **CPU**: Prometheus, `Instant`, format **Table**, e.g. `device_cpu_percent`
+- **NB**: NetBox **Objects**, _Devices_, return fields `name, site_slug, role_slug`
+- **J**: **Expression → SQL**:
+
+  ```sql
+  SELECT NB.site_slug AS site, COUNT(*) AS devices
+  FROM CPU JOIN NB ON CPU.device = NB.name
+  GROUP BY NB.site_slug
+  ```
+
+**Join on keys that survive a rename.** `site_slug` against a `site` label, `id`
+against a `netbox_id` label. A display name is the one thing in NetBox people
+edit freely, and a join on it breaks the day someone tidies a site's name. A
+[join key](./JOIN-KEYS.md) renders numbers as plain strings (`42`, never `42.0`), so
+`id` lines up with a Prometheus label as it is.
+
+**The NetBox side has to be complete, or the panel fails.** An ordinary NetBox
+query that matches more objects than its **Limit** returns what fits and says so
+in a notice (_Showing 100 of 5,000 matching objects_). An expression drops that
+notice, so the same result used to reach the panel as a confident wrong number: a
+join at limit 5 over 15 devices reported `AMS1: 5`, with nothing to say ten were
+missing. A NetBox query that feeds an expression now fails instead:
+
+```
+Query feeding an expression returned 5 of 15 matching objects, so it would
+compute on an incomplete result. Raise the row limit (max 10,000) or add
+filters so every match fits.
+```
+
+- With the inputs hidden, the panel shows only the expression's own error
+  (`could not run sql expression [J] because it selects from the results of query
+  [NB] which has an error`). Unhide **NB**, or open the query inspector, to read
+  the message above.
+- The same applies when part of the result could not be measured or a lookup
+  failed: anything a plain query would have stated in a notice.
+- Grafana marks these queries with the `X-Grafana-From-Expr: true` request header,
+  and the browser sends it for the whole panel as soon as it contains any
+  expression. So a NetBox table drawn directly in such a panel is held to the same
+  standard even if no expression reads it, and a panel with more matches than its
+  Limit fails where it used to show a page with a notice: raise the Limit, or move
+  the table to a panel of its own. A backend calling `/api/ds/query` itself should
+  send the header too; without it the NetBox query is treated as an ordinary
+  dashboard query and a truncated result goes through.
+- The ceiling is 10,000 rows, so an inventory larger than that cannot be joined
+  whole. Filter the NetBox query down to what the panel is about, and aggregate in
+  PromQL before the join where you can: Grafana's own `sql_expression_cell_limit`
+  (100,000 input cells) is usually reached first.
+
 ## Beyond joins
 
 - **Dashboard variables:** variable type **Query** → NetBox datasource → object type
   (e.g. _Sites_), value field `slug`, text field `name`. Chain them
   (`devices` filtered by `site=$site`) and reference as `$site` in any panel.
+  A multi-value selection becomes an OR filter, and so does **All**: every option
+  of the variable, as one repeated NetBox parameter each. On a few hundred sites
+  that is a very long URL and a slow query to say "no filter". When the variable
+  really does list everything, set its **Custom all value** to `$__all`: the data
+  source drops a filter row whose value is exactly that token, so All sends no
+  filter at all. It is opt-in because All is not always everything — for a chained
+  variable (`sites in $region`) or a hand-written list it means every option _on
+  offer_, and dropping the filter would widen the panel to the whole inventory. A
+  caller with no variables to expand, such as a backend posting to
+  `/api/ds/query`, sends `$__all` as the filter value for the same effect.
+  On an IP-enrichment query's IP list the token has nothing to drop — the list is
+  the input — so All resolves nothing, like an empty list.
 - **Change annotations:** add a dashboard annotation backed by NetBox; optionally
   restrict to content types (`dcim.device`, `ipam.prefix`). Change-log events overlay
   your panels with who-changed-what.

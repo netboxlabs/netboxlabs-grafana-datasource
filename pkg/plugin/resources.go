@@ -146,7 +146,7 @@ func (d *Datasource) handleQuery(w http.ResponseWriter, r *http.Request) {
 	ctx := provider.WithBranch(r.Context(), req.Branch)
 	res, err := d.provider.Query(ctx, provider.QuerySpec{
 		ObjectType: req.ObjectType,
-		Filters:    req.Filters,
+		Filters:    dropAllFilters(req.Filters),
 		Fields:     req.Fields,
 		Limit:      req.Limit,
 	})

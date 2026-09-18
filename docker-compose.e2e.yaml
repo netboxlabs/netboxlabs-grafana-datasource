@@ -15,6 +15,28 @@ services:
       NETBOX_API_TOKEN: e2e-stub-token
       # No browser-facing rewrite in e2e; defined so provisioning never dangles.
       NETBOX_PUBLIC_URL: ''
+      # SQL expressions sit behind this toggle on the older Grafana versions in the
+      # CI matrix; it is a no-op where they are already on.
+      GF_FEATURE_TOGGLES_ENABLE: sqlExpressions
+      # A provisioning root of its own, assembled below from the shared files plus
+      # the e2e-only ones under ./e2e/provisioning. It is not layered over the
+      # shared ./provisioning mount because a file mounted inside a bind mount
+      # leaves an empty stub on the host, which the dev and demo stacks then try
+      # to load. Grafana reads each provisioning directory flat, so the shared
+      # files are listed one by one: a new shared datasource or alert-rule file
+      # has to be added here for the e2e stack to see it.
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning-e2e
+    volumes:
+      - ./provisioning/datasources/datasources.yml:/etc/grafana/provisioning-e2e/datasources/datasources.yml:ro
+      - ./e2e/provisioning/datasources/testdata.yml:/etc/grafana/provisioning-e2e/datasources/testdata.yml:ro
+      # The shared provider, whose path (/etc/grafana/provisioning/dashboards) is
+      # still there via the base mount. The e2e dashboards under ./e2e/dashboards
+      # are not provisioned: the specs import them through the API and delete
+      # them again, so no stack ever lists them.
+      - ./provisioning/dashboards/dashboards.yaml:/etc/grafana/provisioning-e2e/dashboards/dashboards.yaml:ro
+      - ./provisioning/alerting/netbox-object-count.yml:/etc/grafana/provisioning-e2e/alerting/netbox-object-count.yml:ro
+      - ./provisioning/alerting/netbox-alert-enriched.yml:/etc/grafana/provisioning-e2e/alerting/netbox-alert-enriched.yml:ro
+      - ./e2e/provisioning/alerting/netbox-sql-join.yml:/etc/grafana/provisioning-e2e/alerting/netbox-sql-join.yml:ro
     depends_on:
       - netbox-stub
 

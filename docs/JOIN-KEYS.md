@@ -132,6 +132,11 @@ IPs as a Grafana **query variable** (from your flow data source), reference it a
 
 ## Caveats
 
+- **Prefer keys that survive a rename.** A display name is what people edit in
+  NetBox; a slug or an id is not. Where your series carry them, join `site_slug`
+  to a `site` label and `id` to a `netbox_id` label rather than joining on names.
+  Numeric sources come out as plain strings (`42`, never `42.0`), so an id matches
+  a Prometheus label without a transform.
 - **Duplicate names.** NetBox permits the same device name in different sites.
   If your fleet has duplicates, a name join can fan out. Prefer a unique key
   (asset tag, primary IP) where it matters.

@@ -1,0 +1,13 @@
+# e2e only. Stands in for Prometheus as the metrics side of a SQL-expression
+# join: the e2e stack runs no telemetry services, and a CSV scenario gives the
+# specs rows they can assert on exactly.
+apiVersion: 1
+
+datasources:
+  - name: TestData
+    type: grafana-testdata-datasource
+    uid: e2e-testdata
+    access: proxy
+    isDefault: false
+    orgId: 1
+    editable: false

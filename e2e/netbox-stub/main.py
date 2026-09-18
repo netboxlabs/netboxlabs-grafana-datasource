@@ -17,7 +17,7 @@ No external dependencies — standard library only. Configure the port with PORT
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 # A devices list whose envelope "count" matches the rows served, as a real NetBox
 # does. It must stay consistent: the plugin treats rows < count as a truncated
@@ -117,6 +117,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send({"detail": "auth required"}, status=403)
             return self._send({"netbox-version": "4.6.0"})
         if path == "/api/dcim/devices/":
+            # Honors the site filter (by slug, repeated params are OR) as NetBox
+            # does, so a spec can tell a dropped filter from one that was sent and
+            # matched nothing. The count follows the rows for the reason above.
+            sites = parse_qs(urlsplit(self.path).query).get("site")
+            if sites:
+                rows = [d for d in DEVICES["results"] if d["site"]["slug"] in sites]
+                return self._send({"count": len(rows), "next": None, "results": rows})
             return self._send(DEVICES)
         if path == "/api/core/object-changes/":
             return self._send(CHANGES)

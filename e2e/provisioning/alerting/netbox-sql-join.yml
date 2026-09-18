@@ -1,0 +1,54 @@
+# e2e only: an alert rule whose condition is a SQL expression joining a metrics
+# table to NetBox inventory. tests/sqlExpressions.spec.ts asserts its health and
+# lastError, not its firing state.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: netbox-sql-join
+    folder: NetBox
+    interval: 10s
+    rules:
+      - uid: netbox-sql-join
+        title: Device CPU high, labelled with its NetBox site (SQL join)
+        condition: J
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: CPU
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: e2e-testdata
+            model:
+              refId: CPU
+              datasource: { type: grafana-testdata-datasource, uid: e2e-testdata }
+              scenarioId: csv_content
+              csvContent: "device,cpu\nleaf1,41\nleaf2,87"
+          - refId: NB
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: netboxlabs-netbox-alerting
+            model:
+              refId: NB
+              datasource: { type: grafana-netboxlabs-datasource, uid: netboxlabs-netbox-alerting }
+              queryType: objects
+              objectType: dcim/devices
+              fields: [name, site_slug]
+              limit: 100
+          - refId: J
+            datasourceUid: __expr__
+            model:
+              refId: J
+              type: sql
+              datasource: { type: __expr__, uid: __expr__ }
+              # Required on a rule that was not created in the rule editor, which
+              # adds it for you: without it evaluation fails with "unexpected field
+              # length: 3 instead of 1". See docs/alerting/rule-time-join.md.
+              format: alerting
+              # The SQL expression IS the condition. Grafana refuses one as the
+              # input to a threshold or reduce ("sql expressions can not be the
+              # input for other expressions"), so the comparison lives in WHERE:
+              # each row returned is an alert instance, its string columns the
+              # labels and its one numeric column the value.
+              expression: >-
+                SELECT CPU.device AS device, NB.site_slug AS site, CPU.cpu AS cpu
+                FROM CPU JOIN NB ON CPU.device = NB.name
+                WHERE CPU.cpu > 80

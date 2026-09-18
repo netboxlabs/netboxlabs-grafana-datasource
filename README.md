@@ -145,7 +145,7 @@ and is the simplest way to get predictable query performance at that scale.
 apiVersion: 1
 datasources:
   - name: NetBox
-    type: grafana-netboxlabs-datasource
+    type: netboxlabs-netbox-datasource
     access: proxy
     jsonData:
       url: ${NETBOX_URL}

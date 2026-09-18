@@ -149,7 +149,7 @@ for v in "${VERSIONS[@]}"; do
     # b. objects query returns the seeded device WITH a display_url column
     check "objects query + display_url" \
       'import json,sys; fr=json.load(sys.stdin)["results"]["A"]["frames"][0]; n=[f["name"] for f in fr["schema"]["fields"]]; assert "display_url" in n and "compat-r1" in fr["data"]["values"][n.index("name")]' \
-      '{"queries":[{"refId":"A","datasource":{"type":"grafana-netboxlabs-datasource","uid":"netboxlabs-netbox"},"queryType":"objects","objectType":"dcim/devices","limit":10}]}' || ok=0
+      '{"queries":[{"refId":"A","datasource":{"type":"netboxlabs-netbox-datasource","uid":"netboxlabs-netbox"},"queryType":"objects","objectType":"dcim/devices","limit":10}]}' || ok=0
     # c. annotations query (the seed just generated object-change records)
     now_ms=$(($(date +%s) * 1000))
     check "annotations query" \
@@ -168,7 +168,7 @@ assert g("address_dns_name")=="compat-r1.example.net", g("address_dns_name")
 assert g("interface_name")=="eth0", g("interface_name")
 assert g("device_name")=="compat-r1", g("device_name")
 assert g("is_primary_ip") is True, g("is_primary_ip")' \
-      '{"queries":[{"refId":"A","datasource":{"type":"grafana-netboxlabs-datasource","uid":"netboxlabs-netbox"},"queryType":"ip-enrichment","ips":"10.99.0.5","contextFields":["ip","match_count","address_dns_name","interface_name","device_name","is_primary_ip"]}]}' || ok=0
+      '{"queries":[{"refId":"A","datasource":{"type":"netboxlabs-netbox-datasource","uid":"netboxlabs-netbox"},"queryType":"ip-enrichment","ips":"10.99.0.5","contextFields":["ip","match_count","address_dns_name","interface_name","device_name","is_primary_ip"]}]}' || ok=0
 
     # d2. Same flag, PROJECTED path. Selecting is_primary_ip with no device_*
     #     column beside it is what makes the device hop request
@@ -192,7 +192,7 @@ g=lambda c: fr["data"]["values"][n.index(c)][0]
 assert g("is_primary_ip") is True, g("is_primary_ip")
 w=(fr.get("schema",{}).get("meta",{}) or {}).get("notices") or []
 assert not [x for x in w if x.get("severity")=="warning"], w' \
-      '{"queries":[{"refId":"A","datasource":{"type":"grafana-netboxlabs-datasource","uid":"netboxlabs-netbox"},"queryType":"ip-enrichment","ips":"10.99.0.5","contextFields":["ip","is_primary_ip"]}]}' || ok=0
+      '{"queries":[{"refId":"A","datasource":{"type":"netboxlabs-netbox-datasource","uid":"netboxlabs-netbox"},"queryType":"ip-enrichment","ips":"10.99.0.5","contextFields":["ip","is_primary_ip"]}]}' || ok=0
     # e. ip-enrichment, prefix fallback: an IP with no address record resolves to
     #    the longest containing prefix. prefix_scope is the 4.2 floor's field.
     check "ip-enrichment prefix fallback" \
@@ -202,7 +202,7 @@ n=[f["name"] for f in fr["schema"]["fields"]]
 g=lambda c: fr["data"]["values"][n.index(c)][0]
 assert g("prefix_cidr")=="10.99.0.0/24", g("prefix_cidr")
 assert g("prefix_scope")=="Compat Site", g("prefix_scope")' \
-      '{"queries":[{"refId":"A","datasource":{"type":"grafana-netboxlabs-datasource","uid":"netboxlabs-netbox"},"queryType":"ip-enrichment","ips":"10.99.0.200","contextFields":["ip","prefix_cidr","prefix_scope"]}]}' || ok=0
+      '{"queries":[{"refId":"A","datasource":{"type":"netboxlabs-netbox-datasource","uid":"netboxlabs-netbox"},"queryType":"ip-enrichment","ips":"10.99.0.200","contextFields":["ip","prefix_cidr","prefix_scope"]}]}' || ok=0
   fi
   if [ "$ok" = 1 ]; then RESULTS+=("$v PASS"); else RESULTS+=("$v FAIL"); overall=1; fi
   "${COMPOSE[@]}" down -v >/dev/null 2>&1 || true

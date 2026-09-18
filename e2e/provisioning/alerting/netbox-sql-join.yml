@@ -28,7 +28,7 @@ groups:
             datasourceUid: netboxlabs-netbox
             model:
               refId: NB
-              datasource: { type: grafana-netboxlabs-datasource, uid: netboxlabs-netbox }
+              datasource: { type: netboxlabs-netbox-datasource, uid: netboxlabs-netbox }
               queryType: objects
               objectType: dcim/devices
               fields: [name, site_slug]

@@ -13,7 +13,7 @@
         "label": "Site",
         "type": "query",
         "datasource": {
-          "type": "grafana-netboxlabs-datasource",
+          "type": "netboxlabs-netbox-datasource",
           "uid": "netboxlabs-netbox"
         },
         "query": {
@@ -40,7 +40,7 @@
         "label": "Role",
         "type": "query",
         "datasource": {
-          "type": "grafana-netboxlabs-datasource",
+          "type": "netboxlabs-netbox-datasource",
           "uid": "netboxlabs-netbox"
         },
         "query": {
@@ -107,7 +107,7 @@
         "enable": true,
         "iconColor": "purple",
         "datasource": {
-          "type": "grafana-netboxlabs-datasource",
+          "type": "netboxlabs-netbox-datasource",
           "uid": "netboxlabs-netbox"
         },
         "target": {
@@ -132,14 +132,14 @@
         "h": 8
       },
       "datasource": {
-        "type": "grafana-netboxlabs-datasource",
+        "type": "netboxlabs-netbox-datasource",
         "uid": "netboxlabs-netbox"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "objectType": "dcim/devices",
@@ -200,7 +200,7 @@
         {
           "refId": "NB",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "objectType": "dcim/devices",
@@ -353,7 +353,7 @@
         {
           "refId": "NB",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "objectType": "dcim/devices",
@@ -544,14 +544,14 @@
         "h": 10
       },
       "datasource": {
-        "type": "grafana-netboxlabs-datasource",
+        "type": "netboxlabs-netbox-datasource",
         "uid": "netboxlabs-netbox"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "queryType": "topology",
@@ -571,14 +571,14 @@
         "h": 10
       },
       "datasource": {
-        "type": "grafana-netboxlabs-datasource",
+        "type": "netboxlabs-netbox-datasource",
         "uid": "netboxlabs-netbox"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "objectType": "dcim/sites",
@@ -640,14 +640,14 @@
         "h": 8
       },
       "datasource": {
-        "type": "grafana-netboxlabs-datasource",
+        "type": "netboxlabs-netbox-datasource",
         "uid": "netboxlabs-netbox"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "queryType": "ip-enrichment",
@@ -708,14 +708,14 @@
         "h": 8
       },
       "datasource": {
-        "type": "grafana-netboxlabs-datasource",
+        "type": "netboxlabs-netbox-datasource",
         "uid": "netboxlabs-netbox"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "objectType": "dcim/devices",
@@ -788,7 +788,7 @@
         {
           "refId": "NB",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "objectType": "dcim/devices",
@@ -893,7 +893,7 @@
         {
           "refId": "NB",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "objectType": "ipam/ip-addresses",
@@ -1002,7 +1002,7 @@
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "queryType": "ip-enrichment",
@@ -1116,7 +1116,7 @@
         {
           "refId": "NB",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "objectType": "dcim/devices",
@@ -1191,14 +1191,14 @@
         "h": 9
       },
       "datasource": {
-        "type": "grafana-netboxlabs-datasource",
+        "type": "netboxlabs-netbox-datasource",
         "uid": "netboxlabs-netbox"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-netboxlabs-datasource",
+            "type": "netboxlabs-netbox-datasource",
             "uid": "netboxlabs-netbox"
           },
           "objectType": "ipam/prefixes",

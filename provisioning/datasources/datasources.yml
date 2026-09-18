@@ -2,7 +2,7 @@ apiVersion: 1
 
 datasources:
   - name: NetBox
-    type: grafana-netboxlabs-datasource
+    type: netboxlabs-netbox-datasource
     uid: netboxlabs-netbox
     access: proxy
     isDefault: false

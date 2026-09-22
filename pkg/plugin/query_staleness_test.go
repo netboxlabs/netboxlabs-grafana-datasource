@@ -32,14 +32,14 @@ func TestQuery_StaleReplicaRefusesStrictConsumersWhenAMaxAgeIsSet(t *testing.T) 
 		{"no setting, old data", &old, "", false, ""},
 		{"no setting, unknown age", nil, "", false, ""},
 		{"setting, fresh", &fresh, "15m", false, ""},
-		{"setting, old", &old, "15m", true, "2h0m0s old"},
-		{"setting, unknown age", nil, "15m", true, "age is unknown"},
+		{"setting, old", &old, "15m", true, "2h old"},
+		{"setting, unknown age", nil, "15m", true, "reports no commit time"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := &provider.Result{Columns: []string{"name"}, Rows: []map[string]interface{}{{"name": "a"}}, Total: 1,
 				DataAsOf: tc.asOf, SnapshotComplete: &yes}
 			d := newTestDatasource(&fakeProvider{result: res})
-			d.cfg.MaxDataAge = tc.maxAge
+			d.cfg.Mode, d.cfg.MaxDataAge = models.ModeReplicaCache, tc.maxAge
 			for _, c := range []consumer{consumerAlert, consumerExpression} {
 				resp := d.query(context.Background(), objects, c)
 				if (resp.Error != nil) != tc.refused {
@@ -65,7 +65,7 @@ func TestQuery_AlertTableShapeIsRefusedOnStalenessForAnyConsumer(t *testing.T) {
 	res := &provider.Result{Columns: []string{"name"}, Rows: []map[string]interface{}{{"name": "a"}}, Total: 1,
 		DataAsOf: &old, SnapshotComplete: &yes}
 	d := newTestDatasource(&fakeProvider{result: res})
-	d.cfg.MaxDataAge = "15m"
+	d.cfg.Mode, d.cfg.MaxDataAge = models.ModeReplicaCache, "15m"
 	q := backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices","alertTable":true,"limit":100}`)}
 	if resp := d.query(context.Background(), q, consumerDashboard); resp.Error == nil || !strings.Contains(resp.Error.Error(), "old") {
 		t.Errorf("alert-table preview on stale data: %v", resp.Error)
@@ -78,7 +78,7 @@ func TestQuery_AlertTableShapeIsRefusedOnStalenessForAnyConsumer(t *testing.T) {
 func TestQuery_ProducerWithoutFreshnessIsNeverRefusedOnAge(t *testing.T) {
 	res := &provider.Result{Columns: []string{"name"}, Rows: []map[string]interface{}{{"name": "a"}}, Total: 1}
 	d := newTestDatasource(&fakeProvider{result: res})
-	d.cfg.MaxDataAge = "15m"
+	d.cfg.Mode, d.cfg.MaxDataAge = models.ModeReplicaCache, "15m"
 	q := backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`)}
 	if resp := d.query(context.Background(), q, consumerAlert); resp.Error != nil {
 		t.Errorf("a live source has no age to be stale by: %v", resp.Error)
@@ -91,7 +91,7 @@ func TestQuery_UnparseableMaxDataAgeRefusesStrictConsumersAndFailsHealth(t *test
 	yes := true
 	res := &provider.Result{Columns: []string{"name"}, Rows: []map[string]interface{}{{"name": "a"}}, Total: 1, SnapshotComplete: &yes}
 	d := newTestDatasource(&fakeProvider{result: res, healthMsg: "ok"})
-	d.cfg.MaxDataAge = "soon"
+	d.cfg.Mode, d.cfg.MaxDataAge = models.ModeReplicaCache, "soon"
 	q := backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`)}
 	if resp := d.query(context.Background(), q, consumerAlert); resp.Error == nil || !strings.Contains(resp.Error.Error(), "Max data age") {
 		t.Errorf("alert on an unparseable setting: %v", resp.Error)
@@ -116,5 +116,60 @@ func TestMaxDataAgeSetting(t *testing.T) {
 		if _, err := (&models.PluginSettings{MaxDataAge: bad}).MaxDataAgeDuration(); err == nil {
 			t.Errorf("%q must be an error, not silently off", bad)
 		}
+	}
+}
+
+// The setting only exists in replica-cache mode — the editor shows it there
+// alone — so a value left behind by a mode switch or a provisioned datasource
+// must not refuse NetBox-mode rules or fail its Save & Test.
+func TestQuery_MaxDataAgeIsIgnoredOutsideCacheMode(t *testing.T) {
+	res := &provider.Result{Columns: []string{"name"}, Rows: []map[string]interface{}{{"name": "a"}}, Total: 1}
+	d := newTestDatasource(&fakeProvider{result: res, healthMsg: "ok"})
+	d.cfg.MaxDataAge = "soon" // NetBox mode
+	q := backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices","limit":100}`)}
+	if resp := d.query(context.Background(), q, consumerAlert); resp.Error != nil {
+		t.Errorf("NetBox mode refused on a setting it does not use: %v", resp.Error)
+	}
+	if hr, _ := d.CheckHealth(context.Background(), &backend.CheckHealthRequest{}); hr.Status != backend.HealthStatusOk {
+		t.Errorf("health = %v %q", hr.Status, hr.Message)
+	}
+}
+
+// The Count shape is a rule's input as much as the alert table is, and it
+// evaluates a single number with no rows to reveal anything: the loading
+// warning and Max data age refuse it exactly as they refuse the other shapes.
+// Truncation must NOT: a count reads Total and returns one row by design.
+func TestQuery_CountRefusesOnLoadingAndStaleness(t *testing.T) {
+	old := time.Now().Add(-134 * time.Minute)
+	fresh := time.Now().Add(-time.Minute)
+	yes := true
+	count := backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices","count":true}`)}
+	for _, tc := range []struct {
+		name    string
+		res     *provider.Result
+		maxAge  string
+		c       consumer
+		refused string
+	}{
+		{"healthy count", &provider.Result{Total: 42, Rows: []map[string]interface{}{{"id": 1}}, DataAsOf: &fresh, SnapshotComplete: &yes}, "15m", consumerAlert, ""},
+		{"loading replica", &provider.Result{Total: 42, Warnings: []string{"This replica is still loading its initial snapshot; results may be incomplete and their age is unknown."}}, "", consumerAlert, "still loading"},
+		{"stale", &provider.Result{Total: 42, DataAsOf: &old, SnapshotComplete: &yes}, "15m", consumerAlert, "2h 14m old"},
+		{"stale, expression", &provider.Result{Total: 42, DataAsOf: &old, SnapshotComplete: &yes}, "15m", consumerExpression, "2h 14m old"},
+		{"stale, dashboard keeps the number", &provider.Result{Total: 42, DataAsOf: &old, SnapshotComplete: &yes}, "15m", consumerDashboard, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDatasource(&fakeProvider{result: tc.res})
+			d.cfg.Mode, d.cfg.MaxDataAge = models.ModeReplicaCache, tc.maxAge
+			resp := d.query(context.Background(), count, tc.c)
+			if tc.refused == "" {
+				if resp.Error != nil {
+					t.Fatalf("refused: %v", resp.Error)
+				}
+				return
+			}
+			if resp.Error == nil || !strings.Contains(resp.Error.Error(), tc.refused) {
+				t.Errorf("err = %v, want it to contain %q", resp.Error, tc.refused)
+			}
+		})
 	}
 }

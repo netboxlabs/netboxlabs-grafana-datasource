@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -220,6 +221,10 @@ type listPage struct {
 	Count      *int               `json:"count"`
 	NextCursor string             `json:"next_cursor"`
 	Results    *[]json.RawMessage `json:"results"`
+	// DataAsOf is the instant this response reflects: everything committed at
+	// or before it is here. Per response, unlike the catalogue's copy, which
+	// is up to ten minutes old.
+	DataAsOf *string `json:"data_as_of"`
 }
 
 // rows is Results with the presence check already done by listOnce.
@@ -358,8 +363,9 @@ func (c *Client) listOnce(ctx context.Context, entity string, q url.Values, curs
 // provider.Result.Total carries, and alerting reads it, so it is taken from the
 // FIRST page and never recomputed from len(rows) — those two numbers answer
 // different questions and conflating them would report a truncated page as the
-// whole population.
-func (c *Client) list(ctx context.Context, entity string, q url.Values, limit int) ([]json.RawMessage, int, error) {
+// whole population. The instant is the first page's data_as_of, nil when the
+// page carries none or one this client cannot read.
+func (c *Client) list(ctx context.Context, entity string, q url.Values, limit int) ([]json.RawMessage, int, *time.Time, error) {
 	if limit <= 0 {
 		limit = defaultLimit
 	}
@@ -378,6 +384,7 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		first    = true
 		// restarted records the one restart a refused cursor is allowed.
 		restarted bool
+		asOf      *time.Time
 		// seenCursors is every cursor already followed, so a service that
 		// repeats one is caught rather than walked in circles.
 		seenCursors = map[string]bool{}
@@ -406,15 +413,20 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 			var apiErr *APIError
 			if cursor != "" && !restarted && errors.As(err, &apiErr) && apiErr.Status == 400 && strings.HasPrefix(apiErr.Message, "cursor") {
 				restarted = true
-				rows, total, maxTotal, cursor, first = nil, 0, 0, "", true
+				rows, total, maxTotal, cursor, first, asOf = nil, 0, 0, "", true, nil
 				seenCursors = map[string]bool{}
 				continue
 			}
-			return nil, 0, err
+			return nil, 0, nil, err
 		}
 		if first {
 			total = *page.Count
 			first = false
+			if page.DataAsOf != nil {
+				if t, ok := parseDataAsOf(*page.DataAsOf); ok {
+					asOf = &t
+				}
+			}
 		}
 		if n := *page.Count; n > maxTotal {
 			maxTotal = n
@@ -435,7 +447,7 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		// counts have grown to cover them, so the check passes. A service
 		// contradicting itself has no such growth, and is refused.
 		if len(rows) > maxTotal {
-			return nil, 0, &TransportError{
+			return nil, 0, nil, &TransportError{
 				Op:      "reading response from " + truncate(c.base+"/v1/"+entity),
 				Err:     errInconsistentCount,
 				Message: "Replica cache returned more rows than any page's total said existed. The service is reachable but answered with something unexpected.",
@@ -455,7 +467,7 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		// that could spin: the loop's other exits are an empty page and an
 		// absent cursor.
 		if seenCursors[page.NextCursor] {
-			return nil, 0, &TransportError{
+			return nil, 0, nil, &TransportError{
 				Op:      "reading response from " + truncate(c.base+"/v1/"+entity),
 				Err:     errCursorNotAdvancing,
 				Message: "Replica cache returned the same pagination cursor twice, so the results would repeat rather than continue. The service is reachable but answered with something unexpected.",
@@ -476,7 +488,7 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 	if maxTotal > total {
 		total = maxTotal
 	}
-	return rows, total, nil
+	return rows, total, asOf, nil
 }
 
 func truncate(s string) string {

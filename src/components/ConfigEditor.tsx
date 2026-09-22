@@ -267,7 +267,7 @@ export function ConfigEditor(props: Props) {
             <InlineField
               label="Max data age for alert rules"
               labelWidth={26}
-              tooltip="Optional. A Go duration such as 15m or 2h. When set, alert rules and expression-fed queries refuse results older than this, or whose age the replica cannot report, instead of evaluating a stale inventory. Dashboards only show the age. Leave empty to never refuse."
+              tooltip="Optional. A Go duration such as 15m or 2h. When set, alert rules and expression-fed queries refuse results older than this, or whose age the replica cannot report, instead of evaluating a stale inventory. Dashboards only show the age. Leave empty to never refuse on age; a replica still loading its initial snapshot is refused regardless."
             >
               <Input
                 id="config-max-data-age"

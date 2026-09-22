@@ -36,20 +36,23 @@ import (
 // Provider is the replica-cache implementation of provider.Provider.
 type Provider struct {
 	client *Client
-	// netboxURL is the NetBox instance this cache mirrors, used only to build
-	// deep links back into the NetBox UI. Empty means no links are produced.
+	// netboxURL is the configured NetBox URL: the link base when the catalogue
+	// does not report which NetBox the replica mirrors (see linkBase). Empty,
+	// with no catalogue URL either, means no links are produced.
 	netboxURL string
 
 	// Custom-field names per object type, from one bounded row read each,
 	// kept for catalogTTL. See customFieldNames.
-	cfMu    sync.Mutex
-	cfNames map[string]cfEntry
+	cfMu      sync.Mutex
+	cfNames   map[string]cfEntry
+	cfFlights map[string]*flight[cfEntry]
 
 	// The catalogue (GET /v1/_meta/schema), cached for catalogTTL. See
 	// catalog.go.
 	catMu      sync.Mutex
 	cat        *catalog
 	catExpires time.Time
+	catFlight  *flight[*catalog]
 }
 
 // customFieldDataColumn is the JSON blob a NetBox model's custom fields live
@@ -66,8 +69,8 @@ const customFieldSampleRows = 20
 type Option func(*Provider)
 
 // WithNetBoxURL supplies the NetBox instance this cache mirrors, so rows can
-// carry a link back to the object in the NetBox UI. replica-cache serves
-// database rows and cannot produce that link itself.
+// carry a link back to the object in the NetBox UI when the replica's
+// catalogue does not name it (linkBase prefers the catalogue's).
 func WithNetBoxURL(base string) Option {
 	// Normalized exactly as netbox.NewClient normalizes it, and for the same
 	// reason: the setting explicitly tolerates a trailing "/api", so a
@@ -85,8 +88,9 @@ func WithNetBoxURL(base string) Option {
 // as NBC-Netbox-ID; the service rejects requests without it.
 func New(base, token, netboxID string, httpClient *http.Client, opts ...Option) *Provider {
 	p := &Provider{
-		client:  NewClient(base, token, netboxID, httpClient),
-		cfNames: map[string]cfEntry{},
+		client:    NewClient(base, token, netboxID, httpClient),
+		cfNames:   map[string]cfEntry{},
+		cfFlights: map[string]*flight[cfEntry]{},
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -222,24 +226,10 @@ func (p *Provider) entityFor(ctx context.Context, objectType string) (entity, *c
 	return e, c, nil
 }
 
-// NotReplicatedError is an entity the catalogue lists but the replica has
-// received no rows for: not replicated for this tenant, or empty in NetBox —
-// the cache cannot tell which. It is neither an outage nor a missing endpoint,
-// and retrying cannot fix it, so the plugin answers it as a bad request whose
-// remedy is picking a served type.
-type NotReplicatedError struct{ ObjectType string }
-
-func (e *NotReplicatedError) Error() string {
-	return "replica-cache has received no data for " + e.ObjectType
-}
-
-func (e *NotReplicatedError) Classification() *provider.UpstreamError {
-	return &provider.UpstreamError{Kind: provider.ErrorKindNotReplicated, Status: 404, Detail: notReplicatedDetail(e.ObjectType)}
-}
-
-// notReplicatedDetail is shared with the client's 404 classification: the
-// catalogue can be up to ten minutes stale, so the row route's own answer for
-// an unfed entity has to read the same way.
+// notReplicatedDetail is the client's 404 classification for an entity the
+// replica is configured for but has received nothing for. The row route is
+// the one authority on it: the catalogue is cached for ten minutes, and an
+// entity fed a minute ago must not be refused for the rest of them.
 func notReplicatedDetail(objectType string) string {
 	return fmt.Sprintf("%s is configured on this replica but has received no data for it (not replicated, or empty in NetBox — the cache cannot tell).", objectType)
 }
@@ -318,6 +308,12 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	if err != nil {
 		return nil, err
 	}
+	// An unfed entity carries no columns in the catalogue (the service lists
+	// them once it has ingested), and its row route answers 404: nothing to
+	// offer and nothing to read.
+	if !e.Ingested {
+		return nil, nil
+	}
 	var out []provider.Field
 	for _, col := range e.Columns {
 		if col.Name == customFieldDataColumn {
@@ -328,9 +324,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	for _, name := range e.expandedColumns() {
 		out = append(out, provider.Field{Name: name, Type: provider.FieldTypeString})
 	}
-	// Only an entity with data can name its custom fields; an unfed one answers
-	// 404 on rows, and nothing is read from it.
-	if e.Ingested && e.has(customFieldDataColumn) {
+	if e.has(customFieldDataColumn) {
 		cf, err := p.customFieldNames(ctx, objectType)
 		if err != nil {
 			return nil, err
@@ -360,12 +354,31 @@ func (p *Provider) linkBase(c *catalog) string {
 func (p *Provider) customFieldNames(ctx context.Context, objectType string) (cfEntry, error) {
 	p.cfMu.Lock()
 	cur, ok := p.cfNames[objectType]
-	p.cfMu.Unlock()
 	if ok && time.Now().Before(cur.expires) {
+		p.cfMu.Unlock()
 		return cur, nil
 	}
+	// One read serves every concurrent caller (see flight).
+	if fl := p.cfFlights[objectType]; fl != nil {
+		p.cfMu.Unlock()
+		return fl.wait(ctx)
+	}
+	fl := &flight[cfEntry]{done: make(chan struct{})}
+	p.cfFlights[objectType] = fl
+	p.cfMu.Unlock()
+	entry, err := p.readCustomFieldNames(ctx, objectType)
+	p.cfMu.Lock()
+	fl.val, fl.err = entry, err
+	if p.cfFlights[objectType] == fl {
+		delete(p.cfFlights, objectType)
+	}
+	p.cfMu.Unlock()
+	close(fl.done)
+	return entry, err
+}
 
-	raws, _, err := p.client.list(ctx, objectType, withFields(nil, []string{customFieldDataColumn}), customFieldSampleRows)
+func (p *Provider) readCustomFieldNames(ctx context.Context, objectType string) (cfEntry, error) {
+	raws, _, _, err := p.client.list(ctx, objectType, withFields(nil, []string{customFieldDataColumn}), customFieldSampleRows)
 	if err != nil {
 		return cfEntry{}, err
 	}
@@ -460,7 +473,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	if err := rejectBranch(ctx); err != nil {
 		return nil, err
 	}
-	e, _, err := p.entityFor(ctx, objectType)
+	e, c, err := p.entityFor(ctx, objectType)
 	if err != nil {
 		return nil, err
 	}
@@ -468,10 +481,20 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 		limit = 1000
 	}
 	pk := e.pk()
-	// Autocomplete on a column we synthesize has nothing upstream to read.
-	col, ok := e.column(field)
-	if !ok {
-		return nil, nil
+	// A stored column is read as itself. A related name FilterFields offers
+	// (site, site_slug) is read under expand=, projected to the primary key
+	// alone: the service returns the expanded columns beside it, and the
+	// search below is the TARGET column's, since that is what ilike runs on.
+	// Anything else — a name this replica cannot produce — has nothing to read.
+	col, stored := e.column(field)
+	var params url.Values
+	if !stored {
+		via, target, ok := e.expandedColumn(field)
+		if !ok || !via.Ref.Available {
+			return nil, nil
+		}
+		params = url.Values{"expand": {via.Ref.ExpandKey}}
+		col = targetColumn(c, via.Ref, target)
 	}
 
 	// A substring search is only pushed down when the catalogue says the
@@ -488,17 +511,25 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	// which is not what someone typing "a,b" means. That text is matched
 	// locally, the same answer as for a column that cannot be searched upstream.
 	pushDown := q != "" && slices.Contains(col.Operators, "ilike") && literalPushable(q)
-	var params url.Values
 	if pushDown {
-		var err error
-		params, err = buildFilterValues([]provider.Filter{{Field: field, Operator: opIContns, Value: q}})
+		fv, err := buildFilterValues([]provider.Filter{{Field: field, Operator: opIContns, Value: q}})
 		if err != nil {
 			return nil, err
 		}
+		if params == nil {
+			params = url.Values{}
+		}
+		for k, vs := range fv {
+			params[k] = vs
+		}
 	}
-	params = withFields(params, []string{field})
+	if stored {
+		params = withFields(params, []string{field})
+	} else {
+		params = withFields(params, []string{pk})
+	}
 
-	raws, _, err := p.client.list(ctx, objectType, params, limit)
+	raws, _, _, err := p.client.list(ctx, objectType, params, limit)
 	if err != nil {
 		return nil, err
 	}

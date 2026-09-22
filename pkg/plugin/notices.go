@@ -298,14 +298,34 @@ func stalenessError(c consumer, res *provider.Result, maxAge time.Duration, now 
 	}
 	v := c.voice()
 	if res.DataAsOf == nil {
-		return fmt.Sprintf("%s read data whose age is unknown (the replica reports no commit time for it), and this datasource allows at most %s, so %s. Wait for the replica to finish loading, or raise or clear Max data age.",
-			v.subject, maxAge, v.stale)
+		// Reachable only once the snapshot is complete: while it loads, the
+		// provider's warning has already refused the result as degraded. So
+		// there is nothing to wait for — the replica reports no commit time
+		// for this entity, and only the setting can change the outcome.
+		return fmt.Sprintf("%s read data whose age is unknown (the replica reports no commit time for this entity), and this datasource allows at most %s, so %s. Raise or clear Max data age.",
+			v.subject, formatAge(maxAge), v.stale)
 	}
 	if age := now.Sub(*res.DataAsOf); age > maxAge {
 		return fmt.Sprintf("%s read data that is %s old and this datasource allows at most %s, so %s. Check the replica's ingestion, or raise Max data age.",
-			v.subject, age.Round(time.Minute), maxAge, v.stale)
+			v.subject, formatAge(age), formatAge(maxAge), v.stale)
 	}
 	return ""
+}
+
+// formatAge writes a duration the way the setting is written: "2h 14m",
+// "15m", "under a minute" — not Go's "2h14m0s".
+func formatAge(d time.Duration) string {
+	d = d.Round(time.Minute)
+	h, m := int(d.Hours()), int(d.Minutes())%60
+	switch {
+	case h > 0 && m > 0:
+		return fmt.Sprintf("%dh %dm", h, m)
+	case h > 0:
+		return fmt.Sprintf("%dh", h)
+	case m > 0:
+		return fmt.Sprintf("%dm", m)
+	}
+	return "under a minute"
 }
 
 // thousands formats n with comma separators (104231 -> "104,231") so large

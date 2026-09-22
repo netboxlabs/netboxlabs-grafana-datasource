@@ -70,10 +70,12 @@ type PluginSettings struct {
 	// MaxDataAge, when set, is how old a replica-cache result may be before an
 	// alert rule or an expression-fed query refuses it rather than evaluating
 	// a stale inventory as current — a Go duration such as "15m". Empty means
-	// never refuse: a replica can legitimately report no age at all (a tenant
-	// mid-way through its initial load), and dashboards only show the age.
-	// It only ever applies to a backend that reports freshness; NetBox mode
-	// ignores it. See MaxDataAgeDuration.
+	// never refuse ON AGE: a replica can legitimately report no age for an
+	// entity once its snapshot is complete, and dashboards only show the age.
+	// (A replica still loading its initial snapshot is refused regardless, as
+	// a degraded result.) Read in replica-cache mode alone, where the editor
+	// shows it; NetBox mode ignores it, including a value that does not parse.
+	// See MaxDataAgeDuration.
 	MaxDataAge string `json:"maxDataAge"`
 
 	Secrets *SecretPluginSettings `json:"-"`

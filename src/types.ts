@@ -123,7 +123,8 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
   /** replica-cache mode only. A Go duration such as 15m or 2h. When set, alert
    * rules and expression-fed queries refuse a result older than this, or whose
    * age the replica cannot report, instead of evaluating a stale inventory.
-   * Dashboards only show the age. Empty = never refuse. */
+   * Dashboards only show the age. Empty = never refuse on age (a replica still
+   * loading its initial snapshot is refused regardless). */
   maxDataAge?: string;
 }
 

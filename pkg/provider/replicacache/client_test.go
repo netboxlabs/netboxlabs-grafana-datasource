@@ -18,7 +18,7 @@ import (
 // truncation notice is suppressed when Total is zero, presents a truncated
 // table as though it were the whole population.
 func TestEnvelopeWithoutCountIsRejected(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"results": [{"id": 1, "name": "CORE-1"}]}`))
 	}))
@@ -41,7 +41,7 @@ func TestEnvelopeWithoutCountIsRejected(t *testing.T) {
 // A count of zero is a real answer and must still be accepted: the guard is on
 // the field's presence, not its value.
 func TestZeroCountIsAnAnswer(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count": 0, "results": []}`))
 	}))
@@ -65,7 +65,7 @@ func TestOversizedBodyIsRejected(t *testing.T) {
 	maxBodyBytes = 1024
 	defer func() { maxBodyBytes = prev }()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count": 1, "results": [{"pad": "`))
 		_, _ = w.Write([]byte(strings.Repeat("x", 4096)))
@@ -91,7 +91,7 @@ func TestOversizedBodyIsRejected(t *testing.T) {
 // empty answer — including to an alert rule, which would evaluate "no matches"
 // as a fact rather than as a failure to read.
 func TestEnvelopeWithoutResultsIsRejected(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count": 0}`))
 	}))
@@ -110,7 +110,7 @@ func TestEnvelopeWithoutResultsIsRejected(t *testing.T) {
 // And an explicitly empty results array is a real answer, so the guard stays on
 // presence rather than becoming a rejection of empty tables.
 func TestEmptyResultsArrayIsAnAnswer(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count": 0, "results": []}`))
 	}))
@@ -131,7 +131,7 @@ func TestEmptyResultsArrayIsAnAnswer(t *testing.T) {
 // alert-table query turns an empty row into a value of 1 — a spurious alert
 // built out of a malformed response.
 func TestNullResultRowIsRejected(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count": 1, "results": [null]}`))
 	}))
@@ -152,7 +152,7 @@ func TestNullResultRowIsRejected(t *testing.T) {
 
 // A row that is a scalar rather than an object is the same protocol failure.
 func TestScalarResultRowIsRejected(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count": 1, "results": ["CORE-1"]}`))
 	}))
@@ -169,7 +169,7 @@ func TestScalarResultRowIsRejected(t *testing.T) {
 // a connection this mode may not even have configured.
 func TestEveryStatusNamesTheCache(t *testing.T) {
 	for _, status := range []int{405, 413, 429, 418} {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(status)
 			_, _ = w.Write([]byte(`{"error": "nope"}`))
 		}))
@@ -197,7 +197,7 @@ func TestPageContradictingItsOwnCountIsRejected(t *testing.T) {
 		`{"count": 0, "results": [{"id": 1, "name": "CORE-1"}]}`,
 		`{"count": -5, "results": []}`,
 	} {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(body))
 		}))
@@ -216,7 +216,7 @@ func TestPageContradictingItsOwnCountIsRejected(t *testing.T) {
 
 	// A page smaller than the total is the ordinary case — that is what paging
 	// IS — and must not be caught by this guard.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count": 500, "results": [{"id": 1, "name": "CORE-1"}]}`))
 	}))
@@ -238,7 +238,7 @@ func TestPageContradictingItsOwnCountIsRejected(t *testing.T) {
 // inequality, so an alert would evaluate the extra row as authoritative.
 func TestPagesThatContradictEachOtherAreRejected(t *testing.T) {
 	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		body := `{"count": 1, "results": [{"id": 1, "name": "A"}], "next_cursor": "c2"}`
@@ -267,7 +267,7 @@ func TestPagesThatContradictEachOtherAreRejected(t *testing.T) {
 // largest would turn ordinary concurrent writes into a query failure.
 func TestGrowingTotalMidWalkIsNotAContradiction(t *testing.T) {
 	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		body := `{"count": 1, "results": [{"id": 1, "name": "A"}], "next_cursor": "c2"}`
@@ -304,7 +304,7 @@ func TestGrowingTotalMidWalkIsNotAContradiction(t *testing.T) {
 // the totals agree.
 func TestRepeatedCursorIsRejected(t *testing.T) {
 	var hits int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		hits++
 		w.Header().Set("Content-Type", "application/json")
 		// Always the same row, always the same cursor.
@@ -329,7 +329,7 @@ func TestRepeatedCursorIsRejected(t *testing.T) {
 // Distinct cursors are the ordinary walk and must not be caught by the guard.
 func TestDistinctCursorsWalkNormally(t *testing.T) {
 	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		switch n {
@@ -358,7 +358,7 @@ func TestDistinctCursorsWalkNormally(t *testing.T) {
 // the reader their column's type could not be determined — sending them to edit
 // a filter that was fine, over a credential that was not.
 func TestSamplingFailureIsReportedAsItselfNotAsABadFilter(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error": "invalid token"}`))
 	}))
@@ -395,7 +395,7 @@ func TestRowWithoutAPrimaryKeyIsRejected(t *testing.T) {
 		`{"count": 1, "results": [{"name": "CORE-1"}]}`,
 		`{"count": 1, "results": [{"id": "not-a-number", "name": "CORE-1"}]}`,
 	} {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(body))
 		}))
@@ -418,7 +418,7 @@ func TestRowWithoutAPrimaryKeyIsRejected(t *testing.T) {
 // subset as the whole population.
 func TestTotalCoversAPageCountThatGrewPastTheLimit(t *testing.T) {
 	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		row := `{"id": ` + strconv.Itoa(n) + `}`
@@ -453,7 +453,7 @@ func TestTotalCoversAPageCountThatGrewPastTheLimit(t *testing.T) {
 // guard does not catch this.
 func TestDuplicateObjectIDsAreRejected(t *testing.T) {
 	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		if n == 1 {
@@ -476,7 +476,7 @@ func TestDuplicateObjectIDsAreRejected(t *testing.T) {
 
 // Within one page too, and distinct ids across pages stay perfectly ordinary.
 func TestDistinctObjectIDsWalkNormally(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count": 3, "results": [{"id": 1}, {"id": 2}, {"id": 3}]}`))
 	}))

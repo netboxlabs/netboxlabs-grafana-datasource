@@ -3,7 +3,6 @@ package replicacache
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -150,9 +149,12 @@ type schemaReference struct {
 }
 
 func (doc schemaDoc) toCatalog() (*catalog, error) {
-	if doc.Entities == nil {
-		return nil, &TransportError{Op: "read catalogue", Err: fmt.Errorf("schema route returned no entities"),
-			Message: "Replica cache answered the schema route with no entities, so nothing can be queried."}
+	if len(doc.Entities) == 0 {
+		return nil, &TransportError{
+			Op:      "listing object types",
+			Err:     errEmptyCatalogue,
+			Message: "Replica cache returned an empty catalogue, so no object types could be listed. The service is reachable but answered with nothing usable; retry, and check the replica-cache URL and NetBox instance ID.",
+		}
 	}
 	out := &catalog{
 		SnapshotComplete: doc.SnapshotComplete,

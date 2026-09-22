@@ -186,7 +186,7 @@ var (
 	errMalformedCustomFields = errors.New("custom field data could not be read")
 	errInconsistentCount     = errors.New("page holds more rows than its reported total")
 	errCursorNotAdvancing    = errors.New("pagination cursor repeated")
-	errEmptyDiscovery        = errors.New("API description lists no object types")
+	errEmptyCatalogue        = errors.New("catalogue lists no object types")
 )
 
 // errorBody is the service's failure shape: {"error": "unknown column: foo"}.

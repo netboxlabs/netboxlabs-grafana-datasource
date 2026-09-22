@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,66 +13,32 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
-func TestObjectTypesFromTheAPIDescription(t *testing.T) {
+// The value is app/model, split at the last slash, and the label reads as the
+// NetBox provider's would: "Ip Addresses" looks like a typo.
+func TestObjectTypes_SplitAppAndModelAndLabelAcronyms(t *testing.T) {
 	f := newFakeService()
-	f.entities["dcim/devices"] = nil
-	f.entities["ipam/ip-addresses"] = nil
+	f.addEntity("ipam/ip-addresses", "id:BIGINT:pk", "address:VARCHAR")
 	p := newTestProvider(t, f)
 
 	types, err := p.ObjectTypes(context.Background())
 	if err != nil {
 		t.Fatalf("ObjectTypes: %v", err)
 	}
-	if len(types) != 2 {
-		t.Fatalf("want 2 object types, got %d: %+v", len(types), types)
-	}
-	// Sorted, so the editor's dropdown does not reshuffle between refreshes.
-	if types[0].Value != "dcim/devices" || types[1].Value != "ipam/ip-addresses" {
-		t.Errorf("want sorted values, got %q then %q", types[0].Value, types[1].Value)
-	}
-	if types[0].App != "dcim" || types[0].Model != "devices" {
-		t.Errorf("app/model not split: %+v", types[0])
-	}
-	// Acronyms read as acronyms; "Ip Addresses" would look like a typo.
-	if types[1].Label != "IP Addresses" {
-		t.Errorf("label = %q, want %q", types[1].Label, "IP Addresses")
-	}
-}
-
-// The per-id path must not become an object type: it is not listable.
-func TestObjectTypesIgnoresItemPaths(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = nil
-	p := newTestProvider(t, f)
-
-	types, err := p.ObjectTypes(context.Background())
-	if err != nil {
-		t.Fatalf("ObjectTypes: %v", err)
-	}
+	byValue := map[string]provider.ObjectType{}
 	for _, ty := range types {
-		if strings.Contains(ty.Value, "{") {
-			t.Errorf("item path leaked into object types: %q", ty.Value)
-		}
+		byValue[ty.Value] = ty
 	}
-}
-
-func TestHealthCheck(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = nil
-	p := newTestProvider(t, f)
-
-	msg, err := p.HealthCheck(context.Background())
-	if err != nil {
-		t.Fatalf("HealthCheck: %v", err)
+	if d := byValue["dcim/devices"]; d.App != "dcim" || d.Model != "devices" {
+		t.Errorf("app/model not split: %+v", d)
 	}
-	if !strings.Contains(msg, "1 object type") {
-		t.Errorf("health message should report what was found, got %q", msg)
+	if ip := byValue["ipam/ip-addresses"]; ip.Label != "IP Addresses" {
+		t.Errorf("label = %q, want %q", ip.Label, "IP Addresses")
 	}
 }
 
 func TestHealthCheckSurfacesAuthFailure(t *testing.T) {
 	f := newFakeService()
-	f.noSwagger = true
+	f.status, f.errBody = 401, "unauthorized"
 	p := newTestProvider(t, f)
 
 	if _, err := p.HealthCheck(context.Background()); err == nil {
@@ -262,54 +229,6 @@ func TestQueryPropagatesUpstreamFailure(t *testing.T) {
 	}
 }
 
-// Discovery is served by one large document and was measured failing (TLS
-// timeouts, truncated bodies) against an instance whose row endpoints were
-// still answering fine. Blocking every query on it would turn a slow endpoint
-// into a total outage, so a query proceeds and lets the row request be
-// authoritative.
-func TestQueryProceedsWhenDiscoveryIsUnavailable(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.noSwagger = true
-	p := newTestProvider(t, f)
-
-	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
-	if err != nil {
-		t.Fatalf("a query must still run when discovery is down: %v", err)
-	}
-	if len(res.Rows) != 1 || res.Rows[0]["name"] != "CORE-1" {
-		t.Fatalf("rows not returned: %+v", res.Rows)
-	}
-	// FK names cannot be built without the entity list, so the gap is stated
-	// rather than left as a silently missing column.
-	if len(res.Warnings) == 0 {
-		t.Error("want a warning that related names are missing")
-	}
-	if res.Rows[0]["site_id"] != float64(4001) {
-		t.Error("the raw id must still be present")
-	}
-}
-
-// With discovery down, a genuinely unknown type is caught by the row request
-// itself and classified from its 404 — not reported as "one of the 0 types
-// this deployment reports", which is what a count from a failed discovery
-// would have produced.
-func TestUnknownTypeWithoutDiscoveryClassifiesAsNotFound(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "d", 1)}
-	f.noSwagger = true
-	p := newTestProvider(t, f)
-
-	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/widgets"})
-	if err == nil {
-		t.Fatal("want an error for an unknown object type")
-	}
-	u := provider.Classify(err)
-	if u == nil || u.Kind != provider.ErrorKindNotFound {
-		t.Fatalf("want a not-found classification, got %+v", u)
-	}
-}
-
 // A dimension that times out yields a SHORTER column list, because the resolved
 // names are missing. Caching that would pin the loss for the whole TTL: the
 // editor would stop offering columns that queries keep returning. Measured live
@@ -354,6 +273,9 @@ func TestFieldsCachesACompleteColumnList(t *testing.T) {
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
 	f.entities["dcim/sites"] = []map[string]interface{}{
 		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
+	}
+	f.entities["dcim/device-roles"] = []map[string]interface{}{
+		{"id": float64(5), "name": "Core Router", "slug": "core-router"},
 	}
 	p := newTestProvider(t, f)
 	ctx := context.Background()
@@ -593,6 +515,7 @@ func TestCacheFailuresNameCacheSettings(t *testing.T) {
 // columns classified as text and offered ILIKE.
 func TestDateColumnsAreNotText(t *testing.T) {
 	f := newFakeService()
+	f.addEntity("circuits/circuits", "id:BIGINT:pk", "cid:VARCHAR", "termination_date:VARCHAR", "install_date:VARCHAR", "created:VARCHAR", "description:VARCHAR")
 	f.entities["circuits/circuits"] = []map[string]interface{}{{
 		"id": float64(1), "cid": "ntt-001",
 		"termination_date": "2026-05-06",
@@ -649,21 +572,28 @@ func TestTransportFailuresNameTheCache(t *testing.T) {
 // "nothing exists". Caching it would pin an empty entity set for the whole TTL,
 // and every object query would then be rejected locally while the row endpoints
 // are perfectly healthy — the opposite of the degradation this path is for.
-func TestEmptyDiscoveryIsNotCachedAsAnAnswer(t *testing.T) {
-	f := newFakeService() // no entities at all, so the document has no list paths
+// A 200 carrying no entities is a catalogue FAILURE, not an answer of "nothing
+// exists". Caching it would pin an empty entity set for the whole TTL, and
+// every query would then be refused locally while the service is healthy.
+func TestEmptyCatalogueIsNotCachedAsAnAnswer(t *testing.T) {
+	f := newFakeService()
+	f.schema.Entities = map[string]fakeEntity{}
 	p := newTestProvider(t, f)
 	ctx := context.Background()
 
 	if _, err := p.ObjectTypes(ctx); err == nil {
-		t.Fatal("an empty API description must be an error, not an empty answer")
+		t.Fatal("an empty catalogue must be an error, not an empty answer")
 	}
 
-	// And nothing was cached: a query must still reach the row endpoint rather
-	// than being refused against an entity set that claims nothing exists.
+	// And nothing was cached: once the catalogue fills, the next call reads it
+	// rather than the remembered failure.
+	f.mu.Lock()
+	f.schema = devicesSchema()
+	f.mu.Unlock()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
 	res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices"})
 	if err != nil {
-		t.Fatalf("the row request is authoritative when discovery failed: %v", err)
+		t.Fatalf("a failed catalogue fetch must not be remembered: %v", err)
 	}
 	if len(res.Rows) != 1 {
 		t.Errorf("want the row, got %d", len(res.Rows))
@@ -674,7 +604,7 @@ func TestEmptyDiscoveryIsNotCachedAsAnAnswer(t *testing.T) {
 // but unclassified it renders as "Couldn't reach NetBox", which is wrong twice:
 // we reached it, and it was not NetBox.
 func TestMalformedResponseNamesTheCache(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"count": 3, "results": [{"id":`)) // truncated
 	}))
@@ -703,6 +633,8 @@ func TestMalformedResponseNamesTheCache(t *testing.T) {
 // ILIKE, which this backend then pushes at a timestamp column.
 func TestTimestampValuesDecideRegardlessOfColumnName(t *testing.T) {
 	f := newFakeService()
+	f.addEntity("core/jobs", "id:BIGINT:pk", "scheduled:VARCHAR", "started:VARCHAR", "completed:VARCHAR", "last_synced:VARCHAR",
+		"last_sync:VARCHAR", "read:VARCHAR", "last_login:VARCHAR", "merged_time:VARCHAR", "date_added:VARCHAR", "description:VARCHAR", "name:VARCHAR")
 	f.entities["core/jobs"] = []map[string]interface{}{{
 		"id":        float64(1),
 		"scheduled": "2026-05-06T17:34:30.696190Z",
@@ -771,16 +703,17 @@ func TestTimestampValuesDecideRegardlessOfColumnName(t *testing.T) {
 // mode — possibly not configured at all. An unclassified error renders through
 // the plugin's fallback as "Cannot reach NetBox", sending Save & Test at the
 // wrong service.
-func TestEmptyDiscoveryPointsAtTheCacheNotNetBox(t *testing.T) {
-	f := newFakeService() // no entities, so the description has no list paths
+func TestEmptyCataloguePointsAtTheCacheNotNetBox(t *testing.T) {
+	f := newFakeService()
+	f.schema.Entities = map[string]fakeEntity{} // a catalogue with nothing in it
 	p := newTestProvider(t, f)
 
 	_, err := p.ObjectTypes(context.Background())
 	if err == nil {
 		t.Fatal("want an error for an empty API description")
 	}
-	if !errors.Is(err, errEmptyDiscovery) {
-		t.Errorf("want errEmptyDiscovery, got %v", err)
+	if !errors.Is(err, errEmptyCatalogue) {
+		t.Errorf("want errEmptyCatalogue, got %v", err)
 	}
 	u := provider.Classify(err)
 	if u == nil {
@@ -822,42 +755,12 @@ func TestHealthCheckDoesNotAnswerFromCache(t *testing.T) {
 	}
 }
 
-// A plugin's models sit one level deeper, and the object type has to read
-// plugins/bgp/bgp-sessions — the same value the NetBox provider produces for
-// the same model. A saved query names one thing; both modes have to answer to
-// it. Rejecting the path omitted every plugin model from the editor, and once
-// discovery was cached validateObjectType rejected the saved query too.
-func TestDiscoveryAcceptsPluginPaths(t *testing.T) {
-	cases := []struct {
-		path              string
-		wantApp, wantMode string
-		ok                bool
-	}{
-		{"/v1/dcim/devices", "dcim", "devices", true},
-		{"/v1/plugins/bgp/bgp-sessions", "plugins/bgp", "bgp-sessions", true},
-		{"/v1/plugins/branching/branches", "plugins/branching", "branches", true},
-		// Detail routes are not collections, at either depth.
-		{"/v1/dcim/devices/{id}", "", "", false},
-		{"/v1/plugins/bgp/bgp-sessions/{id}", "", "", false},
-		// Four segments that are not a plugin namespace stay rejected: nothing
-		// says what they would mean.
-		{"/v1/dcim/devices/interfaces", "", "", false},
-		{"/v1/dcim", "", "", false},
-	}
-	for _, tc := range cases {
-		app, model, ok := parseEntityPath(tc.path)
-		if ok != tc.ok || app != tc.wantApp || model != tc.wantMode {
-			t.Errorf("parseEntityPath(%q) = %q,%q,%v; want %q,%q,%v",
-				tc.path, app, model, ok, tc.wantApp, tc.wantMode, tc.ok)
-		}
-	}
-}
-
 // The whole path: a plugin model must reach the editor's list, with the label
 // the NetBox provider gives it, and a query against it must be accepted rather
 // than refused by validateObjectType.
 func TestPluginModelIsQueryable(t *testing.T) {
 	f := newFakeService()
+	f.addEntity("plugins/bgp/bgp-sessions", "id:BIGINT:pk", "name:VARCHAR")
 	f.entities["plugins/bgp/bgp-sessions"] = []map[string]interface{}{
 		{"id": float64(1), "name": "peer-1"},
 	}
@@ -894,7 +797,7 @@ func TestPluginModelIsQueryable(t *testing.T) {
 // malformed response from the cache rendered as "Couldn't reach NetBox" — a
 // connection this mode may not even have configured.
 func TestMalformedSampleRowNamesTheCache(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// A valid envelope whose first row is a scalar.
 		_, _ = w.Write([]byte(`{"count": 1, "results": ["CORE-1"]}`))
@@ -937,7 +840,7 @@ func TestMalformedValueRowIsRejected(t *testing.T) {
 		// cold cache the malformed page is caught by the schema sample one level
 		// up, and this decoder never runs.
 		var n int
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 			n++
 			w.Header().Set("Content-Type", "application/json")
 			// Two good answers first: the schema sample, then the warming
@@ -1042,7 +945,7 @@ func TestAutocompleteFallsBackForUnpushableText(t *testing.T) {
 // the values differ, which is the problem.
 func TestDuplicateIDsInAutocompleteAreRejected(t *testing.T) {
 	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		if n == 1 {
@@ -1070,7 +973,7 @@ func TestDuplicateIDsInAutocompleteAreRejected(t *testing.T) {
 // authoritative.
 func TestValueRowMissingTheProjectedFieldIsRejected(t *testing.T) {
 	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		if n == 1 {
@@ -1095,7 +998,7 @@ func TestValueRowMissingTheProjectedFieldIsRejected(t *testing.T) {
 // an ordinary answer and must stay one.
 func TestValueRowWithANullFieldIsAnAnswer(t *testing.T) {
 	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		if n == 1 {
@@ -1123,6 +1026,7 @@ func TestValueRowWithANullFieldIsAnAnswer(t *testing.T) {
 // returns the exact opposite population while looking healthy.
 func TestATimestampClaimMustHoldAcrossTheSample(t *testing.T) {
 	f := newFakeService()
+	f.addEntity("plugins/acme/widgets", "id:BIGINT:pk", "note:VARCHAR")
 	f.entities["plugins/acme/widgets"] = []map[string]interface{}{
 		// The first non-null value looks like a timestamp; the rest are prose.
 		{"id": float64(1), "note": "2026-05-06T17:34:30.696190Z"},
@@ -1164,6 +1068,7 @@ func TestATimestampClaimMustHoldAcrossTheSample(t *testing.T) {
 // so the guard does not undo the value-led inference it protects.
 func TestAConsistentTimestampColumnIsStillTime(t *testing.T) {
 	f := newFakeService()
+	f.addEntity("core/jobs", "id:BIGINT:pk", "completed:VARCHAR")
 	f.entities["core/jobs"] = []map[string]interface{}{
 		{"id": float64(1), "completed": "2026-05-06T17:34:30.696190Z"},
 		{"id": float64(2), "completed": "2026-05-07T09:00:00.000000Z"},
@@ -1214,58 +1119,75 @@ func TestMainIsTheUnbranchedDataset(t *testing.T) {
 	}
 }
 
-// A deployment that only evaluates alerts never opens the editor, so nothing
-// else fetches the entity list. With an all-null plugin relationship the query
-// path returns before entitySetSoon, so if this did not start a refresh the
-// list stayed cold forever and the column stayed missing forever.
-func TestAColdEntityListIsWarmedInTheBackground(t *testing.T) {
+func TestObjectTypes_ComeFromTheCatalogue(t *testing.T) {
 	f := newFakeService()
-	f.entities["plugins/acme/widgets"] = []map[string]interface{}{
-		{"id": float64(1), "owner_id": nil},
-	}
-	f.entities["plugins/acme/owners"] = []map[string]interface{}{
-		{"id": float64(7), "name": "Acme"},
-	}
-	srv := f.start(t)
-	p := New(srv.URL, "t", "nb", srv.Client())
-	ctx := context.Background()
-
-	// First query: the list is cold, so the column is withheld rather than
-	// guessed — and the refresh starts.
-	res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "plugins/acme/widgets"})
+	p := newTestProvider(t, f)
+	types, err := p.ObjectTypes(context.Background())
 	if err != nil {
-		t.Fatalf("Query: %v", err)
+		t.Fatal(err)
 	}
-	for _, c := range res.Columns {
-		if c == "owner" {
-			t.Error("with a cold list there is no evidence; the column must be withheld")
-		}
+	var values []string
+	for _, ot := range types {
+		values = append(values, ot.Value)
 	}
+	// Every configured entity, fed or not, sorted; the unfed one stays listed so
+	// the error on query can explain it rather than the picker hiding it.
+	want := []string{"core/object-types", "dcim/device-roles", "dcim/devices", "dcim/platforms", "dcim/racks", "dcim/sites", "tenancy/tenants"}
+	if !slices.Equal(values, want) {
+		t.Errorf("values = %v, want %v", values, want)
+	}
+	if n := f.countRequestsFor("docs/openapi.json"); n != 0 {
+		t.Errorf("discovery must not touch openapi.json any more, saw %d requests", n)
+	}
+}
 
-	// The warm runs in the background. Once it lands, the same query gets the
-	// column — without anything else having touched discovery.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := p.cachedEntitySet(); ok {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if _, ok := p.cachedEntitySet(); !ok {
-		t.Fatal("the cold path must start a refresh, or an alert-only deployment stays cold forever")
-	}
-
-	res, err = p.Query(ctx, provider.QuerySpec{ObjectType: "plugins/acme/widgets"})
+// A plugin model keeps its whole app prefix and is labelled after the plugin,
+// exactly as the OpenAPI-path discovery used to produce it.
+func TestObjectTypes_LabelPluginModels(t *testing.T) {
+	f := newFakeService()
+	f.addEntity("plugins/bgp/bgp-sessions", "id:BIGINT", "name:VARCHAR")
+	p := newTestProvider(t, f)
+	types, err := p.ObjectTypes(context.Background())
 	if err != nil {
-		t.Fatalf("Query: %v", err)
+		t.Fatal(err)
 	}
-	var found bool
-	for _, c := range res.Columns {
-		if c == "owner" {
-			found = true
+	for _, ot := range types {
+		if ot.Value == "plugins/bgp/bgp-sessions" {
+			if ot.Label != "Bgp: Bgp Sessions" || ot.App != "plugins/bgp" || ot.Model != "bgp-sessions" {
+				t.Errorf("plugin type = %+v", ot)
+			}
+			if err := p.validateObjectType(context.Background(), ot.Value); err != nil {
+				t.Errorf("a listed plugin type must validate: %v", err)
+			}
+			return
 		}
 	}
-	if !found {
-		t.Errorf("plugins/acme/owners is discoverable now, so owner is a relationship: %v", res.Columns)
+	t.Error("the plugin model was not listed")
+}
+
+func TestHealthCheck_ReportsFedEntitiesAndRequiresTheRoute(t *testing.T) {
+	f := newFakeService()
+	p := newTestProvider(t, f)
+	msg, err := p.HealthCheck(context.Background())
+	if err != nil || !strings.Contains(msg, "7 object types") || !strings.Contains(msg, "6 with data") {
+		t.Errorf("msg=%q err=%v", msg, err)
+	}
+	f.mu.Lock()
+	f.schema = nil
+	f.mu.Unlock()
+	if _, err := p.HealthCheck(context.Background()); err == nil || !strings.Contains(provider.Classify(err).Detail, "predates") {
+		t.Errorf("an older build must fail Save & Test with the upgrade message, got %v", err)
+	}
+}
+
+func TestValidateObjectType_AnswersFromTheCatalogue(t *testing.T) {
+	p := newTestProvider(t, newFakeService())
+	if err := p.validateObjectType(context.Background(), "dcim/devices"); err != nil {
+		t.Errorf("known type: %v", err)
+	}
+	err := p.validateObjectType(context.Background(), "dcim/widgets")
+	var unknown *UnknownObjectTypeError
+	if !errors.As(err, &unknown) {
+		t.Errorf("unknown type: got %v, want UnknownObjectTypeError", err)
 	}
 }

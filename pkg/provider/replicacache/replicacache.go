@@ -8,11 +8,12 @@
 // does. replica-cache answers the same questions from a copy of the underlying
 // tables, and pushes filtering, sorting, projection and counting down into it.
 //
-// The trade is fidelity. It serves raw table rows, so every relationship is a
-// bare integer id, and a handful of NetBox concepts have no representation at
-// all — the change log, contacts, and the content-type table that would say
-// what an IP is attached to. What can be reconstructed is reconstructed (see
-// fk.go); what cannot is refused explicitly rather than returned as an empty
+// The trade is fidelity. It serves raw table rows, so a relationship is a bare
+// integer id unless the service joins the name in (expand=, from the
+// references its catalogue declares), and a handful of NetBox concepts have no
+// representation at all — the change log, contacts, and the content-type table
+// that would say what an IP is attached to. What the catalogue states is used;
+// what it cannot state is refused explicitly rather than returned as an empty
 // result that looks like an answer.
 package replicacache
 
@@ -32,16 +33,9 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
-// discoveryWaitBudget is the most a query will wait for discovery it needs but
-// does not have. Measured healthy at ~1.6s for the full document, so this
-// covers the good case with headroom while capping the bad one far below the
-// request timeout it would otherwise inherit.
-const discoveryWaitBudget = 4 * time.Second
-
 // Provider is the replica-cache implementation of provider.Provider.
 type Provider struct {
 	client *Client
-	fk     *fkCache
 	// netboxURL is the NetBox instance this cache mirrors, used only to build
 	// deep links back into the NetBox UI. Empty means no links are produced.
 	netboxURL string
@@ -92,7 +86,6 @@ func WithNetBoxURL(base string) Option {
 func New(base, token, netboxID string, httpClient *http.Client, opts ...Option) *Provider {
 	p := &Provider{
 		client:  NewClient(base, token, netboxID, httpClient),
-		fk:      newFKCache(),
 		cfNames: map[string]cfEntry{},
 	}
 	for _, opt := range opts {
@@ -224,34 +217,26 @@ func (p *Provider) entityFor(ctx context.Context, objectType string) (entity, *c
 	return e, c, nil
 }
 
-// entitySetIfWarm and entitySetSoon are the entity-set views fk.go still reads
-// while the client-side resolution exists. Both answer from the catalogue; the
-// background warming they used to drive is gone, since the catalogue is read
-// on the query path itself.
-func (p *Provider) entitySetIfWarm() (map[string]bool, bool) {
-	p.catMu.Lock()
-	c := p.cat
-	p.catMu.Unlock()
-	if c == nil {
-		return nil, false
-	}
-	return entitySet(c), true
+// NotReplicatedError is an entity the catalogue lists but the replica has
+// received no rows for: not replicated for this tenant, or empty in NetBox —
+// the cache cannot tell which. It is neither an outage nor a missing endpoint,
+// and retrying cannot fix it, so the plugin answers it as a bad request whose
+// remedy is picking a served type.
+type NotReplicatedError struct{ ObjectType string }
+
+func (e *NotReplicatedError) Error() string {
+	return "replica-cache has received no data for " + e.ObjectType
 }
 
-func (p *Provider) entitySetSoon(ctx context.Context, _ time.Duration) (map[string]bool, bool) {
-	c, err := p.catalogue(ctx, false)
-	if err != nil {
-		return nil, false
-	}
-	return entitySet(c), true
+func (e *NotReplicatedError) Classification() *provider.UpstreamError {
+	return &provider.UpstreamError{Kind: provider.ErrorKindNotReplicated, Status: 404, Detail: notReplicatedDetail(e.ObjectType)}
 }
 
-func entitySet(c *catalog) map[string]bool {
-	set := make(map[string]bool, len(c.Entities))
-	for key := range c.Entities {
-		set[key] = true
-	}
-	return set
+// notReplicatedDetail is shared with the client's 404 classification: the
+// catalogue can be up to ten minutes stale, so the row route's own answer for
+// an unfed entity has to read the same way.
+func notReplicatedDetail(objectType string) string {
+	return fmt.Sprintf("%s is configured on this replica but has received no data for it (not replicated, or empty in NetBox — the cache cannot tell).", objectType)
 }
 
 // rejectBranch refuses a branch-scoped request.

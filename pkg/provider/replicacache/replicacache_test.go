@@ -519,10 +519,10 @@ func TestNetBoxURLIsNormalizedForDeepLinks(t *testing.T) {
 	}
 }
 
-// A search box's text is one literal name. buildFilterValues refuses % and _
-// (no escape syntax upstream) and splits on commas as a multi-value dashboard
-// filter — neither of which is what someone typing CORE_SW means — so
-// propagating that refusal replaced the suggestions with an error.
+// A search box's text is one literal name. buildFilterValues splits on commas
+// as a multi-value dashboard filter, which is not what someone typing "a,b"
+// means, so that text is matched locally instead of being refused; everything
+// else goes upstream as written, since the backend takes the value literally.
 func TestAutocompleteFallsBackForUnpushableText(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{
@@ -552,15 +552,16 @@ func TestAutocompleteFallsBackForUnpushableText(t *testing.T) {
 		}
 	}
 
-	// Ordinary text is still pushed down, so the wildcard fallback has not
-	// quietly become the only path.
-	if _, err := p.FieldValues(context.Background(), "dcim/devices", "name", "CORE", 100); err != nil {
+	// Ordinary text is pushed down as written — the backend's ilike is a
+	// contains on the literal value — so the local fallback has not quietly
+	// become the only path.
+	if _, err := p.FieldValues(context.Background(), "dcim/devices", "name", "CORE_SW", 100); err != nil {
 		t.Fatalf("FieldValues: %v", err)
 	}
 	if r, ok := f.requestWith("dcim/devices", "filter[name]__ilike"); !ok {
 		t.Error("an ordinary search should still be pushed down")
-	} else if got := r.query.Get("filter[name]__ilike"); got != "%CORE%" {
-		t.Errorf("pushed %q, want %%CORE%%", got)
+	} else if got := r.query.Get("filter[name]__ilike"); got != "CORE_SW" {
+		t.Errorf("pushed %q, want CORE_SW", got)
 	}
 }
 
@@ -875,14 +876,14 @@ func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 		ops[x.Name] = x.Operators
 	}
 	for name, want := range map[string][]string{
-		"name":          {"", "ie", "ic", "isw", "iew", "gt", "lt"}, // nullable VARCHAR: text, no is-empty
-		"serial":        {"", "ie", "ic", "isw", "iew", "gt", "lt"}, // NOT NULL VARCHAR: the same
-		"position":      {"", "gt", "lt", "empty", "nempty"},        // nullable DOUBLE: is-empty is exact
-		"id":            {"", "gt", "lt"},                           // NOT NULL BIGINT: never empty
-		"is_full_depth": {"", "gt", "lt"},                           // NOT NULL BOOLEAN
-		"site":          {"", "ie", "ic", "isw", "iew", "gt", "lt"}, // expanded name: the target's name column
-		"site_slug":     {"", "ie", "ic", "isw", "iew", "gt", "lt"},
-		"rack":          {"", "ie", "ic", "isw", "iew", "gt", "lt"},
+		"name":          {"", "ic", "gt", "lt"},              // nullable VARCHAR: contains, no is-empty
+		"serial":        {"", "ic", "gt", "lt"},              // NOT NULL VARCHAR: the same
+		"position":      {"", "gt", "lt", "empty", "nempty"}, // nullable DOUBLE: is-empty is exact
+		"id":            {"", "gt", "lt"},                    // NOT NULL BIGINT: never empty
+		"is_full_depth": {"", "gt", "lt"},                    // NOT NULL BOOLEAN
+		"site":          {"", "ic", "gt", "lt"},              // expanded name: the target's name column
+		"site_slug":     {"", "ic", "gt", "lt"},
+		"rack":          {"", "ic", "gt", "lt"},
 	} {
 		if !slices.Equal(ops[name], want) {
 			t.Errorf("%s: %v, want %v", name, ops[name], want)

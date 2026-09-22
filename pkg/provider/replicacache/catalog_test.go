@@ -3,7 +3,10 @@ package replicacache
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,7 +27,7 @@ func TestCatalog_ParsesTheSchemaRoute(t *testing.T) {
 	if !ok {
 		t.Fatalf("entities keyed by object type, got %v", keys(c.Entities))
 	}
-	if dev.Path != "/v1/dcim/devices" || dev.PrimaryKey != "id" || !dev.Ingested || dev.DataAsOf == nil {
+	if dev.PrimaryKey != "id" || !dev.Ingested || dev.DataAsOf == nil {
 		t.Errorf("devices = %+v", dev)
 	}
 	if got := dev.DataAsOf.UTC().Format(time.RFC3339); got != "2026-09-22T14:03:11Z" {
@@ -88,6 +91,105 @@ func TestCatalog_MissingRouteIsAnOlderBuild(t *testing.T) {
 	_, _ = p.catalogue(context.Background(), false)
 	if n := f.countRequestsFor("_meta/schema"); n != 2 {
 		t.Errorf("a failed fetch must not be cached, got %d requests", n)
+	}
+}
+
+// A 404 that is not the service's own — an HTML page from a proxy or a wrong
+// path — is a wrong URL, not an old build, and the message must send the
+// reader to the setting rather than to a vendor upgrade.
+func TestCatalog_NonServiceRouteIsNotAnOlderBuild(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte("<html><body>not found</body></html>"))
+	}))
+	defer srv.Close()
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.HealthCheck(context.Background())
+	u := provider.Classify(err)
+	if u == nil || strings.Contains(u.Detail, "predates") || !strings.Contains(u.Detail, "URL") {
+		t.Errorf("classification = %+v, want the check-the-URL message", u)
+	}
+}
+
+// The wire format is RFC3339 today; a tenant that ever reports another common
+// shape must not collapse into "no commit time", and one that reports
+// something unreadable must say so rather than pass as unknown.
+func TestCatalog_DataAsOfLayouts(t *testing.T) {
+	for raw, want := range map[string]string{
+		"2026-09-22T14:03:11Z":            "2026-09-22T14:03:11Z",
+		"2026-09-22T14:03:11.123456Z":     "2026-09-22T14:03:11Z",
+		"2026-09-22T14:03:11+00:00":       "2026-09-22T14:03:11Z",
+		"2026-09-22T14:03:11":             "2026-09-22T14:03:11Z",
+		"2026-09-22 14:03:11":             "2026-09-22T14:03:11Z",
+		"2026-09-22T16:03:11+0200":        "2026-09-22T14:03:11Z",
+		"2026-09-22T14:03:11.123456+0000": "2026-09-22T14:03:11Z",
+	} {
+		e := schemaEntity{DataAsOf: strp(raw)}.toEntity()
+		if e.DataAsOf == nil || e.DataAsOf.UTC().Format(time.RFC3339) != want {
+			t.Errorf("%q: DataAsOf=%v, want %s", raw, e.DataAsOf, want)
+		}
+		if e.DataAsOfRaw != "" {
+			t.Errorf("%q: parsed, so the raw value must not be kept: %q", raw, e.DataAsOfRaw)
+		}
+	}
+	e := schemaEntity{DataAsOf: strp("soon")}.toEntity()
+	if e.DataAsOf != nil || e.DataAsOfRaw != "soon" {
+		t.Errorf("unreadable: DataAsOf=%v raw=%q", e.DataAsOf, e.DataAsOfRaw)
+	}
+}
+
+// netbox_url is upstream-controlled and becomes a link target, so only an
+// http(s) URL with a host is accepted, with the /api suffix a NetBox base
+// often carries stripped as WithNetBoxURL strips it.
+func TestCatalog_NetBoxURLIsValidated(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://nb.example.com":      "https://nb.example.com",
+		"https://nb.example.com/api/": "https://nb.example.com",
+		"http://nb:8000/":             "http://nb:8000",
+		"javascript:alert(1)":         "",
+		"//evil.example.com":          "",
+		"nb.example.com":              "",
+		"":                            "",
+	} {
+		c, err := schemaDoc{NetBoxURL: raw, Entities: map[string]schemaEntity{"/v1/x/y": {}}}.toCatalog()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.NetBoxURL != want {
+			t.Errorf("%q: NetBoxURL=%q, want %q", raw, c.NetBoxURL, want)
+		}
+	}
+}
+
+// Twenty panels refreshing together must not fetch the catalogue twenty
+// times, on a cold start or at the TTL boundary.
+func TestCatalog_ConcurrentCallersShareOneFetch(t *testing.T) {
+	f := newFakeService()
+	p := newTestProvider(t, f)
+	burst := func() {
+		var wg sync.WaitGroup
+		for i := 0; i < 20; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := p.ObjectTypes(context.Background()); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	burst()
+	if n := f.countRequestsFor("_meta/schema"); n != 1 {
+		t.Errorf("cold burst fetched the catalogue %d times, want 1", n)
+	}
+	p.catMu.Lock()
+	p.catExpires = time.Now().Add(-time.Second)
+	p.catMu.Unlock()
+	burst()
+	if n := f.countRequestsFor("_meta/schema"); n != 2 {
+		t.Errorf("expiry burst fetched the catalogue %d more times, want 1 (total %d)", n-1, n)
 	}
 }
 

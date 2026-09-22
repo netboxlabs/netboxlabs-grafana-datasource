@@ -246,6 +246,16 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 		if f.Field == "" {
 			continue
 		}
+		op := f.Operator
+		if op == "exact" {
+			op = opExact
+		}
+		// A row with an operator and no value emits no parameter (as in
+		// NetBox mode; see buildFilterValues), so it is not judged either: a
+		// saved query carrying one used to run.
+		if op != opEmpty && op != opNEmpty && len(splitValues(f.Value)) == 0 {
+			continue
+		}
 		var col column
 		if own, ok := e.column(f.Field); ok {
 			col = own
@@ -259,16 +269,12 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 		} else {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: "this replica has no such column to filter on"}
 		}
-		op := f.Operator
-		if op == "exact" {
-			op = opExact
-		}
 		if (op == opIExact || op == opIStarts || op == opIEnds) && slices.Contains(col.Operators, "ilike") {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: textMatchReason}
 		}
 		if op == opEmpty || op == opNEmpty {
 			if fieldTypeOf(col.Type) == provider.FieldTypeString {
-				return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: emptyOnTextReason(col)}
+				return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: emptyOnTextReason(f.Field)}
 			}
 			if !col.Nullable {
 				return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: "that column is NOT NULL on this replica, so nothing in it is ever empty"}
@@ -310,6 +316,6 @@ func targetColumn(c *catalog, ref *reference, name string) column {
 // backend ANDs its filters with no OR; "has any value" needs a negation it
 // does not have. Equality with an empty value is NOT the advice: buildFilterValues
 // drops it, as NetBox mode does, so following it returns every row.
-func emptyOnTextReason(col column) string {
-	return fmt.Sprintf("this backend answers \"is empty\" on a text column with IS NULL, but NetBox stores a blank %s as \"\", not NULL, so the filter would keep the blanks and drop only the nulls — the opposite of what was asked. There is no equivalent here; use a datasource in NetBox mode for this filter", col.Name)
+func emptyOnTextReason(field string) string {
+	return fmt.Sprintf("this backend answers \"is empty\" on a text column with IS NULL, but NetBox stores a blank %s as \"\", not NULL, so the filter would keep the blanks and drop only the nulls — the opposite of what was asked. There is no equivalent here; use a datasource in NetBox mode for this filter", field)
 }

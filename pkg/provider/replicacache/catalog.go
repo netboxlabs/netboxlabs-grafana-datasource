@@ -3,6 +3,7 @@ package replicacache
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"time"
 
@@ -32,12 +33,14 @@ type catalog struct {
 }
 
 type entity struct {
-	Path       string // "/v1/dcim/devices"
-	Table      string
 	PrimaryKey string
 	Ingested   bool
 	DataAsOf   *time.Time
-	Columns    []column // in the table's ordinal order
+	// DataAsOfRaw is a commit time the route reported but this datasource
+	// could not read, kept so the result can say so instead of passing it
+	// off as "no commit time".
+	DataAsOfRaw string
+	Columns     []column // in the table's ordinal order
 }
 
 type column struct {
@@ -194,20 +197,55 @@ func (doc schemaDoc) toCatalog() (*catalog, error) {
 	}
 	out := &catalog{
 		SnapshotComplete: doc.SnapshotComplete,
-		NetBoxURL:        strings.TrimRight(doc.NetBoxURL, "/"),
+		NetBoxURL:        linkBaseOf(doc.NetBoxURL),
 		Entities:         make(map[string]entity, len(doc.Entities)),
 	}
 	for path, se := range doc.Entities {
-		out.Entities[strings.TrimPrefix(path, "/v1/")] = se.toEntity(path)
+		out.Entities[strings.TrimPrefix(path, "/v1/")] = se.toEntity()
 	}
 	return out, nil
 }
 
-func (se schemaEntity) toEntity(path string) entity {
-	e := entity{Path: path, Table: se.Table, PrimaryKey: se.PrimaryKey, Ingested: se.Ingested}
+// linkBaseOf accepts the route's netbox_url as a link base only when it is an
+// http(s) URL with a host: it is upstream-controlled and becomes the target of
+// every "View in NetBox" link. Normalised as WithNetBoxURL normalises the
+// configured field — no trailing slash, no /api — so both build the same
+// paths. Anything else is ignored and the configured URL stays the base.
+func linkBaseOf(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	base := strings.TrimRight(u.String(), "/")
+	return strings.TrimSuffix(base, "/api")
+}
+
+// dataAsOfLayouts is what the route sends (RFC3339) first, then the common
+// shapes a timestamp arrives in when it does not: without fractional seconds
+// or a zone, with a space, with a zone written without its colon.
+var dataAsOfLayouts = []string{
+	time.RFC3339Nano, "2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02T15:04:05.999999999Z0700", "2006-01-02T15:04:05Z0700",
+}
+
+// parseDataAsOf reads a commit instant; a layout without a zone is UTC, which
+// is what the replica writes.
+func parseDataAsOf(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	for _, layout := range dataAsOfLayouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func (se schemaEntity) toEntity() entity {
+	e := entity{PrimaryKey: se.PrimaryKey, Ingested: se.Ingested}
 	if se.DataAsOf != nil {
-		if t, err := time.Parse(time.RFC3339, *se.DataAsOf); err == nil {
+		if t, ok := parseDataAsOf(*se.DataAsOf); ok {
 			e.DataAsOf = &t
+		} else {
+			e.DataAsOfRaw = *se.DataAsOf
 		}
 	}
 	for _, sc := range se.Columns {
@@ -221,8 +259,11 @@ func (se schemaEntity) toEntity(path string) entity {
 }
 
 // SchemaRouteMissingError is a replica-cache build from before the schema
-// route (v1.35, 2026-09-11). Nothing here works without it, so Save & Test
-// says exactly that rather than reporting an empty deployment.
+// route (v1.35, 2026-09-11): the service itself answered 404 for it. Nothing
+// here works without the route, so Save & Test says exactly that rather than
+// reporting an empty deployment. A 404 that is not the service's own — an
+// HTML page from a proxy, a wrong path — is a wrong URL and keeps the plain
+// classification, which points at the setting.
 type SchemaRouteMissingError struct{}
 
 func (e *SchemaRouteMissingError) Error() string {
@@ -233,7 +274,7 @@ func (e *SchemaRouteMissingError) Classification() *provider.UpstreamError {
 	return &provider.UpstreamError{
 		Kind:   provider.ErrorKindUpstream,
 		Status: 404,
-		Detail: "This replica-cache build predates the schema route this datasource needs (v1.35 or later). Ask NetBox Labs to upgrade the replica.",
+		Detail: "This replica-cache build predates the schema route this datasource needs (v1.35 or later), or the replica-cache URL does not point at the service. Check the URL, then ask NetBox Labs to upgrade the replica.",
 	}
 }
 
@@ -241,12 +282,32 @@ func (c *Client) fetchCatalog(ctx context.Context) (*catalog, error) {
 	var doc schemaDoc
 	if err := c.get(ctx, "/v1/_meta/schema", nil, &doc); err != nil {
 		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.Status == 404 {
+		if errors.As(err, &apiErr) && apiErr.Status == 404 && apiErr.Message != "" {
 			return nil, &SchemaRouteMissingError{}
 		}
 		return nil, err
 	}
 	return doc.toCatalog()
+}
+
+// flight is one in-progress fetch that concurrent callers share, so twenty
+// panels refreshing together fetch the ~100 KB catalogue once rather than
+// twenty times, on a cold start and at every TTL boundary alike. done is
+// closed when the fetch ends; the result is read after that.
+type flight[T any] struct {
+	done chan struct{}
+	val  T
+	err  error
+}
+
+func (f *flight[T]) wait(ctx context.Context) (T, error) {
+	select {
+	case <-f.done:
+		return f.val, f.err
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	}
 }
 
 // catalogue returns the cached catalogue, fetching when absent or expired.
@@ -259,14 +320,24 @@ func (p *Provider) catalogue(ctx context.Context, force bool) (*catalog, error) 
 		p.catMu.Unlock()
 		return c, nil
 	}
+	if fl := p.catFlight; fl != nil && !force {
+		p.catMu.Unlock()
+		return fl.wait(ctx)
+	}
+	fl := &flight[*catalog]{done: make(chan struct{})}
+	p.catFlight = fl
 	p.catMu.Unlock()
 
 	c, err := p.client.fetchCatalog(ctx)
-	if err != nil {
-		return nil, err
-	}
 	p.catMu.Lock()
-	p.cat, p.catExpires = c, time.Now().Add(catalogTTL)
+	if err == nil {
+		p.cat, p.catExpires = c, time.Now().Add(catalogTTL)
+	}
+	fl.val, fl.err = c, err
+	if p.catFlight == fl {
+		p.catFlight = nil
+	}
 	p.catMu.Unlock()
-	return c, nil
+	close(fl.done)
+	return c, err
 }

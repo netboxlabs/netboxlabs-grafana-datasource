@@ -89,14 +89,15 @@ func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings bac
 // service or an upstream rejection — an outage message for the configuration
 // problem this function exists to name.
 func missingSetting(cfg *models.PluginSettings) string {
-	// Checked for every mode: the setting lives in jsonData, which a mode
-	// switch carries along, and a value that cannot be read must be fixed
-	// before it silently means "off".
-	if _, err := cfg.MaxDataAgeDuration(); err != nil {
-		return "Max data age " + strings.TrimPrefix(err.Error(), "max data age ")
-	}
 	switch cfg.Mode {
 	case models.ModeReplicaCache:
+		// A Max data age that cannot be read must be fixed before it silently
+		// means "off". Only in this mode: the editor shows the field here
+		// alone, and a value left behind by a mode switch must not fail a
+		// NetBox-mode datasource on a field it cannot see.
+		if _, err := cfg.MaxDataAgeDuration(); err != nil {
+			return "Max data age " + strings.TrimPrefix(err.Error(), "max data age ")
+		}
 		switch {
 		case strings.TrimSpace(cfg.ReplicaCacheURL) == "":
 			return "replica-cache URL is missing"
@@ -135,9 +136,8 @@ func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.
 		// is absent. A provisioned datasource missing its URL reported a
 		// construction failure instead of "replica-cache URL is missing".
 		return replicacache.New(cfg.ReplicaCacheURL, cfg.Secrets.ReplicaCacheToken, cfg.NetBoxID, httpClient,
-			// The cache serves database rows, which carry no link back to the
-			// NetBox UI. URL is what makes "View in NetBox" work in this mode;
-			// without it those links simply do not appear.
+			// The link base when the replica's catalogue does not report which
+			// NetBox it mirrors; with neither, rows carry no "View in NetBox".
 			replicacache.WithNetBoxURL(cfg.URL)), nil
 	default:
 		return nil, fmt.Errorf("unknown provider mode %q", cfg.Mode)

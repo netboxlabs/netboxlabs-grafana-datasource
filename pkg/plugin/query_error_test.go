@@ -257,7 +257,7 @@ func TestIsAlertRequest(t *testing.T) {
 // route around — pick a served type — not an outage to retry, so it answers
 // as a bad request with the provider's own sentence.
 func TestNotReplicatedIsABadRequestWithTheProviderSentence(t *testing.T) {
-	err := &replicacache.NotReplicatedError{ObjectType: "dcim/platforms"}
+	err := &replicacache.APIError{Status: 404, URL: "https://rc.example/v1/dcim/platforms?limit=1", Message: "no data received for this entity"}
 	if got := queryErrorMessage(err); !strings.Contains(got, "dcim/platforms") || !strings.Contains(got, "has received no data") {
 		t.Errorf("message = %q", got)
 	}

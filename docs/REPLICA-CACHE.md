@@ -121,12 +121,13 @@ instant:
 - _The age of this data is unknown_ — a note, when the snapshot is complete but
   the replica reports no commit time for the type.
 
-**Max data age** is opt-in. When set, an alert rule or expression-fed query
-refuses a result older than the threshold, or of unknown age, with a message
-naming the age and the setting; dashboards only show the notice. A value that
-is not a duration fails **Save & test** and refuses those queries rather than
-silently meaning "off". The setting has no effect on a data source in NetBox
-mode, whose data is live.
+**Max data age** is opt-in. When set, an alert rule, an expression-fed query
+or a **Count** query refuses a result older than the threshold, or of unknown
+age, with a message naming the age and the setting; dashboards only show the
+notice. A value that is not a duration fails **Save & test** and refuses those
+queries rather than silently meaning "off". The setting is read in
+replica-cache mode only; a data source in NetBox mode ignores it, its data
+being live.
 
 ## Not available in this mode
 
@@ -137,7 +138,8 @@ result:
 - **IP enrichment** (IP list and NetBox scope) — the replica does not carry the
   content-type table that says what an address is assigned to.
 - **Topology** — same reason: cable and interface endpoints are content-typed.
-- **Tags** (`tag` / `tag_id` filters) — not replicated.
+- **Tags** — not replicated; a `tag` filter is refused as a column the replica
+  does not have.
 - **Branches** — the replica mirrors the main dataset only.
 
 Point those queries at a data source in NetBox mode; both can coexist on one

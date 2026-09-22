@@ -63,6 +63,12 @@ type Provider struct {
 
 	fieldsMu sync.Mutex
 	fields   map[string]fieldsCacheEntry
+
+	// The catalogue (GET /v1/_meta/schema), cached for catalogTTL. See
+	// catalog.go.
+	catMu      sync.Mutex
+	cat        *catalog
+	catExpires time.Time
 }
 
 type fieldsCacheEntry struct {

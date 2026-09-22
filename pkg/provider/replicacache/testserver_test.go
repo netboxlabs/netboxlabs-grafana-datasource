@@ -19,6 +19,12 @@ import (
 type fakeService struct {
 	mu sync.Mutex
 
+	// schema is the catalogue the fake serves at /v1/_meta/schema. Nil means
+	// the route does not exist (an older build), and the handler answers 404
+	// "endpoint not found" — which the provider turns into a health-check
+	// failure naming the upgrade.
+	schema *fakeSchema
+
 	// entities maps "app/model" to its rows.
 	entities map[string][]map[string]interface{}
 	// pageCap is the most rows a single response returns, whatever was asked.
@@ -62,6 +68,7 @@ type recordedRequest struct {
 
 func newFakeService() *fakeService {
 	return &fakeService{
+		schema:       devicesSchema(),
 		entities:     map[string][]map[string]interface{}{},
 		failEntities: map[string]bool{},
 		failOnce:     map[string]bool{},
@@ -77,6 +84,28 @@ func (f *fakeService) start(t *testing.T) *httptest.Server {
 }
 
 func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v1/_meta/schema" {
+		// Same discipline as the openapi.json branch below: under the lock,
+		// record the request, honour the status/errBody knobs (Save & Test must
+		// fail on a revoked token even with a warm catalogue), then serve the
+		// document. The pointer is encoded after unlocking; tests that mutate
+		// the schema do so under the lock and sequentially, which is enough.
+		f.mu.Lock()
+		f.requests = append(f.requests, recordedRequest{entity: "_meta/schema", query: r.URL.Query()})
+		schema, status, errBody := f.schema, f.status, f.errBody
+		f.mu.Unlock()
+		if status != 0 && status != 200 {
+			writeErr(w, status, errBody)
+			return
+		}
+		if schema == nil {
+			writeErr(w, 404, "endpoint not found")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(schema)
+		return
+	}
 	if r.URL.Path == "/docs/openapi.json" {
 		f.mu.Lock()
 		hang := f.hangSwagger
@@ -312,3 +341,95 @@ func (f *fakeService) countRequestsFor(entity string) int {
 	}
 	return n
 }
+
+// fakeSchema is the wire shape of GET /v1/_meta/schema, as the fake serves it.
+type fakeSchema struct {
+	SnapshotComplete bool                  `json:"snapshot_complete"`
+	NetBoxURL        string                `json:"netbox_url,omitempty"`
+	Entities         map[string]fakeEntity `json:"entities"`
+}
+
+type fakeEntity struct {
+	Table      string       `json:"table"`
+	PrimaryKey string       `json:"primary_key"`
+	Ingested   bool         `json:"ingested"`
+	DataAsOf   *string      `json:"data_as_of"`
+	Columns    []fakeColumn `json:"columns"`
+}
+
+type fakeColumn struct {
+	Name       string         `json:"name"`
+	Type       string         `json:"type"`
+	Nullable   bool           `json:"nullable"`
+	Operators  []string       `json:"operators"`
+	References *fakeReference `json:"references,omitempty"`
+}
+
+type fakeReference struct {
+	Path      string   `json:"path"`
+	ExpandKey string   `json:"expand_key"`
+	Columns   []string `json:"columns"`
+	Available bool     `json:"available"`
+}
+
+// devicesSchema is the staging dcim/devices catalogue cut down to what the
+// tests exercise: text, number, boolean and VARCHAR-timestamp columns
+// (DATA-250), custom_field_data, the columns deviceFixture carries, and
+// references — available ones with and without a slug, and one whose target
+// has received no data.
+func devicesSchema() *fakeSchema {
+	ops := func(text bool) []string {
+		o := []string{"eq", "gt", "lt", "in", "isnull"}
+		if text {
+			o = append(o, "ilike")
+		}
+		return o
+	}
+	asOf := strp("2026-09-22T14:03:11Z")
+	nameSlug := func(table string) fakeEntity {
+		return fakeEntity{Table: table, PrimaryKey: "id", Ingested: true, DataAsOf: asOf, Columns: []fakeColumn{
+			{Name: "id", Type: "BIGINT", Operators: ops(false)},
+			{Name: "name", Type: "VARCHAR", Operators: ops(true)},
+			{Name: "slug", Type: "VARCHAR", Operators: ops(true)},
+		}}
+	}
+	return &fakeSchema{
+		SnapshotComplete: true,
+		Entities: map[string]fakeEntity{
+			"/v1/dcim/devices": {Table: "dcim_device", PrimaryKey: "id", Ingested: true, DataAsOf: asOf, Columns: []fakeColumn{
+				{Name: "id", Type: "BIGINT", Operators: ops(false)},
+				{Name: "name", Type: "VARCHAR", Nullable: true, Operators: ops(true)},
+				{Name: "serial", Type: "VARCHAR", Nullable: false, Operators: ops(true)},
+				{Name: "position", Type: "DOUBLE", Nullable: true, Operators: ops(false)},
+				{Name: "is_full_depth", Type: "BOOLEAN", Operators: ops(false)},
+				{Name: "created", Type: "VARCHAR", Nullable: true, Operators: ops(true)},
+				{Name: "custom_field_data", Type: "VARCHAR", Nullable: true, Operators: ops(true)},
+				{Name: "status", Type: "VARCHAR", Nullable: true, Operators: ops(true)},
+				{Name: "role_id", Type: "BIGINT", Nullable: true, Operators: ops(false),
+					References: &fakeReference{Path: "/v1/dcim/device-roles", ExpandKey: "role", Columns: []string{"name", "slug"}, Available: true}},
+				{Name: "tenant_id", Type: "BIGINT", Nullable: true, Operators: ops(false),
+					References: &fakeReference{Path: "/v1/tenancy/tenants", ExpandKey: "tenant", Columns: []string{"name", "slug"}, Available: true}},
+				{Name: "site_id", Type: "BIGINT", Nullable: true, Operators: ops(false),
+					References: &fakeReference{Path: "/v1/dcim/sites", ExpandKey: "site", Columns: []string{"name", "slug"}, Available: true}},
+				{Name: "rack_id", Type: "BIGINT", Nullable: true, Operators: ops(false),
+					References: &fakeReference{Path: "/v1/dcim/racks", ExpandKey: "rack", Columns: []string{"name"}, Available: true}},
+				{Name: "platform_id", Type: "BIGINT", Nullable: true, Operators: ops(false),
+					References: &fakeReference{Path: "/v1/dcim/platforms", ExpandKey: "platform", Columns: []string{"name", "slug"}, Available: false}},
+			}},
+			"/v1/dcim/sites":        nameSlug("dcim_site"),
+			"/v1/dcim/device-roles": nameSlug("dcim_devicerole"),
+			"/v1/tenancy/tenants":   nameSlug("tenancy_tenant"),
+			"/v1/dcim/racks": {Table: "dcim_rack", PrimaryKey: "id", Ingested: true, DataAsOf: asOf, Columns: []fakeColumn{
+				{Name: "id", Type: "BIGINT", Operators: ops(false)},
+				{Name: "name", Type: "VARCHAR", Operators: ops(true)},
+			}},
+			"/v1/dcim/platforms": {Table: "dcim_platform", PrimaryKey: "id", Ingested: false},
+			"/v1/core/object-types": {Table: "core_objecttype", PrimaryKey: "contenttype_ptr_id", Ingested: true, DataAsOf: asOf, Columns: []fakeColumn{
+				{Name: "contenttype_ptr_id", Type: "INTEGER", Operators: ops(false)},
+				{Name: "public", Type: "BOOLEAN", Operators: ops(false)},
+			}},
+		},
+	}
+}
+
+func strp(s string) *string { return &s }

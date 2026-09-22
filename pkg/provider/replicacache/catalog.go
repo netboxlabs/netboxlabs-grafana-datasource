@@ -69,6 +69,16 @@ func (e entity) column(name string) (column, bool) {
 	return column{}, false
 }
 
+// pk is the primary key column: "id" on nearly every entity, but not all —
+// core/object-types is keyed by contenttype_ptr_id — and the catalogue says
+// which. Every read of a row's identity goes through it.
+func (e entity) pk() string {
+	if e.PrimaryKey == "" {
+		return "id"
+	}
+	return e.PrimaryKey
+}
+
 // has reports whether name is a stored column of the entity — what fields=,
 // sort= and filter[] may name directly.
 func (e entity) has(name string) bool { _, ok := e.column(name); return ok }

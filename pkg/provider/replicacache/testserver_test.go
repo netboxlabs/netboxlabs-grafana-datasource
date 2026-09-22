@@ -373,8 +373,9 @@ func matches(v interface{}, op, want string) bool {
 	case "isnull":
 		return (v == nil) == (want == "true")
 	case "ilike":
-		p := strings.ToLower(strings.Trim(want, "%"))
-		return strings.Contains(strings.ToLower(s), p)
+		// The service's ilike is a case-insensitive contains on the literal
+		// value; a % in the value is that character.
+		return strings.Contains(strings.ToLower(s), strings.ToLower(want))
 	}
 	return true
 }

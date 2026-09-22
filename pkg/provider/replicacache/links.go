@@ -19,22 +19,22 @@ const deepLinkColumn = "display_url"
 // addDeepLinks adds a display_url column pointing at the object in the NetBox
 // UI, and reports whether it added one.
 //
-// The path is built from the object type and primary key. That mapping is exact
-// rather than a guess: replica-cache addresses entities as app/model-plural
-// ("dcim/devices", "ipam/ip-addresses"), which is the same shape NetBox's own
-// UI routes use.
+// The path is built from the object type and the primary key the catalogue
+// names for it. That mapping is exact rather than a guess: replica-cache
+// addresses entities as app/model-plural ("dcim/devices",
+// "ipam/ip-addresses"), which is the same shape NetBox's own UI routes use.
 //
 // A row without a usable id is skipped rather than given a link to nowhere. If
 // the object type were ever to diverge from NetBox's routing the link would 404
 // — visible, and recoverable by the reader, unlike a wrong row.
-func addDeepLinks(netboxURL, objectType string, rows []map[string]interface{}) bool {
+func addDeepLinks(netboxURL, objectType string, rows []map[string]interface{}, pk string) bool {
 	base := strings.TrimRight(strings.TrimSpace(netboxURL), "/")
 	if base == "" || objectType == "" {
 		return false
 	}
 	added := false
 	for _, row := range rows {
-		id, ok := toInt(row["id"])
+		id, ok := toInt(row[pk])
 		if !ok {
 			continue
 		}

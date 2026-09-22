@@ -33,25 +33,17 @@ func TestBuildFilterValues(t *testing.T) {
 			want:    map[string]string{"filter[status]__in": "active,offline"},
 		},
 		{
-			name:    "icontains wraps the value in wildcards",
+			// The backend's ilike IS a case-insensitive contains on the literal
+			// value (measured: ilike=core matched CORE-N9504-01; %core% matched
+			// nothing). Nothing is wrapped, and nothing needs escaping.
+			name:    "icontains sends the value bare",
 			filters: []provider.Filter{{Field: "name", Operator: "ic", Value: "core"}},
-			want:    map[string]string{"filter[name]__ilike": "%core%"},
+			want:    map[string]string{"filter[name]__ilike": "core"},
 		},
 		{
-			name:    "istartswith anchors left",
-			filters: []provider.Filter{{Field: "name", Operator: "isw", Value: "core"}},
-			want:    map[string]string{"filter[name]__ilike": "core%"},
-		},
-		{
-			name:    "iendswith anchors right",
-			filters: []provider.Filter{{Field: "name", Operator: "iew", Value: "01"}},
-			want:    map[string]string{"filter[name]__ilike": "%01"},
-		},
-		{
-			// ilike with no wildcards is exactly case-insensitive equality.
-			name:    "iexact uses ilike without wildcards",
-			filters: []provider.Filter{{Field: "name", Operator: "ie", Value: "CORE-1"}},
-			want:    map[string]string{"filter[name]__ilike": "CORE-1"},
+			name:    "a wildcard character is sent as itself",
+			filters: []provider.Filter{{Field: "name", Operator: "ic", Value: "50%"}},
+			want:    map[string]string{"filter[name]__ilike": "50%"},
 		},
 		{
 			name:    "empty asks isnull true",
@@ -89,6 +81,23 @@ func TestBuildFilterValues(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The backend's one text match is a contains: it cannot anchor to the start or
+// end of a value, nor compare whole values case-insensitively. Each of these
+// has a tempting near-miss (send the value and hope), and every near-miss
+// matches MORE rows than asked for while looking healthy.
+func TestBuildFilterValuesRefusesAnchoredAndWholeValueTextMatches(t *testing.T) {
+	for _, op := range []string{opIExact, opIStarts, opIEnds} {
+		_, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: op, Value: "core"}})
+		var unsupported *UnsupportedFilterError
+		if !errors.As(err, &unsupported) {
+			t.Fatalf("%q: want *UnsupportedFilterError, got %v", op, err)
+		}
+		if !strings.Contains(unsupported.Reason, "contains") {
+			t.Errorf("%q: the reason should point at the match that does work: %q", op, unsupported.Reason)
+		}
 	}
 }
 
@@ -281,7 +290,7 @@ func TestSeamOperators_TranslateTheCatalogue(t *testing.T) {
 		col  column
 		want []string
 	}{
-		{"nullable text", column{Type: "VARCHAR", Nullable: true, Operators: text}, []string{"", "ie", "ic", "isw", "iew", "gt", "lt"}},
+		{"nullable text", column{Type: "VARCHAR", Nullable: true, Operators: text}, []string{"", "ic", "gt", "lt"}},
 		{"nullable number", column{Type: "BIGINT", Nullable: true, Operators: all}, []string{"", "gt", "lt", "empty", "nempty"}},
 		{"not null number", column{Type: "BIGINT", Operators: all}, []string{"", "gt", "lt"}},
 		{"nullable timestamp", column{Type: "TIMESTAMP WITH TIME ZONE", Nullable: true, Operators: all}, []string{"", "gt", "lt", "empty", "nempty"}},
@@ -313,7 +322,9 @@ func TestValidateFilters_AgainstTheCatalogue(t *testing.T) {
 		{"empty on text", provider.Filter{Field: "name", Operator: "empty"}, false},
 		{"unknown column", provider.Filter{Field: "colour", Value: "x"}, false},
 		{"expanded name, text op", provider.Filter{Field: "site", Operator: "ic", Value: "ams"}, true},
-		{"expanded slug", provider.Filter{Field: "site_slug", Operator: "isw", Value: "ams"}, true},
+		{"expanded slug, contains", provider.Filter{Field: "site_slug", Operator: "ic", Value: "ams"}, true},
+		{"starts-with is not a match this backend has", provider.Filter{Field: "name", Operator: "isw", Value: "core"}, false},
+		{"case-insensitive equality neither", provider.Filter{Field: "name", Operator: "ie", Value: "core"}, false},
 		{"unavailable expansion", provider.Filter{Field: "platform", Value: "x"}, false},
 		{"cf_ is not filterable", provider.Filter{Field: "cf_lifecycle_phase", Value: "x"}, false},
 		{"blank row is ignored", provider.Filter{Field: "", Value: ""}, true},
@@ -330,6 +341,16 @@ func TestValidateFilters_AgainstTheCatalogue(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A saved query with an anchored match is told what does work here, in the
+// same words buildFilterValues uses, whichever check meets it first.
+func TestValidateFilters_ExplainsTheTextMatchLimit(t *testing.T) {
+	c := catalogFromFake(t, devicesSchema())
+	err := validateFilters([]provider.Filter{{Field: "name", Operator: "isw", Value: "core"}}, c.Entities["dcim/devices"], c)
+	if err == nil || !strings.Contains(err.Error(), "contains") {
+		t.Errorf("the refusal should point at the match that does work: %v", err)
 	}
 }
 

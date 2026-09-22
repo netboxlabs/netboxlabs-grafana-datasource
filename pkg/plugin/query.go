@@ -14,6 +14,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/models"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
@@ -259,6 +260,14 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		if err != nil {
 			return queryErrorResponse(err)
 		}
+		// A count is a rule's input as much as the alert table is, and it has
+		// no rows to reveal anything: a loading replica (a degradation warning)
+		// or stale data refuses it for a strict consumer exactly as they refuse
+		// the row shapes. Not the truncation check — a count reads Total and
+		// returns one row by design.
+		if msg := d.refuseCount(c, res); msg != "" {
+			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+		}
 		frame := buildCountFrame(qm.ObjectType, res.Total)
 		frame.RefID = q.RefID
 		return backend.DataResponse{Frames: data.Frames{frame}}
@@ -417,6 +426,28 @@ func queryOrdering(ordering string, c consumer) string {
 func (d *Datasource) refuse(c consumer, res *provider.Result, noun string) string {
 	if msg := resultRefusal(c, res, noun); msg != "" {
 		return msg
+	}
+	return d.stalenessRefusal(c, res)
+}
+
+// refuseCount is refuse for the Count shape: degradation and staleness, never
+// truncation (a count returns one row beside a total by design).
+func (d *Datasource) refuseCount(c consumer, res *provider.Result) string {
+	if !c.strict() {
+		return ""
+	}
+	if msg := degradationError(c, res); msg != "" {
+		return msg
+	}
+	return d.stalenessRefusal(c, res)
+}
+
+// stalenessRefusal applies Max data age, which exists in replica-cache mode
+// alone (the editor shows it there alone): a value left behind by a mode
+// switch must not refuse a NetBox-mode rule on a field it cannot see.
+func (d *Datasource) stalenessRefusal(c consumer, res *provider.Result) string {
+	if d.cfg.Mode != models.ModeReplicaCache {
+		return ""
 	}
 	maxAge, err := d.cfg.MaxDataAgeDuration()
 	if err != nil {

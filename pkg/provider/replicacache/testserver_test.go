@@ -15,8 +15,9 @@ import (
 
 // fakeService mimics the replica-cache read API closely enough to test against,
 // including the behaviours that were MEASURED on a live instance rather than
-// read off its spec: the page size ceiling that ignores a larger limit, the
-// {"error": …} failure body, and the cursor that is absent on the last page.
+// read off its spec: the 400 above the page size ceiling, the {"error": …}
+// failure body, the LEFT-JOIN semantics of expand=, and the cursor that is
+// absent on the last page.
 type fakeService struct {
 	mu sync.Mutex
 
@@ -83,8 +84,9 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/_meta/schema" {
 		// Same discipline as the row branch below: under the lock, record the
 		// request, honour the status/errBody knobs (Save & Test must fail on a
-		// revoked token even with a warm catalogue), then serve the document. The pointer is encoded after unlocking; tests that mutate
-		// the schema do so under the lock and sequentially, which is enough.
+		// revoked token even with a warm catalogue), then serve the document.
+		// The pointer is encoded after unlocking; tests that mutate the schema
+		// do so under the lock and sequentially, which is enough.
 		f.mu.Lock()
 		f.requests = append(f.requests, recordedRequest{entity: "_meta/schema", query: r.URL.Query()})
 		schema, status, errBody := f.schema, f.status, f.errBody
@@ -317,8 +319,8 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	page := filtered[start:end]
 
 	// Projection: the primary key always comes back, as documented, and so do
-	// the expanded columns — they are not stored columns and fields= does not
-	// name them.
+	// the expanded columns and the column each expansion resolves through —
+	// none of which fields= names.
 	if fs := q.Get("fields"); fs != "" {
 		want := map[string]bool{pk: true}
 		for _, c := range strings.Split(fs, ",") {
@@ -329,6 +331,10 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 			want[c] = true
 		}
 		for _, x := range expansions {
+			// The service returns the referencing column beside the expanded
+			// ones whether or not it was projected, which is what lets a
+			// dangling reference be told from a null one.
+			want[x.col] = true
 			want[x.key] = true
 			for _, c := range x.cols[1:] {
 				want[x.key+"_"+c] = true
@@ -347,7 +353,11 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 		page = projected
 	}
 
-	resp := map[string]interface{}{"count": total, "results": page}
+	// Every list envelope carries the entity's instant, as the service's does.
+	resp := map[string]interface{}{"count": total, "results": page, "data_as_of": nil}
+	if se != nil && se.DataAsOf != nil {
+		resp["data_as_of"] = *se.DataAsOf
+	}
 	if end < len(filtered) {
 		resp["next_cursor"] = strconv.Itoa(end)
 	}

@@ -328,6 +328,11 @@ func TestValidateFilters_AgainstTheCatalogue(t *testing.T) {
 		{"unavailable expansion", provider.Filter{Field: "platform", Value: "x"}, false},
 		{"cf_ is not filterable", provider.Filter{Field: "cf_lifecycle_phase", Value: "x"}, false},
 		{"blank row is ignored", provider.Filter{Field: "", Value: ""}, true},
+		// A row with an operator and no value emits no parameter (as in NetBox
+		// mode), so it must not be refused either: a saved query carrying one
+		// used to run.
+		{"blank value is ignored", provider.Filter{Field: "name", Operator: "isw", Value: ""}, true},
+		{"blank value on a number is ignored", provider.Filter{Field: "id", Operator: "ic", Value: " "}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateFilters([]provider.Filter{tc.f}, e, c)

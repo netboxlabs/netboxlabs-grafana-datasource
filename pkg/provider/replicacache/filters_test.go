@@ -2,6 +2,7 @@ package replicacache
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -138,136 +139,6 @@ func TestBuildFilterValuesRefusesMultiValueComparison(t *testing.T) {
 	}
 }
 
-func TestFilterFieldsAdvertisesOnlySupportedOperators(t *testing.T) {
-	fields := []provider.Field{{Name: "name", Type: provider.FieldTypeString}, {Name: "id", Type: provider.FieldTypeNumber}}
-	raw := map[string]bool{"name": true, "id": true}
-	types := map[string]provider.FieldType{"name": provider.FieldTypeString, "id": provider.FieldTypeNumber}
-
-	got := filterFieldsFor(fields, raw, types)
-	if len(got) != 2 {
-		t.Fatalf("want 2 filter fields, got %d", len(got))
-	}
-	// Sorted, so the editor's list is stable between refreshes.
-	if got[0].Name != "id" || got[1].Name != "name" {
-		t.Errorf("want fields sorted by name, got %q then %q", got[0].Name, got[1].Name)
-	}
-	for _, op := range got[0].Operators {
-		if _, err := buildFilterValues([]provider.Filter{{Field: "id", Operator: op, Value: "1"}}); err != nil {
-			t.Errorf("operator %q is advertised but rejected by the translator: %v", op, err)
-		}
-	}
-}
-
-// ILIKE against a non-text column was measured returning HTTP 200 with the
-// UNFILTERED total, so a text operator must never be offered for one.
-func TestFilterFieldsWithholdsTextOperatorsFromNonTextColumns(t *testing.T) {
-	fields := []provider.Field{
-		{Name: "name", Type: provider.FieldTypeString},
-		{Name: "id", Type: provider.FieldTypeNumber},
-		{Name: "sometimes_null", Type: provider.FieldTypeString},
-	}
-	raw := map[string]bool{"name": true, "id": true, "sometimes_null": true}
-	types := map[string]provider.FieldType{
-		"name": provider.FieldTypeString,
-		"id":   provider.FieldTypeNumber,
-		// never seen holding a value, so it cannot be typed
-		"sometimes_null": provider.FieldType(""),
-	}
-
-	byName := map[string][]string{}
-	for _, f := range filterFieldsFor(fields, raw, types) {
-		byName[f.Name] = f.Operators
-	}
-	has := func(ops []string, op string) bool {
-		for _, o := range ops {
-			if o == op {
-				return true
-			}
-		}
-		return false
-	}
-	if !has(byName["name"], opIContns) {
-		t.Error("a text column must keep the text operators")
-	}
-	if has(byName["id"], opIContns) {
-		t.Error("a numeric column must not be offered a text match: ILIKE on it returns every row unfiltered")
-	}
-	if has(byName["sometimes_null"], opIContns) {
-		t.Error("an untypeable column must not be offered a text match")
-	}
-	// Equality stays available everywhere.
-	for _, n := range []string{"name", "id", "sometimes_null"} {
-		if !has(byName[n], opExact) {
-			t.Errorf("%q lost equality", n)
-		}
-	}
-	// Is-empty is the mirror case: kept where blank means NULL, withheld for
-	// text where it would answer the opposite question (see the empty-family
-	// tests below).
-	if !has(byName["id"], opEmpty) {
-		t.Error("a numeric column should keep is-empty: blank means NULL there")
-	}
-	if has(byName["name"], opEmpty) {
-		t.Error("a text column must not be offered is-empty: IS NULL inverts it")
-	}
-}
-
-// Derived columns are built here, not stored upstream, so filtering on one is
-// rejected as an unknown column. They must not be advertised as filterable.
-func TestFilterFieldsExcludesDerivedColumns(t *testing.T) {
-	fields := []provider.Field{
-		{Name: "site_id", Type: provider.FieldTypeNumber},
-		{Name: "site", Type: provider.FieldTypeString},
-		{Name: "cf_tier", Type: provider.FieldTypeString},
-	}
-	raw := map[string]bool{"site_id": true}
-	types := map[string]provider.FieldType{"site_id": provider.FieldTypeNumber, "site": provider.FieldTypeString}
-
-	got := filterFieldsFor(fields, raw, types)
-	if len(got) != 1 || got[0].Name != "site_id" {
-		t.Fatalf("want only the upstream column offered, got %+v", got)
-	}
-}
-
-// A saved dashboard predates the editor's current answer, so the combination
-// has to be refused at query time too.
-func TestValidateFilterTypesRefusesTextMatchOnNonTextColumn(t *testing.T) {
-	types := map[string]provider.FieldType{"id": provider.FieldTypeNumber, "name": provider.FieldTypeString}
-
-	err := validateFilterTypes([]provider.Filter{{Field: "id", Operator: opIContns, Value: "1"}}, types)
-	if err == nil {
-		t.Fatal("want a refusal for a text match on a numeric column")
-	}
-	var unsupported *UnsupportedFilterError
-	if !errors.As(err, &unsupported) {
-		t.Fatalf("want *UnsupportedFilterError, got %T", err)
-	}
-
-	if err := validateFilterTypes([]provider.Filter{{Field: "name", Operator: opIContns, Value: "x"}}, types); err != nil {
-		t.Errorf("a text match on a text column must be allowed: %v", err)
-	}
-	// Equality is safe on any type and must not be blocked.
-	if err := validateFilterTypes([]provider.Filter{{Field: "id", Operator: opExact, Value: "1"}}, types); err != nil {
-		t.Errorf("equality on a numeric column must be allowed: %v", err)
-	}
-	// Unknown types fail CLOSED. This previously asserted the opposite, on the
-	// reasoning that the request itself would be authoritative — which does not
-	// hold here: a text match on a numeric column does not fail, it answers
-	// HTTP 200 over the unfiltered population. There is no error to defer to.
-	if err := validateFilterTypes([]provider.Filter{{Field: "id", Operator: opIContns, Value: "1"}}, nil); err == nil {
-		t.Error("a type-sensitive filter must be refused when no type information is available")
-	}
-	// A column absent from an otherwise-populated map is the same case.
-	if err := validateFilterTypes([]provider.Filter{{Field: "mystery", Operator: opIContns, Value: "x"}},
-		map[string]provider.FieldType{"name": provider.FieldTypeString}); err == nil {
-		t.Error("an unseen column must be refused a text match")
-	}
-	// Operators whose validity does not depend on type are unaffected.
-	if err := validateFilterTypes([]provider.Filter{{Field: "anything", Operator: opExact, Value: "x"}}, nil); err != nil {
-		t.Errorf("equality does not depend on type and must still work: %v", err)
-	}
-}
-
 // Two rows on one field mean OR. Writing each in turn let the last overwrite
 // the rest, so "status is active or planned" silently became "status is
 // planned" — a narrower result set, with nothing to show it happened.
@@ -370,124 +241,14 @@ func TestBuildFilterValuesAllowsARangeOnOneField(t *testing.T) {
 	}
 }
 
-// NetBox stores a blank character field as "" rather than NULL, so translating
-// is-empty to IS NULL asks the opposite question. Measured on staging, where
-// every device has a blank serial: isnull=true matched 0 of 6,824,570 rows and
-// isnull=false matched all of them — so "is empty" found nothing where every
-// row qualified, and "has any value" found everything where none did.
-func TestFilterFieldsWithholdsTheEmptyFamilyFromTextColumns(t *testing.T) {
-	fields := []provider.Field{
-		{Name: "serial", Type: provider.FieldTypeString},
-		{Name: "tenant_id", Type: provider.FieldTypeNumber},
-	}
-	raw := map[string]bool{"serial": true, "tenant_id": true}
-	types := map[string]provider.FieldType{
-		"serial":    provider.FieldTypeString,
-		"tenant_id": provider.FieldTypeNumber,
-	}
-
-	byName := map[string][]string{}
-	for _, f := range filterFieldsFor(fields, raw, types) {
-		byName[f.Name] = f.Operators
-	}
-	has := func(ops []string, op string) bool {
-		for _, o := range ops {
-			if o == op {
-				return true
-			}
-		}
-		return false
-	}
-
-	for _, op := range []string{opEmpty, opNEmpty} {
-		if has(byName["serial"], op) {
-			t.Errorf("text column was offered %q; IS NULL answers the opposite question for a blank string", op)
-		}
-		if !has(byName["tenant_id"], op) {
-			t.Errorf("numeric column lost %q; blank really is NULL there", op)
-		}
-	}
-}
-
-// A saved dashboard predates the editor's current answer, so the combination
-// has to be refused at query time as well.
-func TestValidateFilterTypesRefusesTheEmptyFamilyOnTextColumns(t *testing.T) {
-	types := map[string]provider.FieldType{
-		"serial":    provider.FieldTypeString,
-		"tenant_id": provider.FieldTypeNumber,
-	}
-
-	for _, op := range []string{opEmpty, opNEmpty} {
-		err := validateFilterTypes([]provider.Filter{{Field: "serial", Operator: op}}, types)
-		if err == nil {
-			t.Fatalf("want a refusal for %q on a text column", op)
-		}
-		var unsupported *UnsupportedFilterError
-		if !errors.As(err, &unsupported) {
-			t.Fatalf("want *UnsupportedFilterError, got %T", err)
-		}
-		// The message has to say what to do instead, since the operator is in
-		// the editor for every other column type.
-		if !strings.Contains(unsupported.Reason, "empty string") {
-			t.Errorf("reason should explain the blank-string mismatch: %q", unsupported.Reason)
-		}
-
-		if err := validateFilterTypes([]provider.Filter{{Field: "tenant_id", Operator: op}}, types); err != nil {
-			t.Errorf("%q on a numeric column must be allowed: %v", op, err)
-		}
-	}
-}
-
-// A column whose type was never established must NOT get the empty family.
-//
-// This test previously asserted the opposite, and was wrong: "unknown" is not
-// "not text". A nullable text column that was NULL in every sampled row is
-// precisely what cannot be typed, and precisely where IS NULL would later miss
-// the "" rows — so the untyped case is the one most likely to invert, not the
-// one safe to wave through.
-func TestEmptyFamilyRefusedWhenTypeIsUnknown(t *testing.T) {
-	types := map[string]provider.FieldType{"mystery": provider.FieldType("")}
-	for _, op := range []string{opEmpty, opNEmpty} {
-		if err := validateFilterTypes([]provider.Filter{{Field: "mystery", Operator: op}}, types); err == nil {
-			t.Errorf("%q on an untyped column must be refused: it may be nullable text", op)
-		}
-	}
-
-	// A confirmed non-text type still gets them. The time column is named for
-	// what it is, which for THIS operator is part of the evidence — see below.
-	ok := map[string]provider.FieldType{
-		"vcpus":        provider.FieldTypeNumber,
-		"is_active":    provider.FieldTypeBoolean,
-		"last_updated": provider.FieldTypeTime,
-	}
-	for field := range ok {
-		if err := validateFilterTypes([]provider.Filter{{Field: field, Operator: opEmpty}}, ok); err != nil {
-			t.Errorf("is-empty on a confirmed %s column must be allowed: %v", ok[field], err)
-		}
-	}
-
-	// A column TYPED as time whose name does not agree does not get it. The
-	// type is inferred from values, and a text column whose sampled values all
-	// look like RFC3339 — contrived for NetBox's own models, but a plugin can
-	// define anything — would otherwise be handed an operator this backend
-	// answers with IS NULL, while blank text is stored as "": the exact
-	// opposite population, returned without an error.
-	valueOnly := map[string]provider.FieldType{"note": provider.FieldTypeTime}
-	for _, op := range []string{opEmpty, opNEmpty} {
-		if err := validateFilterTypes([]provider.Filter{{Field: "note", Operator: op}}, valueOnly); err == nil {
-			t.Errorf("%q on a time type with no corroborating name must be refused", op)
-		}
-	}
-}
-
 // The is-empty refusal used to recommend "filter on equality with an empty
 // value". Following that advice lands in the branch below, which drops the
 // filter and returns the unfiltered population — the very outcome the refusal
 // exists to prevent. This pins both halves: the advice, and the behaviour that
 // makes the old advice wrong.
 func TestIsEmptyRefusalDoesNotRecommendADiscardedFilter(t *testing.T) {
-	types := map[string]provider.FieldType{"serial": provider.FieldTypeString}
-	err := validateFilterTypes([]provider.Filter{{Field: "serial", Operator: "empty"}}, types)
+	c := catalogFromFake(t, devicesSchema())
+	err := validateFilters([]provider.Filter{{Field: "name", Operator: "empty"}}, c.Entities["dcim/devices"], c)
 	if err == nil {
 		t.Fatal("is-empty on a text column must still be refused")
 	}
@@ -541,5 +302,76 @@ func TestTextFilterRefusesWildcardsItCannotEscape(t *testing.T) {
 	}
 	if _, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: "", Value: "rack_1"}}); err != nil {
 		t.Errorf("equality is not a pattern match and must accept it: %v", err)
+	}
+}
+
+// The catalogue's operators translate to the editor's tokens.
+func TestSeamOperators_TranslateTheCatalogue(t *testing.T) {
+	all := []string{"eq", "gt", "lt", "in", "isnull"}
+	text := append(slices.Clone(all), "ilike")
+	for _, tc := range []struct {
+		name string
+		col  column
+		want []string
+	}{
+		{"nullable text", column{Type: "VARCHAR", Nullable: true, Operators: text}, []string{"", "ie", "ic", "isw", "iew", "gt", "lt"}},
+		{"nullable number", column{Type: "BIGINT", Nullable: true, Operators: all}, []string{"", "gt", "lt", "empty", "nempty"}},
+		{"not null number", column{Type: "BIGINT", Operators: all}, []string{"", "gt", "lt"}},
+		{"nullable timestamp", column{Type: "TIMESTAMP WITH TIME ZONE", Nullable: true, Operators: all}, []string{"", "gt", "lt", "empty", "nempty"}},
+		{"equality only", column{Type: "VARCHAR", Nullable: true, Operators: []string{"eq"}}, []string{""}},
+		{"nothing", column{Type: "VARCHAR"}, nil},
+	} {
+		if got := seamOperators(tc.col); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A saved or provisioned query predates the editor's answer, so every filter
+// is checked against the catalogue before anything is sent. Fail closed: a
+// text match on a number used to be a 200 over the whole table.
+func TestValidateFilters_AgainstTheCatalogue(t *testing.T) {
+	c := catalogFromFake(t, devicesSchema())
+	e := c.Entities["dcim/devices"]
+	for _, tc := range []struct {
+		name string
+		f    provider.Filter
+		ok   bool
+	}{
+		{"text op on VARCHAR", provider.Filter{Field: "name", Operator: "ic", Value: "core"}, true},
+		{"text op on BIGINT", provider.Filter{Field: "id", Operator: "ic", Value: "1"}, false},
+		{"exact is spelled two ways", provider.Filter{Field: "id", Operator: "exact", Value: "1"}, true},
+		{"empty on nullable number", provider.Filter{Field: "position", Operator: "empty"}, true},
+		{"empty on NOT NULL", provider.Filter{Field: "id", Operator: "empty"}, false},
+		{"empty on text", provider.Filter{Field: "name", Operator: "empty"}, false},
+		{"unknown column", provider.Filter{Field: "colour", Value: "x"}, false},
+		{"expanded name, text op", provider.Filter{Field: "site", Operator: "ic", Value: "ams"}, true},
+		{"expanded slug", provider.Filter{Field: "site_slug", Operator: "isw", Value: "ams"}, true},
+		{"unavailable expansion", provider.Filter{Field: "platform", Value: "x"}, false},
+		{"cf_ is not filterable", provider.Filter{Field: "cf_lifecycle_phase", Value: "x"}, false},
+		{"blank row is ignored", provider.Filter{Field: "", Value: ""}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateFilters([]provider.Filter{tc.f}, e, c)
+			if (err == nil) != tc.ok {
+				t.Fatalf("err = %v, want ok=%v", err, tc.ok)
+			}
+			if err != nil {
+				var u *UnsupportedFilterError
+				if !errors.As(err, &u) {
+					t.Errorf("refusal must be an UnsupportedFilterError, got %T", err)
+				}
+			}
+		})
+	}
+}
+
+// An expansion whose target has no data looks perfectly real in a saved
+// query, so the refusal names the entity that is missing.
+func TestValidateFilters_NamesTheUnfedTarget(t *testing.T) {
+	c := catalogFromFake(t, devicesSchema())
+	err := validateFilters([]provider.Filter{{Field: "platform", Value: "x"}}, c.Entities["dcim/devices"], c)
+	if err == nil || !strings.Contains(err.Error(), "dcim/platforms") {
+		t.Errorf("the refusal should name the entity that has no data: %v", err)
 	}
 }

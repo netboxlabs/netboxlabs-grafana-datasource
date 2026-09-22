@@ -27,22 +27,12 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err := rejectBranch(ctx); err != nil {
 		return nil, err
 	}
-	if err := p.validateObjectType(ctx, spec.ObjectType); err != nil {
+	e, c, err := p.entityFor(ctx, spec.ObjectType)
+	if err != nil {
 		return nil, err
 	}
-
-	if needsTypeCheck(spec.Filters) {
-		// A sampling FAILURE is reported as itself. Only a successful sample
-		// that simply has no type for the column reaches validateFilterTypes,
-		// which fails closed on it — the two look alike as a nil map and need
-		// opposite answers.
-		types, err := p.columnTypes(ctx, spec.ObjectType)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateFilterTypes(spec.Filters, types); err != nil {
-			return nil, err
-		}
+	if err := validateFilters(spec.Filters, e, c); err != nil {
+		return nil, err
 	}
 	q, err := buildFilterValues(spec.Filters)
 	if err != nil {
@@ -89,30 +79,19 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		}
 		field = strings.TrimSpace(field)
 		ordering = direction + field
-		raw, rerr := p.rawColumns(ctx, spec.ObjectType)
-		switch {
-		case rerr == nil && len(raw) > 0 && raw[field]:
+		if e.has(field) {
 			q.Set("sort", ordering)
-		case rerr == nil && len(raw) > 0:
+		} else {
 			notes = append(notes, fmt.Sprintf(
 				"Rows are not sorted by %q: this backend sorts only on stored columns, and that one is derived from %s_id. Sort by %s_id instead, or use a datasource in NetBox mode.",
 				field, field, field))
-		default:
-			// The schema could not be read, so we cannot tell a stored column
-			// from a derived one. Pushing the sort anyway fails CLOSED in the
-			// worst way: a derived column is answered with 400 "unknown sort
-			// column", turning an optional ordering into a dead panel. Dropping
-			// it costs the ordering and says so, which the seam permits.
-			notes = append(notes, fmt.Sprintf(
-				"Rows are not sorted by %q: this backend sorts only on stored columns, and its schema could not be read to confirm that one is stored. Retry, or use a datasource in NetBox mode.",
-				field))
 		}
 	}
 
 	// Projection. Ask only for the columns needed to build what was requested.
 	var projected []string
 	if !spec.CountOnly {
-		if cols, ok := p.projectColumns(ctx, spec); ok {
+		if cols, ok := projectColumns(e, spec); ok {
 			q = withFields(q, cols)
 			projected = cols
 		}
@@ -137,12 +116,12 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if !spec.CountOnly {
 		// All three build columns a count-only caller never reads: it takes
 		// Result.Total and nothing else. The third one also COSTS something —
-		// it consults rawColumns, which fetches a schema sample when the cache
-		// is cold, so an alert counting a multi-million-row table paid for a
+		// it reads the custom-field names, one row request when the cache is
+		// cold, so an alert counting a multi-million-row table paid for a
 		// second list request to decorate rows it discards.
 		cols = append(cols, addChoiceValueAliases(selectedFields(spec), rows)...)
 		cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
-		cols = append(cols, p.addUnsetCustomFieldColumns(ctx, spec, rows)...)
+		cols = append(cols, p.addUnsetCustomFieldColumns(ctx, e, spec, rows)...)
 		if addDeepLinks(p.netboxURL, spec.ObjectType, rows) {
 			cols = append(cols, deepLinkColumn)
 		}
@@ -312,18 +291,24 @@ func checkProjection(projected []string, rows []map[string]interface{}) error {
 // Gated on the entity actually having the blob. Where it does not, a requested
 // cf_* really is a column this deployment cannot produce, and the backstop is
 // right to say so.
-func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider.QuerySpec, rows []map[string]interface{}) []string {
-	if len(rows) == 0 {
+func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, e entity, spec provider.QuerySpec, rows []map[string]interface{}) []string {
+	if len(rows) == 0 || !e.has(customFieldDataColumn) {
 		return nil
 	}
-	raw, err := p.rawColumns(ctx, spec.ObjectType)
-	if err != nil || !raw["custom_field_data"] {
-		return nil
+	// The entity's known custom fields, from the same cached read the editor
+	// uses. cf_* names that appeared in ANY sampled row are there, which is
+	// the evidence the _count question below needs — read only when a count
+	// asks for it, so an ordinary query costs no second request.
+	var known map[string]provider.FieldType
+	knownNames := func() map[string]provider.FieldType {
+		if known == nil {
+			known = map[string]provider.FieldType{}
+			if cf, err := p.customFieldNames(ctx, spec.ObjectType); err == nil {
+				known = cf.types
+			}
+		}
+		return known
 	}
-	// The entity's known columns, from the same cached sample. cf_* names that
-	// appeared in ANY sampled row are here, which is the evidence the _count
-	// question below needs.
-	knownTypes, _ := p.columnTypes(ctx, spec.ObjectType)
 	var added []string
 	for _, f := range selectedFields(spec) {
 		if !strings.HasPrefix(f, "cf_") {
@@ -337,7 +322,7 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 		// A _count suffix is not proof that this is a list's derived count: a
 		// custom field can be NAMED service_count, and NetBox shows an unset one
 		// as null. So the base has to be a column this entity actually has —
-		// evidence from the schema sample, which is cached and needs no request.
+		// evidence from the cached names read, which needs no request.
 		// Without that, the suffix is treated as part of the field's own name.
 		isCount := false
 		if base, ok := strings.CutSuffix(f, "_count"); ok {
@@ -356,13 +341,15 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, spec provider
 					break
 				}
 			}
-			// Otherwise the base's existence is the evidence. The schema sample
+			// Otherwise the base's existence is the evidence. The names read
 			// is one source of it, not the only one: it is 20 unfiltered rows,
 			// so a sparse list custom field can be absent from it while the rows
 			// in hand carry it, and those rows are the result being answered.
 			if !literal {
-				_, known := knownTypes[base]
-				isCount = known || hasColumn(rows, base)
+				isCount = hasColumn(rows, base)
+				if !isCount {
+					_, isCount = knownNames()[base]
+				}
 			}
 		}
 		var unset interface{}
@@ -544,7 +531,7 @@ func selectedFields(spec provider.QuerySpec) []string {
 // unrecognized field usually means a saved dashboard naming something this
 // deployment no longer has, and fetching a wider row is a cost, while
 // projecting it away is a blank column with no explanation.
-func (p *Provider) projectColumns(ctx context.Context, spec provider.QuerySpec) ([]string, bool) {
+func projectColumns(e entity, spec provider.QuerySpec) ([]string, bool) {
 	// An empty Fields means "all columns" — the contract's wording and the query
 	// editor's default. KeyFields alone must NOT trigger a projection: they name
 	// join-key sources the caller reads but did not ask to see, so projecting
@@ -556,29 +543,25 @@ func (p *Provider) projectColumns(ctx context.Context, spec provider.QuerySpec) 
 	if len(spec.Fields) == 0 {
 		return nil, false
 	}
-	raw, err := p.rawColumns(ctx, spec.ObjectType)
-	if err != nil || len(raw) == 0 {
-		return nil, false
-	}
 
 	want := map[string]bool{}
 	for _, f := range selectedFields(spec) {
 		switch {
-		case raw[f]:
+		case e.has(f):
 			want[f] = true
-		case raw[f+"_id"]:
+		case e.has(f + "_id"):
 			// A resolved name is built from its id column.
 			want[f+"_id"] = true
-		case strings.HasSuffix(f, "_slug") && raw[strings.TrimSuffix(f, "_slug")+"_id"]:
+		case strings.HasSuffix(f, "_slug") && e.has(strings.TrimSuffix(f, "_slug")+"_id"):
 			want[strings.TrimSuffix(f, "_slug")+"_id"] = true
-		case strings.HasSuffix(f, "_value") && raw[strings.TrimSuffix(f, "_value")]:
+		case strings.HasSuffix(f, "_value") && e.has(strings.TrimSuffix(f, "_value")):
 			// NetBox mode splits a choice into <field> (the label, "Active") and
 			// <field>_value (the raw value, "active"). This backend stores the
 			// raw value in the physical column and has no labels at all, so the
 			// alias is built from it — see addChoiceValueAliases.
 			want[strings.TrimSuffix(f, "_value")] = true
-		case strings.HasPrefix(f, "cf_") && raw["custom_field_data"]:
-			want["custom_field_data"] = true
+		case strings.HasPrefix(f, "cf_") && e.has(customFieldDataColumn):
+			want[customFieldDataColumn] = true
 		case f == deepLinkColumn:
 			// Built from the primary key, which the service returns on every
 			// projection regardless, so nothing extra needs requesting.
@@ -713,26 +696,9 @@ func flattenRows(raws []json.RawMessage, projected []string) ([]string, []map[st
 	for _, obj := range objs {
 		row := make(map[string]interface{}, len(obj)+4)
 		for k, v := range obj {
-			if k == "custom_field_data" {
-				// Through the SHARED contract, not a copy of it. A custom field
-				// holding a list or an object was previously written straight
-				// into cf_<name>, so a panel selecting the cf_<name>_count that
-				// NetBox mode produces got no such column, and the list itself
-				// rendered in a different format.
-				//
-				// What cannot be matched is the OBJECT custom field. NetBox's API
-				// expands it to a nested object; the column this mirrors holds
-				// the bare id, and the target model is named by a content-type id
-				// the service does not expose — the same wall as the polymorphic
-				// FKs. So cf_<name> is that id, and no _id/_slug follow it.
-				cf, cferr := customFields(v)
-				if cferr != nil {
-					return nil, nil, cferr
-				}
-				for _, name := range sortedNames(cf) {
-					provider.FlattenField("cf_"+name, cf[name], func(n string, val interface{}) {
-						row[n] = val
-					})
+			if k == customFieldDataColumn {
+				if err := expandCustomFields(v, row); err != nil {
+					return nil, nil, err
 				}
 				continue
 			}
@@ -758,9 +724,30 @@ func flattenRows(raws []json.RawMessage, projected []string) ([]string, []map[st
 	return cols, out, nil
 }
 
-// customFields decodes the custom_field_data blob. It is a JSON object encoded
-// as a string, so it needs a second decode; anything else is ignored rather
-// than guessed at.
+// expandCustomFields writes the blob's fields onto row as cf_<name> columns,
+// through the SHARED contract rather than a copy of it. A custom field holding
+// a list or an object was previously written straight into cf_<name>, so a
+// panel selecting the cf_<name>_count that NetBox mode produces got no such
+// column, and the list itself rendered in a different format.
+//
+// What cannot be matched is the OBJECT custom field. NetBox's API expands it to
+// a nested object; the column this mirrors holds the bare id, and the target
+// model is named by a content-type id the service does not expose — the same
+// wall as the polymorphic FKs. So cf_<name> is that id, and no _id/_slug
+// follow it.
+func expandCustomFields(v interface{}, row map[string]interface{}) error {
+	cf, err := customFields(v)
+	if err != nil {
+		return err
+	}
+	for _, name := range sortedNames(cf) {
+		provider.FlattenField("cf_"+name, cf[name], func(n string, val interface{}) {
+			row[n] = val
+		})
+	}
+	return nil
+}
+
 // sortedNames keeps the derived custom-field columns in a deterministic order,
 // since Go randomizes map iteration and a column list that reordered between
 // refreshes would reorder the panel's table on every refresh.
@@ -773,6 +760,9 @@ func sortedNames(m map[string]interface{}) []string {
 	return out
 }
 
+// customFields decodes the custom_field_data blob. It is a JSON object encoded
+// as a string, so it needs a second decode; anything else is ignored rather
+// than guessed at.
 func customFields(v interface{}) (map[string]interface{}, error) {
 	// Absent or blank is a real answer: this object has no custom fields.
 	if v == nil {

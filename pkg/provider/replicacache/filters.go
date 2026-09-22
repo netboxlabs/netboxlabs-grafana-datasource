@@ -3,7 +3,7 @@ package replicacache
 import (
 	"fmt"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
@@ -31,12 +31,6 @@ const (
 	opEmpty   = "empty"
 	opNEmpty  = "nempty"
 )
-
-// supportedOperators is the set FilterFields advertises, in the editor's
-// canonical display order.
-var supportedOperators = []string{
-	opExact, opIExact, opIContns, opIStarts, opIEnds, opGT, opLT, opEmpty, opNEmpty,
-}
 
 // UnsupportedFilterError is a filter the backend cannot express. It is the
 // user's input rather than an upstream failure, so it classifies as a bad
@@ -221,178 +215,113 @@ func boolString(b bool) string {
 	return "false"
 }
 
-// nullOperators ask whether a column has a value. They compile to SQL IS NULL,
-// which is the wrong question for a TEXT column.
-//
-// NetBox stores a blank character field as "" rather than NULL, so the two
-// answers invert. Measured against a staging instance where every device has a
-// blank serial:
-//
-//	filter[serial]__isnull=true   -> 0          (what we send for "is empty")
-//	filter[serial]__eq=           -> 6,824,570  (what NetBox means by empty)
-//	filter[serial]__isnull=false  -> 6,824,570  (our "has any value")
-//
-// So "is empty" matched nothing where every row qualified, and "has any value"
-// matched everything where none did — a panel switched from NetBox mode to this
-// one silently inverts, with no error.
-//
-// Neither can be expressed correctly here. "Is empty" would need `isnull OR
-// eq ""`, and this backend ANDs its filters with no OR; `eq ""` alone is right
-// only for a column that is NOT NULL, which we cannot know without a schema
-// endpoint (DATA-206). "Has any value" needs a negation operator the backend
-// does not have at all. So they are withheld for text and kept for everything
-// else, where blank-string semantics do not arise.
-var nullOperators = map[string]bool{
-	opEmpty: true, opNEmpty: true,
-}
-
-// blankSafe reports whether a column's type is one where blank genuinely means
-// NULL, so IS NULL answers the question asked.
-//
-// It requires a CONFIRMED type. An unknown type is not "not text": a nullable
-// text column that happened to be NULL in every sampled row is exactly the case
-// that cannot be typed, and it is also exactly the case where IS NULL would
-// later miss the "" rows. Treating unknown as safe reproduced the inversion
-// this gate exists to prevent, on the columns most likely to hit it.
-func blankSafe(name string, t provider.FieldType) bool {
-	switch t {
-	case provider.FieldTypeNumber, provider.FieldTypeBoolean:
-		return true
-	case provider.FieldTypeTime:
-		// A timestamp gets is-empty only when the NAME agrees as well. The type
-		// is inferred from values, and values alone can be wrong in the one
-		// direction that matters here: a text column whose sampled values all
-		// look like RFC3339 — contrived for NetBox's own models, but a plugin
-		// can define anything — would otherwise be offered an operator this
-		// backend answers with IS NULL, while blank text is stored as "", so
-		// the filter returns the exact opposite population and looks healthy.
-		//
-		// Corroboration is required only for this operator, not for the type.
-		// Value-led typing still suppresses ILIKE on the eleven NetBox
-		// date-time columns no naming rule finds — that is what it was for —
-		// and this withholds the one operator whose failure is silent and
-		// inverted rather than visible.
-		return isTimeColumn(name)
+// seamOperators translates a catalogue column's operators into the editor's
+// tokens. eq and in collapse to "" (the editor sends a CSV for several
+// values); ilike fans out to the four text matches; isnull becomes
+// empty/nempty only where "empty" and NULL coincide — a nullable non-text
+// column. On text the two diverge (see emptyOnTextReason), and on a NOT NULL
+// column nothing is ever empty.
+func seamOperators(col column) []string {
+	var out []string
+	has := func(op string) bool { return slices.Contains(col.Operators, op) }
+	if has("eq") || has("in") {
+		out = append(out, opExact)
 	}
-	return false
+	if has("ilike") {
+		out = append(out, opIExact, opIContns, opIStarts, opIEnds)
+	}
+	if has("gt") {
+		out = append(out, opGT)
+	}
+	if has("lt") {
+		out = append(out, opLT)
+	}
+	if has("isnull") && col.Nullable && fieldTypeOf(col.Type) != provider.FieldTypeString {
+		out = append(out, opEmpty, opNEmpty)
+	}
+	return out
 }
 
-// textOperators need the column to hold text. They compile to SQL ILIKE, which
-// the backend applies without checking the column's type.
-var textOperators = map[string]bool{
-	opIExact: true, opIContns: true, opIStarts: true, opIEnds: true,
-}
-
-// filterFieldsFor advertises the columns that can actually be filtered, each
-// with the operators that are safe for its type.
-//
-// Two restrictions, both of which produce a broken query if skipped.
-//
-// Only columns that exist UPSTREAM are offered. The resolved names (site) and
-// custom fields (cf_*) are built here, not stored there, so filtering on one is
-// rejected as an unknown column.
-//
-// Text operators are offered only for a column confirmed to hold text. Operator
-// validity does vary by column, which is not obvious from how the service
-// reports errors: it validates the operator against a fixed list and the column
-// against the schema, and reports those two clearly and separately. Type
-// compatibility is a third check that does not happen, and ILIKE against a
-// non-text column was measured failing two different ways on the same column:
+// validateFilters refuses, before anything is sent, a filter the catalogue
+// says the backend cannot honour: an unknown column, an operator the column
+// does not take, an expansion whose target has no data, a cf_* column (not a
+// stored column at all). FilterFields already hides those combinations from
+// the editor, but a saved dashboard predates the editor's current answer and
+// a provisioned one never consulted it — and "the request will tell us" only
+// holds when a wrong request produces an error. It does not here: ILIKE on a
+// non-text column was measured answering both ways on the same column,
 //
 //	filter[id]__ilike=ZZZZ  -> HTTP 500 {"error":"count query failed"}
 //	filter[id]__ilike=%1%   -> HTTP 200, count 6824570 — the UNFILTERED total
 //
-// The second is why this gate exists. A 500 is at least visible; a filter that
-// returns every row under a healthy status code is a panel quietly showing the
-// whole fleet while claiming to show a subset.
-//
-// A column never seen holding a value cannot be typed and is treated as
-// non-text. Withholding an operator costs a dropdown entry; offering one that
-// silently matches everything costs a wrong answer.
-func filterFieldsFor(fields []provider.Field, raw map[string]bool, types map[string]provider.FieldType) []provider.FilterField {
-	out := make([]provider.FilterField, 0, len(fields))
-	for _, f := range fields {
-		if len(raw) > 0 && !raw[f.Name] {
+// and the second is a panel quietly showing the whole fleet while claiming to
+// show a subset.
+func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
+	for _, f := range filters {
+		if f.Field == "" {
 			continue
 		}
-		isText := types[f.Name] == provider.FieldTypeString
-		ops := make([]string, 0, len(supportedOperators))
-		for _, op := range supportedOperators {
-			if textOperators[op] && !isText {
-				continue
+		var col column
+		if own, ok := e.column(f.Field); ok {
+			col = own
+		} else if via, target, ok := e.expandedColumn(f.Field); ok {
+			if !via.Ref.Available {
+				return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+					Reason: fmt.Sprintf("%s cannot be resolved on this replica: %s has received no data, so nothing can be filtered by it; %s still holds the raw id",
+						f.Field, strings.TrimPrefix(via.Ref.Path, "/v1/"), via.Name)}
 			}
-			// The mirror of the rule above: a text match needs text, and an
-			// is-empty check needs a column where blank means NULL.
-			if nullOperators[op] && !blankSafe(f.Name, types[f.Name]) {
-				continue
-			}
-			ops = append(ops, op)
+			col = targetColumn(c, via.Ref, target)
+		} else {
+			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: "this replica has no such column to filter on"}
 		}
-		out = append(out, provider.FilterField{Name: f.Name, Operators: ops})
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
-}
-
-// needsTypeCheck reports whether any filter uses an operator whose validity
-// depends on the column's type. It exists so a query with no text match never
-// pays for a schema sample — notably the count-only path, whose whole point is
-// to skip work it will not read.
-func needsTypeCheck(filters []provider.Filter) bool {
-	for _, f := range filters {
 		op := f.Operator
 		if op == "exact" {
 			op = opExact
 		}
-		if textOperators[op] || nullOperators[op] {
-			return true
+		if op == opEmpty || op == opNEmpty {
+			if fieldTypeOf(col.Type) == provider.FieldTypeString {
+				return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: emptyOnTextReason(col)}
+			}
+			if !col.Nullable {
+				return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: "that column is NOT NULL on this replica, so nothing in it is ever empty"}
+			}
 		}
-	}
-	return false
-}
-
-// validateFilterTypes refuses a filter whose operator is unsafe for the
-// column's type, before any request is built.
-//
-// FilterFields already hides those combinations from the editor, but a saved
-// dashboard predates the editor's current answer and a provisioned one never
-// consulted it. Sending it anyway is what produces the silent unfiltered
-// result above, so it is refused here as well.
-func validateFilterTypes(filters []provider.Filter, types map[string]provider.FieldType) error {
-	for _, f := range filters {
-		op := f.Operator
-		if op == "exact" {
-			op = opExact
-		}
-		// Only these operators care about the column's type. Equality, `in` and
-		// the comparisons work on anything, so they are never held up by a
-		// schema we could not read.
-		if !textOperators[op] && !nullOperators[op] {
-			continue
-		}
-
-		// For the ones that do care, fail CLOSED when the type cannot be
-		// confirmed — whether the schema sample failed outright (types nil) or
-		// this column was never seen holding a value.
-		//
-		// The earlier version let those through, reasoning that the request
-		// itself was authoritative. That is wrong for exactly this family: a
-		// text match against a numeric column does not fail, it answers HTTP
-		// 200 over the unfiltered population. "The request will tell us" only
-		// holds when a wrong request produces an error.
-		t, seen := types[f.Field]
-		if !seen || t == provider.FieldType("") {
+		if !slices.Contains(seamOperators(col), op) {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-				Reason: "this column's type could not be determined, and this operator is only safe on some types — a text match on a numeric column returns every row while appearing to filter. Retry once the object type's fields have loaded, or filter on equality"}
-		}
-		if textOperators[op] && t != provider.FieldTypeString {
-			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-				Reason: "a text match needs a text column, and this backend applies it to any column without checking — returning either a server error or, worse, every row unfiltered"}
-		}
-		if nullOperators[op] && !blankSafe(f.Field, t) {
-			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-				Reason: "this backend answers is-empty with IS NULL, but NetBox stores a blank text field as an empty string, so the result would be the exact opposite of what was asked. There is no equivalent here — an equality filter with an empty value is dropped, as it is in NetBox mode, so it would return every row — use NetBox mode for this filter"}
+				Reason: fmt.Sprintf("the backend does not take that operator on a %s column", strings.ToLower(col.Type))}
 		}
 	}
 	return nil
+}
+
+// targetColumn is the column an expanded name filters and sorts on: the
+// target entity's own column when the catalogue has it (it lists every served
+// entity), else a text stand-in — every declared target column (name, slug,
+// label, address, prefix, cid, model, mac_address, ssid) is text in NetBox.
+func targetColumn(c *catalog, ref *reference, name string) column {
+	if c != nil {
+		if t, ok := c.Entities[strings.TrimPrefix(ref.Path, "/v1/")]; ok {
+			if col, ok := t.column(name); ok {
+				return col
+			}
+		}
+	}
+	return column{Name: name, Type: "VARCHAR", Nullable: true, Operators: []string{"eq", "gt", "lt", "in", "isnull", "ilike"}}
+}
+
+// emptyOnTextReason is the DATA-206 refusal, stated from the catalogue: the
+// column is nullable text, NetBox stores a blank as "" rather than NULL, and
+// the backend's only test is IS NULL — so "is empty" answers the inverse of
+// the population it names. Measured on 6.8M devices:
+//
+//	filter[serial]__isnull=true   -> 0          (what "is empty" would send)
+//	filter[serial]__eq=           -> 6,824,570  (what NetBox means by empty)
+//	filter[serial]__isnull=false  -> 6,824,570  (our "has any value")
+//
+// Neither can be expressed here: "is empty" needs `isnull OR eq ""` and the
+// backend ANDs its filters with no OR; "has any value" needs a negation it
+// does not have. Equality with an empty value is NOT the advice: buildFilterValues
+// drops it, as NetBox mode does, so following it returns every row.
+func emptyOnTextReason(col column) string {
+	return fmt.Sprintf("this backend answers \"is empty\" on a text column with IS NULL, but NetBox stores a blank %s as \"\", not NULL, so the filter would keep the blanks and drop only the nulls — the opposite of what was asked. There is no equivalent here; use a datasource in NetBox mode for this filter", col.Name)
 }

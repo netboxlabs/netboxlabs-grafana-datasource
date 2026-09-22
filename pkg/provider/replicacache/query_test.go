@@ -537,38 +537,6 @@ func TestQueryResolvesSelfReferentialParent(t *testing.T) {
 	}
 }
 
-// The raw schema is what separates a stored column from a derived one. When it
-// cannot be read we do not know which this is, and pushing the sort anyway
-// fails in the worst direction: the service answers a derived column with 400
-// "unknown sort column", so an optional ordering kills the whole panel.
-func TestSortIsDroppedWhenTheSchemaCannotBeRead(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	p := newTestProvider(t, f)
-
-	// The schema probe goes first and fails; the row fetch behind it succeeds.
-	f.mu.Lock()
-	f.failOnce["dcim/devices"] = true
-	f.mu.Unlock()
-
-	res, err := p.Query(context.Background(), provider.QuerySpec{
-		ObjectType: "dcim/devices",
-		Ordering:   "site",
-	})
-	if err != nil {
-		t.Fatalf("the rows are healthy, so the query must succeed: %v", err)
-	}
-	if r, ok := f.requestWith("dcim/devices", "sort"); ok {
-		t.Errorf("sort was pushed without confirming the column is stored: %v", r.query)
-	}
-	if len(res.Notes) == 0 {
-		t.Error("dropping the sort must be stated, not silent")
-	}
-	if len(res.Rows) != 1 {
-		t.Errorf("want the row, got %d", len(res.Rows))
-	}
-}
-
 // A panel written against NetBox mode selects status_value, which there is the
 // raw value beside the label. This backend has no labels — the physical column
 // holds the raw value — so the alias is built from it rather than left blank.
@@ -1197,15 +1165,8 @@ func TestKeyOnlyJoinsAreValidatedUnderAllColumns(t *testing.T) {
 // anywhere" test passes it and the second object becomes a blank cell — a
 // variable option silently dropped, or an alert label that lost its identity.
 func TestProjectedColumnsAreCheckedOnEveryRow(t *testing.T) {
-	var n int
 	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
-		n++
 		w.Header().Set("Content-Type", "application/json")
-		if n == 1 {
-			// The schema sample, so the projection is built at all.
-			_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 1, "name": "a", "status": "active"}]}`))
-			return
-		}
 		_, _ = w.Write([]byte(`{"count": 2, "results": [{"id": 1, "name": "a"}, {"id": 2}]}`))
 	}))
 	defer srv.Close()
@@ -1251,15 +1212,8 @@ func TestProjectedNullsAreOrdinaryAnswers(t *testing.T) {
 // the cf_* column. The projection is checked against the objects as they
 // arrived, which is the only place the distinction still exists.
 func TestCustomFieldProjectionIsCheckedBeforeItIsConsumed(t *testing.T) {
-	var n int
 	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
-		n++
 		w.Header().Set("Content-Type", "application/json")
-		if n == 1 {
-			// The schema sample, so a projection is built at all.
-			_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 1, "name": "a", "custom_field_data": "{\"owner\": 22}"}]}`))
-			return
-		}
 		// The first row supplies cf_owner; the second omits the blob entirely.
 		_, _ = w.Write([]byte(`{"count": 2, "results": [` +
 			`{"id": 1, "custom_field_data": "{\"owner\": 22}"},` +
@@ -1342,7 +1296,7 @@ func TestAnUnknownCustomFieldIsReportedNotInvented(t *testing.T) {
 // A _count suffix is not proof that the column is a list's derived count: a
 // custom field can be NAMED service_count, and NetBox shows an unset one as
 // null. The evidence is whether the BASE is a column this entity has, taken
-// from the cached schema sample.
+// from the cached custom-field names read.
 func TestUnsetCountNeedsEvidenceThatItIsDerived(t *testing.T) {
 	// No object anywhere has "services", so cf_services is not a column of this
 	// entity and cf_services_count is read as a field named that way.
@@ -1437,16 +1391,17 @@ func TestUnsetCustomFieldsAreFilledPerRow(t *testing.T) {
 	}
 }
 
-// The schema sample is 20 unfiltered rows, so a sparse list custom field can be
+// The names read is 20 unfiltered rows, so a sparse list custom field can be
 // absent from it while the rows in hand carry it. Those rows are evidence too,
 // and better evidence — they are the result being answered.
 func TestCountEvidenceCanComeFromTheRowsInHand(t *testing.T) {
 	f := newFakeService()
-	// The schema sample reads the FIRST sampleRows rows, so the sparse field has
-	// to sit beyond them for this to be the case the finding describes. Without
-	// that, the sample sees it and the fix is never exercised.
+	// Custom-field names are read from the FIRST customFieldSampleRows rows, so
+	// the sparse field has to sit beyond them for this to be the case the
+	// finding describes. Without that, the read sees it and the fix is never
+	// exercised.
 	var devices []map[string]interface{}
-	for i := 1; i <= sampleRows+5; i++ {
+	for i := 1; i <= customFieldSampleRows+5; i++ {
 		devices = append(devices, map[string]interface{}{
 			"id": float64(i), "name": fmt.Sprintf("PLAIN-%02d", i), "custom_field_data": "{}",
 		})
@@ -1544,8 +1499,8 @@ func TestALiteralCountFieldUnsetBeatsTheDerivedOne(t *testing.T) {
 }
 
 // A count-only caller reads Result.Total and nothing else, so building derived
-// columns for it is waste — and one of the builders consults rawColumns, which
-// fetches a schema sample when the cache is cold. An alert counting a
+// columns for it is waste — and one of the builders reads the custom-field
+// names, a row request when the cache is cold. An alert counting a
 // multi-million-row table was paying for a second list request to decorate rows
 // it then discards.
 func TestACountOnlyQueryMakesOneRequest(t *testing.T) {

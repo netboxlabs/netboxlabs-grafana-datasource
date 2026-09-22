@@ -299,8 +299,8 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 
 // requestWith returns the recorded request for an entity that carries a given
 // query parameter. Several requests can hit one entity in a single Query — the
-// row fetch plus the cached schema sample — so tests that assert pushdown must
-// name the one they mean rather than taking the last.
+// row fetch plus the custom-field names read — so tests that assert pushdown
+// must name the one they mean rather than taking the last.
 func (f *fakeService) requestWith(entity, key string) (recordedRequest, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

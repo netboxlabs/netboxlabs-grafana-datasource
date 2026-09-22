@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"sort"
 	"strings"
@@ -31,6 +32,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
+	if !e.Ingested {
+		return nil, &NotReplicatedError{ObjectType: spec.ObjectType}
+	}
 	if err := validateFilters(spec.Filters, e, c); err != nil {
 		return nil, err
 	}
@@ -38,125 +42,255 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
+	plan := planRequest(e, spec)
 
-	limit := spec.Limit
-	if limit <= 0 {
-		limit = defaultLimit
+	// expand= goes with every query, count-only included: a filter on an
+	// expanded name is only valid under it, and the alert Count path sends the
+	// rule's filters with CountOnly. Only the sort and the projection are
+	// pointless when nothing but the total is read — and for that caller the
+	// smallest page the service returns is enough, since the count in the
+	// envelope is for the whole filter and unaffected by the limit.
+	if len(plan.expand) > 0 {
+		q.Set("expand", strings.Join(plan.expand, ","))
 	}
-	if limit > MaxLimit {
-		limit = MaxLimit
-	}
-
-	// A count-only caller reads Total and nothing else, so fetch the smallest
-	// page the service will return. The count in the envelope is for the whole
-	// filter and is unaffected by the limit.
+	limit, projected := clampLimit(spec.Limit), plan.fields
 	if spec.CountOnly {
-		limit = 1
-	}
-
-	// Sorting is only accepted on columns that physically exist: the service
-	// answers `sort=site` with 400 "unknown sort column: site" rather than
-	// ignoring it. Passing a derived column straight through would therefore
-	// turn a saved panel into an error toast the moment someone sorts by a
-	// related object's name.
-	//
-	// The seam permits a provider to ignore Ordering as long as it says so, so
-	// the unsortable request is dropped and stated instead. Substituting the id
-	// column was the tempting alternative and is worse: site_id order is not
-	// site-name order, and the panel would look correctly sorted while being
-	// ordered by something the reader cannot see.
-	var notes []string
-	if ordering := strings.TrimSpace(spec.Ordering); ordering != "" {
-		// Trimmed for the same reason the NetBox path trims (see
-		// netbox/ordering.go's orderingValue): the value can come from a
-		// provisioned dashboard's YAML rather than the editor's picker, and a
-		// stray space is not a different field to a human. Untrimmed, " -name "
-		// did not even match the "-" prefix, so a stored descending sort on a
-		// perfectly ordinary column was reported as derived and dropped.
-		direction, field := "", ordering
-		if rest, ok := strings.CutPrefix(field, "-"); ok {
-			direction, field = "-", rest
+		limit, projected = 1, nil
+	} else {
+		if plan.sort != "" {
+			q.Set("sort", plan.sort)
 		}
-		field = strings.TrimSpace(field)
-		ordering = direction + field
-		if e.has(field) {
-			q.Set("sort", ordering)
-		} else {
-			notes = append(notes, fmt.Sprintf(
-				"Rows are not sorted by %q: this backend sorts only on stored columns, and that one is derived from %s_id. Sort by %s_id instead, or use a datasource in NetBox mode.",
-				field, field, field))
-		}
-	}
-
-	// Projection. Ask only for the columns needed to build what was requested.
-	var projected []string
-	if !spec.CountOnly {
-		if cols, ok := projectColumns(e, spec); ok {
-			q = withFields(q, cols)
-			projected = cols
-		}
+		q = withFields(q, plan.fields)
 	}
 
 	raws, total, err := p.client.list(ctx, spec.ObjectType, q, limit)
 	if err != nil {
 		return nil, err
 	}
-
 	cols, rows, err := flattenRows(raws, projected)
 	if err != nil {
 		return nil, err
 	}
-	// Both take Fields AND KeyFields. A join source is fetched but not displayed,
-	// so an alias asked for only as a join key had its physical source projected
-	// in and then never built — applyJoinKeys produced an empty output column,
-	// and since the backstop covers key fields too, alert evaluation failed on
-	// it. projectColumns already unions the two; these are the last places that
-	// did not.
-	var warnings []string
+	warnings := plan.warnings
 	if !spec.CountOnly {
-		// All three build columns a count-only caller never reads: it takes
-		// Result.Total and nothing else. The third one also COSTS something —
+		// All of these build columns a count-only caller never reads: it takes
+		// Result.Total and nothing else. The third one can also COST something —
 		// it reads the custom-field names, one row request when the cache is
 		// cold, so an alert counting a multi-million-row table paid for a
 		// second list request to decorate rows it discards.
+		//
+		// Each takes Fields AND KeyFields. A join source is fetched but not
+		// displayed, so an alias asked for only as a join key had its physical
+		// source projected in and then never built — applyJoinKeys produced an
+		// empty output column, and since the backstop covers key fields too,
+		// alert evaluation failed on it.
 		cols = append(cols, addChoiceValueAliases(selectedFields(spec), rows)...)
 		cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
 		cols = append(cols, p.addUnsetCustomFieldColumns(ctx, e, spec, rows)...)
-		if addDeepLinks(p.netboxURL, spec.ObjectType, rows) {
+		if addDeepLinks(p.linkBase(c), spec.ObjectType, rows) {
 			cols = append(cols, deepLinkColumn)
 		}
-		added, warns := p.resolveFKs(ctx, spec.ObjectType, rows, wantedRelations(spec))
-		cols = append(cols, added...)
 		cols = append(cols, addNullSlugColumns(spec, rows)...)
-		warnings = warns
-		warnings = append(warnings, unresolvedRelationWarnings(spec, cols, rows)...)
-	}
-
-	// Present the caller's chosen columns, in the order they asked for them.
-	// KeyFields are fetched and left in the rows but never announced: the caller
-	// reads them to build a join key and did not ask to see them.
-	if len(spec.Fields) > 0 {
-		present := map[string]bool{}
-		for _, c := range cols {
-			present[c] = true
-		}
-		var out []string
-		for _, f := range spec.Fields {
-			if present[f] {
-				out = append(out, f)
-			}
-		}
-		cols = out
+		warnings = append(warnings, unresolvedRelationWarnings(spec, rows, plan.unavailable)...)
 	}
 
 	return &provider.Result{
-		Columns:  cols,
+		Columns:  restrictColumns(cols, spec.Fields),
 		Rows:     rows,
 		Total:    total,
 		MaxRows:  MaxLimit,
 		Warnings: warnings,
-		Notes:    notes,
+		Notes:    plan.notes,
 	}, nil
+}
+
+// request is what a QuerySpec becomes on the wire, decided from the catalogue
+// before anything is sent. It is a plain value so the derivation can be tested
+// without a server.
+type request struct {
+	fields   []string // stored columns for fields=; nil means every column
+	expand   []string // expand= keys, in catalogue order
+	sort     string   // sort= value; "" when the ordering was dropped
+	notes    []string
+	warnings []string
+	// unavailable is every requested name an unavailable reference would have
+	// produced, so the missing-column backstop does not report it a second time.
+	unavailable map[string]bool
+}
+
+// planRequest maps the caller's columns onto the service's vocabulary.
+//
+// Several columns the caller can ask for are not stored: "site" and "site_slug"
+// come from expanding site_id, "cf_tier" from the custom_field_data blob,
+// display_url from the primary key. Naming those in fields= is a 400, and
+// omitting their source returns the column empty — so each is translated to
+// what produces it. A reference whose target has no data on this replica
+// cannot be expanded (the service returns the id alone); asking for it is a
+// warning naming the cause, never a blank column, and sorting on it a note for
+// the same reason.
+func planRequest(e entity, spec provider.QuerySpec) request {
+	r := request{unavailable: map[string]bool{}}
+	wantAll := len(spec.Fields) == 0
+
+	// Which references to expand: the ones a filter names — the only ones a
+	// count-only caller needs, since it reads nothing but the total — plus,
+	// for a caller that reads rows, every available one when everything is
+	// wanted (the contract's "all columns", and the NetBox-mode parity that
+	// site and role come back beside their ids), else the ones a requested
+	// name resolves to. KeyFields count, by the same rule: a join on "site"
+	// needs the name, a join on "site_id" does not.
+	expandSet := map[string]bool{}
+	for _, f := range spec.Filters {
+		// validateFilters has already refused a filter on an unavailable one.
+		if via, _, ok := e.expandedColumn(f.Field); ok && via.Ref.Available {
+			expandSet[via.Ref.ExpandKey] = true
+		}
+	}
+	warned := map[string]bool{}
+	ask := func(name string) {
+		via, _, ok := e.expandedColumn(name)
+		if !ok {
+			return
+		}
+		if !via.Ref.Available {
+			r.unavailable[name] = true
+			if !warned[via.Ref.ExpandKey] {
+				warned[via.Ref.ExpandKey] = true
+				r.warnings = append(r.warnings, unavailableReferenceWarning(via))
+			}
+			return
+		}
+		expandSet[via.Ref.ExpandKey] = true
+	}
+	if wantAll && !spec.CountOnly {
+		for _, col := range e.Columns {
+			if col.Ref != nil && col.Ref.Available {
+				expandSet[col.Ref.ExpandKey] = true
+			}
+		}
+	}
+	if !spec.CountOnly {
+		for _, name := range selectedFields(spec) {
+			ask(name)
+		}
+	}
+
+	// Ordering, which a count-only caller has no use for. Trimmed for the same reason the NetBox path trims (see
+	// netbox/ordering.go's orderingValue): the value can come from a
+	// provisioned dashboard's YAML rather than the editor's picker, and a
+	// stray space is not a different field to a human. Untrimmed, " -name "
+	// did not even match the "-" prefix, so a stored descending sort on a
+	// perfectly ordinary column was reported as derived and dropped.
+	//
+	// The seam permits a provider to ignore Ordering as long as it says so.
+	// Substituting the id column was the tempting alternative and is worse:
+	// site_id order is not site-name order, and the panel would look correctly
+	// sorted while being ordered by something the reader cannot see.
+	if ordering := strings.TrimSpace(spec.Ordering); ordering != "" && !spec.CountOnly {
+		direction, field := "", ordering
+		if rest, ok := strings.CutPrefix(field, "-"); ok {
+			direction, field = "-", rest
+		}
+		field = strings.TrimSpace(field)
+		via, _, isExpansion := e.expandedColumn(field)
+		switch {
+		case e.has(field):
+			r.sort = direction + field
+		case isExpansion && via.Ref.Available:
+			expandSet[via.Ref.ExpandKey] = true
+			r.sort = direction + field
+		case isExpansion:
+			r.notes = append(r.notes, fmt.Sprintf(
+				"Rows are not sorted by %q: %s has received no data on this replica, so the name cannot be resolved to sort on. Sort by %s instead.",
+				field, strings.TrimPrefix(via.Ref.Path, "/v1/"), via.Name))
+		default:
+			r.notes = append(r.notes, fmt.Sprintf("Rows are not sorted by %q: this replica has no such column.", field))
+		}
+	}
+	for _, col := range e.Columns { // catalogue order, so the parameter is deterministic
+		if col.Ref != nil && expandSet[col.Ref.ExpandKey] {
+			r.expand = append(r.expand, col.Ref.ExpandKey)
+		}
+	}
+	if wantAll || spec.CountOnly {
+		// An empty Fields means "all columns" — the contract's wording and the
+		// editor's default — and KeyFields alone must NOT trigger a projection:
+		// they name join-key sources the caller reads but did not ask to see,
+		// so projecting onto them would return a panel containing nothing but
+		// its join keys. Object queries populate KeyFields whenever a join
+		// mapping is configured, so this fired on an ordinary panel left at
+		// "All columns" and silently removed every unrelated column from it.
+		return r
+	}
+
+	// fields=: the stored columns behind what was asked for. The primary key
+	// rides along — the service returns it regardless, and the deep link and
+	// the row checks read it.
+	seen := map[string]bool{}
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			r.fields = append(r.fields, name)
+		}
+	}
+	for _, f := range selectedFields(spec) {
+		switch {
+		case e.has(f):
+			add(f)
+		case strings.HasSuffix(f, "_value") && e.has(strings.TrimSuffix(f, "_value")):
+			// NetBox mode splits a choice into <field> (the label, "Active") and
+			// <field>_value (the raw value, "active"). This backend stores the
+			// raw value in the physical column and has no labels at all, so the
+			// alias is built from it — see addChoiceValueAliases.
+			add(strings.TrimSuffix(f, "_value"))
+		case strings.HasPrefix(f, "cf_") && e.has(customFieldDataColumn):
+			add(customFieldDataColumn)
+		}
+	}
+	pk := e.PrimaryKey
+	if pk == "" {
+		pk = "id"
+	}
+	add(pk)
+	return r
+}
+
+func unavailableReferenceWarning(col column) string {
+	return fmt.Sprintf("%s cannot be resolved: %s has received no data in this replica; %s still holds the value.",
+		col.Ref.ExpandKey, strings.TrimPrefix(col.Ref.Path, "/v1/"), col.Name)
+}
+
+// clampLimit applies the provider's defaults: unset means defaultLimit, above
+// the ceiling means MaxLimit. The per-page size is the client's business.
+func clampLimit(limit int) int {
+	if limit <= 0 {
+		return defaultLimit
+	}
+	if limit > MaxLimit {
+		return MaxLimit
+	}
+	return limit
+}
+
+// restrictColumns presents the caller's chosen columns, in the order they
+// asked for them; an empty request keeps everything. KeyFields are fetched and
+// left in the rows but never announced: the caller reads them to build a join
+// key and did not ask to see them.
+func restrictColumns(cols, requested []string) []string {
+	if len(requested) == 0 {
+		return cols
+	}
+	present := map[string]bool{}
+	for _, c := range cols {
+		present[c] = true
+	}
+	var out []string
+	for _, f := range requested {
+		if present[f] {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // addChoiceValueAliases fills in the <field>_value columns a panel written
@@ -451,7 +585,7 @@ func hasColumn(rows []map[string]interface{}, name string) bool {
 //
 // A blank column at least reads as a blank; a missing one a panel selected is
 // invisible.
-func unresolvedRelationWarnings(spec provider.QuerySpec, cols []string, rows []map[string]interface{}) []string {
+func unresolvedRelationWarnings(spec provider.QuerySpec, rows []map[string]interface{}, skip map[string]bool) []string {
 	// Both empty, not just Fields. "All columns" with a join mapping leaves
 	// Fields empty while KeyFields still names a source that has to exist, and
 	// skipping on Fields alone let applyJoinKeys announce an output column that
@@ -474,7 +608,9 @@ func unresolvedRelationWarnings(spec provider.QuerySpec, cols []string, rows []m
 	// key as missing, and omitting them let a join announce an output column
 	// with an empty value on every row, silently.
 	for _, f := range selectedFields(spec) {
-		if hasColumn(rows, f) {
+		// skip holds the names an unavailable reference would have produced;
+		// planRequest already said why those are missing.
+		if skip[f] || hasColumn(rows, f) {
 			continue
 		}
 		// A relationship names its source, because the id is still there and is
@@ -491,25 +627,6 @@ func unresolvedRelationWarnings(spec provider.QuerySpec, cols []string, rows []m
 	return out
 }
 
-// wantedRelations names the relationships whose NAMES the caller asked to see,
-// or nil when it asked for everything.
-//
-// A caller that selected site_id asked for the id and nothing else — resolving
-// "site" for it spends the discovery budget on a column that will be projected
-// away, and risks a warning that alert evaluation reads as a failure.
-// KeyFields count, but by the same rule: joining on "site" needs the name,
-// joining on "site_id" does not.
-func wantedRelations(spec provider.QuerySpec) map[string]bool {
-	if len(spec.Fields) == 0 {
-		return nil
-	}
-	want := map[string]bool{}
-	for _, f := range selectedFields(spec) {
-		want[strings.TrimSuffix(f, "_slug")] = true
-	}
-	return want
-}
-
 // selectedFields is every column the caller needs the value of: the ones it
 // asked to SEE plus the ones it reads to build a join key. Three separate
 // places have now had to learn that KeyFields count, so it is one function.
@@ -518,63 +635,49 @@ func selectedFields(spec provider.QuerySpec) []string {
 		spec.Fields...), spec.KeyFields...)
 }
 
-// projectColumns maps the caller's requested columns onto the columns that
-// exist upstream.
-//
-// The mapping is needed because several columns the caller can ask for are ours
-// rather than the service's: "site" is built from site_id, "cf_tier" out of the
-// custom_field_data blob. Naming those upstream is an error ("unknown column"),
-// and omitting their SOURCE would return the column empty.
-//
-// It reports ok=false when any requested column cannot be accounted for, and
-// the caller then asks for every column. That fallback is deliberate: an
-// unrecognized field usually means a saved dashboard naming something this
-// deployment no longer has, and fetching a wider row is a cost, while
-// projecting it away is a blank column with no explanation.
-func projectColumns(e entity, spec provider.QuerySpec) ([]string, bool) {
-	// An empty Fields means "all columns" — the contract's wording and the query
-	// editor's default. KeyFields alone must NOT trigger a projection: they name
-	// join-key sources the caller reads but did not ask to see, so projecting
-	// onto them would return a panel containing nothing but its join keys.
-	//
-	// Object queries populate KeyFields whenever a join mapping is configured,
-	// so this fired on an ordinary panel left at "All columns" and silently
-	// removed every unrelated column from it.
-	if len(spec.Fields) == 0 {
-		return nil, false
-	}
-
-	want := map[string]bool{}
-	for _, f := range selectedFields(spec) {
-		switch {
-		case e.has(f):
-			want[f] = true
-		case e.has(f + "_id"):
-			// A resolved name is built from its id column.
-			want[f+"_id"] = true
-		case strings.HasSuffix(f, "_slug") && e.has(strings.TrimSuffix(f, "_slug")+"_id"):
-			want[strings.TrimSuffix(f, "_slug")+"_id"] = true
-		case strings.HasSuffix(f, "_value") && e.has(strings.TrimSuffix(f, "_value")):
-			// NetBox mode splits a choice into <field> (the label, "Active") and
-			// <field>_value (the raw value, "active"). This backend stores the
-			// raw value in the physical column and has no labels at all, so the
-			// alias is built from it — see addChoiceValueAliases.
-			want[strings.TrimSuffix(f, "_value")] = true
-		case strings.HasPrefix(f, "cf_") && e.has(customFieldDataColumn):
-			want[customFieldDataColumn] = true
-		case f == deepLinkColumn:
-			// Built from the primary key, which the service returns on every
-			// projection regardless, so nothing extra needs requesting.
-			want["id"] = true
-		default:
-			return nil, false
+// toInt reads a primary key or foreign key. Every caller wants an identifier,
+// so the bar is a positive whole number that fits: JSON has one number type, and
+// an id of 1.9 silently truncated to 1 would be a DIFFERENT object in every
+// lookup and deep link built from it, while 0, a negative and a non-finite
+// value are not identifiers at all.
+func toInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return fromFloat(n)
+	case int:
+		return n, n > 0
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil || i <= 0 {
+			return 0, false
 		}
+		return int(i), true
 	}
-	out := make([]string, 0, len(want))
-	for c := range want {
-		out = append(out, c)
+	return 0, false
+}
+
+// maxExactID bounds ids at the range where float64 is INJECTIVE, which is a
+// stronger property than being exactly representable and is the one that
+// matters here.
+//
+// Ids arrive through encoding/json as float64, and the rounding happens during
+// decode, before anything here can inspect the value: the wire integer
+// 9007199254740993 is already 9007199254740992 by the time it is checked, so a
+// bound that merely excluded inexact values could not detect the collision.
+// Below 2^53 no two integers share a float64, so an accepted value names
+// exactly one object. 2^53 itself is excluded because 2^53+1 rounds onto it.
+//
+// The alternative — decoding rows with json.Number to keep the token — would
+// change the type of every value in every row, and with it frame building, to
+// defend a boundary no NetBox instance reaches: its keys are 64-bit, but 2^53
+// is nine quadrillion rows.
+const maxExactID = 1 << 53
+
+func fromFloat(f float64) (int, bool) {
+	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) || f <= 0 || f >= maxExactID {
+		return 0, false
 	}
-	return out, true
+	return int(f), true
 }
 
 // withFields sets the projection parameter. The service always returns the
@@ -683,16 +786,6 @@ func flattenRows(raws []json.RawMessage, projected []string) ([]string, []map[st
 		return nil, nil, err
 	}
 
-	// Whether a *_id column is a relationship is decided ACROSS the page, not
-	// per value. One row's numeric site_id confirms the column is a real
-	// foreign key, and a string in the next row is then malformed rather than
-	// evidence that the column is text — read per value it was accepted, and
-	// resolveFKs would resolve the first row, leave the second blank, and warn
-	// about neither.
-	if err := validateFKColumns(objs); err != nil {
-		return nil, nil, err
-	}
-
 	for _, obj := range objs {
 		row := make(map[string]interface{}, len(obj)+4)
 		for k, v := range obj {
@@ -795,46 +888,4 @@ func customFields(v interface{}) (map[string]interface{}, error) {
 		return m, nil
 	}
 	return nil, bad()
-}
-
-// validateFKColumns decides per COLUMN, across the whole page, whether a *_id
-// column is a relationship, and refuses a page that contradicts itself.
-//
-// A column is a foreign key if any row carries a usable id for it. NetBox also
-// has CharFields whose names end in _id — circuits.ProviderNetwork.service_id
-// holds the provider's own service identifier as text — and those are not
-// relationships at all, so a page where every non-null value is a string is
-// accepted and simply not resolved.
-func validateFKColumns(objs []map[string]interface{}) error {
-	isFK := map[string]bool{}
-	for _, obj := range objs {
-		for col, v := range obj {
-			if base, ok := strings.CutSuffix(col, "_id"); ok && base != "" {
-				if _, kind := classifyFKValue(v); kind == fkID {
-					isFK[col] = true
-				}
-			}
-		}
-	}
-	for _, obj := range objs {
-		for col, v := range obj {
-			base, ok := strings.CutSuffix(col, "_id")
-			if !ok || base == "" {
-				continue
-			}
-			_, kind := classifyFKValue(v)
-			switch {
-			case kind == fkBadID:
-			case isFK[col] && kind == fkNotAKey:
-			default:
-				continue
-			}
-			return &TransportError{
-				Op:      "reading " + col,
-				Err:     errMalformedFK,
-				Message: "Replica cache returned a relationship id that is not a usable identifier. The service is reachable but answered with something unexpected.",
-			}
-		}
-	}
-	return nil
 }

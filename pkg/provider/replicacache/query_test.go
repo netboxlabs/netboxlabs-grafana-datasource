@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -28,7 +30,9 @@ func newTestProvider(t *testing.T, f *fakeService) *Provider {
 	return New(srv.URL, "test-token", "nb-test", srv.Client())
 }
 
-func TestQueryResolvesForeignKeysToNames(t *testing.T) {
+// A panel written against the NetBox provider selects "site", not "site_id".
+// The server joins the name in under expand=; nothing is read client-side.
+func TestQueryExpandsForeignKeysToNames(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
 	f.entities["dcim/sites"] = []map[string]interface{}{
@@ -48,8 +52,12 @@ func TestQueryResolvesForeignKeysToNames(t *testing.T) {
 	}
 	row := res.Rows[0]
 
-	// This is the whole point of FK resolution: a panel written against the
-	// NetBox provider selects "site", not "site_id".
+	if req, ok := f.requestWith("dcim/devices", "expand"); !ok || req.query.Get("expand") != "role,tenant,site,rack" {
+		t.Errorf("an unprojected query expands every available reference, got %v", req.query)
+	}
+	if n := f.countRequestsFor("dcim/sites"); n != 0 {
+		t.Errorf("the server resolves the names; %d dimension reads were made", n)
+	}
 	if got := row["site"]; got != "DC-Northeast" {
 		t.Errorf("site = %v, want DC-Northeast", got)
 	}
@@ -197,7 +205,7 @@ func TestQueryProjectsResolvedColumnsOntoTheirIDs(t *testing.T) {
 		t.Fatalf("Query: %v", err)
 	}
 	if res.Rows[0]["site"] != "DC-Northeast" {
-		t.Errorf("site = %v; the id column was not fetched to build it", res.Rows[0]["site"])
+		t.Errorf("site = %v; the name was not expanded", res.Rows[0]["site"])
 	}
 	if len(res.Columns) != 2 || res.Columns[0] != "name" || res.Columns[1] != "site" {
 		t.Errorf("Columns = %v, want the requested fields in order", res.Columns)
@@ -283,17 +291,15 @@ func TestQueryRejectsCountOnlyWithAllowUncounted(t *testing.T) {
 	}
 }
 
-// The better message — "not one of the N types this deployment reports" —
-// depends on discovery already being cached, because the query path never waits
-// on it. That is the real flow: the query editor populates its object-type
-// dropdown before a query can name a type.
+// An object type the catalogue does not list is refused before any row
+// request, with the message naming how many types this deployment reports.
 func TestQueryRejectsUnknownObjectType(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "d", 1)}
 	p := newTestProvider(t, f)
 
 	if _, err := p.ObjectTypes(context.Background()); err != nil {
-		t.Fatalf("warming discovery: %v", err)
+		t.Fatalf("warming the catalogue: %v", err)
 	}
 
 	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/widgets"})
@@ -311,72 +317,23 @@ func TestQueryRejectsUnknownObjectType(t *testing.T) {
 	}
 }
 
-// Sorting on a column we synthesize cannot be pushed down, and the service
-// ignores it. Saying so is required: a panel must not believe it is sorted.
-func TestQueryNotesWhenSortCannotBePushedDown(t *testing.T) {
+// Sorting on a related name whose target has no data cannot be pushed down —
+// the service answers 400 "cannot sort on platform" — so the ordering is
+// dropped and the note names the cause.
+func TestQueryNotesWhenSortTargetHasNoData(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{{"id": float64(4001), "name": "DC-1", "slug": "dc-1"}}
 	p := newTestProvider(t, f)
 
-	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Ordering: "site"})
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Ordering: "platform"})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if len(res.Notes) == 0 {
-		t.Fatal("want a note saying the rows are not sorted by a derived column")
+	if len(res.Notes) == 0 || !strings.Contains(res.Notes[0], "dcim/platforms") {
+		t.Errorf("the note should name the unfed target: %v", res.Notes)
 	}
-	if !strings.Contains(res.Notes[0], "site") {
-		t.Errorf("note should name the column: %q", res.Notes[0])
-	}
-}
-
-// A dimension that fails to answer leaves a blank name column, which looks
-// exactly like "this device has no site". That gap has to be stated.
-func TestQueryWarnsWhenADimensionCannotBeRead(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	// dcim/sites is a known entity but returns rows that omit the id, so nothing
-	// resolves; the entity list still contains it.
-	f.entities["dcim/sites"] = []map[string]interface{}{}
-	p := newTestProvider(t, f)
-
-	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-	// No site name is available, and the id is still present rather than blank.
-	if _, ok := res.Rows[0]["site"]; ok {
-		t.Error("site should be absent when it could not be resolved, not blank")
-	}
-	if res.Rows[0]["site_id"] != float64(4001) {
-		t.Error("the raw id must survive an unresolved FK")
-	}
-}
-
-// Dimension tables are the slowest-changing data in NetBox, and a panel
-// refreshing every few seconds would otherwise re-read the site list on every
-// query. The second query must resolve names without touching the wire.
-func TestFKResolutionCachesDimensionReads(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{
-		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
-	}
-	p := newTestProvider(t, f)
-	ctx := context.Background()
-
-	for i := 0; i < 3; i++ {
-		res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices"})
-		if err != nil {
-			t.Fatalf("Query %d: %v", i, err)
-		}
-		if res.Rows[0]["site"] != "DC-Northeast" {
-			t.Fatalf("query %d lost the resolved name: %v", i, res.Rows[0]["site"])
-		}
-	}
-	if n := f.countRequestsFor("dcim/sites"); n != 1 {
-		t.Errorf("dimension read %d times across 3 queries, want 1 (the cache is not holding)", n)
+	if r, ok := f.requestWith("dcim/devices", "sort"); ok {
+		t.Errorf("sort was pushed for an unfed target: %v", r.query)
 	}
 }
 
@@ -506,6 +463,7 @@ func TestQueryProjectsKeyFieldsAlongsideExplicitFields(t *testing.T) {
 func TestQueryResolvesSelfReferentialParent(t *testing.T) {
 	f := newFakeService()
 	f.addEntity("dcim/locations", "id:BIGINT:pk", "name:VARCHAR", "slug:VARCHAR", "parent_id:BIGINT")
+	f.addReference("dcim/locations", "parent_id", "dcim/locations", "parent", "name", "slug")
 	f.entities["dcim/locations"] = []map[string]interface{}{
 		{"id": float64(10), "name": "Campus", "slug": "campus", "parent_id": nil},
 		{"id": float64(11), "name": "Building A", "slug": "building-a", "parent_id": float64(10)},
@@ -719,34 +677,9 @@ func TestOrderingIsNormalizedBeforeItIsValidated(t *testing.T) {
 	}
 }
 
-// Whether a *_id column is a relationship is decided across the PAGE, not per
-// value. One row's numeric site_id confirms the column is a real foreign key,
-// so a string in the next row is malformed rather than evidence that the column
-// is text — read per value it was accepted, and resolveFKs would resolve the
-// first row, leave the second blank, and warn about neither.
-func TestAConfirmedForeignKeyColumnRejectsTextInOtherRows(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{
-		{"id": float64(1), "name": "CORE-1", "site_id": float64(4001)},
-		{"id": float64(2), "name": "CORE-2", "site_id": "4002"},
-	}
-	f.entities["dcim/sites"] = []map[string]interface{}{
-		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
-	}
-	p := newTestProvider(t, f)
-
-	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
-	if err == nil {
-		t.Fatal("a confirmed relationship column must not accept text in another row")
-	}
-	if !errors.Is(err, errMalformedFK) {
-		t.Errorf("want errMalformedFK, got %v", err)
-	}
-}
-
-// The other side of the same rule: a column where NO row carries an id is not a
-// relationship at all, so text in it is ordinary data. service_id is a NetBox
-// CharField, and a page of them must stay a perfectly good answer.
+// A column is a relationship only when the catalogue declares a reference for
+// it. service_id is a NetBox CharField — circuits.ProviderNetwork's own service
+// identifier — and its name must not conjure a "service" column.
 func TestATextColumnEndingInIDIsStillNotARelationship(t *testing.T) {
 	f := newFakeService()
 	f.addEntity("circuits/provider-networks", "id:BIGINT:pk", "name:VARCHAR", "service_id:VARCHAR")
@@ -808,23 +741,17 @@ func TestUnreadableCustomFieldsAreReported(t *testing.T) {
 	}
 }
 
-// Resolving a name the caller did not ask for is not free twice over: it can
-// spend the whole discovery budget, and a dimension that fails adds a warning —
-// which alert evaluation treats as a hard failure. A rule selecting only
-// site_id would stop firing because dcim/sites was unreachable, though every
-// value it asked for was present.
-func TestUnrequestedRelationshipsAreNotResolved(t *testing.T) {
+// Expanding a name the caller did not ask for is not free: the server joins
+// for it and every row widens. A rule selecting only site_id gets exactly that.
+func TestUnrequestedRelationshipsAreNotExpanded(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
 	f.entities["dcim/sites"] = []map[string]interface{}{
 		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
 	}
-	f.failEntities["dcim/sites"] = true // the dimension is down
 	p := newTestProvider(t, f)
 	ctx := context.Background()
 
-	// Asking for the id only: the dimension being down is not this query's
-	// problem, and must not be reported as a degradation.
 	res, err := p.Query(ctx, provider.QuerySpec{
 		ObjectType: "dcim/devices",
 		Fields:     []string{"name", "site_id"},
@@ -832,15 +759,13 @@ func TestUnrequestedRelationshipsAreNotResolved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if len(res.Warnings) != 0 {
-		t.Errorf("site was never asked for: %v", res.Warnings)
+	if req, ok := f.requestWith("dcim/devices", "expand"); ok {
+		t.Errorf("site was never asked for, yet it was expanded: %v", req.query)
 	}
 	if res.Rows[0]["site_id"] != float64(4001) {
 		t.Errorf("site_id = %v, want 4001", res.Rows[0]["site_id"])
 	}
 
-	// Asking for the NAME: now the failure is this query's problem and must be
-	// reported, or the blank column would read as "this device has no site".
 	res, err = p.Query(ctx, provider.QuerySpec{
 		ObjectType: "dcim/devices",
 		Fields:     []string{"name", "site"},
@@ -848,8 +773,11 @@ func TestUnrequestedRelationshipsAreNotResolved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if len(res.Warnings) == 0 {
-		t.Error("site was asked for and could not be read; that must be reported")
+	if req, ok := f.requestWith("dcim/devices", "expand"); !ok || req.query.Get("expand") != "site" {
+		t.Errorf("site was asked for and must be expanded, got %v", req.query)
+	}
+	if res.Rows[0]["site"] != "DC-Northeast" {
+		t.Errorf("site = %v, want DC-Northeast", res.Rows[0]["site"])
 	}
 }
 
@@ -857,65 +785,38 @@ func TestUnrequestedRelationshipsAreNotResolved(t *testing.T) {
 // rule applies to it: joining on "site" needs the name, joining on "site_id"
 // does not.
 func TestJoinKeysFollowTheSameRule(t *testing.T) {
-	if want := wantedRelations(provider.QuerySpec{
-		Fields: []string{"name"}, KeyFields: []string{"site_id"},
-	}); want["site"] {
-		t.Errorf("site_id as a join key does not need the name: %v", want)
+	e := catalogFromFake(t, devicesSchema()).Entities["dcim/devices"]
+	expand := func(spec provider.QuerySpec) []string {
+		t.Helper()
+		return planRequest(e, spec).expand
 	}
-	if want := wantedRelations(provider.QuerySpec{
-		Fields: []string{"name"}, KeyFields: []string{"site"},
-	}); !want["site"] {
-		t.Errorf("site as a join key needs the name: %v", want)
+	if got := expand(provider.QuerySpec{Fields: []string{"name"}, KeyFields: []string{"site_id"}}); len(got) != 0 {
+		t.Errorf("site_id as a join key does not need the name: %v", got)
 	}
-	// A slug is built from the same lookup, so it counts as wanting it.
-	if want := wantedRelations(provider.QuerySpec{Fields: []string{"site_slug"}}); !want["site"] {
-		t.Errorf("site_slug needs the site lookup: %v", want)
+	if got := expand(provider.QuerySpec{Fields: []string{"name"}, KeyFields: []string{"site"}}); !slices.Equal(got, []string{"site"}) {
+		t.Errorf("site as a join key needs the name: %v", got)
 	}
-	// No projection at all still means everything.
-	if want := wantedRelations(provider.QuerySpec{}); want != nil {
-		t.Errorf("an unprojected query wants every relationship, got %v", want)
+	// A slug comes from the same expansion, so it counts as wanting it.
+	if got := expand(provider.QuerySpec{Fields: []string{"site_slug"}}); !slices.Equal(got, []string{"site"}) {
+		t.Errorf("site_slug needs the site expansion: %v", got)
+	}
+	// No projection at all still means everything that can be resolved.
+	if got := expand(provider.QuerySpec{}); !slices.Equal(got, []string{"role", "tenant", "site", "rack"}) {
+		t.Errorf("an unprojected query expands every available reference, got %v", got)
 	}
 }
 
-// A relationship the caller asked to SEE that produced no column at all must
-// say so. A blank column reads as a blank; a missing one a panel selected is
+// A column the caller asked to SEE that the result does not contain must say
+// so. A blank column reads as a blank; a missing one a panel selected is
 // invisible, and alert evaluation treats warnings as failures precisely so it
-// never runs on one.
-func TestARequestedRelationshipThatVanishesIsReported(t *testing.T) {
+// never runs on one. A saved panel selecting a NetBox-computed column such as
+// ipam/prefixes.utilization gets nothing here, and got no word about it.
+func TestARequestedColumnThatCannotBeProducedIsReported(t *testing.T) {
 	f := newFakeService()
-	// site_id is a string in every row, so nothing proves the column is a
-	// relationship and it is accepted as text — a request for "site" then
-	// produced neither a column nor a word about why.
-	f.entities["dcim/devices"] = []map[string]interface{}{
-		{"id": float64(1), "name": "CORE-1", "site_id": "4001"},
-	}
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
 	p := newTestProvider(t, f)
 
 	res, err := p.Query(context.Background(), provider.QuerySpec{
-		ObjectType: "dcim/devices",
-		Fields:     []string{"name", "site"},
-	})
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-	var warned bool
-	for _, w := range res.Warnings {
-		if strings.Contains(w, "site") {
-			warned = true
-		}
-	}
-	if !warned {
-		t.Errorf("site was requested and never appeared; that must be stated: %v", res.Warnings)
-	}
-
-	// A field with no source column at all is reported too. This assertion was
-	// the other way round when the backstop first landed — "the projection's
-	// business, not a degradation" — and that reasoning was wrong for the same
-	// reason everything else in this file is: absence is indistinguishable from
-	// emptiness, and alert evaluation reads an empty Warnings list as
-	// permission to run. A saved panel selecting a NetBox-computed column such
-	// as ipam/prefixes.utilization gets nothing here, and got no word about it.
-	res, err = p.Query(context.Background(), provider.QuerySpec{
 		ObjectType: "dcim/devices",
 		Fields:     []string{"name", "utilization"},
 	})
@@ -952,22 +853,20 @@ func TestARequestedRelationshipThatVanishesIsReported(t *testing.T) {
 // on every row.
 func TestAJoinKeySourceThatVanishesIsReported(t *testing.T) {
 	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{
-		{"id": float64(1), "name": "CORE-1", "site_id": "4001"}, // text, so "site" never builds
-	}
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
 	p := newTestProvider(t, f)
 
 	res, err := p.Query(context.Background(), provider.QuerySpec{
 		ObjectType: "dcim/devices",
 		Fields:     []string{"name"},
-		KeyFields:  []string{"site"},
+		KeyFields:  []string{"utilization"}, // nothing this backend produces
 	})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 	var warned bool
 	for _, w := range res.Warnings {
-		if strings.Contains(w, "site") {
+		if strings.Contains(w, "utilization") {
 			warned = true
 		}
 	}
@@ -1118,22 +1017,19 @@ func TestAliasesAreBuiltForJoinKeySourcesToo(t *testing.T) {
 // an output column that was blank on every row with nothing to say why.
 func TestKeyOnlyJoinsAreValidatedUnderAllColumns(t *testing.T) {
 	f := newFakeService()
-	// site_id is text in every row, so "site" can never be built.
-	f.entities["dcim/devices"] = []map[string]interface{}{
-		{"id": float64(1), "name": "CORE-1", "site_id": "4001"},
-	}
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
 	p := newTestProvider(t, f)
 
 	res, err := p.Query(context.Background(), provider.QuerySpec{
 		ObjectType: "dcim/devices",
-		KeyFields:  []string{"site"}, // Fields deliberately empty
+		KeyFields:  []string{"utilization"}, // Fields deliberately empty
 	})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 	var warned bool
 	for _, w := range res.Warnings {
-		if strings.Contains(w, "site") {
+		if strings.Contains(w, "utilization") {
 			warned = true
 		}
 	}
@@ -1578,30 +1474,191 @@ func TestARequestedSlugSurvivesAnUnsetRelationship(t *testing.T) {
 	}
 }
 
-// Where the relationship DOES carry ids, a missing slug means resolution failed
-// to produce one, and that is still worth reporting rather than filling in.
-func TestAMissingSlugIsStillReportedWhenTheRelationshipHasIDs(t *testing.T) {
+// planRequest decides, from the catalogue alone, what a QuerySpec becomes on
+// the wire: which stored columns to project, which references to expand, and
+// whether the ordering can be pushed. It is pure, so every case is a table.
+func TestPlanRequest(t *testing.T) {
+	e := catalogFromFake(t, devicesSchema()).Entities["dcim/devices"]
+	for _, tc := range []struct {
+		name           string
+		spec           provider.QuerySpec
+		fields, expand []string
+		sort           string
+		notesHas       string
+		warnsHas       string
+	}{
+		{"physical only", provider.QuerySpec{Fields: []string{"name", "serial"}}, []string{"name", "serial", "id"}, nil, "", "", ""},
+		{"the key is not duplicated", provider.QuerySpec{Fields: []string{"id", "name"}}, []string{"id", "name"}, nil, "", "", ""},
+		{"expanded name pulls its key", provider.QuerySpec{Fields: []string{"name", "site", "site_slug"}}, []string{"name", "id"}, []string{"site"}, "", "", ""},
+		{"key field is fetched too", provider.QuerySpec{Fields: []string{"name"}, KeyFields: []string{"rack"}}, []string{"name", "id"}, []string{"rack"}, "", "", ""},
+		{"cf pulls custom_field_data", provider.QuerySpec{Fields: []string{"cf_lifecycle_phase"}}, []string{"custom_field_data", "id"}, nil, "", "", ""},
+		{"display_url pulls nothing extra", provider.QuerySpec{Fields: []string{"display_url"}}, []string{"id"}, nil, "", "", ""},
+		{"empty fields means everything", provider.QuerySpec{}, nil, []string{"role", "tenant", "site", "rack"}, "", "", ""},
+		{"sort on physical", provider.QuerySpec{Fields: []string{"name"}, Ordering: "-name"}, []string{"name", "id"}, nil, "-name", "", ""},
+		{"sort on expansion expands it", provider.QuerySpec{Fields: []string{"name"}, Ordering: "site"}, []string{"name", "id"}, []string{"site"}, "site", "", ""},
+		{"descending sort on expansion", provider.QuerySpec{Fields: []string{"name"}, Ordering: " -site "}, []string{"name", "id"}, []string{"site"}, "-site", "", ""},
+		{"sort on unavailable expansion is dropped with the cause", provider.QuerySpec{Fields: []string{"name"}, Ordering: "platform"}, []string{"name", "id"}, nil, "", "dcim/platforms has received no data", ""},
+		{"sort on unknown is dropped", provider.QuerySpec{Fields: []string{"name"}, Ordering: "colour"}, []string{"name", "id"}, nil, "", "no such column", ""},
+		{"unavailable expansion requested warns and is not expanded", provider.QuerySpec{Fields: []string{"name", "platform"}}, []string{"name", "id"}, nil, "", "", "platform cannot be resolved"},
+		{"filter on expanded name expands it", provider.QuerySpec{Fields: []string{"name"}, Filters: []provider.Filter{{Field: "site", Operator: "ic", Value: "ams"}}}, []string{"name", "id"}, []string{"site"}, "", "", ""},
+		{"count-only expands only for its filters", provider.QuerySpec{CountOnly: true, Ordering: "site", Filters: []provider.Filter{{Field: "rack", Operator: "ic", Value: "r1"}}}, nil, []string{"rack"}, "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := planRequest(e, tc.spec)
+			if !slices.Equal(r.fields, tc.fields) || !slices.Equal(r.expand, tc.expand) || r.sort != tc.sort {
+				t.Errorf("fields=%v expand=%v sort=%q; want %v %v %q", r.fields, r.expand, r.sort, tc.fields, tc.expand, tc.sort)
+			}
+			if tc.notesHas != "" && !strings.Contains(strings.Join(r.notes, " "), tc.notesHas) {
+				t.Errorf("notes %v lack %q", r.notes, tc.notesHas)
+			}
+			if tc.warnsHas != "" && !strings.Contains(strings.Join(r.warnings, " "), tc.warnsHas) {
+				t.Errorf("warnings %v lack %q", r.warnings, tc.warnsHas)
+			}
+			if tc.warnsHas == "" && len(r.warnings) != 0 {
+				t.Errorf("unexpected warnings %v", r.warnings)
+			}
+		})
+	}
+}
+
+func TestQuery_ExpandsServerSideAndSortsOnTheName(t *testing.T) {
 	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{
-		{"id": float64(4001), "name": "DC-Northeast"}, // no slug on the dimension
+	f.entities["dcim/sites"] = []map[string]interface{}{{"id": 1, "name": "AMS1", "slug": "ams1"}, {"id": 2, "name": "NYC1", "slug": "nyc1"}}
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": 10, "name": "n-1", "site_id": 2, "rack_id": nil, "platform_id": 5, "custom_field_data": `{}`},
+		{"id": 11, "name": "a-1", "site_id": 1, "rack_id": nil, "platform_id": nil, "custom_field_data": `{}`},
+		{"id": 12, "name": "x-1", "site_id": nil, "rack_id": nil, "platform_id": nil, "custom_field_data": `{}`},
 	}
 	p := newTestProvider(t, f)
 
-	res, err := p.Query(context.Background(), provider.QuerySpec{
-		ObjectType: "dcim/devices",
-		Fields:     []string{"name", "site_slug"},
-	})
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
+		Fields: []string{"name", "site", "site_slug", "rack", "platform"}, Ordering: "site", Limit: 10})
 	if err != nil {
-		t.Fatalf("Query: %v", err)
+		t.Fatal(err)
 	}
-	var told bool
-	for _, w := range res.Warnings {
-		if strings.Contains(w, "site_slug") {
-			told = true
+	req, _ := f.requestWith("dcim/devices", "expand")
+	if req.query.Get("expand") != "site,rack" || req.query.Get("sort") != "site" || req.query.Get("fields") != "name,id" {
+		t.Errorf("request = %v", req.query)
+	}
+	if f.countRequestsFor("dcim/sites") != 0 {
+		t.Error("no client-side dimension fetch: the server resolved the names")
+	}
+	// Sorted by site name on the server, nulls last; the null-site row keeps
+	// null expansions (not blanks, not missing).
+	if got := rowNames(res.Rows); !slices.Equal(got, []string{"a-1", "n-1", "x-1"}) {
+		t.Errorf("order = %v", got)
+	}
+	if v, ok := res.Rows[2]["site"]; !ok || v != nil {
+		t.Errorf("a null FK must yield null expansions, got %v", res.Rows[2])
+	}
+	if !slices.Equal(res.Columns, []string{"name", "site", "site_slug", "rack"}) {
+		t.Errorf("columns = %v (platform is unavailable and must be absent, not blank)", res.Columns)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "platform cannot be resolved") {
+		t.Errorf("warnings = %v, want exactly the unavailable-target warning", res.Warnings)
+	}
+}
+
+// expand= goes with every query, count-only included: a filter on an expanded
+// name is only valid under it, and the alert Count path sends the rule's
+// filters with CountOnly. Only the sort and the projection are dropped.
+func TestQuery_CountOnlyStillExpandsForFilters(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/sites"] = []map[string]interface{}{{"id": 1, "name": "AMS1", "slug": "ams1"}}
+	f.entities["dcim/devices"] = []map[string]interface{}{{"id": 1, "name": "a", "site_id": 1, "custom_field_data": `{}`}}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", CountOnly: true, Limit: 1,
+		Filters: []provider.Filter{{Field: "site", Operator: "ic", Value: "ams"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := f.requestWith("dcim/devices", "expand")
+	if req.query.Get("expand") != "site" || req.query.Get("sort") != "" || req.query.Get("fields") != "" {
+		t.Errorf("count-only request = %v: expand must travel, sort and fields must not", req.query)
+	}
+	if res.Total != 1 {
+		t.Errorf("total = %d", res.Total)
+	}
+}
+
+// The service escapes wildcards now, so a % or _ in the user's own value is
+// sent as itself and the refusal is gone.
+func TestQuery_TextFilterMayContainWildcards(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{{"id": 1, "name": "100%", "custom_field_data": `{}`}}
+	p := newTestProvider(t, f)
+
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"},
+		Filters: []provider.Filter{{Field: "name", Operator: "ic", Value: "0%"}}})
+	if err != nil {
+		t.Fatalf("the server escapes wildcards; the refusal must be gone: %v", err)
+	}
+	req, _ := f.requestWith("dcim/devices", "filter[name]__ilike")
+	if got := req.query.Get("filter[name]__ilike"); got != "%0%%" {
+		t.Errorf("pattern = %q", got)
+	}
+}
+
+// An entity the catalogue lists but has fed nothing for is a distinct error
+// naming the type, not an empty table and not a missing endpoint.
+func TestQuery_UnfedEntityIsNotReplicated(t *testing.T) {
+	p := newTestProvider(t, newFakeService())
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/platforms"})
+	u := provider.Classify(err)
+	if u == nil || u.Kind != provider.ErrorKindNotReplicated || !strings.Contains(u.Detail, "dcim/platforms") {
+		t.Errorf("got %v / %+v, want not-replicated naming the type", err, u)
+	}
+}
+
+func rowNames(rows []map[string]interface{}) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r["name"].(string))
+	}
+	return out
+}
+
+// JSON has one number type, so an id of 1.9 truncated to 1 would be a DIFFERENT
+// object in every lookup and deep link built from it, and 0, a negative or a
+// non-finite value is not an identifier at all.
+func TestIDsMustBeWholeAndPositive(t *testing.T) {
+	for _, v := range []interface{}{
+		float64(1.9), float64(0), float64(-5), math.NaN(), math.Inf(1),
+		"12", nil, true, float64(1) / 3,
+	} {
+		if id, ok := toInt(v); ok {
+			t.Errorf("toInt(%#v) = %d, accepted; not a usable identifier", v, id)
 		}
 	}
-	if !told {
-		t.Errorf("the site resolved but has no slug; that must be stated: %v", res.Warnings)
+	for _, v := range []interface{}{
+		float64(1), float64(4001), int(7),
+		// NetBox primary keys are 64-bit. An int32 cap — which this first had —
+		// would reject legitimate ids on a large instance, and the bound that
+		// matters is the one the wire format imposes: ids arrive as float64.
+		float64(2147483648), float64(1 << 52), float64(maxExactID - 1),
+	} {
+		id, ok := toInt(v)
+		if !ok {
+			t.Errorf("toInt(%#v) rejected a valid id", v)
+		}
+		if f, isF := v.(float64); isF && float64(id) != f {
+			t.Errorf("toInt(%#v) = %d, which is a different object", v, id)
+		}
+	}
+	// The bound is INJECTIVITY, not exact representability. 2^53 is exactly
+	// representable, but so is 2^53+1's rounded form — they are the same
+	// float64 — and the rounding happens during decode, before anything here
+	// can see it. Accepting 2^53 would therefore accept 2^53+1 as a different
+	// object's id.
+	if id, ok := toInt(float64(maxExactID)); ok {
+		t.Errorf("toInt accepted %d, which 2^53+1 also decodes to", id)
+	}
+	if id, ok := toInt(float64(maxExactID) * 4); ok {
+		t.Errorf("toInt accepted an inexact id as %d", id)
+	}
+	// Everything below the bound is unambiguous.
+	if got, ok := toInt(float64(maxExactID - 1)); !ok || got != maxExactID-1 {
+		t.Errorf("toInt(2^53-1) = %d,%v; want it accepted unchanged", got, ok)
 	}
 }

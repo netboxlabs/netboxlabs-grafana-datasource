@@ -3,6 +3,7 @@ package replicacache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -529,5 +530,56 @@ func TestAMalformedCacheURLFailsHealthWithTheSameGuidance(t *testing.T) {
 	}
 	if u := provider.Classify(err); u == nil || !strings.Contains(u.Detail, "replica-cache URL") {
 		t.Errorf("guidance should name the setting at fault, got %+v", u)
+	}
+}
+
+// The catalogue can be up to ten minutes stale, so the row route's own answer
+// for an entity that has received nothing is classified the same way the
+// catalogue's Ingested flag is: not replicated, naming the type.
+func TestNoDataReceived404IsNotReplicated(t *testing.T) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
+		writeErr(w, 404, "no data received for this entity")
+	}))
+	defer srv.Close()
+
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	u := provider.Classify(err)
+	if u == nil || u.Kind != provider.ErrorKindNotReplicated || !strings.Contains(u.Detail, "dcim/devices") {
+		t.Errorf("got %v / %+v, want not-replicated naming the type", err, u)
+	}
+}
+
+// A cursor minted against one catalogue is refused after the catalogue changes
+// underneath the walk. The walk restarts from the first page once; a second
+// refusal is the service's problem and is returned as its own 400.
+func TestCursorWalkRestartsOnceWhenTheCursorIsRefused(t *testing.T) {
+	f := newFakeService()
+	var devices []map[string]interface{}
+	for i := 1; i <= 5; i++ {
+		devices = append(devices, deviceFixture(i, fmt.Sprintf("D-%d", i), 4001))
+	}
+	f.entities["dcim/devices"] = devices
+	f.pageCap = 2
+	f.rejectCursors = 1
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Limit: 5})
+	if err != nil {
+		t.Fatalf("one refusal must be recovered from by restarting the walk: %v", err)
+	}
+	if len(res.Rows) != 5 || res.Total != 5 {
+		t.Errorf("rows=%d total=%d, want the whole table after the restart", len(res.Rows), res.Total)
+	}
+
+	f.mu.Lock()
+	f.rejectCursors = 2
+	f.mu.Unlock()
+	_, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Limit: 5})
+	if err == nil {
+		t.Fatal("a second refusal in one walk must not be retried forever")
+	}
+	if u := provider.Classify(err); u == nil || u.Kind != provider.ErrorKindBadRequest {
+		t.Errorf("the second refusal is the service's 400, got %+v", u)
 	}
 }

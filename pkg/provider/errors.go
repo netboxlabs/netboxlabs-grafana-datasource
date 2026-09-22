@@ -47,6 +47,11 @@ const (
 	// ErrorKindBadRequest because the remedy is different — the reader has to
 	// point the query at a backend that can answer it, not fix the query.
 	ErrorKindUnsupported ErrorKind = "unsupported"
+	// ErrorKindNotReplicated is an object type the backend is configured to
+	// serve but has received no data for — not replicated for this tenant, or
+	// empty at the source; the backend cannot tell which. Retrying cannot fix
+	// it; the query has to name a type the backend has data for.
+	ErrorKindNotReplicated ErrorKind = "not-replicated"
 	// ErrorKindUpstream is any other identified upstream refusal. Status carries
 	// the code; there is nothing more specific to say.
 	ErrorKindUpstream ErrorKind = "upstream"

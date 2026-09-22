@@ -166,7 +166,7 @@ func TestQueryPropagatesUpstreamFailure(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "d", 1)}
 	p := newTestProvider(t, f)
-	// Prime discovery while the service is healthy, then break it.
+	// Prime the catalogue while the service is healthy, then break it.
 	if _, err := p.ObjectTypes(context.Background()); err != nil {
 		t.Fatalf("ObjectTypes: %v", err)
 	}
@@ -303,10 +303,6 @@ func TestTransportFailuresNameTheCache(t *testing.T) {
 	}
 }
 
-// A 200 carrying no usable paths is a discovery FAILURE, not an answer of
-// "nothing exists". Caching it would pin an empty entity set for the whole TTL,
-// and every object query would then be rejected locally while the row endpoints
-// are perfectly healthy — the opposite of the degradation this path is for.
 // A 200 carrying no entities is a catalogue FAILURE, not an answer of "nothing
 // exists". Caching it would pin an empty entity set for the whole TTL, and
 // every query would then be refused locally while the service is healthy.
@@ -390,8 +386,8 @@ func TestEmptyCataloguePointsAtTheCacheNotNetBox(t *testing.T) {
 	}
 }
 
-// Save & Test must make a live request. Answering from a discovery result up
-// to ten minutes old lets it report "Connected" after the token has been
+// Save & Test must make a live request. Answering from a catalogue up to ten
+// minutes old lets it report "Connected" after the token has been
 // revoked, while every query fails — a wrong answer from the one button whose
 // whole job is to check the connection.
 func TestHealthCheckDoesNotAnswerFromCache(t *testing.T) {

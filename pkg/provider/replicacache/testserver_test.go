@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,25 +36,11 @@ type fakeService struct {
 	errBody string
 	// requests records every list request's query string, for asserting pushdown.
 	requests []recordedRequest
-	// failEntities names entities that answer 500, to simulate one dimension
-	// timing out while the rest of the service is healthy.
-	failEntities map[string]bool
-	// nullRowsFor names an entity whose rows come back as JSON nulls, which
-	// decode without error but leave the row map nil.
-	nullRowsFor string
-	// ignoreIDFilterFor names an entity that answers an id__in filter with its
-	// whole table, modelling a cache or intermediary that mishandled the filter
-	// and returned the right NUMBER of rows but not the right ones.
-	ignoreIDFilterFor string
-	// idlessRowsFor names an entity whose rows come back as objects with their
-	// primary key stripped — object-shaped, but nothing to match a reference
-	// against. Stripped on the way OUT so the row still matches the id filter
-	// that asked for it, which is what makes this reachable at all.
-	idlessRowsFor string
-	// failOnce names entities whose FIRST request answers 500 and whose later
-	// requests are served normally — a transient failure, which is how the
-	// schema probe can fail while the row fetch behind it succeeds.
-	failOnce map[string]bool
+	// rejectCursors is how many cursor-carrying requests still answer 400
+	// "cursor does not belong to this walk" — what the service says when the
+	// catalogue changed underneath a walk. One models the case the client
+	// recovers from; two models a service that keeps refusing.
+	rejectCursors int
 }
 
 type recordedRequest struct {
@@ -63,11 +50,9 @@ type recordedRequest struct {
 
 func newFakeService() *fakeService {
 	return &fakeService{
-		schema:       devicesSchema(),
-		entities:     map[string][]map[string]interface{}{},
-		failEntities: map[string]bool{},
-		failOnce:     map[string]bool{},
-		pageCap:      1000,
+		schema:   devicesSchema(),
+		entities: map[string][]map[string]interface{}{},
+		pageCap:  1000,
 	}
 }
 
@@ -118,59 +103,162 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entity := strings.TrimPrefix(r.URL.Path, "/v1/")
+	q := r.URL.Query()
 	f.mu.Lock()
-	f.requests = append(f.requests, recordedRequest{entity: entity, query: r.URL.Query()})
+	f.requests = append(f.requests, recordedRequest{entity: entity, query: q})
 	rows, ok := f.entities[entity]
 	status, errBody, pageCap := f.status, f.errBody, f.pageCap
+	var se *fakeEntity
+	if f.schema != nil {
+		if e, known := f.schema.Entities["/v1/"+entity]; known {
+			se = &e
+		}
+	}
+	rejectCursor := f.rejectCursors > 0 && q.Get("cursor") != ""
+	if rejectCursor {
+		f.rejectCursors--
+	}
 	f.mu.Unlock()
 
 	if status != 0 {
 		writeErr(w, status, errBody)
 		return
 	}
-	f.mu.Lock()
-	broken := f.failEntities[entity]
-	if f.failOnce[entity] {
-		delete(f.failOnce, entity)
-		broken = true
+	// The catalogue decides what exists and what has data, as the service
+	// does: an entity it does not list is no endpoint, one it lists unfed
+	// answers 404 with the sentence the provider classifies.
+	if f.schema != nil && se == nil {
+		writeErr(w, 404, "endpoint not found")
+		return
 	}
-	f.mu.Unlock()
-	if broken {
-		writeErr(w, 500, "server error")
+	if se != nil && !se.Ingested {
+		writeErr(w, 404, "no data received for this entity")
 		return
 	}
 	if !ok {
 		writeErr(w, 404, "endpoint not found")
 		return
 	}
+	if rejectCursor {
+		writeErr(w, 400, "cursor does not belong to this walk")
+		return
+	}
+	if l, err := strconv.Atoi(q.Get("limit")); err == nil && l > 1000 {
+		writeErr(w, 400, fmt.Sprintf("limit %d exceeds the maximum page size of 1000", l))
+		return
+	}
 
-	q := r.URL.Query()
-	f.mu.Lock()
-	ignoreIDFilter := f.ignoreIDFilterFor == entity
-	f.mu.Unlock()
-	if ignoreIDFilter {
-		q = url.Values{}
-		for k, vs := range r.URL.Query() {
-			if strings.HasPrefix(k, "filter[id]") {
-				continue
-			}
-			q[k] = vs
+	// The columns a request may name are the schema's plus the keys it
+	// expands — never the rows', which is how the service behaves and what
+	// makes a projection bug surface here as the 400 it would be in
+	// production. A schema-less fake (an older build) falls back to the rows.
+	pk := "id"
+	stored := map[string]fakeColumn{}
+	if se != nil {
+		pk = se.PrimaryKey
+		for _, c := range se.Columns {
+			stored[c.Name] = c
+		}
+	} else if len(rows) > 0 {
+		for k := range rows[0] {
+			stored[k] = fakeColumn{Name: k, Type: "VARCHAR"}
 		}
 	}
-	// Filtering: only what the tests need, but rejecting an unknown column the
-	// way the real service does, so a projection bug surfaces as a failure.
-	filtered := rows
+
+	// Expansions, resolved from the UNPROJECTED rows the way the service's
+	// LEFT JOIN does: the derived columns are present whenever the key is
+	// expanded and null when the id is null or the target row is absent. An
+	// unavailable target adds nothing, and sorting on it is refused by name.
+	type expansion struct {
+		col, target, key string
+		cols             []string
+	}
+	var expansions []expansion
+	unavailable := map[string]string{}
+	if ex := q.Get("expand"); ex != "" {
+		for _, key := range strings.Split(ex, ",") {
+			var found *fakeColumn
+			for _, c := range stored {
+				if c.References != nil && c.References.ExpandKey == key {
+					cc := c
+					found = &cc
+				}
+			}
+			if found == nil {
+				writeErr(w, 400, "unknown expand key: "+key)
+				return
+			}
+			target := strings.TrimPrefix(found.References.Path, "/v1/")
+			if !found.References.Available {
+				unavailable[key] = strings.ReplaceAll(target, "/", "_")
+				continue
+			}
+			expansions = append(expansions, expansion{col: found.Name, target: target, key: key, cols: found.References.Columns})
+		}
+	}
+	f.mu.Lock()
+	resolved := make([]map[string]interface{}, 0, len(rows))
+	for _, row := range rows {
+		out := make(map[string]interface{}, len(row)+2*len(expansions))
+		for k, v := range row {
+			out[k] = v
+		}
+		for _, x := range expansions {
+			var target map[string]interface{}
+			if id, ok := toInt(row[x.col]); ok {
+				for _, t := range f.entities[x.target] {
+					if tid, ok := toInt(t["id"]); ok && tid == id {
+						target = t
+					}
+				}
+			}
+			out[x.key] = nil
+			if target != nil {
+				out[x.key] = target[x.cols[0]]
+			}
+			for _, c := range x.cols[1:] {
+				out[x.key+"_"+c] = nil
+				if target != nil {
+					out[x.key+"_"+c] = target[c]
+				}
+			}
+		}
+		resolved = append(resolved, out)
+	}
+	f.mu.Unlock()
+	nameOK := func(name string) bool {
+		if _, ok := stored[name]; ok {
+			return true
+		}
+		for _, x := range expansions {
+			if name == x.key {
+				return true
+			}
+			for _, c := range x.cols[1:] {
+				if name == x.key+"_"+c {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// Filtering: an unknown column and ilike on a non-text column are refused
+	// the way the service refuses them.
+	filtered := resolved
 	for k, vs := range q {
 		if !strings.HasPrefix(k, "filter[") {
 			continue
 		}
 		col := k[len("filter["):strings.Index(k, "]")]
 		op := k[strings.Index(k, "]")+3:]
-		if len(rows) > 0 {
-			if _, exists := rows[0][col]; !exists {
-				writeErr(w, 400, "unknown column: "+col)
-				return
-			}
+		if !nameOK(col) {
+			writeErr(w, 400, "unknown column: "+col)
+			return
+		}
+		if c, isStored := stored[col]; op == "ilike" && isStored && c.Type != "VARCHAR" {
+			writeErr(w, 400, fmt.Sprintf("operator ilike requires a text column: %s is %s", col, c.Type))
+			return
 		}
 		var keep []map[string]interface{}
 		for _, row := range filtered {
@@ -181,15 +269,35 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 		filtered = keep
 	}
 
-	// The real service rejects a sort on anything but a stored column:
-	// sort=site answers 400 "unknown sort column: site" rather than ignoring it.
-	// The fake must do the same, or a provider that passes a derived column
-	// through looks healthy here and 400s in production.
-	if srt := strings.TrimPrefix(q.Get("sort"), "-"); srt != "" && len(rows) > 0 {
-		if _, exists := rows[0][srt]; !exists {
-			writeErr(w, 400, "unknown sort column: "+srt)
+	// Sorting: a stored column or an expanded key, nulls last; anything else
+	// is the service's 400, including the named refusal for an unfed target.
+	if srt := q.Get("sort"); srt != "" {
+		key := strings.TrimPrefix(srt, "-")
+		if table, bad := unavailable[key]; bad {
+			writeErr(w, 400, fmt.Sprintf("cannot sort on %s: %s is not present in this replica", key, table))
 			return
 		}
+		if !nameOK(key) {
+			writeErr(w, 400, "unknown sort column: "+key)
+			return
+		}
+		desc := strings.HasPrefix(srt, "-")
+		sort.SliceStable(filtered, func(i, j int) bool {
+			a, b := filtered[i][key], filtered[j][key]
+			if a == nil || b == nil {
+				return a != nil && b == nil
+			}
+			less, equal := fmt.Sprint(a) < fmt.Sprint(b), fmt.Sprint(a) == fmt.Sprint(b)
+			if fa, ok := a.(float64); ok {
+				if fb, ok := b.(float64); ok {
+					less, equal = fa < fb, fa == fb
+				}
+			}
+			if desc {
+				return !less && !equal
+			}
+			return less
+		})
 	}
 
 	total := len(filtered)
@@ -208,20 +316,26 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	page := filtered[start:end]
 
-	// Projection. The primary key always comes back, as documented.
+	// Projection: the primary key always comes back, as documented, and so do
+	// the expanded columns — they are not stored columns and fields= does not
+	// name them.
 	if fs := q.Get("fields"); fs != "" {
-		want := map[string]bool{"id": true}
+		want := map[string]bool{pk: true}
 		for _, c := range strings.Split(fs, ",") {
+			if _, exists := stored[c]; !exists {
+				writeErr(w, 400, "unknown field: "+c)
+				return
+			}
 			want[c] = true
+		}
+		for _, x := range expansions {
+			want[x.key] = true
+			for _, c := range x.cols[1:] {
+				want[x.key+"_"+c] = true
+			}
 		}
 		projected := make([]map[string]interface{}, 0, len(page))
 		for _, row := range page {
-			for c := range want {
-				if _, exists := row[c]; !exists && c != "id" {
-					writeErr(w, 400, "unknown field: "+c)
-					return
-				}
-			}
 			cut := map[string]interface{}{}
 			for k, v := range row {
 				if want[k] {
@@ -231,32 +345,6 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 			projected = append(projected, cut)
 		}
 		page = projected
-	}
-
-	f.mu.Lock()
-	nullRows := f.nullRowsFor == entity
-	idless := f.idlessRowsFor == entity
-	f.mu.Unlock()
-	if idless {
-		stripped := make([]map[string]interface{}, 0, len(page))
-		for _, row := range page {
-			cut := map[string]interface{}{}
-			for k, v := range row {
-				if k != "id" {
-					cut[k] = v
-				}
-			}
-			stripped = append(stripped, cut)
-		}
-		page = stripped
-	}
-	if nullRows {
-		// Valid JSON, valid envelope, unusable rows: each element decodes into
-		// a map without error and leaves it nil.
-		nulls := make([]interface{}, len(page))
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": total, "results": nulls})
-		return
 	}
 
 	resp := map[string]interface{}{"count": total, "results": page}
@@ -433,6 +521,22 @@ func (f *fakeService) addEntity(objectType string, cols ...string) {
 			e.PrimaryKey, col.Nullable = parts[0], false
 		}
 		e.Columns = append(e.Columns, col)
+	}
+	f.schema.Entities["/v1/"+objectType] = e
+}
+
+// addReference declares col of objectType as a foreign key to target, expanded
+// under key with the target's cols. Available follows the target's ingestion
+// in the fake schema, as the real catalogue's does per tenant.
+func (f *fakeService) addReference(objectType, col, target, key string, cols ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e := f.schema.Entities["/v1/"+objectType]
+	t, known := f.schema.Entities["/v1/"+target]
+	for i := range e.Columns {
+		if e.Columns[i].Name == col {
+			e.Columns[i].References = &fakeReference{Path: "/v1/" + target, ExpandKey: key, Columns: cols, Available: known && t.Ingested}
+		}
 	}
 	f.schema.Entities["/v1/"+objectType] = e
 }

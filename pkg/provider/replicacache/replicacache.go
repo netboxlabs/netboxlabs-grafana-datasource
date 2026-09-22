@@ -105,12 +105,17 @@ func (p *Provider) Name() string { return "replica-cache" }
 // the cache root would leave the rewrite prefix matching nothing and hand the
 // user an internal, unreachable NetBox URL.
 //
-// It falls back to the cache root when no NetBox URL is configured. Nothing is
-// linkable in that case, so there is nothing to rewrite, and the value is only
-// ever used as a prefix to match.
+// It is the same base the links were built from (linkBase): the NetBox the
+// catalogue says the replica mirrors, else the configured NetBox URL. Read
+// from the cached catalogue only — this must stay cheap — and the cache root
+// when neither is known: nothing is linkable then, so there is nothing to
+// rewrite, and the value is only ever used as a prefix to match.
 func (p *Provider) BaseURL() string {
-	if p.netboxURL != "" {
-		return strings.TrimRight(strings.TrimSpace(p.netboxURL), "/")
+	p.catMu.Lock()
+	c := p.cat
+	p.catMu.Unlock()
+	if base := p.linkBase(c); base != "" {
+		return base
 	}
 	return p.client.BaseURL()
 }

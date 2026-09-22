@@ -996,6 +996,16 @@ func (p *Provider) ResolveIPs(_ context.Context, _ []string, _ []string, _ int) 
 	}
 }
 
+// ResolveScope is the scope source of the same query, and is unsupported for
+// the same reason: every address in a scope still has to be resolved to what
+// it is assigned to, which goes through the content-type table.
+func (p *Provider) ResolveScope(_ context.Context, _ []provider.Filter, _ []string, _ int) (*provider.Result, error) {
+	return nil, &UnsupportedError{
+		Feature: "IP enrichment",
+		Detail:  "This datasource is configured to read from replica-cache, which cannot say what an IP address is assigned to because it does not expose NetBox's content-type table. Use a datasource in NetBox mode for IP enrichment.",
+	}
+}
+
 // Topology is not supported.
 //
 // It needs the cable path walk — cables, terminations and the content types

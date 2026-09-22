@@ -730,7 +730,8 @@ func queryErrorStatus(err error) backend.Status {
 	// classifies as ErrorKindUpstream or not at all, and stays internal.
 	if u := provider.Classify(err); u != nil {
 		switch u.Kind {
-		case provider.ErrorKindUnknownObjectType, provider.ErrorKindUnsupported, provider.ErrorKindBadRequest:
+		case provider.ErrorKindUnknownObjectType, provider.ErrorKindUnsupported, provider.ErrorKindBadRequest,
+			provider.ErrorKindNotReplicated:
 			return backend.StatusBadRequest
 		}
 	}

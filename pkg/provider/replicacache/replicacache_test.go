@@ -902,3 +902,43 @@ func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 		}
 	}
 }
+
+// Deep links point at the NetBox the replica reports it mirrors, when it does;
+// the configured NetBox URL is the fallback for a replica that does not say.
+// BaseURL has to agree with whichever base the links were built from, or the
+// plugin's public-URL rewrite matches nothing.
+func TestLinks_PreferTheCatalogueNetBoxURL(t *testing.T) {
+	f := newFakeService()
+	f.mu.Lock()
+	f.schema.NetBoxURL = "https://nb.example.com"
+	f.mu.Unlock()
+	f.entities["dcim/devices"] = []map[string]interface{}{{"id": 7, "name": "a", "custom_field_data": `{}`}}
+	srv := f.start(t)
+	p := New(srv.URL, "tok", "nb-1", srv.Client(), WithNetBoxURL("https://override.example.com/api"))
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "display_url"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Rows[0]["display_url"] != "https://nb.example.com/dcim/devices/7/" {
+		t.Errorf("display_url = %v (the replica's own NetBox wins)", res.Rows[0]["display_url"])
+	}
+	if p.BaseURL() != "https://nb.example.com" {
+		t.Errorf("BaseURL = %q must match the base the links were built from", p.BaseURL())
+	}
+
+	f.mu.Lock()
+	f.schema.NetBoxURL = ""
+	f.mu.Unlock()
+	p = New(srv.URL, "tok", "nb-1", srv.Client(), WithNetBoxURL("https://override.example.com/api"))
+	res, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "display_url"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Rows[0]["display_url"] != "https://override.example.com/dcim/devices/7/" {
+		t.Errorf("display_url = %v (the configured URL is the fallback)", res.Rows[0]["display_url"])
+	}
+	if p.BaseURL() != "https://override.example.com" {
+		t.Errorf("BaseURL = %q", p.BaseURL())
+	}
+}

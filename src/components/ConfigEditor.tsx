@@ -182,7 +182,7 @@ export function ConfigEditor(props: Props) {
           labelWidth={20}
           tooltip={
             isCache
-              ? 'Base URL of the NetBox instance the cache mirrors, without /api. Optional in this mode: it is used only to build "View in NetBox" links, since cache rows carry none. Leave it empty and rows have no links.'
+              ? 'Optional in this mode. Used only to build "View in NetBox" links when the replica does not report which NetBox instance it mirrors; without either, rows have no links.'
               : 'Base URL of the NetBox instance, without /api'
           }
         >

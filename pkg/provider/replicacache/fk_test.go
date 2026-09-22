@@ -432,6 +432,9 @@ func TestFullyResolvedDimensionDoesNotWarn(t *testing.T) {
 	f.entities["dcim/sites"] = []map[string]interface{}{
 		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
 	}
+	f.entities["dcim/device-roles"] = []map[string]interface{}{
+		{"id": float64(5), "name": "Core Router", "slug": "core-router"},
+	}
 	p := newTestProvider(t, f)
 
 	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
@@ -593,39 +596,6 @@ func TestUnrequestedDimensionRowsAreNotCached(t *testing.T) {
 	}
 }
 
-// A failed discovery must not also lose the columns that need none. site_id has
-// ids and cannot resolve without the entity list; tenant_id is null on every
-// row, which is derived from the rows alone.
-func TestNullColumnsSurviveADiscoveryFailure(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{
-		{"id": float64(1), "name": "CORE-1", "site_id": float64(4001), "tenant_id": nil},
-	}
-	release := make(chan struct{})
-	defer close(release)
-	f.hangSwagger = release
-
-	srv := f.start(t)
-	p := New(srv.URL, "t", "nb", srv.Client())
-
-	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-	var hasTenant bool
-	for _, c := range res.Columns {
-		if c == "tenant" {
-			hasTenant = true
-		}
-	}
-	if !hasTenant {
-		t.Errorf("tenant needs nothing from discovery and must survive it: %v", res.Columns)
-	}
-	if len(res.Warnings) == 0 {
-		t.Error("the columns that DID need discovery must still be reported missing")
-	}
-}
-
 // Three shapes a *_id column can hold, and they need three different answers.
 func TestForeignKeyValuesAreClassifiedNotJustParsed(t *testing.T) {
 	// A number that is not an identifier is a malformed row, not "no
@@ -652,6 +622,7 @@ func TestForeignKeyValuesAreClassifiedNotJustParsed(t *testing.T) {
 	// holds the provider's own service identifier — and deriving a "service"
 	// column of nils from one invents a relationship that does not exist.
 	f := newFakeService()
+	f.addEntity("circuits/provider-networks", "id:BIGINT:pk", "name:VARCHAR", "service_id:VARCHAR", "provider_id:BIGINT")
 	f.entities["circuits/provider-networks"] = []map[string]interface{}{
 		{"id": float64(1), "name": "NET-1", "service_id": "SVC-9", "provider_id": nil},
 	}

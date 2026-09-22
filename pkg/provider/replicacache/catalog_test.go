@@ -2,6 +2,7 @@ package replicacache
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -109,4 +110,47 @@ func keys(m map[string]entity) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// catalogFromFake parses a fake schema document through the same code the
+// provider uses on the wire, so a unit test on the catalogue's helpers works
+// on exactly what a fetch would have produced.
+func catalogFromFake(t *testing.T, s *fakeSchema) *catalog {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc schemaDoc
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	c, err := doc.toCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// expandedColumn maps a derived name back to the reference that produces it
+// and the target column it stands for, available or not: validation has to
+// name an unfed target, not merely fail to find the column.
+func TestEntity_ExpandedColumnNamesItsReferenceAndTarget(t *testing.T) {
+	e := catalogFromFake(t, devicesSchema()).Entities["dcim/devices"]
+	for name, want := range map[string][2]string{
+		"site": {"site_id", "name"}, "site_slug": {"site_id", "slug"}, "rack": {"rack_id", "name"}, "platform": {"platform_id", "name"},
+	} {
+		col, target, ok := e.expandedColumn(name)
+		if !ok || col.Name != want[0] || target != want[1] {
+			t.Errorf("%s: (%s, %s, %v), want (%s, %s)", name, col.Name, target, ok, want[0], want[1])
+		}
+	}
+	for _, name := range []string{"rack_slug", "site_id", "name", "cf_x"} {
+		if _, _, ok := e.expandedColumn(name); ok {
+			t.Errorf("%s is not an expansion", name)
+		}
+	}
+	if !e.has("name") || e.has("site") {
+		t.Error("has answers for physical columns only")
+	}
 }

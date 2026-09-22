@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Replica-cache mode.** A data source can read from a NetBox replica-cache
+  deployment instead of the REST API (**Mode** → _replica-cache_), for
+  instances too large for the API to serve table queries interactively. The
+  data source reads the replica's schema route for object types, columns,
+  types, operators and references, so nothing is sampled or guessed; related
+  names (site, role, tenant…) are resolved by the replica and can be sorted
+  and filtered on; custom fields expand as in NetBox mode; every result states
+  how fresh the data is, and a replica still loading its initial snapshot is a
+  warning. A new **Max data age** setting makes alert rules and expression-fed
+  queries refuse stale or unknown-age data. Annotations, IP enrichment,
+  topology and tags are not available in this mode and fail with an explicit
+  message. Requires a replica-cache build with the schema route (v1.35+).
+  Guide: `docs/REPLICA-CACHE.md`.
 - **IP enrichment has a second source: a NetBox scope.** The query took its
   IPs as input, which an alert rule cannot supply — rules have no variables and
   one query cannot read another's output — so a rule over an IP-only metric
@@ -42,7 +55,7 @@ Initial release of the NetBox data source for Grafana.
   query resource behind chained variables, so a dashboard author can set a
   variable's Custom all value to `$__all` and a caller outside the browser can
   say All without a variable to expand. Opt-in by design: All is every option
-  *on offer*, which for a chained or hand-written variable is not everything.
+  _on offer_, which for a chained or hand-written variable is not everything.
 - e2e coverage for the SQL-expression path (a panel join, the truncation
   refusal, and an alert rule whose condition is the join) and for `$__all`
   surviving interpolation as a Custom all value. The e2e stack now assembles
@@ -90,7 +103,7 @@ Initial release of the NetBox data source for Grafana.
   `CASE`, carried as a label). Names the default set and says plainly that
   `offline` is a choice. Measured why the suppression belongs in the `CASE` and
   not the `WHERE`: a device with no NetBox record has a `NULL` status, `NULL NOT
-  IN` is `NULL`, and `WHERE` drops it — silently unmonitored — where the `CASE`
+IN` is `NULL`, and `WHERE` drops it — silently unmonitored — where the `CASE`
   form keeps it firing as `unknown`.
 - Object queries now ask NetBox to serialize only the properties the query
   actually reads (`?fields=`), instead of fetching whole objects and discarding
@@ -145,8 +158,7 @@ Initial release of the NetBox data source for Grafana.
   panel. NetBox publishes utilization on no list endpoint, so each of these
   three columns is worked out from that row's own child lookups: on the bundled
   demo stack, selecting them turns a four-prefix table from one NetBox request
-  into eight, and a ten-prefix page on a large instance from one request into
-  34. That was invisible, and the conclusion a user reached was that the plugin
+  into eight, and a ten-prefix page on a large instance from one request into 34. That was invisible, and the conclusion a user reached was that the plugin
   is slow. **This is the one change here that a small instance will notice** —
   a prefix panel with these columns selected gains a notice it did not have
   before. Its rows, columns, values and request count are unchanged, and a table
@@ -350,7 +362,7 @@ Initial release of the NetBox data source for Grafana.
   string whenever the current IP set resolved no device at all (every address external,
   VM-assigned or unassigned) and as a boolean as soon as one matched, so the same saved
   panel changed field type with the data and boolean value mappings, `filterByValue
-  isTrue`, field overrides and transformations silently stopped applying on the refresh
+isTrue`, field overrides and transformations silently stopped applying on the refresh
   that happened to match nothing. An IP with no device is still null, not `false`.
 - `demo/compat-check.sh` covers 4.2 → 4.6 and asserts both IP-enrichment outcomes —
   address → interface → device, and the longest-prefix fallback — so the compatibility
@@ -377,7 +389,7 @@ Initial release of the NetBox data source for Grafana.
   dashboards, `demo/compat-check.sh` and the recipes are updated.
 - IP enrichment: `is_primary_ip` is left **blank, never `false`**, for an address assigned
   to an **FHRP/VRRP group**. `ipam.fhrpgroup` has no `primary_*` field of any kind — a
-  group *holds* addresses (`ip_addresses`) and NetBox never elects one of them as primary
+  group _holds_ addresses (`ip_addresses`) and NetBox never elects one of them as primary
   — so `false` would be a confident answer to a question NetBox does not ask. Blank means
   "this kind of owner has no primary-IP concept"; `false` means "this address is not its
   owner's primary", which includes owners that have no primary recorded. A rule or panel looking for

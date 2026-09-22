@@ -15,16 +15,9 @@ import (
 )
 
 const (
-	// pageSize is the rows requested per upstream call.
-	//
-	// The published spec says limit is "capped at 10000". Measured against a
-	// staging instance it is not: limit=2000 returns 1000 rows, as does
-	// limit=5000. Asking for more than the server will give does not fail, it
-	// silently returns fewer — so a caller that trusted the documented cap would
-	// read 1000 rows and believe it had seen 10000 of them.
-	//
-	// We therefore page at the size the server actually honours and reach larger
-	// limits with the cursor, rather than in one oversized request.
+	// pageSize is the rows requested per upstream call: the service's maximum
+	// page, above which it answers 400 "limit N exceeds the maximum page size
+	// of 1000". Larger limits are reached with the cursor.
 	pageSize = 1000
 
 	// defaultLimit is the row count for a query that does not ask for one. It
@@ -126,6 +119,15 @@ func (e *APIError) Classification() *provider.UpstreamError {
 		// wrong as the token.
 		c.Detail = "Replica cache rejected the credentials. Check the replica-cache token and the NetBox instance ID."
 	case 404:
+		// Two different 404s. An entity the replica is configured for but has
+		// received nothing for says so in the body; the provider normally
+		// pre-empts it from the catalogue, but the catalogue can be minutes
+		// stale, so the route's own answer classifies the same way.
+		if strings.Contains(e.Message, "no data received") {
+			c.Kind = provider.ErrorKindNotReplicated
+			c.Detail = notReplicatedDetail(e.entity())
+			break
+		}
 		c.Kind = provider.ErrorKindNotFound
 		c.Detail = "Replica cache has no such endpoint. Check the replica-cache URL, and that this object type is one the cache serves."
 	case 500, 502, 503, 504:
@@ -138,6 +140,17 @@ func (e *APIError) Classification() *provider.UpstreamError {
 		c.Detail = fmt.Sprintf("Replica cache returned HTTP %d for this request. The cache is reachable but did not answer it; this is not a NetBox failure.", e.Status)
 	}
 	return c
+}
+
+// entity is the object type the failed URL addressed, for a message that
+// names it. Empty when the URL was not a list route.
+func (e *APIError) entity() string {
+	_, after, ok := strings.Cut(e.URL, "/v1/")
+	if !ok {
+		return ""
+	}
+	after, _, _ = strings.Cut(after, "?")
+	return after
 }
 
 // TransportError is a request that never reached the service — the host is
@@ -180,7 +193,6 @@ var (
 	errMalformedEnvelope     = errors.New(`response envelope is missing "count" or "results"`)
 	errMalformedRow          = errors.New("result row is not an object")
 	errRowWithoutID          = errors.New("result row has no usable id")
-	errMalformedFK           = errors.New("relationship id is not a usable identifier")
 	errDuplicateRow          = errors.New("the same object id appeared twice")
 	errRowWithoutField       = errors.New("row is missing the column it was projected onto")
 	errMalformedCustomFields = errors.New("custom field data could not be read")
@@ -364,6 +376,8 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		maxTotal int
 		cursor   string
 		first    = true
+		// restarted records the one restart a refused cursor is allowed.
+		restarted bool
 		// seenCursors is every cursor already followed, so a service that
 		// repeats one is caught rather than walked in circles.
 		seenCursors = map[string]bool{}
@@ -383,6 +397,19 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 
 		page, err := c.listOnce(ctx, entity, pq, cursor)
 		if err != nil {
+			// A cursor is minted against the catalogue, and when the catalogue
+			// changes underneath a walk the service refuses the next page with
+			// a 400 that begins "cursor" ("cursor does not belong to this
+			// walk"). The walk starts over from the first page once; a second
+			// refusal is returned as it is, or a service that keeps refusing
+			// would be walked forever.
+			var apiErr *APIError
+			if cursor != "" && !restarted && errors.As(err, &apiErr) && apiErr.Status == 400 && strings.HasPrefix(apiErr.Message, "cursor") {
+				restarted = true
+				rows, total, maxTotal, cursor, first = nil, 0, 0, "", true
+				seenCursors = map[string]bool{}
+				continue
+			}
 			return nil, 0, err
 		}
 		if first {

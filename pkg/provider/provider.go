@@ -197,6 +197,17 @@ type Result struct {
 	// a column is empty for a reason the data cannot show, so a rule may evaluate
 	// on a result that carries them.
 	Notes []string `json:"notes,omitempty"`
+	// DataAsOf is the instant every change committed at or before which is
+	// reflected in these rows, when the producer knows it. replica-cache
+	// reports it per entity; the NetBox API is live and leaves it nil. Nil
+	// means unknown, never "no data".
+	DataAsOf *time.Time `json:"dataAsOf,omitempty"`
+	// SnapshotComplete says whether the producer has finished its initial
+	// load. False means the rows may be a fraction of the fleet with nothing
+	// else to say so — measured: 0.7% of a tenant served as a confident 200.
+	// Nil when the producer has no such notion, which is also what tells the
+	// plugin layer that a maximum data age cannot apply to it.
+	SnapshotComplete *bool `json:"snapshotComplete,omitempty"`
 	// Capped, when non-nil, reports that an expensive per-row enrichment
 	// deliberately measured only the first Cap.Measured rows and left its columns
 	// blank on the rest.

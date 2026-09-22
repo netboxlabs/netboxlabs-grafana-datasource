@@ -3,6 +3,8 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
@@ -65,8 +67,35 @@ type PluginSettings struct {
 	// regardless of this setting — for every rule, not only the ones whose query
 	// uses the Alert table shape.
 	FastPagingNoTotals bool `json:"fastPagingNoTotals"`
+	// MaxDataAge, when set, is how old a replica-cache result may be before an
+	// alert rule or an expression-fed query refuses it rather than evaluating
+	// a stale inventory as current — a Go duration such as "15m". Empty means
+	// never refuse: a replica can legitimately report no age at all (a tenant
+	// mid-way through its initial load), and dashboards only show the age.
+	// It only ever applies to a backend that reports freshness; NetBox mode
+	// ignores it. See MaxDataAgeDuration.
+	MaxDataAge string `json:"maxDataAge"`
 
 	Secrets *SecretPluginSettings `json:"-"`
+}
+
+// MaxDataAgeDuration parses MaxDataAge. Empty is off (0). An unparseable or
+// negative value is an ERROR, not off: the setting exists to make a rule
+// refuse stale data, and a typo that silently disabled it would be the one
+// wrong direction. Save & Test and the strict query paths both report it.
+func (s *PluginSettings) MaxDataAgeDuration() (time.Duration, error) {
+	raw := strings.TrimSpace(s.MaxDataAge)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("max data age %q is not a duration such as 15m or 2h", raw)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("max data age %q is negative", raw)
+	}
+	return d, nil
 }
 
 // SecretPluginSettings holds values that are encrypted at rest by Grafana and

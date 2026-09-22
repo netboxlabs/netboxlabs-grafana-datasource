@@ -120,6 +120,11 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
    * hundred thousand objects it buys nothing and the costs apply at every size.
    * Alerting is unaffected: count and alert-table queries never use it. */
   fastPagingNoTotals?: boolean;
+  /** replica-cache mode only. A Go duration such as 15m or 2h. When set, alert
+   * rules and expression-fed queries refuse a result older than this, or whose
+   * age the replica cannot report, instead of evaluating a stale inventory.
+   * Dashboards only show the age. Empty = never refuse. */
+  maxDataAge?: string;
 }
 
 /** Secret values — never returned to the frontend after being set. */

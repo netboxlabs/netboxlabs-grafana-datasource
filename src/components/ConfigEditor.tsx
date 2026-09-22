@@ -263,6 +263,20 @@ export function ConfigEditor(props: Props) {
                 onChange={onCacheTokenChange}
               />
             </InlineField>
+
+            <InlineField
+              label="Max data age for alert rules"
+              labelWidth={26}
+              tooltip="Optional. A Go duration such as 15m or 2h. When set, alert rules and expression-fed queries refuse results older than this, or whose age the replica cannot report, instead of evaluating a stale inventory. Dashboards only show the age. Leave empty to never refuse."
+            >
+              <Input
+                id="config-max-data-age"
+                width={20}
+                value={jsonData.maxDataAge ?? ''}
+                placeholder="15m"
+                onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ maxDataAge: e.target.value })}
+              />
+            </InlineField>
           </>
         )}
 

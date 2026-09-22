@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
@@ -175,7 +176,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			// for in reverse: a strict path that silently ignores a new Result field
 			// is exactly how a deliberate cap ended up evaluating as a column of
 			// zeroes.
-			if msg := resultRefusal(c, res, noun); msg != "" {
+			if msg := d.refuse(c, res, noun); msg != "" {
 				return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 			}
 		}
@@ -288,8 +289,9 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		// alerting on an arbitrary subset or on values that were never measured.
 		// Unconditional, unlike the other branches: asking for this shape is
 		// asking for a rule's input, whoever is asking. See resultRefusal for the
-		// three checks and why they run in that order.
-		if msg := resultRefusal(c, res, nounObjects); msg != "" {
+		// three checks and why they run in that order; refuse adds the
+		// datasource's staleness rule after them.
+		if msg := d.refuse(c, res, nounObjects); msg != "" {
 			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 		}
 		applyJoinKeys(res, qm.JoinKeys)
@@ -366,7 +368,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		// measured live, limit 2 against 4 matching prefixes evaluated two
 		// instances and dropped an 86%-utilized prefix entirely, so a
 		// "utilization > 90" rule never fired and nothing anywhere said why.
-		if msg := resultRefusal(c, res, nounObjects); msg != "" {
+		if msg := d.refuse(c, res, nounObjects); msg != "" {
 			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 		}
 	}
@@ -405,6 +407,22 @@ func queryOrdering(ordering string, c consumer) string {
 		return ""
 	}
 	return ordering
+}
+
+// refuse is resultRefusal plus the datasource-level staleness rule, applied
+// after it so the reader gets the most actionable reason first. An unparseable
+// Max data age is itself a refusal naming the setting: silently treating it as
+// "off" would be the one wrong direction. The alert-table branch calls this
+// for every consumer, so its preview refuses on staleness as the rule would.
+func (d *Datasource) refuse(c consumer, res *provider.Result, noun string) string {
+	if msg := resultRefusal(c, res, noun); msg != "" {
+		return msg
+	}
+	maxAge, err := d.cfg.MaxDataAgeDuration()
+	if err != nil {
+		return fmt.Sprintf("This datasource's Max data age (%q) is not a duration; fix it or clear it before this query can be evaluated.", d.cfg.MaxDataAge)
+	}
+	return stalenessError(c, res, maxAge, time.Now())
 }
 
 // allFilterValue is Grafana's own token for a variable's "All" option. A filter

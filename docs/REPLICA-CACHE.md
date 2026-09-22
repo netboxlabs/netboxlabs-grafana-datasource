@@ -82,10 +82,16 @@ Values are the stored ones: a choice column holds `active`, not `Active`, and
 NetBox mode.
 
 **Filters** offer, per column, the operators the replica accepts on it: equality
-(multi-value → `in`), text matches on text columns, greater/less than, and
-_is empty_ / _has any value_ on nullable non-text columns. Related names filter
-too (`site contains ams`). Two things are deliberately not offered:
+(multi-value → `in`), a case-insensitive **contains** on text columns,
+greater/less than, and _is empty_ / _has any value_ on nullable non-text
+columns. Related names filter too (`site contains ams`). A `%` or `_` in a
+value is that character, not a wildcard. Three things are deliberately not
+offered:
 
+- _starts with_, _ends with_ and case-insensitive equality. The replica's one
+  text match is a contains; anchoring it or matching whole values is not
+  expressible, and a saved query using one fails with a message rather than
+  matching more rows than it asked for.
 - _is empty_ on a **text** column. NetBox stores a blank text field as `""`,
   the replica tests `IS NULL`, and the two answer opposite questions — a rule
   that switched modes would silently invert. Use a datasource in NetBox mode

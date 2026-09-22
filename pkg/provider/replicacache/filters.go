@@ -131,7 +131,9 @@ func buildFilterValues(filters []provider.Filter) (url.Values, error) {
 			}
 			seen[key] = true
 			q.Set(param(f.Field, op), values[0])
-		case opIExact, opIContns, opIStarts, opIEnds:
+		case opIExact, opIStarts, opIEnds:
+			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: textMatchReason}
+		case opIContns:
 			if len(values) > 1 {
 				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 					Reason: "this backend cannot combine several values for a text match; select one value or filter on equality"}
@@ -142,7 +144,11 @@ func buildFilterValues(filters []provider.Filter) (url.Values, error) {
 					Reason: "two text matches are applied to this field; this backend cannot combine them, so remove one"}
 			}
 			seen[key] = true
-			q.Set(param(f.Field, "ilike"), likePattern(op, values[0]))
+			// The value goes as written. The backend's ilike is a
+			// case-insensitive contains on the LITERAL value — measured:
+			// ilike=core matched CORE-N9504-01, while %core% matched nothing —
+			// so there is nothing to wrap and nothing to escape.
+			q.Set(param(f.Field, "ilike"), values[0])
 		default:
 			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 				Reason: "this backend supports only equality, text match, greater/less than and is-empty"}
@@ -169,23 +175,10 @@ func param(field, op string) string {
 	return "filter[" + field + "]__" + op
 }
 
-// likePattern wraps a value in the SQL LIKE wildcards that turn `ilike` into
-// the requested match. A % or _ in the user's own value goes through as
-// itself: the service escapes user text before it reaches LIKE (measured — a
-// literal % matches literally), so only the wildcards added here are
-// wildcards.
-func likePattern(op, v string) string {
-	switch op {
-	case opIContns:
-		return "%" + v + "%"
-	case opIStarts:
-		return v + "%"
-	case opIEnds:
-		return "%" + v
-	default: // opIExact: no wildcards, so ilike is case-insensitive equality
-		return v
-	}
-}
+// textMatchReason is why an anchored or whole-value text match is refused:
+// the backend's one text match is a contains, and every near-miss (send the
+// value and hope) matches MORE rows than asked for while looking healthy.
+const textMatchReason = "this backend's only text match is a case-insensitive contains: it cannot anchor a match to the start or end of a value, nor compare whole values case-insensitively. Use contains, equality (which is case-sensitive), or a datasource in NetBox mode"
 
 func splitValues(s string) []string {
 	var out []string
@@ -206,7 +199,7 @@ func boolString(b bool) string {
 
 // seamOperators translates a catalogue column's operators into the editor's
 // tokens. eq and in collapse to "" (the editor sends a CSV for several
-// values); ilike fans out to the four text matches; isnull becomes
+// values); ilike is the contains match and nothing else; isnull becomes
 // empty/nempty only where "empty" and NULL coincide — a nullable non-text
 // column. On text the two diverge (see emptyOnTextReason), and on a NOT NULL
 // column nothing is ever empty.
@@ -217,7 +210,10 @@ func seamOperators(col column) []string {
 		out = append(out, opExact)
 	}
 	if has("ilike") {
-		out = append(out, opIExact, opIContns, opIStarts, opIEnds)
+		// ilike is a case-insensitive CONTAINS on the literal value, so it is
+		// offered as exactly that; starts-with, ends-with and case-insensitive
+		// equality have no expression here (see textMatchReason).
+		out = append(out, opIContns)
 	}
 	if has("gt") {
 		out = append(out, opGT)
@@ -266,6 +262,9 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 		op := f.Operator
 		if op == "exact" {
 			op = opExact
+		}
+		if (op == opIExact || op == opIStarts || op == opIEnds) && slices.Contains(col.Operators, "ilike") {
+			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: textMatchReason}
 		}
 		if op == opEmpty || op == opNEmpty {
 			if fieldTypeOf(col.Type) == provider.FieldTypeString {

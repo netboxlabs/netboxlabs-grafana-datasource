@@ -67,7 +67,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
-	cols, rows, err := flattenRows(raws, projected)
+	cols, rows, err := flattenRows(raws, projected, e.pk())
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		cols = append(cols, addChoiceValueAliases(selectedFields(spec), rows)...)
 		cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
 		cols = append(cols, p.addUnsetCustomFieldColumns(ctx, e, spec, rows)...)
-		if addDeepLinks(p.linkBase(c), spec.ObjectType, rows) {
+		if addDeepLinks(p.linkBase(c), spec.ObjectType, rows, e.pk()) {
 			cols = append(cols, deepLinkColumn)
 		}
 		cols = append(cols, addNullSlugColumns(spec, rows)...)
@@ -268,11 +268,7 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 			add(customFieldDataColumn)
 		}
 	}
-	pk := e.PrimaryKey
-	if pk == "" {
-		pk = "id"
-	}
-	add(pk)
+	add(e.pk())
 	return r
 }
 
@@ -725,7 +721,7 @@ func withFields(q url.Values, cols []string) url.Values {
 // and so is the thing to check.
 const rowShapeGuidance = "Replica cache returned a result row that is not a usable object. The service is reachable but answered with something unexpected."
 
-func flattenRows(raws []json.RawMessage, projected []string) ([]string, []map[string]interface{}, error) {
+func flattenRows(raws []json.RawMessage, projected []string, pk string) ([]string, []map[string]interface{}, error) {
 	var (
 		cols []string
 		seen = map[string]bool{}
@@ -750,7 +746,7 @@ func flattenRows(raws []json.RawMessage, projected []string) ([]string, []map[st
 			}
 		}
 		if obj != nil {
-			if id, ok := toInt(obj["id"]); ok {
+			if id, ok := toInt(obj[pk]); ok {
 				// A repeated id means one object came back twice and another
 				// never did, while len(rows) still reaches the reported total —
 				// so the result looks complete and an alert evaluates it.
@@ -770,13 +766,13 @@ func flattenRows(raws []json.RawMessage, projected []string) ([]string, []map[st
 				}
 				seenIDs[id] = true
 			} else {
-				// Measured: the service returns id on every projection, even one
-				// that did not ask for it — `fields=serial` comes back as
-				// {id, serial} — which is the same invariant the deep-link column
-				// already relies on. A row without one identifies no object, and
-				// {"count":1,"results":[{}]} would otherwise be one empty row with
-				// a matching total, which an alert-table query turns into a value
-				// of 1.
+				// Measured: the service returns the primary key on every
+				// projection, even one that did not ask for it — `fields=serial`
+				// comes back as {id, serial} — which is the same invariant the
+				// deep-link column already relies on. A row without one
+				// identifies no object, and {"count":1,"results":[{}]} would
+				// otherwise be one empty row with a matching total, which an
+				// alert-table query turns into a value of 1.
 				return nil, nil, &TransportError{
 					Op:      "reading a result row",
 					Err:     errRowWithoutID,

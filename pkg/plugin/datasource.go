@@ -89,6 +89,12 @@ func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings bac
 // service or an upstream rejection — an outage message for the configuration
 // problem this function exists to name.
 func missingSetting(cfg *models.PluginSettings) string {
+	// Checked for every mode: the setting lives in jsonData, which a mode
+	// switch carries along, and a value that cannot be read must be fixed
+	// before it silently means "off".
+	if _, err := cfg.MaxDataAgeDuration(); err != nil {
+		return "Max data age " + strings.TrimPrefix(err.Error(), "max data age ")
+	}
 	switch cfg.Mode {
 	case models.ModeReplicaCache:
 		switch {
@@ -180,6 +186,7 @@ type refusalVoice struct {
 	degraded   string // …returned a degraded result, so <degraded>
 	links      string // …returned an incomplete set of links, so <links>
 	unmeasured string // …measured X for N of M rows, so the other K <unmeasured>
+	stale      string // …read data that is X old / of unknown age, so <stale>
 }
 
 // voice addresses the refusal to its reader. Someone whose dashboard panel broke
@@ -195,6 +202,7 @@ func (c consumer) voice() refusalVoice {
 			degraded:   "the expression would compute on data that is missing for a reason the numbers cannot show",
 			links:      "the expression would see a device as less connected than it is",
 			unmeasured: "would reach the expression blank instead of with the values they hold",
+			stale:      "the expression would compute on a stale replica",
 		}
 	}
 	return refusalVoice{
@@ -203,6 +211,7 @@ func (c consumer) voice() refusalVoice {
 		degraded:   "it would alert on data that is missing for a reason the numbers cannot show",
 		links:      "it would alert on a device that may have a working path it cannot see",
 		unmeasured: "would evaluate as zero rather than as the values they hold",
+		stale:      "it would alert on a stale replica",
 	}
 }
 

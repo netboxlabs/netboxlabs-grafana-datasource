@@ -214,6 +214,21 @@ describe('replica-cache mode', () => {
     );
   });
 
+  // Max data age only means something for a backend that reports one, and it
+  // must reach jsonData, where the backend reads it.
+  it('offers Max data age in replica-cache mode and writes it to jsonData', () => {
+    const { onOptionsChange } = setup({ mode: 'replica-cache' });
+    fireEvent.change(screen.getByLabelText(/Max data age/i), { target: { value: '15m' } });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ jsonData: expect.objectContaining({ maxDataAge: '15m' }) })
+    );
+  });
+
+  it('does not offer Max data age in NetBox mode', () => {
+    setup();
+    expect(screen.queryByLabelText(/Max data age/i)).not.toBeInTheDocument();
+  });
+
   // The cache token must land in secureJsonData, or it is stored in the clear.
   it('stores the cache token as a secret, separate from the NetBox token', () => {
     const { onOptionsChange } = setup({ mode: 'replica-cache' });
@@ -442,7 +457,5 @@ it('still mirrors the NetBox URL in NetBox mode', () => {
   fireEvent.change(screen.getByPlaceholderText('https://netbox.example.com'), {
     target: { value: 'https://netbox.example.com' },
   });
-  expect(onOptionsChange).toHaveBeenCalledWith(
-    expect.objectContaining({ url: 'https://netbox.example.com' })
-  );
+  expect(onOptionsChange).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://netbox.example.com' }));
 });

@@ -71,7 +71,8 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
-	warnings := plan.warnings
+	notes, warnings := freshnessNotes(c, e)
+	notes, warnings = append(plan.notes, notes...), append(plan.warnings, warnings...)
 	if !spec.CountOnly {
 		// All of these build columns a count-only caller never reads: it takes
 		// Result.Total and nothing else. The third one can also COST something —
@@ -94,14 +95,34 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		warnings = append(warnings, unresolvedRelationWarnings(spec, rows, plan.unavailable)...)
 	}
 
+	snapshotComplete := c.SnapshotComplete
 	return &provider.Result{
-		Columns:  restrictColumns(cols, spec.Fields),
-		Rows:     rows,
-		Total:    total,
-		MaxRows:  MaxLimit,
-		Warnings: warnings,
-		Notes:    plan.notes,
+		Columns:          restrictColumns(cols, spec.Fields),
+		Rows:             rows,
+		Total:            total,
+		MaxRows:          MaxLimit,
+		Warnings:         warnings,
+		Notes:            notes,
+		DataAsOf:         e.DataAsOf,
+		SnapshotComplete: &snapshotComplete,
 	}, nil
+}
+
+// freshnessNotes states how current the rows are, from the catalogue's
+// per-entity instant. Loading — no instant and the tenant-wide snapshot not
+// complete — is a WARNING, because the rows may be a fraction of the fleet
+// served as a confident 200, and a warning is what keeps an alert rule from
+// evaluating them as the whole. An unknown age after the snapshot is a note.
+func freshnessNotes(c *catalog, e entity) (notes, warnings []string) {
+	switch {
+	case e.DataAsOf != nil:
+		notes = append(notes, fmt.Sprintf("Data as of %s (replica-cache).", e.DataAsOf.UTC().Format("2006-01-02 15:04:05 UTC")))
+	case !c.SnapshotComplete:
+		warnings = append(warnings, "This replica is still loading its initial snapshot; results may be incomplete and their age is unknown.")
+	default:
+		notes = append(notes, "The age of this data is unknown: the replica reports no commit time for this entity.")
+	}
+	return notes, warnings
 }
 
 // request is what a QuerySpec becomes on the wire, decided from the catalogue

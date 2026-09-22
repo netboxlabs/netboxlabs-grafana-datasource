@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -659,8 +660,10 @@ func TestOrderingIsNormalizedBeforeItIsValidated(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", stored, err)
 		}
-		if len(res.Notes) != 0 {
-			t.Errorf("%q: name is a stored column and must sort, got notes %v", stored, res.Notes)
+		for _, n := range res.Notes {
+			if strings.Contains(n, "not sorted") {
+				t.Errorf("%q: name is a stored column and must sort, got note %q", stored, n)
+			}
 		}
 		r, ok := f.requestWith("dcim/devices", "sort")
 		if !ok {
@@ -1660,5 +1663,54 @@ func TestIDsMustBeWholeAndPositive(t *testing.T) {
 	// Everything below the bound is unambiguous.
 	if got, ok := toInt(float64(maxExactID - 1)); !ok || got != maxExactID-1 {
 		t.Errorf("toInt(2^53-1) = %d,%v; want it accepted unchanged", got, ok)
+	}
+}
+
+// Every result says how current its rows are, from the catalogue's per-entity
+// instant. A replica still loading its initial snapshot is a WARNING: the rows
+// may be a fraction of the fleet, served as a confident 200. An unknown age
+// after the snapshot is a note.
+func TestQuery_ReportsFreshness(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{{"id": 1, "name": "a", "custom_field_data": `{}`}}
+	p := newTestProvider(t, f)
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DataAsOf == nil || res.DataAsOf.UTC().Format(time.RFC3339) != "2026-09-22T14:03:11Z" || res.SnapshotComplete == nil || !*res.SnapshotComplete {
+		t.Errorf("DataAsOf=%v SnapshotComplete=%v", res.DataAsOf, res.SnapshotComplete)
+	}
+	if !strings.Contains(strings.Join(res.Notes, " "), "Data as of 2026-09-22 14:03:11 UTC") || len(res.Warnings) != 0 {
+		t.Errorf("notes=%v warnings=%v", res.Notes, res.Warnings)
+	}
+
+	// Loading: no instant and the tenant-wide snapshot not complete.
+	f.mu.Lock()
+	f.schema.SnapshotComplete = false
+	ent := f.schema.Entities["/v1/dcim/devices"]
+	ent.DataAsOf = nil
+	f.schema.Entities["/v1/dcim/devices"] = ent
+	f.mu.Unlock()
+	p = newTestProvider(t, f)
+	res, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, " "), "still loading its initial snapshot") || res.DataAsOf != nil || *res.SnapshotComplete {
+		t.Errorf("warnings=%v DataAsOf=%v", res.Warnings, res.DataAsOf)
+	}
+
+	// Unknown age after the snapshot: a note, not a warning.
+	f.mu.Lock()
+	f.schema.SnapshotComplete = true
+	f.mu.Unlock()
+	p = newTestProvider(t, f)
+	res, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(res.Notes, " "), "age of this data is unknown") || len(res.Warnings) != 0 {
+		t.Errorf("notes=%v warnings=%v", res.Notes, res.Warnings)
 	}
 }

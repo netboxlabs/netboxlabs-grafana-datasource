@@ -10,6 +10,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/replicacache"
 )
 
 func TestQueryErrorMessage(t *testing.T) {
@@ -166,5 +167,18 @@ func TestIsAlertRequest(t *testing.T) {
 	}
 	if isAlertRequest(nil) {
 		t.Error("a nil request must not be treated as an alert evaluation")
+	}
+}
+
+// An entity the replica has received no data for is the reader's problem to
+// route around — pick a served type — not an outage to retry, so it answers
+// as a bad request with the provider's own sentence.
+func TestNotReplicatedIsABadRequestWithTheProviderSentence(t *testing.T) {
+	err := &replicacache.NotReplicatedError{ObjectType: "dcim/platforms"}
+	if got := queryErrorMessage(err); !strings.Contains(got, "dcim/platforms") || !strings.Contains(got, "has received no data") {
+		t.Errorf("message = %q", got)
+	}
+	if got := queryErrorStatus(err); got != backend.StatusBadRequest {
+		t.Errorf("status = %v, want bad request", got)
 	}
 }

@@ -297,21 +297,6 @@ func singularize(s string) string {
 	return s
 }
 
-// splitEntity divides an object type into its app and its model.
-//
-// It splits at the LAST slash, not the first, because a plugin's models sit one
-// level deeper: plugins/acme/widgets is the widgets model of the plugins/acme
-// app, which is also what parseEntityPath produces for it. Splitting at the
-// first slash made the app "plugins" and the model "acme/widgets", so a
-// role_id could not reach plugins/acme/roles and — worse — fell through to the
-// global-basename fallback, which would have resolved it to ipam/roles.
-func splitEntity(e string) (app, model string) {
-	if i := strings.LastIndexByte(e, '/'); i >= 0 {
-		return e[:i], e[i+1:]
-	}
-	return "", e
-}
-
 // related is the resolved label of one row in a dimension table.
 type related struct {
 	display string

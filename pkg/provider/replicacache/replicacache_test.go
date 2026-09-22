@@ -98,53 +98,6 @@ func TestUnsupportedCapabilitiesRefuseRatherThanReturnNothing(t *testing.T) {
 	}
 }
 
-func TestFieldsIncludesResolvedAndCustomColumns(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{
-		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
-	}
-	p := newTestProvider(t, f)
-
-	fields, err := p.Fields(context.Background(), "dcim/devices")
-	if err != nil {
-		t.Fatalf("Fields: %v", err)
-	}
-	have := map[string]provider.FieldType{}
-	for _, f := range fields {
-		have[f.Name] = f.Type
-	}
-	// The editor must offer exactly what a query returns, including the columns
-	// that do not exist upstream.
-	for _, want := range []string{"name", "site_id", "site", "site_slug", "cf_lifecycle_phase"} {
-		if _, ok := have[want]; !ok {
-			t.Errorf("Fields is missing %q; the editor would not offer a column queries return", want)
-		}
-	}
-	if have["site_id"] != provider.FieldTypeNumber {
-		t.Errorf("site_id typed %q, want number", have["site_id"])
-	}
-	if have["name"] != provider.FieldTypeString {
-		t.Errorf("name typed %q, want string", have["name"])
-	}
-}
-
-// An empty table is not an error: the type exists and a query against it
-// legitimately returns no rows.
-func TestFieldsOnAnEmptyTableIsNotAnError(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{}
-	p := newTestProvider(t, f)
-
-	fields, err := p.Fields(context.Background(), "dcim/devices")
-	if err != nil {
-		t.Fatalf("Fields on an empty table returned an error: %v", err)
-	}
-	if len(fields) != 0 {
-		t.Errorf("want no fields from an empty table, got %v", fields)
-	}
-}
-
 func TestFieldValuesSamplesDistinctValues(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{
@@ -229,140 +182,6 @@ func TestQueryPropagatesUpstreamFailure(t *testing.T) {
 	}
 }
 
-// A dimension that times out yields a SHORTER column list, because the resolved
-// names are missing. Caching that would pin the loss for the whole TTL: the
-// editor would stop offering columns that queries keep returning. Measured live
-// as 47 and 53 columns where a healthy run returns 56.
-func TestFieldsDoesNotCacheADegradedColumnList(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{
-		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
-	}
-	p := newTestProvider(t, f)
-	ctx := context.Background()
-
-	// The sites dimension is unreachable, so "site" and "site_slug" cannot be built.
-	f.failEntities["dcim/sites"] = true
-	degraded, err := p.Fields(ctx, "dcim/devices")
-	if err != nil {
-		t.Fatalf("Fields: %v", err)
-	}
-	if names(degraded)["site"] {
-		t.Fatal("site should be absent while its dimension is unreachable")
-	}
-
-	// It recovers, and the next read must reflect that rather than serving the
-	// short list from cache.
-	f.failEntities["dcim/sites"] = false
-	healthy, err := p.Fields(ctx, "dcim/devices")
-	if err != nil {
-		t.Fatalf("Fields after recovery: %v", err)
-	}
-	if !names(healthy)["site"] {
-		t.Error("site is still missing after the dimension recovered: a degraded column list was cached")
-	}
-	if len(healthy) <= len(degraded) {
-		t.Errorf("recovered list (%d) should be longer than the degraded one (%d)", len(healthy), len(degraded))
-	}
-}
-
-// A complete answer IS cached, or every editor interaction would re-sample.
-func TestFieldsCachesACompleteColumnList(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{
-		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
-	}
-	f.entities["dcim/device-roles"] = []map[string]interface{}{
-		{"id": float64(5), "name": "Core Router", "slug": "core-router"},
-	}
-	p := newTestProvider(t, f)
-	ctx := context.Background()
-
-	for i := 0; i < 3; i++ {
-		if _, err := p.Fields(ctx, "dcim/devices"); err != nil {
-			t.Fatalf("Fields %d: %v", i, err)
-		}
-	}
-	if n := f.countRequestsFor("dcim/devices"); n != 1 {
-		t.Errorf("sampled %d times across 3 calls, want 1", n)
-	}
-}
-
-func names(fields []provider.Field) map[string]bool {
-	out := map[string]bool{}
-	for _, f := range fields {
-		out[f.Name] = true
-	}
-	return out
-}
-
-// Regression: while a FK dimension is unreachable, the enriched field list is
-// incomplete — but the raw schema from the main-table sample is not, and it is
-// what decides which columns may be filtered. Withholding the whole cache entry
-// made rawColumns return nil, which filterFieldsFor reads as "no restriction",
-// advertising site and cf_* as filterable. Selecting one sends a synthesized
-// name upstream as a physical column and answers 400.
-func TestFilterFieldsNeverAdvertisesDerivedColumnsWhileDegraded(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{
-		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
-	}
-	p := newTestProvider(t, f)
-	ctx := context.Background()
-
-	f.failEntities["dcim/sites"] = true
-	ffs, err := p.FilterFields(ctx, "dcim/devices")
-	if err != nil {
-		t.Fatalf("FilterFields: %v", err)
-	}
-	if len(ffs) == 0 {
-		t.Fatal("want the upstream columns to remain filterable while a dimension is down")
-	}
-	for _, ff := range ffs {
-		if ff.Name == "site" || ff.Name == "site_slug" || strings.HasPrefix(ff.Name, "cf_") {
-			t.Errorf("%q was advertised as filterable; it is not an upstream column and would answer 400", ff.Name)
-		}
-	}
-	// The real columns are still offered, so the editor stays usable.
-	found := false
-	for _, ff := range ffs {
-		if ff.Name == "site_id" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("site_id should still be filterable: it is a stored column and the sample succeeded")
-	}
-}
-
-// The raw schema stays available through a degradation, since it comes from the
-// main-table sample rather than from FK resolution.
-func TestRawColumnsSurviveDegradation(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{{"id": float64(4001), "name": "DC-1", "slug": "dc-1"}}
-	p := newTestProvider(t, f)
-	ctx := context.Background()
-
-	f.failEntities["dcim/sites"] = true
-	raw, err := p.rawColumns(ctx, "dcim/devices")
-	if err != nil {
-		t.Fatalf("rawColumns: %v", err)
-	}
-	if len(raw) == 0 {
-		t.Fatal("raw columns must survive a failed dimension: the main-table sample succeeded")
-	}
-	if !raw["site_id"] || !raw["name"] {
-		t.Errorf("raw schema incomplete: %v", raw)
-	}
-	if raw["site"] {
-		t.Error("a resolved name must never appear in the raw schema")
-	}
-}
-
 // BaseURL is what the plugin layer uses as the prefix when rewriting links from
 // an internal host to a browser-facing one. The deep links point at NetBox, so
 // returning the cache root left that prefix matching nothing and handed the
@@ -433,55 +252,6 @@ func TestFieldValuesPushesTextSearchForTextColumns(t *testing.T) {
 	}
 }
 
-// An RFC3339 timestamp arrives from JSON as a string like any other. Calling it
-// text is what decides the column is offered a "contains" filter, which this
-// backend then applies to a TIMESTAMP column — the 500-or-unfiltered hazard the
-// provider already guards for numerics.
-func TestTimestampColumnsAreNotText(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{{
-		"id": float64(1), "name": "CORE-1",
-		"created":      "2026-05-06T17:34:30.696190Z",
-		"last_updated": "2026-05-07T16:30:21.910011Z",
-		// A text column that merely looks date-ish must keep its text operators.
-		"description": "2026 refresh",
-	}}
-	p := newTestProvider(t, f)
-	ctx := context.Background()
-
-	byName := map[string]provider.FieldType{}
-	fields, err := p.Fields(ctx, "dcim/devices")
-	if err != nil {
-		t.Fatalf("Fields: %v", err)
-	}
-	for _, fl := range fields {
-		byName[fl.Name] = fl.Type
-	}
-	for _, ts := range []string{"created", "last_updated"} {
-		if byName[ts] != provider.FieldTypeTime {
-			t.Errorf("%s typed %q, want time", ts, byName[ts])
-		}
-	}
-	if byName["description"] != provider.FieldTypeString {
-		t.Errorf("description typed %q, want string", byName["description"])
-	}
-
-	ffs, err := p.FilterFields(ctx, "dcim/devices")
-	if err != nil {
-		t.Fatalf("FilterFields: %v", err)
-	}
-	for _, ff := range ffs {
-		if ff.Name != "created" && ff.Name != "last_updated" {
-			continue
-		}
-		for _, op := range ff.Operators {
-			if textOperators[op] {
-				t.Errorf("%s was offered text operator %q; ILIKE on a timestamp is the hazard this gate exists for", ff.Name, op)
-			}
-		}
-	}
-}
-
 // The shared error wording names the NetBox URL and API token, which this mode
 // does not use — so a credential failure would send the reader to fix a field
 // with no bearing on it.
@@ -507,41 +277,6 @@ func TestCacheFailuresNameCacheSettings(t *testing.T) {
 		if strings.Contains(d, "NetBox API token") || strings.Contains(d, "NetBox URL") {
 			t.Errorf("status %d points at a NetBox setting this mode does not use: %s", status, d)
 		}
-	}
-}
-
-// A DateField serializes as YYYY-MM-DD rather than RFC3339, and a fixed list of
-// five names cannot enumerate the columns that use it. Both gaps left date
-// columns classified as text and offered ILIKE.
-func TestDateColumnsAreNotText(t *testing.T) {
-	f := newFakeService()
-	f.addEntity("circuits/circuits", "id:BIGINT:pk", "cid:VARCHAR", "termination_date:VARCHAR", "install_date:VARCHAR", "created:VARCHAR", "description:VARCHAR")
-	f.entities["circuits/circuits"] = []map[string]interface{}{{
-		"id": float64(1), "cid": "ntt-001",
-		"termination_date": "2026-05-06",
-		"install_date":     "2026-01-02",
-		"created":          "2026-05-06T17:34:30.696190Z",
-		// Not a date column by name, and must keep its text operators even
-		// though the value would parse.
-		"description": "2026-05-06 cutover",
-	}}
-	p := newTestProvider(t, f)
-
-	fields, err := p.Fields(context.Background(), "circuits/circuits")
-	if err != nil {
-		t.Fatalf("Fields: %v", err)
-	}
-	byName := map[string]provider.FieldType{}
-	for _, fl := range fields {
-		byName[fl.Name] = fl.Type
-	}
-	for _, c := range []string{"termination_date", "install_date", "created"} {
-		if byName[c] != provider.FieldTypeTime {
-			t.Errorf("%s typed %q, want time", c, byName[c])
-		}
-	}
-	if byName["description"] != provider.FieldTypeString {
-		t.Errorf("description typed %q, want string — the name gate should keep it text", byName["description"])
 	}
 }
 
@@ -627,78 +362,6 @@ func TestMalformedResponseNamesTheCache(t *testing.T) {
 	}
 }
 
-// Column names cannot be enumerated. Every name here is a real NetBox 4.4
-// date or date-time field that no naming rule would have guessed — checked
-// against the 4.4.10 OpenAPI schema — and classifying them as text advertises
-// ILIKE, which this backend then pushes at a timestamp column.
-func TestTimestampValuesDecideRegardlessOfColumnName(t *testing.T) {
-	f := newFakeService()
-	f.addEntity("core/jobs", "id:BIGINT:pk", "scheduled:VARCHAR", "started:VARCHAR", "completed:VARCHAR", "last_synced:VARCHAR",
-		"last_sync:VARCHAR", "read:VARCHAR", "last_login:VARCHAR", "merged_time:VARCHAR", "date_added:VARCHAR", "description:VARCHAR", "name:VARCHAR")
-	f.entities["core/jobs"] = []map[string]interface{}{{
-		"id":        float64(1),
-		"scheduled": "2026-05-06T17:34:30.696190Z",
-		"started":   "2026-05-06T17:34:31.000000Z",
-		"completed": "2026-05-06T17:35:02.100000Z",
-		// DataSource.last_synced, Branch.last_sync, Notification.read,
-		// User.last_login — all DateTimeFields, none name-guessable.
-		"last_synced": "2026-05-06T17:35:02.100000Z",
-		"last_sync":   "2026-05-06T17:35:02.100000Z",
-		"read":        "2026-05-06T17:35:02.100000Z",
-		"last_login":  "2026-05-06T17:35:02.100000Z",
-		"merged_time": "2026-05-06T17:35:02.100000Z",
-		// Aggregate.date_added is a plain DateField: ambiguous on its own, so
-		// the name still has to agree — and the date_ prefix is how it does.
-		"date_added": "2026-01-02",
-		// Text that looks date-ish must keep its text operators: no zone, no T.
-		"description": "2026-05-06 cutover",
-		"name":        "2026-01-02",
-	}}
-	p := newTestProvider(t, f)
-
-	fields, err := p.Fields(context.Background(), "core/jobs")
-	if err != nil {
-		t.Fatalf("Fields: %v", err)
-	}
-	byName := map[string]provider.FieldType{}
-	for _, fl := range fields {
-		byName[fl.Name] = fl.Type
-	}
-	for _, c := range []string{
-		"scheduled", "started", "completed", "last_synced",
-		"last_sync", "read", "last_login", "merged_time", "date_added",
-	} {
-		if byName[c] != provider.FieldTypeTime {
-			t.Errorf("%s typed %q, want time", c, byName[c])
-		}
-	}
-	if byName["description"] != provider.FieldTypeString {
-		t.Errorf("description typed %q, want string", byName["description"])
-	}
-
-	// And the consequence that matters: no ILIKE offered on a timestamp.
-	ffs, err := p.FilterFields(context.Background(), "core/jobs")
-	if err != nil {
-		t.Fatalf("FilterFields: %v", err)
-	}
-	timestamps := map[string]bool{
-		"scheduled": true, "started": true, "completed": true,
-		"last_synced": true, "last_sync": true, "read": true,
-		"last_login": true, "merged_time": true, "date_added": true,
-	}
-	for _, ff := range ffs {
-		if !timestamps[ff.Name] {
-			continue
-		}
-		for _, op := range ff.Operators {
-			switch op {
-			case opIContns, opIStarts, opIEnds, opIExact:
-				t.Errorf("%s is a timestamp but advertises the text operator %q", ff.Name, op)
-			}
-		}
-	}
-}
-
 // The service that failed is replica-cache, and NetBox is optional in this
 // mode — possibly not configured at all. An unclassified error renders through
 // the plugin's fallback as "Cannot reach NetBox", sending Save & Test at the
@@ -757,7 +420,7 @@ func TestHealthCheckDoesNotAnswerFromCache(t *testing.T) {
 
 // The whole path: a plugin model must reach the editor's list, with the label
 // the NetBox provider gives it, and a query against it must be accepted rather
-// than refused by validateObjectType.
+// than refused as unknown.
 func TestPluginModelIsQueryable(t *testing.T) {
 	f := newFakeService()
 	f.addEntity("plugins/bgp/bgp-sessions", "id:BIGINT:pk", "name:VARCHAR")
@@ -793,35 +456,6 @@ func TestPluginModelIsQueryable(t *testing.T) {
 	}
 }
 
-// The schema sample has its own decoder, ahead of flattenRows. Unclassified, a
-// malformed response from the cache rendered as "Couldn't reach NetBox" — a
-// connection this mode may not even have configured.
-func TestMalformedSampleRowNamesTheCache(t *testing.T) {
-	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// A valid envelope whose first row is a scalar.
-		_, _ = w.Write([]byte(`{"count": 1, "results": ["CORE-1"]}`))
-	}))
-	defer srv.Close()
-
-	p := New(srv.URL, "t", "nb", srv.Client())
-	// A type-sensitive filter forces the cold schema sample before the query.
-	_, err := p.Query(context.Background(), provider.QuerySpec{
-		ObjectType: "dcim/devices",
-		Filters:    []provider.Filter{{Field: "name", Operator: "ic", Value: "CORE"}},
-	})
-	if err == nil {
-		t.Fatal("want an error for a malformed sample row")
-	}
-	u := provider.Classify(err)
-	if u == nil {
-		t.Fatal("an unclassified error renders as a NetBox failure")
-	}
-	if !strings.Contains(u.Detail, "Replica cache") {
-		t.Errorf("guidance should name the cache: %q", u.Detail)
-	}
-}
-
 // Skipping a malformed value row made an unreadable response look like a short
 // list, which the editor presents as authoritative — the same silence the query
 // path refuses, in the one place a user is choosing what to filter on.
@@ -835,18 +469,13 @@ func TestMalformedValueRowIsRejected(t *testing.T) {
 		`{"count": 1, "results": [{"name": "ghost"}]}`,
 		`{"count": 1, "results": [{"id": 0, "name": "ghost"}]}`,
 	} {
-		// The schema sample is answered normally FIRST, so rawColumns succeeds
-		// and caches. That is what makes the value loop reachable at all: with a
-		// cold cache the malformed page is caught by the schema sample one level
-		// up, and this decoder never runs.
+		// A healthy page first, so the failure below is the value decoder's and
+		// not the transport's.
 		var n int
 		srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 			n++
 			w.Header().Set("Content-Type", "application/json")
-			// Two good answers first: the schema sample, then the warming
-			// value fetch. Only after rawColumns is cached does the value loop
-			// become the sole guard, which is the path under test.
-			if n <= 2 {
+			if n <= 1 {
 				_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 1, "name": "CORE-1"}]}`))
 				return
 			}
@@ -854,7 +483,7 @@ func TestMalformedValueRowIsRejected(t *testing.T) {
 		}))
 		p := New(srv.URL, "t", "nb", srv.Client())
 		if _, err := p.FieldValues(context.Background(), "dcim/devices", "name", "", 100); err != nil {
-			t.Fatalf("the warming call must succeed: %v", err)
+			t.Fatalf("a healthy page must succeed: %v", err)
 		}
 		_, err := p.FieldValues(context.Background(), "dcim/devices", "name", "", 100)
 		srv.Close()
@@ -944,15 +573,8 @@ func TestAutocompleteFallsBackForUnpushableText(t *testing.T) {
 // then match nothing. Deduplicating by the displayed value does not catch it:
 // the values differ, which is the problem.
 func TestDuplicateIDsInAutocompleteAreRejected(t *testing.T) {
-	var n int
 	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
-		n++
 		w.Header().Set("Content-Type", "application/json")
-		if n == 1 {
-			// The schema sample.
-			_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 1, "name": "CORE-1"}]}`))
-			return
-		}
 		_, _ = w.Write([]byte(`{"count": 2, "results": [{"id": 1, "name": "CORE-1"}, {"id": 1, "name": "STALE"}]}`))
 	}))
 	defer srv.Close()
@@ -972,14 +594,8 @@ func TestDuplicateIDsInAutocompleteAreRejected(t *testing.T) {
 // turned an incomplete response into a short list the editor presents as
 // authoritative.
 func TestValueRowMissingTheProjectedFieldIsRejected(t *testing.T) {
-	var n int
 	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
-		n++
 		w.Header().Set("Content-Type", "application/json")
-		if n == 1 {
-			_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 1, "name": "CORE-1"}]}`))
-			return
-		}
 		_, _ = w.Write([]byte(`{"count": 2, "results": [{"id": 1, "name": "CORE-1"}, {"id": 2}]}`))
 	}))
 	defer srv.Close()
@@ -1016,81 +632,6 @@ func TestValueRowWithANullFieldIsAnAnswer(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "ABC" {
 		t.Errorf("got %v, want just ABC", got)
-	}
-}
-
-// A timestamp claim has to hold across the whole sample. One RFC3339-looking
-// value in a text column would otherwise type it as time, and the damage is not
-// cosmetic: filterFieldsFor then offers is-empty, which this backend answers
-// with IS NULL, and NetBox stores a blank text field as "" — so the filter
-// returns the exact opposite population while looking healthy.
-func TestATimestampClaimMustHoldAcrossTheSample(t *testing.T) {
-	f := newFakeService()
-	f.addEntity("plugins/acme/widgets", "id:BIGINT:pk", "note:VARCHAR")
-	f.entities["plugins/acme/widgets"] = []map[string]interface{}{
-		// The first non-null value looks like a timestamp; the rest are prose.
-		{"id": float64(1), "note": "2026-05-06T17:34:30.696190Z"},
-		{"id": float64(2), "note": "replaced the line card"},
-		{"id": float64(3), "note": "scheduled for refresh"},
-	}
-	p := newTestProvider(t, f)
-	ctx := context.Background()
-
-	fields, err := p.Fields(ctx, "plugins/acme/widgets")
-	if err != nil {
-		t.Fatalf("Fields: %v", err)
-	}
-	for _, fl := range fields {
-		if fl.Name == "note" && fl.Type == provider.FieldTypeTime {
-			t.Error("a text column with one timestamp-shaped value is not a time column")
-		}
-	}
-
-	// The consequence that matters: is-empty must not be offered, because this
-	// backend answers it with IS NULL and blank text is "" rather than NULL.
-	ffs, err := p.FilterFields(ctx, "plugins/acme/widgets")
-	if err != nil {
-		t.Fatalf("FilterFields: %v", err)
-	}
-	for _, ff := range ffs {
-		if ff.Name != "note" {
-			continue
-		}
-		for _, op := range ff.Operators {
-			if op == opEmpty || op == opNEmpty {
-				t.Errorf("note advertises %q; on a text column that inverts the result", op)
-			}
-		}
-	}
-}
-
-// And a column that really is a timestamp in every sampled row keeps its type,
-// so the guard does not undo the value-led inference it protects.
-func TestAConsistentTimestampColumnIsStillTime(t *testing.T) {
-	f := newFakeService()
-	f.addEntity("core/jobs", "id:BIGINT:pk", "completed:VARCHAR")
-	f.entities["core/jobs"] = []map[string]interface{}{
-		{"id": float64(1), "completed": "2026-05-06T17:34:30.696190Z"},
-		{"id": float64(2), "completed": "2026-05-07T09:00:00.000000Z"},
-		{"id": float64(3), "completed": nil},
-	}
-	p := newTestProvider(t, f)
-
-	fields, err := p.Fields(context.Background(), "core/jobs")
-	if err != nil {
-		t.Fatalf("Fields: %v", err)
-	}
-	var found bool
-	for _, fl := range fields {
-		if fl.Name == "completed" {
-			found = true
-			if fl.Type != provider.FieldTypeTime {
-				t.Errorf("completed typed %q, want time", fl.Type)
-			}
-		}
-	}
-	if !found {
-		t.Error("completed missing from the field list")
 	}
 }
 
@@ -1156,8 +697,8 @@ func TestObjectTypes_LabelPluginModels(t *testing.T) {
 			if ot.Label != "Bgp: Bgp Sessions" || ot.App != "plugins/bgp" || ot.Model != "bgp-sessions" {
 				t.Errorf("plugin type = %+v", ot)
 			}
-			if err := p.validateObjectType(context.Background(), ot.Value); err != nil {
-				t.Errorf("a listed plugin type must validate: %v", err)
+			if _, _, err := p.entityFor(context.Background(), ot.Value); err != nil {
+				t.Errorf("a listed plugin type must resolve: %v", err)
 			}
 			return
 		}
@@ -1180,14 +721,188 @@ func TestHealthCheck_ReportsFedEntitiesAndRequiresTheRoute(t *testing.T) {
 	}
 }
 
-func TestValidateObjectType_AnswersFromTheCatalogue(t *testing.T) {
+func TestEntityFor_AnswersFromTheCatalogue(t *testing.T) {
 	p := newTestProvider(t, newFakeService())
-	if err := p.validateObjectType(context.Background(), "dcim/devices"); err != nil {
-		t.Errorf("known type: %v", err)
+	if e, _, err := p.entityFor(context.Background(), "dcim/devices"); err != nil || e.Table != "dcim_device" {
+		t.Errorf("known type: entity=%+v err=%v", e, err)
 	}
-	err := p.validateObjectType(context.Background(), "dcim/widgets")
+	_, _, err := p.entityFor(context.Background(), "dcim/widgets")
 	var unknown *UnknownObjectTypeError
 	if !errors.As(err, &unknown) {
 		t.Errorf("unknown type: got %v, want UnknownObjectTypeError", err)
+	}
+}
+
+// Fields is read off the catalogue: the physical columns in table order,
+// typed by the catalogue; then the columns every AVAILABLE reference adds
+// under expand=; then the custom fields; then the link. The one row read is
+// for custom-field names — the catalogue cannot carry them — projected to the
+// blob and bounded.
+func TestFields_AreTheCatalogueColumnsPlusExpansions(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "a", "custom_field_data": `{"lifecycle_phase":"production","tags_count":2}`},
+	}
+	srv := f.start(t)
+	p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.example.com"))
+
+	fields, err := p.Fields(context.Background(), "dcim/devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]provider.FieldType{}
+	var order []string
+	for _, fl := range fields {
+		byName[fl.Name] = fl.Type
+		order = append(order, fl.Name)
+	}
+	wantOrder := []string{
+		"id", "name", "serial", "position", "is_full_depth", "created", "status", "role_id", "tenant_id", "site_id", "rack_id", "platform_id",
+		"role", "role_slug", "tenant", "tenant_slug", "site", "site_slug", "rack",
+		"cf_lifecycle_phase", "cf_tags_count",
+		"display_url",
+	}
+	if !slices.Equal(order, wantOrder) {
+		t.Errorf("order = %v\nwant    %v", order, wantOrder)
+	}
+	for name, want := range map[string]provider.FieldType{
+		"id": provider.FieldTypeNumber, "name": provider.FieldTypeString, "position": provider.FieldTypeNumber,
+		"is_full_depth": provider.FieldTypeBoolean,
+		// VARCHAR on every tenant today (DATA-250); time the day the catalogue says so.
+		"created": provider.FieldTypeString,
+		"site":    provider.FieldTypeString, "site_slug": provider.FieldTypeString,
+		"cf_lifecycle_phase": provider.FieldTypeString, "cf_tags_count": provider.FieldTypeNumber,
+	} {
+		if byName[name] != want {
+			t.Errorf("%s: type %q, want %q", name, byName[name], want)
+		}
+	}
+	if _, ok := byName["platform"]; ok {
+		t.Error("an expansion whose target has no data must not be offered as a column")
+	}
+	if _, ok := byName["custom_field_data"]; ok {
+		t.Error("the raw JSON column is not a field; its cf_* expansion is")
+	}
+	req, ok := f.requestWith("dcim/devices", "fields")
+	if !ok || req.query.Get("fields") != "custom_field_data" || req.query.Get("limit") != "20" {
+		t.Errorf("custom-field discovery request = %v, want fields=custom_field_data&limit=20", req.query)
+	}
+	if n := f.countRequestsFor("dcim/devices"); n != 1 {
+		t.Errorf("Fields made %d row requests, want exactly the custom-field read", n)
+	}
+}
+
+// An empty table still has columns: they are the catalogue's, not the rows'.
+// Only the custom-field names are missing, since no row could name them.
+func TestFields_EmptyTableStillListsTheCatalogueColumns(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{}
+	p := newTestProvider(t, f)
+
+	fields, err := p.Fields(context.Background(), "dcim/devices")
+	if err != nil {
+		t.Fatalf("Fields on an empty table: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, fl := range fields {
+		seen[fl.Name] = true
+	}
+	if !seen["name"] || !seen["site"] {
+		t.Errorf("catalogue columns missing from an empty table's fields: %v", fields)
+	}
+	for _, fl := range fields {
+		if strings.HasPrefix(fl.Name, "cf_") || fl.Name == deepLinkColumn {
+			t.Errorf("%s offered with no rows to name it and no link base", fl.Name)
+		}
+	}
+}
+
+// An entity the catalogue lists but has fed no data for keeps its columns —
+// the editor can still show what a query would return — but nothing is read
+// from it: the row route answers 404 for it, and the custom-field names it
+// cannot supply are simply absent.
+func TestFields_UnfedEntityListsColumnsButReadsNoRows(t *testing.T) {
+	f := newFakeService()
+	ops := []string{"eq", "gt", "lt", "in", "isnull"}
+	f.schema.Entities["/v1/dcim/platforms"] = fakeEntity{Table: "dcim_platform", PrimaryKey: "id", Ingested: false, Columns: []fakeColumn{
+		{Name: "id", Type: "BIGINT", Operators: ops},
+		{Name: "name", Type: "VARCHAR", Nullable: true, Operators: append(slices.Clone(ops), "ilike")},
+		{Name: "custom_field_data", Type: "VARCHAR", Nullable: true, Operators: append(slices.Clone(ops), "ilike")},
+	}}
+	p := newTestProvider(t, f)
+
+	fields, err := p.Fields(context.Background(), "dcim/platforms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, fl := range fields {
+		got = append(got, fl.Name)
+	}
+	if !slices.Equal(got, []string{"id", "name"}) {
+		t.Errorf("fields = %v, want the catalogue's columns and nothing read", got)
+	}
+	if n := f.countRequestsFor("dcim/platforms"); n != 0 {
+		t.Errorf("an unfed entity answers 404 on rows; %d requests were made anyway", n)
+	}
+}
+
+// The names are cached with the catalogue's TTL, or every editor interaction
+// would read the blob again.
+func TestFields_CachesTheCustomFieldNames(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, err := p.Fields(ctx, "dcim/devices"); err != nil {
+			t.Fatalf("Fields %d: %v", i, err)
+		}
+	}
+	if n := f.countRequestsFor("dcim/devices"); n != 1 {
+		t.Errorf("read custom-field names %d times across 3 calls, want 1", n)
+	}
+}
+
+// The operators come from the catalogue, translated to the editor's tokens.
+// The two withholdings that remain are deliberate: is-empty on TEXT (NetBox
+// stores a blank as "", the backend tests IS NULL — DATA-206) and on a NOT
+// NULL column (nothing is ever empty there).
+func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
+	p := newTestProvider(t, newFakeService())
+	ff, err := p.FilterFields(context.Background(), "dcim/devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := map[string][]string{}
+	for _, x := range ff {
+		ops[x.Name] = x.Operators
+	}
+	for name, want := range map[string][]string{
+		"name":          {"", "ie", "ic", "isw", "iew", "gt", "lt"}, // nullable VARCHAR: text, no is-empty
+		"serial":        {"", "ie", "ic", "isw", "iew", "gt", "lt"}, // NOT NULL VARCHAR: the same
+		"position":      {"", "gt", "lt", "empty", "nempty"},        // nullable DOUBLE: is-empty is exact
+		"id":            {"", "gt", "lt"},                           // NOT NULL BIGINT: never empty
+		"is_full_depth": {"", "gt", "lt"},                           // NOT NULL BOOLEAN
+		"site":          {"", "ie", "ic", "isw", "iew", "gt", "lt"}, // expanded name: the target's name column
+		"site_slug":     {"", "ie", "ic", "isw", "iew", "gt", "lt"},
+		"rack":          {"", "ie", "ic", "isw", "iew", "gt", "lt"},
+	} {
+		if !slices.Equal(ops[name], want) {
+			t.Errorf("%s: %v, want %v", name, ops[name], want)
+		}
+	}
+	for _, absent := range []string{"platform", "platform_slug", "rack_slug", "cf_lifecycle_phase", "custom_field_data", "display_url"} {
+		if _, ok := ops[absent]; ok {
+			t.Errorf("%s must not be filterable", absent)
+		}
+	}
+	// Every advertised operator is one the translator accepts.
+	for name, list := range ops {
+		for _, op := range list {
+			if _, err := buildFilterValues([]provider.Filter{{Field: name, Operator: op, Value: "1"}}); err != nil {
+				t.Errorf("%s advertises %q but the translator rejects it: %v", name, op, err)
+			}
+		}
 	}
 }

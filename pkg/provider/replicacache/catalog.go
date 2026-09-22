@@ -69,6 +69,32 @@ func (e entity) column(name string) (column, bool) {
 	return column{}, false
 }
 
+// has reports whether name is a stored column of the entity — what fields=,
+// sort= and filter[] may name directly.
+func (e entity) has(name string) bool { _, ok := e.column(name); return ok }
+
+// expandedColumn reports whether name is a column an expansion adds — the bare
+// <key> or <key>_<col> of some reference, available or not — returning the
+// referencing column and the target column it stands for. "Or not" matters: a
+// filter on an unfed target has to be refused by naming the target, which
+// takes finding the reference first.
+func (e entity) expandedColumn(name string) (column, string, bool) {
+	for _, c := range e.Columns {
+		if c.Ref == nil {
+			continue
+		}
+		if name == c.Ref.ExpandKey {
+			return c, c.Ref.Columns[0], true
+		}
+		for _, col := range c.Ref.Columns[1:] {
+			if name == c.Ref.ExpandKey+"_"+col {
+				return c, col, true
+			}
+		}
+	}
+	return column{}, "", false
+}
+
 // expandedColumns lists the derived columns every AVAILABLE reference adds
 // under expand=, in catalogue order: <key>, then <key>_<col> for the target's
 // remaining columns. An unavailable reference adds nothing; expanding it would

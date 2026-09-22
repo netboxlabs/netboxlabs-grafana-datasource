@@ -3,6 +3,7 @@ package plugin
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
@@ -280,6 +281,31 @@ func resultRefusal(c consumer, res *provider.Result, noun string) string {
 		return msg
 	}
 	return degradationError(c, res)
+}
+
+// stalenessError refuses a strict consumer's result whose data is older than
+// the datasource allows, or of unknown age, when a maximum is set at all.
+// Opt-in, because a replica can legitimately report no age; on by choice,
+// because a rule that evaluates a two-hour-old inventory as current is the
+// failure the replica's freshness reporting exists to make visible.
+//
+// Only a producer that reports freshness at all can be stale. NetBox mode
+// leaves SnapshotComplete nil, and the setting lives in jsonData, which a mode
+// switch or a provisioned datasource can carry either way.
+func stalenessError(c consumer, res *provider.Result, maxAge time.Duration, now time.Time) string {
+	if maxAge <= 0 || res == nil || res.SnapshotComplete == nil {
+		return ""
+	}
+	v := c.voice()
+	if res.DataAsOf == nil {
+		return fmt.Sprintf("%s read data whose age is unknown (the replica reports no commit time for it), and this datasource allows at most %s, so %s. Wait for the replica to finish loading, or raise or clear Max data age.",
+			v.subject, maxAge, v.stale)
+	}
+	if age := now.Sub(*res.DataAsOf); age > maxAge {
+		return fmt.Sprintf("%s read data that is %s old and this datasource allows at most %s, so %s. Check the replica's ingestion, or raise Max data age.",
+			v.subject, age.Round(time.Minute), maxAge, v.stale)
+	}
+	return ""
 }
 
 // thousands formats n with comma separators (104231 -> "104,231") so large

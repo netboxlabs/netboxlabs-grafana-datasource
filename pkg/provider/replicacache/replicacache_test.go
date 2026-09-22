@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -114,20 +115,42 @@ func TestFieldValuesSamplesDistinctValues(t *testing.T) {
 	}
 }
 
-// Autocomplete on a column we synthesize has nothing upstream to read, and
-// asking for it by name would be rejected as an unknown column.
-func TestFieldValuesOnADerivedColumnReturnsNothing(t *testing.T) {
+// A related name FilterFields advertises can be searched: the service returns
+// the expanded columns beside the primary key under a projection, so the
+// picker reads them from there, with the search pushed down under expand=.
+func TestFieldValuesOnAnExpandedNameReadsTheTarget(t *testing.T) {
 	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{{"id": float64(4001), "name": "DC-1", "slug": "dc-1"}}
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001), deviceFixture(2, "CORE-2", 4002), deviceFixture(3, "EDGE-1", 4001)}
+	f.entities["dcim/sites"] = []map[string]interface{}{
+		{"id": float64(4001), "name": "DC-1", "slug": "dc-1"},
+		{"id": float64(4002), "name": "Branch-9", "slug": "branch-9"},
+	}
 	p := newTestProvider(t, f)
 
 	vals, err := p.FieldValues(context.Background(), "dcim/devices", "site", "", 100)
 	if err != nil {
-		t.Fatalf("FieldValues on a derived column errored: %v", err)
+		t.Fatalf("FieldValues on an expanded name: %v", err)
 	}
-	if len(vals) != 0 {
-		t.Errorf("want no values for a derived column, got %v", vals)
+	if !slices.Equal(vals, []string{"Branch-9", "DC-1"}) {
+		t.Errorf("values = %v, want the distinct site names", vals)
+	}
+	req, ok := f.requestWith("dcim/devices", "expand")
+	if !ok || req.query.Get("expand") != "site" || req.query.Get("fields") != "id" {
+		t.Errorf("request = %v, want expand=site with only the key projected", req.query)
+	}
+
+	vals, err = p.FieldValues(context.Background(), "dcim/devices", "site", "dc", 100)
+	if err != nil || !slices.Equal(vals, []string{"DC-1"}) {
+		t.Errorf("searched values = %v err=%v", vals, err)
+	}
+	if r, ok := f.requestWith("dcim/devices", "filter[site]__ilike"); !ok || r.query.Get("expand") != "site" {
+		t.Error("the search must be pushed down under expand=")
+	}
+
+	// A name that is neither stored nor an available expansion has nothing
+	// to read.
+	if vals, err := p.FieldValues(context.Background(), "dcim/devices", "platform", "", 100); err != nil || len(vals) != 0 {
+		t.Errorf("unavailable expansion: %v %v", vals, err)
 	}
 }
 
@@ -720,7 +743,7 @@ func TestHealthCheck_ReportsFedEntitiesAndRequiresTheRoute(t *testing.T) {
 
 func TestEntityFor_AnswersFromTheCatalogue(t *testing.T) {
 	p := newTestProvider(t, newFakeService())
-	if e, _, err := p.entityFor(context.Background(), "dcim/devices"); err != nil || e.Table != "dcim_device" {
+	if e, _, err := p.entityFor(context.Background(), "dcim/devices"); err != nil || e.PrimaryKey != "id" {
 		t.Errorf("known type: entity=%+v err=%v", e, err)
 	}
 	_, _, err := p.entityFor(context.Background(), "dcim/widgets")
@@ -814,30 +837,17 @@ func TestFields_EmptyTableStillListsTheCatalogueColumns(t *testing.T) {
 	}
 }
 
-// An entity the catalogue lists but has fed no data for keeps its columns —
-// the editor can still show what a query would return — but nothing is read
-// from it: the row route answers 404 for it, and the custom-field names it
-// cannot supply are simply absent.
-func TestFields_UnfedEntityListsColumnsButReadsNoRows(t *testing.T) {
+// An entity the catalogue lists but has fed no data for carries no columns
+// in the catalogue (the service lists none until it has ingested), so it has
+// no fields; and nothing is read from it, since the row route answers 404.
+func TestFields_UnfedEntityHasNoFieldsAndReadsNoRows(t *testing.T) {
 	f := newFakeService()
-	ops := []string{"eq", "gt", "lt", "in", "isnull"}
-	f.schema.Entities["/v1/dcim/platforms"] = fakeEntity{Table: "dcim_platform", PrimaryKey: "id", Ingested: false, Columns: []fakeColumn{
-		{Name: "id", Type: "BIGINT", Operators: ops},
-		{Name: "name", Type: "VARCHAR", Nullable: true, Operators: append(slices.Clone(ops), "ilike")},
-		{Name: "custom_field_data", Type: "VARCHAR", Nullable: true, Operators: append(slices.Clone(ops), "ilike")},
-	}}
-	p := newTestProvider(t, f)
+	srv := f.start(t)
+	p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.example.com"))
 
 	fields, err := p.Fields(context.Background(), "dcim/platforms")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	for _, fl := range fields {
-		got = append(got, fl.Name)
-	}
-	if !slices.Equal(got, []string{"id", "name"}) {
-		t.Errorf("fields = %v, want the catalogue's columns and nothing read", got)
+	if err != nil || len(fields) != 0 {
+		t.Errorf("fields=%v err=%v, want none", fields, err)
 	}
 	if n := f.countRequestsFor("dcim/platforms"); n != 0 {
 		t.Errorf("an unfed entity answers 404 on rows; %d requests were made anyway", n)
@@ -941,5 +951,27 @@ func TestLinks_PreferTheCatalogueNetBoxURL(t *testing.T) {
 	}
 	if p.BaseURL() != "https://override.example.com" {
 		t.Errorf("BaseURL = %q", p.BaseURL())
+	}
+}
+
+// Every editor open that lists fields must not re-read the custom-field names
+// once per panel; concurrent callers share one read.
+func TestFields_ConcurrentCallersShareOneNamesRead(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := p.Fields(context.Background(), "dcim/devices"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := f.countRequestsFor("dcim/devices"); n != 1 {
+		t.Errorf("read custom-field names %d times for one burst, want 1", n)
 	}
 }

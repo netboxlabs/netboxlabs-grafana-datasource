@@ -591,8 +591,8 @@ func TestCustomFieldExpansionMatchesNetBoxMode(t *testing.T) {
 	provider.FlattenField("custom_fields", cf, func(n string, v interface{}) { netboxSide[n] = v })
 
 	cacheSide := map[string]interface{}{}
-	for _, name := range sortedNames(cf) {
-		provider.FlattenField("cf_"+name, cf[name], func(n string, v interface{}) { cacheSide[n] = v })
+	if err := expandCustomFields(cf, cacheSide); err != nil {
+		t.Fatal(err)
 	}
 
 	if len(netboxSide) != len(cacheSide) {
@@ -1217,6 +1217,12 @@ func TestUnsetCountNeedsEvidenceThatItIsDerived(t *testing.T) {
 	if _, ok := res.Rows[0]["cf_services_count"]; ok {
 		t.Error("with no evidence of a list, the count must not be invented")
 	}
+	// The rows in hand are the evidence, and the whole of it: a defined
+	// custom field is present in every row's blob, so a names read could not
+	// find what the rows lack.
+	if n := f.countRequestsFor("dcim/devices"); n != 1 {
+		t.Errorf("made %d requests deciding a count; the rows already answered", n)
+	}
 	var told bool
 	for _, w := range res.Warnings {
 		if strings.Contains(w, "cf_services_count") {
@@ -1638,13 +1644,136 @@ func TestQuery_UsesTheCataloguePrimaryKey(t *testing.T) {
 }
 
 // An entity the catalogue lists but has fed nothing for is a distinct error
-// naming the type, not an empty table and not a missing endpoint.
+// naming the type, not an empty table and not a missing endpoint. The ROW
+// ROUTE says so, not the cached catalogue: a type that was fed a minute ago
+// must not be refused for the rest of the catalogue's ten-minute life.
 func TestQuery_UnfedEntityIsNotReplicated(t *testing.T) {
-	p := newTestProvider(t, newFakeService())
+	f := newFakeService()
+	p := newTestProvider(t, f)
 	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/platforms"})
 	u := provider.Classify(err)
 	if u == nil || u.Kind != provider.ErrorKindNotReplicated || !strings.Contains(u.Detail, "dcim/platforms") {
 		t.Errorf("got %v / %+v, want not-replicated naming the type", err, u)
+	}
+	if n := f.countRequestsFor("dcim/platforms"); n != 1 {
+		t.Errorf("the row route is authoritative; %d requests were made", n)
+	}
+
+	// The replica starts feeding platforms while the catalogue is still cached
+	// as unfed: the next query gets the rows.
+	f.mu.Lock()
+	e := f.schema.Entities["/v1/dcim/platforms"]
+	e.Ingested = true
+	f.schema.Entities["/v1/dcim/platforms"] = e
+	f.mu.Unlock()
+	f.entities["dcim/platforms"] = []map[string]interface{}{{"id": float64(1), "name": "IOS-XR"}}
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/platforms"})
+	if err != nil || len(res.Rows) != 1 {
+		t.Errorf("a newly fed entity must not be refused from a stale catalogue: rows=%v err=%v", res, err)
+	}
+}
+
+// Freshness is read from the list envelope, which carries the instant for
+// THIS response, not from the catalogue cached up to ten minutes earlier: a
+// continuously ingesting replica would otherwise report ages up to ten
+// minutes too old, and Max data age would refuse fresh data.
+func TestQuery_FreshnessComesFromTheEnvelope(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+	if _, err := p.ObjectTypes(context.Background()); err != nil { // cache the catalogue at 14:03:11
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	e := f.schema.Entities["/v1/dcim/devices"]
+	e.DataAsOf = strp("2026-09-22T15:00:00Z")
+	f.schema.Entities["/v1/dcim/devices"] = e
+	f.mu.Unlock()
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DataAsOf == nil || res.DataAsOf.UTC().Format(time.RFC3339) != "2026-09-22T15:00:00Z" {
+		t.Errorf("DataAsOf = %v, want the envelope's instant", res.DataAsOf)
+	}
+	if !strings.Contains(strings.Join(res.Notes, " "), "2026-09-22 15:00:00 UTC") {
+		t.Errorf("notes = %v", res.Notes)
+	}
+
+	// The envelope's instant also ends the loading state for this entity,
+	// whatever the cached catalogue still says.
+	f.mu.Lock()
+	f.schema.SnapshotComplete = false
+	f.mu.Unlock()
+	p = newTestProvider(t, f)
+	res, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Warnings) != 0 || res.DataAsOf == nil {
+		t.Errorf("an entity with an instant is not loading: warnings=%v DataAsOf=%v", res.Warnings, res.DataAsOf)
+	}
+}
+
+// A commit time the replica reports but this datasource cannot read is said,
+// not silently treated as "no commit time".
+func TestQuery_UnreadableCommitTimeIsSaid(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	f.mu.Lock()
+	e := f.schema.Entities["/v1/dcim/devices"]
+	e.DataAsOf = strp("yesterday-ish")
+	f.schema.Entities["/v1/dcim/devices"] = e
+	f.mu.Unlock()
+	p := newTestProvider(t, f)
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := strings.Join(res.Notes, " ")
+	if res.DataAsOf != nil || !strings.Contains(notes, "could not be read") || !strings.Contains(notes, "yesterday-ish") {
+		t.Errorf("DataAsOf=%v notes=%v", res.DataAsOf, res.Notes)
+	}
+}
+
+// A reference the replica cannot resolve — the row points at an object the
+// replica does not hold, the normal state while a snapshot loads and after
+// any create/delete window — comes back as a null name beside a real id. That
+// is indistinguishable from "no site" to a rule grouping on it, so it is
+// reported, as the client-side cascade used to report it.
+func TestQuery_DanglingReferenceIsReported(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/sites"] = []map[string]interface{}{{"id": float64(4001), "name": "DC-1", "slug": "dc-1"}}
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		deviceFixture(1, "a", 4001),
+		deviceFixture(2, "b", 999), // no such site
+		{"id": float64(3), "name": "c", "site_id": nil, "role_id": float64(5), "custom_field_data": "{}"},
+	}
+	p := newTestProvider(t, f)
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "site"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	warned := strings.Join(res.Warnings, " ")
+	if !strings.Contains(warned, "dcim/sites") || !strings.Contains(warned, "1 of 3") || !strings.Contains(warned, "site_id") {
+		t.Errorf("warnings = %v, want the dangling site named with its count", res.Warnings)
+	}
+	if v, ok := res.Rows[1]["site"]; !ok || v != nil {
+		t.Errorf("the null stays a null: %v", res.Rows[1])
+	}
+
+	// Null ids are not dangling, and a fully resolved page stays silent.
+	f.entities["dcim/devices"] = f.entities["dcim/devices"][:1]
+	f.entities["dcim/devices"] = append(f.entities["dcim/devices"], map[string]interface{}{"id": float64(3), "name": "c", "site_id": nil, "role_id": nil, "custom_field_data": "{}"})
+	res, err = newTestProvider(t, f).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "site", "role"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "dcim/sites") {
+			t.Errorf("a null id is not a dangling reference: %v", res.Warnings)
+		}
 	}
 }
 

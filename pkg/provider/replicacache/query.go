@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -15,10 +16,13 @@ import (
 // Query executes an object query and returns flattened, joinable rows.
 //
 // Almost everything the NetBox provider does in Go happens upstream here:
-// filtering, sorting, projection and counting are all query parameters, which
-// is the entire reason this backend exists. What remains in process is turning
-// the raw table row into the shape the rest of the plugin expects — custom
-// fields out of their JSON blob, and foreign keys resolved to names.
+// filtering, sorting, projection, counting and the resolution of related
+// names (expand=) are all query parameters, which is the entire reason this
+// backend exists. What remains in process is turning the raw table row into
+// the shape the rest of the plugin expects — custom fields out of their JSON
+// blob, the aliases a NetBox-mode panel selects, the link — and saying what
+// the numbers cannot: how fresh the rows are, and which references the replica
+// could not resolve.
 func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provider.Result, error) {
 	// Same contradiction the NetBox provider rejects: a caller that reads only
 	// the total cannot also be able to do without one.
@@ -32,9 +36,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
-	if !e.Ingested {
-		return nil, &NotReplicatedError{ObjectType: spec.ObjectType}
-	}
+	// Deliberately not pre-empted from e.Ingested: the row route answers 404
+	// for an unfed entity, classified as not-replicated by the client, and it
+	// is current where the catalogue can be ten minutes stale.
 	if err := validateFilters(spec.Filters, e, c); err != nil {
 		return nil, err
 	}
@@ -63,7 +67,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		q = withFields(q, plan.fields)
 	}
 
-	raws, total, err := p.client.list(ctx, spec.ObjectType, q, limit)
+	raws, total, asOf, err := p.client.list(ctx, spec.ObjectType, q, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +75,10 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
-	notes, warnings := freshnessNotes(c, e)
+	if asOf == nil {
+		asOf = e.DataAsOf
+	}
+	notes, warnings := freshnessNotes(c, e, asOf)
 	notes, warnings = append(plan.notes, notes...), append(plan.warnings, warnings...)
 	if !spec.CountOnly {
 		// All of these build columns a count-only caller never reads: it takes
@@ -87,11 +94,11 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// alert evaluation failed on it.
 		cols = append(cols, addChoiceValueAliases(selectedFields(spec), rows)...)
 		cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
-		cols = append(cols, p.addUnsetCustomFieldColumns(ctx, e, spec, rows)...)
+		cols = append(cols, addUnsetCustomFieldColumns(spec, rows)...)
 		if addDeepLinks(p.linkBase(c), spec.ObjectType, rows, e.pk()) {
 			cols = append(cols, deepLinkColumn)
 		}
-		cols = append(cols, addNullSlugColumns(spec, rows)...)
+		warnings = append(warnings, danglingReferenceWarnings(plan.expanded, rows)...)
 		warnings = append(warnings, unresolvedRelationWarnings(spec, rows, plan.unavailable)...)
 	}
 
@@ -103,26 +110,55 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		MaxRows:          MaxLimit,
 		Warnings:         warnings,
 		Notes:            notes,
-		DataAsOf:         e.DataAsOf,
+		DataAsOf:         asOf,
 		SnapshotComplete: &snapshotComplete,
 	}, nil
 }
 
-// freshnessNotes states how current the rows are, from the catalogue's
-// per-entity instant. Loading — no instant and the tenant-wide snapshot not
-// complete — is a WARNING, because the rows may be a fraction of the fleet
-// served as a confident 200, and a warning is what keeps an alert rule from
-// evaluating them as the whole. An unknown age after the snapshot is a note.
-func freshnessNotes(c *catalog, e entity) (notes, warnings []string) {
+// freshnessNotes states how current the rows are. asOf is the instant for
+// THIS response (the list envelope's, else the catalogue's). Loading — no
+// instant and the tenant-wide snapshot not complete — is a WARNING, because
+// the rows may be a fraction of the fleet served as a confident 200, and a
+// warning is what keeps an alert rule from evaluating them as the whole. An
+// unknown age after the snapshot is a note, and so is an instant the replica
+// reported that this datasource could not read: the reader should see the
+// value rather than "unknown".
+func freshnessNotes(c *catalog, e entity, asOf *time.Time) (notes, warnings []string) {
 	switch {
-	case e.DataAsOf != nil:
-		notes = append(notes, fmt.Sprintf("Data as of %s (replica-cache).", e.DataAsOf.UTC().Format("2006-01-02 15:04:05 UTC")))
+	case asOf != nil:
+		notes = append(notes, fmt.Sprintf("Data as of %s (replica-cache).", asOf.UTC().Format("2006-01-02 15:04:05 UTC")))
+	case e.DataAsOfRaw != "":
+		notes = append(notes, fmt.Sprintf("The age of this data could not be read: the replica reports %q as the commit time.", truncate(e.DataAsOfRaw)))
 	case !c.SnapshotComplete:
 		warnings = append(warnings, "This replica is still loading its initial snapshot; results may be incomplete and their age is unknown.")
 	default:
 		notes = append(notes, "The age of this data is unknown: the replica reports no commit time for this entity.")
 	}
 	return notes, warnings
+}
+
+// danglingReferenceWarnings reports, per expanded reference, the rows whose
+// id points at an object the replica does not hold: the server's join yields
+// a null name beside a real id, which is indistinguishable from "no site" to
+// a rule grouping or joining on the name. The normal state while a snapshot
+// loads (devices arrive before their sites) and after any create/delete
+// window — and the one the client-side cascade used to report.
+func danglingReferenceWarnings(expanded []expansion, rows []map[string]interface{}) []string {
+	var out []string
+	for _, x := range expanded {
+		missing := 0
+		for _, row := range rows {
+			if _, ok := toInt(row[x.via]); ok && row[x.key] == nil {
+				missing++
+			}
+		}
+		if missing > 0 {
+			out = append(out, fmt.Sprintf(
+				"Related names from %s are missing for %d of %d objects: those rows reference objects this replica does not hold, so %q is blank there; the %s column still holds the values.",
+				x.target, missing, len(rows), x.key, x.via))
+		}
+	}
+	return out
 }
 
 // request is what a QuerySpec becomes on the wire, decided from the catalogue
@@ -137,7 +173,12 @@ type request struct {
 	// unavailable is every requested name an unavailable reference would have
 	// produced, so the missing-column backstop does not report it a second time.
 	unavailable map[string]bool
+	// expanded is what expand carries, with the column each key resolves
+	// through and the entity it resolves to, for the dangling-reference check.
+	expanded []expansion
 }
+
+type expansion struct{ key, via, target string }
 
 // planRequest maps the caller's columns onto the service's vocabulary.
 //
@@ -230,7 +271,9 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 	}
 	for _, col := range e.Columns { // catalogue order, so the parameter is deterministic
 		if col.Ref != nil && expandSet[col.Ref.ExpandKey] {
+			delete(expandSet, col.Ref.ExpandKey) // once, should two references share a key
 			r.expand = append(r.expand, col.Ref.ExpandKey)
+			r.expanded = append(r.expanded, expansion{key: col.Ref.ExpandKey, via: col.Name, target: strings.TrimPrefix(col.Ref.Path, "/v1/")})
 		}
 	}
 	if wantAll || spec.CountOnly {
@@ -442,23 +485,9 @@ func checkProjection(projected []string, rows []map[string]interface{}) error {
 // Gated on the entity actually having the blob. Where it does not, a requested
 // cf_* really is a column this deployment cannot produce, and the backstop is
 // right to say so.
-func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, e entity, spec provider.QuerySpec, rows []map[string]interface{}) []string {
-	if len(rows) == 0 || !e.has(customFieldDataColumn) {
+func addUnsetCustomFieldColumns(spec provider.QuerySpec, rows []map[string]interface{}) []string {
+	if len(rows) == 0 || !hasColumn(rows, customFieldDataColumn) && !anyCustomField(rows) {
 		return nil
-	}
-	// The entity's known custom fields, from the same cached read the editor
-	// uses. cf_* names that appeared in ANY sampled row are there, which is
-	// the evidence the _count question below needs — read only when a count
-	// asks for it, so an ordinary query costs no second request.
-	var known map[string]provider.FieldType
-	knownNames := func() map[string]provider.FieldType {
-		if known == nil {
-			known = map[string]provider.FieldType{}
-			if cf, err := p.customFieldNames(ctx, spec.ObjectType); err == nil {
-				known = cf.types
-			}
-		}
-		return known
 	}
 	var added []string
 	for _, f := range selectedFields(spec) {
@@ -472,9 +501,11 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, e entity, spe
 		// things in NetBox, but for a COUNT they mean the same one.
 		// A _count suffix is not proof that this is a list's derived count: a
 		// custom field can be NAMED service_count, and NetBox shows an unset one
-		// as null. So the base has to be a column this entity actually has —
-		// evidence from the cached names read, which needs no request.
-		// Without that, the suffix is treated as part of the field's own name.
+		// as null. So the base has to be a column this entity actually has, and
+		// the rows in hand are the whole of the evidence: a defined custom field
+		// is present in every row's blob (measured), so a wider read could not
+		// find what these rows lack. Without it, the suffix is treated as part
+		// of the field's own name.
 		isCount := false
 		if base, ok := strings.CutSuffix(f, "_count"); ok {
 			// Direct evidence first. The flattener emits cf_X_count only
@@ -492,15 +523,9 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, e entity, spe
 					break
 				}
 			}
-			// Otherwise the base's existence is the evidence. The names read
-			// is one source of it, not the only one: it is 20 unfiltered rows,
-			// so a sparse list custom field can be absent from it while the rows
-			// in hand carry it, and those rows are the result being answered.
+			// Otherwise the base's existence in these rows is the evidence.
 			if !literal {
 				isCount = hasColumn(rows, base)
-				if !isCount {
-					_, isCount = knownNames()[base]
-				}
 			}
 		}
 		var unset interface{}
@@ -542,42 +567,17 @@ func (p *Provider) addUnsetCustomFieldColumns(ctx context.Context, e entity, spe
 	return added
 }
 
-// addNullSlugColumns gives a requested <base>_slug its null values when the
-// relationship is null on every row.
-//
-// A slug comes from the object a foreign key points at, so an unset
-// relationship has none — the same reason NetBox mode emits no slug for a null
-// tenant. But the missing-column backstop cannot tell that from a slug that
-// should have been built and was not, so it reported the legitimate case as a
-// degradation, which alert evaluation turns into an error. A rule whose objects
-// all have no tenant would fail for having no tenant.
-//
-// Only when asked for, and only when the base is there and null throughout:
-// where the base carries ids, a missing slug means resolution did not produce
-// one, and that IS worth reporting.
-func addNullSlugColumns(spec provider.QuerySpec, rows []map[string]interface{}) []string {
-	var added []string
-	for _, f := range selectedFields(spec) {
-		base, ok := strings.CutSuffix(f, "_slug")
-		if !ok || base == "" || hasColumn(rows, f) || !hasColumn(rows, base) {
-			continue
-		}
-		allNull := true
-		for _, row := range rows {
-			if v, present := row[base]; present && v != nil {
-				allNull = false
-				break
+// anyCustomField reports whether any row carries a flattened custom field,
+// which is how "this entity has the blob" reads once flattening has run.
+func anyCustomField(rows []map[string]interface{}) bool {
+	for _, row := range rows {
+		for k := range row {
+			if strings.HasPrefix(k, "cf_") {
+				return true
 			}
 		}
-		if !allNull {
-			continue
-		}
-		for _, row := range rows {
-			row[f] = nil
-		}
-		added = append(added, f)
 	}
-	return added
+	return false
 }
 
 func hasColumn(rows []map[string]interface{}, name string) bool {
@@ -628,14 +628,6 @@ func unresolvedRelationWarnings(spec provider.QuerySpec, rows []map[string]inter
 		// skip holds the names an unavailable reference would have produced;
 		// planRequest already said why those are missing.
 		if skip[f] || hasColumn(rows, f) {
-			continue
-		}
-		// A relationship names its source, because the id is still there and is
-		// what the reader can fall back on. Anything else can only say it is
-		// absent, which is the part that was missing.
-		if base := strings.TrimSuffix(f, "_slug"); hasColumn(rows, base+"_id") {
-			out = append(out, fmt.Sprintf(
-				"%q could not be built from %s_id, so the column is missing from this result; the id column still holds the value.", f, base))
 			continue
 		}
 		out = append(out, fmt.Sprintf(
@@ -698,7 +690,7 @@ func fromFloat(f float64) (int, bool) {
 }
 
 // withFields sets the projection parameter. The service always returns the
-// primary key regardless, which the flattener relies on for FK resolution.
+// primary key regardless, which the row checks and the deep link rely on.
 func withFields(q url.Values, cols []string) url.Values {
 	if len(cols) == 0 {
 		return q
@@ -850,24 +842,13 @@ func expandCustomFields(v interface{}, row map[string]interface{}) error {
 	if err != nil {
 		return err
 	}
-	for _, name := range sortedNames(cf) {
-		provider.FlattenField("cf_"+name, cf[name], func(n string, val interface{}) {
-			row[n] = val
-		})
-	}
+	// The blob is the same object NetBox's API serves as custom_fields, so
+	// the contract's own branch for it produces the columns — one place for
+	// the cf_ prefix, the list _count, the object id.
+	provider.FlattenField("custom_fields", cf, func(n string, val interface{}) {
+		row[n] = val
+	})
 	return nil
-}
-
-// sortedNames keeps the derived custom-field columns in a deterministic order,
-// since Go randomizes map iteration and a column list that reordered between
-// refreshes would reorder the panel's table on every refresh.
-func sortedNames(m map[string]interface{}) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // customFields decodes the custom_field_data blob. It is a JSON object encoded

@@ -31,13 +31,8 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
-// schemaTTL bounds how long the discovered entity list is reused.
+// schemaTTL bounds how long a sampled column list is reused.
 const schemaTTL = 10 * time.Minute
-
-// discoveryWarmBudget bounds the background discovery refresh itself. No caller
-// waits this long; it exists so a hung endpoint cannot hold a goroutine and a
-// connection forever.
-const discoveryWarmBudget = 60 * time.Second
 
 // discoveryWaitBudget is the most a query will wait for discovery it needs but
 // does not have. Measured healthy at ~1.6s for the full document, so this
@@ -52,14 +47,6 @@ type Provider struct {
 	// netboxURL is the NetBox instance this cache mirrors, used only to build
 	// deep links back into the NetBox UI. Empty means no links are produced.
 	netboxURL string
-
-	mu       sync.Mutex
-	entities []provider.ObjectType
-	expires  time.Time
-	// warmDone is non-nil while a background discovery refresh is in flight, and
-	// is closed when it ends. One refresh serves every concurrent panel, and a
-	// caller may wait on it for a bounded time instead of issuing its own.
-	warmDone chan struct{}
 
 	fieldsMu sync.Mutex
 	fields   map[string]fieldsCacheEntry
@@ -195,6 +182,96 @@ func (e *UnknownObjectTypeError) Classification() *provider.UpstreamError {
 	}
 }
 
+// HealthCheck reads the catalogue afresh — never from the cache, so Save & Test
+// cannot report "Connected" from a stale answer after a token revocation — and
+// says how much of the deployment has data.
+func (p *Provider) HealthCheck(ctx context.Context) (string, error) {
+	c, err := p.catalogue(ctx, true)
+	if err != nil {
+		return "", err
+	}
+	fed := 0
+	for _, e := range c.Entities {
+		if e.Ingested {
+			fed++
+		}
+	}
+	return fmt.Sprintf("Connected to replica-cache (%d object types, %d with data)", len(c.Entities), fed), nil
+}
+
+// ObjectTypes lists every entity the catalogue configures, fed or not. The
+// value is the object type ("dcim/devices", "plugins/bgp/bgp-sessions") —
+// deliberately what the NetBox provider produces, so one saved query names
+// one thing in both modes. An unfed entity stays listed: the error a query
+// against it gets explains the situation better than a picker that silently
+// lacks it.
+func (p *Provider) ObjectTypes(ctx context.Context) ([]provider.ObjectType, error) {
+	c, err := p.catalogue(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]provider.ObjectType, 0, len(c.Entities))
+	for key := range c.Entities {
+		app, model := splitEntity(key)
+		label := humanize(model)
+		if plugin, ok := strings.CutPrefix(app, "plugins/"); ok {
+			label = humanize(plugin) + ": " + label
+		}
+		out = append(out, provider.ObjectType{Value: key, Label: label, App: app, Model: model})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Value < out[j].Value })
+	return out, nil
+}
+
+// entityFor is the lookup every query-path method starts with: the entity's
+// catalogue entry, the catalogue it came from, or the reason there is none.
+func (p *Provider) entityFor(ctx context.Context, objectType string) (entity, *catalog, error) {
+	c, err := p.catalogue(ctx, false)
+	if err != nil {
+		return entity{}, nil, err
+	}
+	e, ok := c.Entities[objectType]
+	if !ok {
+		return entity{}, nil, &UnknownObjectTypeError{Type: objectType, Known: len(c.Entities)}
+	}
+	return e, c, nil
+}
+
+func (p *Provider) validateObjectType(ctx context.Context, objectType string) error {
+	_, _, err := p.entityFor(ctx, objectType)
+	return err
+}
+
+// entitySetIfWarm and entitySetSoon are the entity-set views fk.go still reads
+// while the client-side resolution exists. Both answer from the catalogue; the
+// background warming they used to drive is gone, since the catalogue is read
+// on the query path itself.
+func (p *Provider) entitySetIfWarm() (map[string]bool, bool) {
+	p.catMu.Lock()
+	c := p.cat
+	p.catMu.Unlock()
+	if c == nil {
+		return nil, false
+	}
+	return entitySet(c), true
+}
+
+func (p *Provider) entitySetSoon(ctx context.Context, _ time.Duration) (map[string]bool, bool) {
+	c, err := p.catalogue(ctx, false)
+	if err != nil {
+		return nil, false
+	}
+	return entitySet(c), true
+}
+
+func entitySet(c *catalog) map[string]bool {
+	set := make(map[string]bool, len(c.Entities))
+	for key := range c.Entities {
+		set[key] = true
+	}
+	return set
+}
+
 // rejectBranch refuses a branch-scoped request.
 //
 // replica-cache mirrors the main dataset and has no notion of a NetBox branch.
@@ -221,136 +298,6 @@ func rejectBranch(ctx context.Context) error {
 	}
 }
 
-// HealthCheck verifies connectivity, credentials and the tenant header.
-//
-// It bypasses the discovery cache deliberately. Answering from a result up to
-// ten minutes old would let Save & Test report "Connected" after the token has
-// been revoked or the service has gone away, while every query fails — a wrong
-// answer from the one button whose whole job is to make a live request. The
-// cost is one request per press, which is what the button is for; the refresh
-// also leaves the cache warm.
-func (p *Provider) HealthCheck(ctx context.Context) (string, error) {
-	types, err := p.objectTypes(ctx, forceRefresh)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("Connected to replica-cache (%d object types)", len(types)), nil
-}
-
-// swaggerDoc is the subset of the service's API description we read. The
-// document is Swagger 2.0 and describes no per-entity schemas — every list
-// endpoint returns a generic "row" object whose columns depend on the
-// deployment — so it is useful for discovering WHICH entities exist and for
-// nothing else. Columns come from sampling a row (see Fields).
-type swaggerDoc struct {
-	Paths map[string]json.RawMessage `json:"paths"`
-}
-
-// ObjectTypes lists the entities this deployment serves.
-func (p *Provider) ObjectTypes(ctx context.Context) ([]provider.ObjectType, error) {
-	return p.objectTypes(ctx, useCache)
-}
-
-// cachePolicy says whether a discovery result may be served from cache.
-type cachePolicy bool
-
-const (
-	useCache     cachePolicy = false
-	forceRefresh cachePolicy = true
-)
-
-func (p *Provider) objectTypes(ctx context.Context, refresh cachePolicy) ([]provider.ObjectType, error) {
-	p.mu.Lock()
-	if !bool(refresh) && p.entities != nil && time.Now().Before(p.expires) {
-		out := p.entities
-		p.mu.Unlock()
-		return out, nil
-	}
-	p.mu.Unlock()
-
-	var doc swaggerDoc
-	if err := p.client.get(ctx, "/docs/openapi.json", nil, &doc); err != nil {
-		return nil, err
-	}
-
-	seen := map[string]bool{}
-	var out []provider.ObjectType
-	for path := range doc.Paths {
-		app, model, ok := parseEntityPath(path)
-		if !ok {
-			continue
-		}
-		value := app + "/" + model
-		if seen[value] {
-			continue
-		}
-		seen[value] = true
-		label := humanize(model)
-		if plugin, ok := strings.CutPrefix(app, "plugins/"); ok {
-			// "Bgp: Bgp Sessions", as the NetBox provider labels the same model.
-			label = humanize(plugin) + ": " + label
-		}
-		out = append(out, provider.ObjectType{
-			Value: value,
-			Label: label,
-			App:   app,
-			Model: model,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Value < out[j].Value })
-
-	// An empty list is treated as a FAILURE rather than an answer. A 200
-	// carrying no usable paths — a transient discovery hiccup, a truncated
-	// document — would otherwise be cached for the full TTL, and every object
-	// query then fails locally against an entity set that says nothing exists,
-	// while the row endpoints are perfectly healthy. That is the opposite of
-	// the degradation this path is built for: not knowing must let the row
-	// request decide, and caching "nothing" is a confident wrong answer.
-	if len(out) == 0 {
-		// Classified, not a bare error: the service that failed is replica-cache,
-		// and NetBox is optional in this mode. Unclassified it renders through
-		// the plugin's fallback as "Cannot reach NetBox", pointing Save & Test at
-		// the wrong service — or at one that is not configured at all.
-		return nil, &TransportError{
-			Op:      "listing object types",
-			Err:     errEmptyDiscovery,
-			Message: "Replica cache returned an empty API description, so no object types could be listed. The service is reachable but answered with nothing usable; retry, and check the replica-cache URL and NetBox instance ID.",
-		}
-	}
-
-	p.mu.Lock()
-	p.entities = out
-	p.expires = time.Now().Add(schemaTTL)
-	p.mu.Unlock()
-	return out, nil
-}
-
-// parseEntityPath accepts "/v1/dcim/devices" and rejects "/v1/dcim/devices/{id}"
-// and anything else, so only listable collections become object types.
-func parseEntityPath(path string) (app, model string, ok bool) {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) < 3 || parts[0] != "v1" {
-		return "", "", false
-	}
-	for _, p := range parts {
-		// Detail routes carry a path parameter; only collections are listable.
-		if strings.ContainsAny(p, "{}") {
-			return "", "", false
-		}
-	}
-	switch {
-	case len(parts) == 3:
-		return parts[1], parts[2], true
-	case len(parts) == 4 && parts[1] == "plugins":
-		// A plugin's models sit one level deeper. The app carries the plugin
-		// name so that the object type reads plugins/bgp/bgp-sessions — the same
-		// value the NetBox provider produces for the same model, which is the
-		// point: a saved query has to name one thing in both modes.
-		return parts[1] + "/" + parts[2], parts[3], true
-	}
-	return "", "", false
-}
-
 // acronyms are rendered upper-case in labels, so the editor reads "IP
 // Addresses" rather than "Ip Addresses".
 var acronyms = map[string]string{
@@ -372,133 +319,6 @@ func humanize(model string) string {
 		}
 	}
 	return strings.Join(words, " ")
-}
-
-// cachedEntitySet returns the discovered entities ONLY if they are already
-// cached, never fetching. It exists so the query path can consult discovery
-// without waiting on it.
-func (p *Provider) cachedEntitySet() (map[string]bool, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.entities == nil || time.Now().After(p.expires) {
-		return nil, false
-	}
-	set := make(map[string]bool, len(p.entities))
-	for _, t := range p.entities {
-		set[t.Value] = true
-	}
-	return set, true
-}
-
-// warmEntities starts a background discovery refresh if one is not already
-// running, and returns a channel closed when it finishes. It never blocks.
-//
-// Discovery is the slowest and least reliable request in this service —
-// measured timing out while row endpoints answered in ~1.3s — so it must never
-// sit inline on the query path. But it cannot simply be skipped either: nothing
-// else on a rendering dashboard populates the cache (the editor warms it when it
-// lists object types; a dashboard that only renders panels does not), so FK
-// names would be permanently absent there.
-//
-// One refresh therefore serves every caller, and callers choose how long they
-// are willing to wait for it.
-func (p *Provider) warmEntities() <-chan struct{} {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.warmDone != nil {
-		return p.warmDone
-	}
-	done := make(chan struct{})
-	p.warmDone = done
-
-	go func() {
-		// Bounded so a hung discovery endpoint cannot hold a goroutine and a
-		// connection indefinitely. Nothing is required to wait for this, so the
-		// budget can exceed what any caller will spend on it.
-		ctx, cancel := context.WithTimeout(context.Background(), discoveryWarmBudget)
-		defer cancel()
-		_, _ = p.ObjectTypes(ctx)
-
-		p.mu.Lock()
-		p.warmDone = nil
-		p.mu.Unlock()
-		close(done)
-	}()
-	return done
-}
-
-// entitySetSoon returns the entity list, waiting at most budget for a refresh
-// that is already running or that it starts.
-//
-// The bound is the whole point. Waiting indefinitely puts a timeout-prone
-// request in front of work that does not depend on it; not waiting at all
-// throws away the healthy case, where discovery answers in under two seconds
-// and the caller can simply have the right answer. A short cap keeps the good
-// case correct and makes the bad case cost a fixed, small amount instead of a
-// full HTTP timeout — per refresh rather than per panel, since the refresh is
-// shared.
-// entitySetIfWarm returns the cached entity list, and when there is none starts
-// a refresh in the background without waiting for it.
-//
-// The waiting is what the callers of this cannot afford — they are on paths
-// that deliberately run without discovery — but never STARTING one leaves a
-// deployment that only ever evaluates alerts permanently cold, since nothing
-// else would fetch it. The current query answers conservatively; the next one
-// has the answer.
-func (p *Provider) entitySetIfWarm() (map[string]bool, bool) {
-	if set, ok := p.cachedEntitySet(); ok {
-		return set, true
-	}
-	p.warmEntities()
-	return nil, false
-}
-
-func (p *Provider) entitySetSoon(ctx context.Context, budget time.Duration) (map[string]bool, bool) {
-	if set, ok := p.cachedEntitySet(); ok {
-		return set, true
-	}
-	select {
-	case <-p.warmEntities():
-	case <-time.After(budget):
-	case <-ctx.Done():
-		// The caller has gone — a cancelled dashboard, or one that hit its
-		// deadline. Holding the backend for the rest of the budget serves
-		// nobody: the rows are already fetched and nothing will read them. The
-		// refresh itself continues in the background, so the next query still
-		// benefits.
-	}
-	return p.cachedEntitySet()
-}
-
-// validateObjectType rejects a type this deployment does not serve, before any
-// request is built. Doing it here rather than letting the service answer 404
-// is what makes the message actionable: the reader learns it is not one of the
-// N types available, not that a URL was not found.
-func (p *Provider) validateObjectType(_ context.Context, objectType string) error {
-	// Deliberately consults only an ALREADY-CACHED entity list, and never
-	// fetches one.
-	//
-	// The list is served by a single large document that was measured failing
-	// (TLS timeouts, truncated bodies) against an instance whose row endpoints
-	// were still answering in ~1.3s. Fetching here put that request in front of
-	// every query, so a slow discovery endpoint delayed each panel by a full
-	// timeout before the row request it does not depend on had even started —
-	// and an object query could then pay it a second time in resolveFKs.
-	//
-	// Tolerating the failure was not enough; the wait was the problem. Skipping
-	// validation is safe because the row request is authoritative: an object
-	// type this deployment does not serve answers 404, which classifies as
-	// not-found and reads correctly. What is lost is only the better message
-	// naming how many types DO exist, and only until something warms the cache —
-	// which the query editor does when it populates its object-type dropdown.
-	set, ok := p.cachedEntitySet()
-	if !ok {
-		return nil
-	}
-	if !set[objectType] {
-		return &UnknownObjectTypeError{Type: objectType, Known: len(set)}
-	}
-	return nil
 }
 
 // Fields returns the columns available for an object type.

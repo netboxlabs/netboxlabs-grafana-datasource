@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -501,114 +500,12 @@ func TestQueryProjectsKeyFieldsAlongsideExplicitFields(t *testing.T) {
 	}
 }
 
-// Discovery is served by one large document that was measured failing while row
-// endpoints stayed healthy. Waiting on it before the row request delayed every
-// panel by a full timeout it did not depend on, so the query path must consult
-// only an already-cached entity list.
-func TestQueryDoesNotFetchDiscoveryOnTheQueryPath(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	p := newTestProvider(t, f)
-
-	res, err := p.Query(context.Background(), provider.QuerySpec{
-		ObjectType: "dcim/devices",
-		CountOnly:  true,
-	})
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-	if res.Total != 1 {
-		t.Errorf("Total = %d", res.Total)
-	}
-	// A count-only query needs neither validation nor FK resolution, so nothing
-	// should have reached the discovery document.
-	if n := f.countRequestsFor("docs/openapi.json"); n != 0 {
-		t.Errorf("discovery was fetched %d times on the query path", n)
-	}
-}
-
-// Discovery is the slowest, least reliable request in this service, and FK
-// resolution runs after the rows have already arrived. An unbounded fetch there
-// delays a panel that has its data, so the wait is capped: the query returns
-// promptly with ids and an honest warning rather than blocking on discovery.
-func TestQueryDoesNotBlockIndefinitelyOnHungDiscovery(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{{"id": float64(4001), "name": "DC-1", "slug": "dc-1"}}
-	p := newTestProvider(t, f)
-
-	// Released with defer rather than t.Cleanup: httptest's Close waits for
-	// outstanding handlers, and cleanups run last-registered-first, so a
-	// Cleanup registered here would run AFTER Close and deadlock against the
-	// handler it is meant to release.
-	release := make(chan struct{})
-	f.mu.Lock()
-	f.hangSwagger = release
-	f.mu.Unlock()
-	defer close(release)
-
-	start := time.Now()
-	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("the query must still succeed on its own data: %v", err)
-	}
-	if elapsed > discoveryWaitBudget+3*time.Second {
-		t.Errorf("query took %s; the wait for discovery is meant to be capped at %s", elapsed, discoveryWaitBudget)
-	}
-	// The rows are complete and correct as ids.
-	if res.Rows[0]["site_id"] != float64(4001) {
-		t.Errorf("rows lost their data: %v", res.Rows[0])
-	}
-	// The missing names are stated rather than left as a silent gap.
-	if len(res.Warnings) == 0 {
-		t.Error("want a warning that related names are missing")
-	}
-	if _, ok := res.Rows[0]["site"]; ok {
-		t.Error("no name should be invented while the entity list is unavailable")
-	}
-}
-
-// A cancelled dashboard should not hold the backend for the rest of the
-// discovery budget: the rows are already fetched and nothing will read them.
-func TestQueryStopsWaitingForDiscoveryWhenCancelled(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{{"id": float64(4001), "name": "DC-1", "slug": "dc-1"}}
-	release := make(chan struct{})
-	p := newTestProvider(t, f)
-	f.mu.Lock()
-	f.hangSwagger = release
-	f.mu.Unlock()
-	defer close(release)
-
-	// Cancelled shortly after the call starts: the row fetch completes, then FK
-	// resolution finds a cold cache and would otherwise wait out the budget.
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-
-	start := time.Now()
-	res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices"})
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("the rows were already fetched, so the query should still return them: %v", err)
-	}
-	if elapsed >= discoveryWaitBudget {
-		t.Errorf("waited %s despite cancellation; the budget is %s and should have been cut short",
-			elapsed, discoveryWaitBudget)
-	}
-	if res.Rows[0]["site_id"] != float64(4001) {
-		t.Error("rows must survive a cancelled discovery wait")
-	}
-}
-
 // End to end for the self-referential case: a panel written against the NetBox
 // provider selects "parent", not "parent_id", and the resolution has to read
 // the parent's name out of the SAME table it is querying.
 func TestQueryResolvesSelfReferentialParent(t *testing.T) {
 	f := newFakeService()
+	f.addEntity("dcim/locations", "id:BIGINT:pk", "name:VARCHAR", "slug:VARCHAR", "parent_id:BIGINT")
 	f.entities["dcim/locations"] = []map[string]interface{}{
 		{"id": float64(10), "name": "Campus", "slug": "campus", "parent_id": nil},
 		{"id": float64(11), "name": "Building A", "slug": "building-a", "parent_id": float64(10)},
@@ -669,49 +566,6 @@ func TestSortIsDroppedWhenTheSchemaCannotBeRead(t *testing.T) {
 	}
 	if len(res.Rows) != 1 {
 		t.Errorf("want the row, got %d", len(res.Rows))
-	}
-}
-
-// The query path must not wait on entity discovery to learn its columns.
-// Discovery is one large document measured failing while row endpoints answered
-// in about 1.3s; putting it in front of the row request delayed every panel by
-// a wait the rows do not depend on. Raw columns and types come from the
-// main-table sample, which needs no discovery at all.
-func TestProjectionDoesNotWaitOnDiscovery(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	f.entities["dcim/sites"] = []map[string]interface{}{
-		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
-	}
-	// Discovery hangs for the whole test, as it does when the description
-	// endpoint times out while the row endpoints are healthy.
-	release := make(chan struct{})
-	defer close(release)
-	f.hangSwagger = release
-
-	srv := f.start(t)
-	p := New(srv.URL, "t", "nb", srv.Client())
-
-	done := make(chan error, 1)
-	go func() {
-		// Columns are needed for both the projection and the sort check, so this
-		// spec exercises rawColumns and columnTypes with a cold cache.
-		_, err := p.Query(context.Background(), provider.QuerySpec{
-			ObjectType: "dcim/devices",
-			Fields:     []string{"name", "status"},
-			Ordering:   "name",
-			Filters:    []provider.Filter{{Field: "name", Operator: "ic", Value: "CORE"}},
-		})
-		done <- err
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("the rows are healthy, so the query must answer: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("the query blocked on discovery; column facts must come from the row sample")
 	}
 }
 
@@ -927,6 +781,7 @@ func TestAConfirmedForeignKeyColumnRejectsTextInOtherRows(t *testing.T) {
 // CharField, and a page of them must stay a perfectly good answer.
 func TestATextColumnEndingInIDIsStillNotARelationship(t *testing.T) {
 	f := newFakeService()
+	f.addEntity("circuits/provider-networks", "id:BIGINT:pk", "name:VARCHAR", "service_id:VARCHAR")
 	f.entities["circuits/provider-networks"] = []map[string]interface{}{
 		{"id": float64(1), "name": "NET-1", "service_id": "SVC-9"},
 		{"id": float64(2), "name": "NET-2", "service_id": "SVC-10"},
@@ -1183,6 +1038,7 @@ func TestAJoinKeySourceThatVanishesIsReported(t *testing.T) {
 // selecting it got no column and no explanation.
 func TestObjectCustomFieldExposesItsID(t *testing.T) {
 	f := newFakeService()
+	f.addEntity("dcim/interfaces", "id:BIGINT:pk", "name:VARCHAR", "custom_field_data:VARCHAR")
 	f.entities["dcim/interfaces"] = []map[string]interface{}{{
 		"id": float64(1), "name": "eth0",
 		"custom_field_data": `{"owning_tenant": 22, "tier": "gold", "tags": ["a","b"]}`,
@@ -1324,6 +1180,9 @@ func TestKeyOnlyJoinsAreValidatedUnderAllColumns(t *testing.T) {
 	f2.entities["dcim/sites"] = []map[string]interface{}{
 		{"id": float64(4001), "name": "DC-Northeast", "slug": "dc-northeast"},
 	}
+	f2.entities["dcim/device-roles"] = []map[string]interface{}{
+		{"id": float64(5), "name": "Core Router", "slug": "core-router"},
+	}
 	res, err = newTestProvider(t, f2).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
@@ -1339,7 +1198,7 @@ func TestKeyOnlyJoinsAreValidatedUnderAllColumns(t *testing.T) {
 // variable option silently dropped, or an alert label that lost its identity.
 func TestProjectedColumnsAreCheckedOnEveryRow(t *testing.T) {
 	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		if n == 1 {
@@ -1393,7 +1252,7 @@ func TestProjectedNullsAreOrdinaryAnswers(t *testing.T) {
 // arrived, which is the only place the distinction still exists.
 func TestCustomFieldProjectionIsCheckedBeforeItIsConsumed(t *testing.T) {
 	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSchema(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		if n == 1 {

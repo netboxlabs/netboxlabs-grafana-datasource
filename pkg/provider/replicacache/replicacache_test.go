@@ -99,6 +99,10 @@ func TestUnsupportedCapabilitiesRefuseRatherThanReturnNothing(t *testing.T) {
 			_, err := p.ResolveIPs(ctx, []string{"10.0.0.1"}, nil, 10)
 			return err
 		}},
+		{"ResolveScope", func() error {
+			_, err := p.ResolveScope(ctx, []provider.Filter{{Field: "parent", Value: "10.0.0.0/24"}}, nil, 10)
+			return err
+		}},
 		{"Topology", func() error {
 			_, err := p.Topology(ctx, provider.TopologySpec{})
 			return err

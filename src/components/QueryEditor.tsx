@@ -212,12 +212,14 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   // gets no control rather than an empty dropdown.
   //
   // None of that reasoning is about replica-cache. There the sortable set is
-  // the STORED columns, which the backend already publishes as the filterable
-  // set — filterFieldsFor restricts it to exactly the raw columns — so the
-  // options come from the schema like every other picker. The allow-list was
-  // wrong for it in both directions: dcim/racks and every plugin model have no
-  // entry and so got no sort control at all, while dcim/devices offered site
-  // and role, which are derived and which the backend drops with a note.
+  // the STORED columns plus the related names the backend resolves server-side
+  // (site, site_slug…), which is exactly the filterable set it publishes from
+  // its catalogue — so the options come from the schema like every other
+  // picker. A measured allow-list was wrong for it in both directions:
+  // dcim/racks and every plugin model have no entry and so got no sort control
+  // at all, while a dcim/devices entry could not know which related names THIS
+  // replica can resolve (a target that has received no data cannot be sorted
+  // on, and the backend leaves it out of the set).
   //
   // A sort already stored is kept in the list even when the schema has not
   // arrived yet, or no longer has that column, so the control does not vanish

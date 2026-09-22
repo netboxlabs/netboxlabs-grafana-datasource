@@ -547,6 +547,28 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
     );
   });
 
+  it('offers related names in replica-cache mode, which sorts on them server-side', async () => {
+    // The backend publishes the sortable set as its filterable set: stored
+    // columns plus the related names it resolves under expand=. Nothing here
+    // decides which; the picker shows what the backend said.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-cache-related',
+      datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+      getFilterFields: jest.fn().mockResolvedValue([
+        { name: 'name', operators: ['', 'ic'] },
+        { name: 'site', operators: ['', 'ic'] },
+        { name: 'site_slug', operators: ['', 'ic'] },
+      ]),
+    } as any;
+    setup({}, ds);
+
+    const menu = await openMenu(await screen.findByLabelText('Sort by'));
+    expect(menu.getByText('name')).toBeInTheDocument();
+    expect(menu.getByText('site')).toBeInTheDocument();
+    expect(menu.getByText('site_slug')).toBeInTheDocument();
+  });
+
   it('hides the sort control for a count query — a single number has no order', async () => {
     setup({ count: true }, { ...datasource, uid: 'ds-sort-count' } as any);
     await screen.findByText('Add filter');

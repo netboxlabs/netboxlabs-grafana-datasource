@@ -35,11 +35,6 @@ type fakeService struct {
 	errBody string
 	// requests records every list request's query string, for asserting pushdown.
 	requests []recordedRequest
-	// noSwagger serves a 500 for the API description.
-	noSwagger bool
-	// hangSwagger blocks the API description until the test finishes, modelling
-	// the measured failure where discovery times out while row endpoints answer.
-	hangSwagger chan struct{}
 	// failEntities names entities that answer 500, to simulate one dimension
 	// timing out while the rest of the service is healthy.
 	failEntities map[string]bool
@@ -83,12 +78,27 @@ func (f *fakeService) start(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// withSchema puts the devices fixture's catalogue in front of a bare handler,
+// so a test that scripts row responses by hand does not have to script the
+// schema route as well. Only /v1/_meta/schema is intercepted; everything else,
+// and every request count a test keeps, sees the bare handler alone.
+func withSchema(h http.HandlerFunc) http.Handler {
+	schema := devicesSchema()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/_meta/schema" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(schema)
+			return
+		}
+		h(w, r)
+	})
+}
+
 func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/_meta/schema" {
-		// Same discipline as the openapi.json branch below: under the lock,
-		// record the request, honour the status/errBody knobs (Save & Test must
-		// fail on a revoked token even with a warm catalogue), then serve the
-		// document. The pointer is encoded after unlocking; tests that mutate
+		// Same discipline as the row branch below: under the lock, record the
+		// request, honour the status/errBody knobs (Save & Test must fail on a
+		// revoked token even with a warm catalogue), then serve the document. The pointer is encoded after unlocking; tests that mutate
 		// the schema do so under the lock and sequentially, which is enough.
 		f.mu.Lock()
 		f.requests = append(f.requests, recordedRequest{entity: "_meta/schema", query: r.URL.Query()})
@@ -104,34 +114,6 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(schema)
-		return
-	}
-	if r.URL.Path == "/docs/openapi.json" {
-		f.mu.Lock()
-		hang := f.hangSwagger
-		f.requests = append(f.requests, recordedRequest{entity: "docs/openapi.json", query: r.URL.Query()})
-		fail := f.noSwagger
-		// status applies here too: a revoked token or a wrong instance id is
-		// rejected on every path, discovery included.
-		status, errBody := f.status, f.errBody
-		paths := map[string]interface{}{}
-		for e := range f.entities {
-			paths["/v1/"+e] = map[string]interface{}{"get": map[string]interface{}{}}
-			paths["/v1/"+e+"/{id}"] = map[string]interface{}{"get": map[string]interface{}{}}
-		}
-		f.mu.Unlock()
-		if hang != nil {
-			<-hang
-		}
-		if status != 0 {
-			writeErr(w, status, errBody)
-			return
-		}
-		if fail {
-			writeErr(w, 500, "server error")
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"swagger": "2.0", "paths": paths})
 		return
 	}
 
@@ -433,3 +415,24 @@ func devicesSchema() *fakeSchema {
 }
 
 func strp(s string) *string { return &s }
+
+// addEntity registers an ingested entity with plain columns, for tests that
+// use an object type the devices fixture does not carry. cols is "name:TYPE";
+// the primary key is "id" unless a col is "<name>:TYPE:pk".
+func (f *fakeService) addEntity(objectType string, cols ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e := fakeEntity{Table: strings.ReplaceAll(objectType, "/", "_"), PrimaryKey: "id", Ingested: true, DataAsOf: strp("2026-09-22T14:03:11Z")}
+	for _, c := range cols {
+		parts := strings.Split(c, ":")
+		col := fakeColumn{Name: parts[0], Type: parts[1], Nullable: true, Operators: []string{"eq", "gt", "lt", "in", "isnull"}}
+		if parts[1] == "VARCHAR" {
+			col.Operators = append(col.Operators, "ilike")
+		}
+		if len(parts) == 3 && parts[2] == "pk" {
+			e.PrimaryKey, col.Nullable = parts[0], false
+		}
+		e.Columns = append(e.Columns, col)
+	}
+	f.schema.Entities["/v1/"+objectType] = e
+}

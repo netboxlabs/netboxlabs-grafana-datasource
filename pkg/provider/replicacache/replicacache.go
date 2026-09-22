@@ -467,6 +467,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
 	}
+	pk := e.pk()
 	// Autocomplete on a column we synthesize has nothing upstream to read.
 	col, ok := e.column(field)
 	if !ok {
@@ -480,13 +481,12 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	// For every other column the page is fetched unfiltered and matched here:
 	// a sample rather than the column's full domain, which is already true of
 	// this endpoint, and an honest subset beats a confident wrong list.
-	// Pushed down only when the text can be sent as a literal. buildFilterValues
-	// refuses a value carrying % or _ — the service has no escape syntax, so
-	// they would widen the match — and it splits on commas as a multi-value
-	// dashboard filter. Neither is right for a search box: typing CORE_SW is
-	// one literal name, and propagating the refusal replaced the suggestions
-	// with an error. The local matching below is the existing answer for a
-	// column that cannot be searched upstream, so it answers this too.
+	//
+	// The backend's ilike is a contains on the literal value, which is exactly
+	// what a search box means, so the text goes as written — except that
+	// buildFilterValues splits on commas as a multi-value dashboard filter,
+	// which is not what someone typing "a,b" means. That text is matched
+	// locally, the same answer as for a column that cannot be searched upstream.
 	pushDown := q != "" && slices.Contains(col.Operators, "ilike") && literalPushable(q)
 	var params url.Values
 	if pushDown {
@@ -519,7 +519,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 			// A JSON null decodes without error and leaves the map nil.
 			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errMalformedRow, Message: rowShapeGuidance}
 		}
-		id, hasID := toInt(obj["id"])
+		id, hasID := toInt(obj[pk])
 		if hasID {
 			// Same rule as every other consumer of these rows. Two rows sharing
 			// an id carry two values for one object, and only one can be its
@@ -534,12 +534,12 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 		}
 		if !hasID {
 			// The same invariant the query path enforces, and it holds here for
-			// the same measured reason: the service returns id on every
-			// projection, even one that did not ask for it — `fields=serial`
-			// comes back as {id, serial}, and the projection above is exactly
-			// that shape. A row without one identifies no object, so offering
-			// its value would put something in the picker that nothing in the
-			// deployment corresponds to.
+			// the same measured reason: the service returns the primary key on
+			// every projection, even one that did not ask for it —
+			// `fields=serial` comes back as {id, serial}, and the projection
+			// above is exactly that shape. A row without one identifies no
+			// object, so offering its value would put something in the picker
+			// that nothing in the deployment corresponds to.
 			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errRowWithoutID, Message: rowShapeGuidance}
 		}
 		v, present := obj[field]
@@ -569,10 +569,11 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 }
 
 // literalPushable reports whether a search box's text can go upstream as
-// written. A % or _ would be a wildcard there and a comma a value separator,
-// and none of the three means that in something a person is typing.
+// written. Only a comma cannot: buildFilterValues reads it as a value
+// separator, which is not what it means in something a person is typing. The
+// backend takes % and _ literally, so they can.
 func literalPushable(q string) bool {
-	return !strings.ContainsAny(q, "%_,")
+	return !strings.Contains(q, ",")
 }
 
 func valueString(v interface{}) string {

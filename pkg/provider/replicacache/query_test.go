@@ -1315,7 +1315,7 @@ func TestCountEvidenceCanComeFromTheRowsInHand(t *testing.T) {
 	res, err := p.Query(context.Background(), provider.QuerySpec{
 		ObjectType: "dcim/devices",
 		Fields:     []string{"name", "cf_services_count"},
-		Filters:    []provider.Filter{{Field: "name", Operator: "isw", Value: "RARE"}},
+		Filters:    []provider.Filter{{Field: "name", Operator: "ic", Value: "RARE"}},
 	})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
@@ -1585,21 +1585,55 @@ func TestQuery_CountOnlyStillExpandsForFilters(t *testing.T) {
 	}
 }
 
-// The service escapes wildcards now, so a % or _ in the user's own value is
-// sent as itself and the refusal is gone.
-func TestQuery_TextFilterMayContainWildcards(t *testing.T) {
+// The backend takes a text match's value literally — its ilike is a
+// case-insensitive contains, and a % or _ in the value is that character — so
+// the value goes upstream as written and the old wildcard refusal is gone.
+func TestQuery_TextMatchSendsTheValueLiterally(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{{"id": 1, "name": "100%", "custom_field_data": `{}`}}
 	p := newTestProvider(t, f)
 
-	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"},
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"},
 		Filters: []provider.Filter{{Field: "name", Operator: "ic", Value: "0%"}}})
 	if err != nil {
-		t.Fatalf("the server escapes wildcards; the refusal must be gone: %v", err)
+		t.Fatalf("a literal wildcard character is an ordinary value: %v", err)
 	}
 	req, _ := f.requestWith("dcim/devices", "filter[name]__ilike")
-	if got := req.query.Get("filter[name]__ilike"); got != "%0%%" {
-		t.Errorf("pattern = %q", got)
+	if got := req.query.Get("filter[name]__ilike"); got != "0%" {
+		t.Errorf("value = %q, want it sent as written", got)
+	}
+	if len(res.Rows) != 1 {
+		t.Errorf("rows = %d, want the one name containing 0%%", len(res.Rows))
+	}
+}
+
+// Not every entity is keyed by "id": core/object-types is keyed by
+// contenttype_ptr_id (measured on staging). The catalogue names the primary
+// key, and every place that reads a row's identity — the duplicate and
+// missing-id checks, the deep link, autocomplete — reads that column.
+func TestQuery_UsesTheCataloguePrimaryKey(t *testing.T) {
+	f := newFakeService()
+	f.entities["core/object-types"] = []map[string]interface{}{
+		{"contenttype_ptr_id": 1, "public": true},
+		{"contenttype_ptr_id": 2, "public": false},
+	}
+	srv := f.start(t)
+	p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.example.com"))
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "core/object-types", Fields: []string{"public", "display_url"}})
+	if err != nil {
+		t.Fatalf("a table keyed by something other than id must be queryable: %v", err)
+	}
+	if len(res.Rows) != 2 || res.Rows[0]["display_url"] != "https://netbox.example.com/core/object-types/1/" {
+		t.Errorf("rows = %v", res.Rows)
+	}
+	req, _ := f.requestWith("core/object-types", "fields")
+	if got := req.query.Get("fields"); got != "public,contenttype_ptr_id" {
+		t.Errorf("fields = %q, want the primary key projected in", got)
+	}
+	vals, err := p.FieldValues(context.Background(), "core/object-types", "public", "", 10)
+	if err != nil || len(vals) != 2 {
+		t.Errorf("autocomplete on such a table: %v %v", vals, err)
 	}
 }
 

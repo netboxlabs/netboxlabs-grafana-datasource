@@ -27,6 +27,19 @@
   connection refused, timed out, certificate not verified, response not JSON)
   with what to check; the raw error stays in the Grafana server log.
 
+- **Replica-cache mode.** A data source can read from a NetBox replica-cache
+  deployment instead of the REST API (**Mode** → _replica-cache_), for
+  instances too large for the API to serve table queries interactively. The
+  data source reads the replica's schema route for object types, columns,
+  types, operators and references, so nothing is sampled or guessed; related
+  names (site, role, tenant…) are resolved by the replica and can be sorted
+  and filtered on; custom fields expand as in NetBox mode; every result states
+  how fresh the data is, and a replica still loading its initial snapshot is a
+  warning. A new **Max data age** setting makes alert rules and expression-fed
+  queries refuse stale or unknown-age data. Annotations, IP enrichment,
+  topology and tags are not available in this mode and fail with an explicit
+  message. Requires a replica-cache build with the schema route (v1.35+).
+  Guide: `docs/REPLICA-CACHE.md`.
 - **IP enrichment has a second source: a NetBox scope.** The query took its
   IPs as input, which an alert rule cannot supply — rules have no variables and
   one query cannot read another's output — so a rule over an IP-only metric

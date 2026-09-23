@@ -151,6 +151,11 @@ func TestCatalog_NetBoxURLIsValidated(t *testing.T) {
 		"//evil.example.com":          "",
 		"nb.example.com":              "",
 		"":                            "",
+		// A query string, a fragment or credentials cannot be part of a link
+		// base; they are dropped rather than pasted into every link.
+		"https://nb.example.com/netbox?x=1": "https://nb.example.com/netbox",
+		"https://nb.example.com/#frag":      "https://nb.example.com",
+		"https://user:pw@nb.example.com/":   "https://nb.example.com",
 	} {
 		c, err := schemaDoc{NetBoxURL: raw, Entities: map[string]schemaEntity{"/v1/x/y": {}}}.toCatalog()
 		if err != nil {
@@ -163,11 +168,17 @@ func TestCatalog_NetBoxURLIsValidated(t *testing.T) {
 }
 
 // Twenty panels refreshing together must not fetch the catalogue twenty
-// times, on a cold start or at the TTL boundary.
+// times, on a cold start or at the TTL boundary. The fake parks every request
+// it records, so callers that did not share the flight would each be counted.
 func TestCatalog_ConcurrentCallersShareOneFetch(t *testing.T) {
 	f := newFakeService()
 	p := newTestProvider(t, f)
-	burst := func() {
+	burst := func(want int) {
+		t.Helper()
+		gate := make(chan struct{})
+		f.mu.Lock()
+		f.gate = gate
+		f.mu.Unlock()
 		var wg sync.WaitGroup
 		for i := 0; i < 20; i++ {
 			wg.Add(1)
@@ -178,18 +189,50 @@ func TestCatalog_ConcurrentCallersShareOneFetch(t *testing.T) {
 				}
 			}()
 		}
+		// Let the leader's request land and the others park behind it.
+		for f.countRequestsFor("_meta/schema") < want {
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(20 * time.Millisecond)
+		close(gate)
 		wg.Wait()
+		if n := f.countRequestsFor("_meta/schema"); n != want {
+			t.Errorf("burst fetched the catalogue %d times in total, want %d", n, want)
+		}
 	}
-	burst()
-	if n := f.countRequestsFor("_meta/schema"); n != 1 {
-		t.Errorf("cold burst fetched the catalogue %d times, want 1", n)
-	}
+	burst(1)
 	p.catMu.Lock()
 	p.catExpires = time.Now().Add(-time.Second)
 	p.catMu.Unlock()
-	burst()
-	if n := f.countRequestsFor("_meta/schema"); n != 2 {
-		t.Errorf("expiry burst fetched the catalogue %d more times, want 1 (total %d)", n-1, n)
+	burst(2)
+}
+
+// A joiner's answer is the leader's fetch, so the fetch must outlive the
+// leader: a panel that navigates away (context cancelled) while nineteen
+// others wait on its flight must not fail all nineteen with "context
+// canceled" on a healthy replica.
+func TestCatalog_CancelledLeaderDoesNotPoisonJoiners(t *testing.T) {
+	f := newFakeService()
+	gate := make(chan struct{})
+	f.gate = gate
+	p := newTestProvider(t, f)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderErr := make(chan error, 1)
+	go func() { _, err := p.ObjectTypes(leaderCtx); leaderErr <- err }()
+	for f.countRequestsFor("_meta/schema") < 1 {
+		time.Sleep(time.Millisecond)
+	}
+	joinerDone := make(chan error, 1)
+	go func() { _, err := p.ObjectTypes(context.Background()); joinerDone <- err }()
+	time.Sleep(20 * time.Millisecond)
+	cancelLeader()
+	if err := <-leaderErr; err == nil {
+		t.Error("the cancelled caller itself is told so")
+	}
+	close(gate)
+	if err := <-joinerDone; err != nil {
+		t.Errorf("a joiner with a live context got the leader's cancellation: %v", err)
 	}
 }
 

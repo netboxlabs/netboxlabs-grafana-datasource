@@ -37,6 +37,10 @@ type fakeService struct {
 	errBody string
 	// requests records every list request's query string, for asserting pushdown.
 	requests []recordedRequest
+	// gate, when non-nil, parks every request after recording it until the
+	// channel is closed — how a test holds callers in flight to prove they
+	// share one fetch, or cancels one while others wait.
+	gate chan struct{}
 	// rejectCursors is how many cursor-carrying requests still answer 400
 	// "cursor does not belong to this walk" — what the service says when the
 	// catalogue changed underneath a walk. One models the case the client
@@ -89,8 +93,11 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 		// do so under the lock and sequentially, which is enough.
 		f.mu.Lock()
 		f.requests = append(f.requests, recordedRequest{entity: "_meta/schema", query: r.URL.Query()})
-		schema, status, errBody := f.schema, f.status, f.errBody
+		schema, status, errBody, gate := f.schema, f.status, f.errBody, f.gate
 		f.mu.Unlock()
+		if gate != nil {
+			<-gate
+		}
 		if status != 0 && status != 200 {
 			writeErr(w, status, errBody)
 			return
@@ -120,7 +127,11 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	if rejectCursor {
 		f.rejectCursors--
 	}
+	gate := f.gate
 	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 
 	if status != 0 {
 		writeErr(w, status, errBody)

@@ -190,17 +190,26 @@ type expansion struct{ key, via, target string }
 // cannot be expanded (the service returns the id alone); asking for it is a
 // warning naming the cause, never a blank column, and sorting on it a note for
 // the same reason.
+//
+// A reference is expanded only when something asks for it by name — a field,
+// a join key, a filter, the ordering. An unprojected query ("All columns")
+// returns the stored columns, ids included, and NOT every related name the
+// catalogue could resolve: each expansion is a join the service runs per
+// page, and one is enough to sink the query. Measured on staging's 12.9M-row
+// dcim/interfaces at 100 rows: seven of its references cost 1.4–9 s each,
+// expand=lag alone 62 s, and all eight together answered 503 — on the table
+// this backend exists to serve, from the editor's default query. NetBox-mode
+// parity for the unprojected column set is the price; the editor offers every
+// related name, and a panel that wants one selects it.
 func planRequest(e entity, spec provider.QuerySpec) request {
 	r := request{unavailable: map[string]bool{}}
 	wantAll := len(spec.Fields) == 0
 
 	// Which references to expand: the ones a filter names — the only ones a
 	// count-only caller needs, since it reads nothing but the total — plus,
-	// for a caller that reads rows, every available one when everything is
-	// wanted (the contract's "all columns", and the NetBox-mode parity that
-	// site and role come back beside their ids), else the ones a requested
-	// name resolves to. KeyFields count, by the same rule: a join on "site"
-	// needs the name, a join on "site_id" does not.
+	// for a caller that reads rows, the ones a requested name resolves to.
+	// KeyFields count, by the same rule: a join on "site" needs the name, a
+	// join on "site_id" does not.
 	expandSet := map[string]bool{}
 	for _, f := range spec.Filters {
 		// validateFilters has already refused a filter on an unavailable one.
@@ -223,13 +232,6 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 			return
 		}
 		expandSet[via.Ref.ExpandKey] = true
-	}
-	if wantAll && !spec.CountOnly {
-		for _, col := range e.Columns {
-			if col.Ref != nil && col.Ref.Available {
-				expandSet[col.Ref.ExpandKey] = true
-			}
-		}
 	}
 	if !spec.CountOnly {
 		for _, name := range selectedFields(spec) {

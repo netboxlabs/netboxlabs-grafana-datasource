@@ -33,6 +33,10 @@ func newTestProvider(t *testing.T, f *fakeService) *Provider {
 
 // A panel written against the NetBox provider selects "site", not "site_id".
 // The server joins the name in under expand=; nothing is read client-side.
+// Only what is asked for: an unprojected query returns the stored columns,
+// because expanding every reference on a large table is what made the
+// default query time out (dcim/interfaces: one reference alone took 62 s for
+// 100 rows on staging, and all eight answered 503).
 func TestQueryExpandsForeignKeysToNames(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
@@ -48,13 +52,24 @@ func TestQueryExpandsForeignKeysToNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
+	if req, ok := f.requestWith("dcim/devices", "expand"); ok {
+		t.Errorf("an unprojected query expands nothing, got %v", req.query)
+	}
+	if _, ok := res.Rows[0]["site"]; ok || res.Rows[0]["site_id"] != float64(4001) {
+		t.Errorf("unprojected row = %v, want the stored columns alone", res.Rows[0])
+	}
+
+	res, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "site", "site_slug", "role", "site_id"}})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
 	if len(res.Rows) != 1 {
 		t.Fatalf("want 1 row, got %d", len(res.Rows))
 	}
 	row := res.Rows[0]
 
-	if req, ok := f.requestWith("dcim/devices", "expand"); !ok || req.query.Get("expand") != "role,tenant,site,rack" {
-		t.Errorf("an unprojected query expands every available reference, got %v", req.query)
+	if req, ok := f.requestWith("dcim/devices", "expand"); !ok || req.query.Get("expand") != "role,site" {
+		t.Errorf("the requested names are expanded, in catalogue order, got %v", req.query)
 	}
 	if n := f.countRequestsFor("dcim/sites"); n != 0 {
 		t.Errorf("the server resolves the names; %d dimension reads were made", n)
@@ -471,7 +486,7 @@ func TestQueryResolvesSelfReferentialParent(t *testing.T) {
 	}
 	p := newTestProvider(t, f)
 
-	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/locations"})
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/locations", Fields: []string{"id", "name", "parent", "parent_slug", "parent_id"}})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -803,9 +818,11 @@ func TestJoinKeysFollowTheSameRule(t *testing.T) {
 	if got := expand(provider.QuerySpec{Fields: []string{"site_slug"}}); !slices.Equal(got, []string{"site"}) {
 		t.Errorf("site_slug needs the site expansion: %v", got)
 	}
-	// No projection at all still means everything that can be resolved.
-	if got := expand(provider.QuerySpec{}); !slices.Equal(got, []string{"role", "tenant", "site", "rack"}) {
-		t.Errorf("an unprojected query expands every available reference, got %v", got)
+	// No projection at all expands nothing: resolving every reference on a
+	// large table is what made the default query time out (measured), so a
+	// related name is resolved when something asks for it by name.
+	if got := expand(provider.QuerySpec{}); len(got) != 0 {
+		t.Errorf("an unprojected query must not expand every reference, got %v", got)
 	}
 }
 
@@ -1502,7 +1519,8 @@ func TestPlanRequest(t *testing.T) {
 		{"key field is fetched too", provider.QuerySpec{Fields: []string{"name"}, KeyFields: []string{"rack"}}, []string{"name", "id"}, []string{"rack"}, "", "", ""},
 		{"cf pulls custom_field_data", provider.QuerySpec{Fields: []string{"cf_lifecycle_phase"}}, []string{"custom_field_data", "id"}, nil, "", "", ""},
 		{"display_url pulls nothing extra", provider.QuerySpec{Fields: []string{"display_url"}}, []string{"id"}, nil, "", "", ""},
-		{"empty fields means everything", provider.QuerySpec{}, nil, []string{"role", "tenant", "site", "rack"}, "", "", ""},
+		{"empty fields expands nothing", provider.QuerySpec{}, nil, nil, "", "", ""},
+		{"empty fields still expands a join key", provider.QuerySpec{KeyFields: []string{"site"}}, nil, []string{"site"}, "", "", ""},
 		{"sort on physical", provider.QuerySpec{Fields: []string{"name"}, Ordering: "-name"}, []string{"name", "id"}, nil, "-name", "", ""},
 		{"sort on expansion expands it", provider.QuerySpec{Fields: []string{"name"}, Ordering: "site"}, []string{"name", "id"}, []string{"site"}, "site", "", ""},
 		{"descending sort on expansion", provider.QuerySpec{Fields: []string{"name"}, Ordering: " -site "}, []string{"name", "id"}, []string{"site"}, "-site", "", ""},

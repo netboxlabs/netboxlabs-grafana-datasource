@@ -960,6 +960,13 @@ func TestFields_ConcurrentCallersShareOneNamesRead(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
 	p := newTestProvider(t, f)
+	if _, err := p.ObjectTypes(context.Background()); err != nil { // warm the catalogue
+		t.Fatal(err)
+	}
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.gate = gate
+	f.mu.Unlock()
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
@@ -970,6 +977,11 @@ func TestFields_ConcurrentCallersShareOneNamesRead(t *testing.T) {
 			}
 		}()
 	}
+	for f.countRequestsFor("dcim/devices") < 1 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(gate)
 	wg.Wait()
 	if n := f.countRequestsFor("dcim/devices"); n != 1 {
 		t.Errorf("read custom-field names %d times for one burst, want 1", n)

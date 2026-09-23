@@ -61,8 +61,9 @@ const customFieldDataColumn = "custom_field_data"
 
 // customFieldSampleRows bounds the read that discovers custom-field NAMES. A
 // defined custom field is present in the blob even when unset (measured: every
-// dcim/devices row carries the same keys, some null), so one small page names
-// them all; twenty covers a sparse list field the first row leaves out.
+// dcim/devices row carries the same keys, some null), so one row would name
+// them all; twenty is a small page that costs the same request and covers a
+// row whose blob is empty or unreadable.
 const customFieldSampleRows = 20
 
 // Option configures a Provider.
@@ -366,15 +367,15 @@ func (p *Provider) customFieldNames(ctx context.Context, objectType string) (cfE
 	fl := &flight[cfEntry]{done: make(chan struct{})}
 	p.cfFlights[objectType] = fl
 	p.cfMu.Unlock()
-	entry, err := p.readCustomFieldNames(ctx, objectType)
-	p.cfMu.Lock()
-	fl.val, fl.err = entry, err
-	if p.cfFlights[objectType] == fl {
-		delete(p.cfFlights, objectType)
-	}
-	p.cfMu.Unlock()
-	close(fl.done)
-	return entry, err
+	fl.run(ctx, func(ctx context.Context) (cfEntry, error) { return p.readCustomFieldNames(ctx, objectType) },
+		func(cfEntry, error) {
+			p.cfMu.Lock()
+			defer p.cfMu.Unlock()
+			if p.cfFlights[objectType] == fl {
+				delete(p.cfFlights, objectType)
+			}
+		})
+	return fl.wait(ctx)
 }
 
 func (p *Provider) readCustomFieldNames(ctx context.Context, objectType string) (cfEntry, error) {

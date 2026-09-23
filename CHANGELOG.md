@@ -32,8 +32,8 @@
   instances too large for the API to serve table queries interactively. The
   data source reads the replica's schema route for object types, columns,
   types, operators and references, so nothing is sampled or guessed; related
-  names (site, role, tenant…) are resolved by the replica and can be sorted
-  and filtered on; custom fields expand as in NetBox mode; every result states
+  names (site, role, tenant…) are resolved by the replica when selected and
+  can be sorted and filtered on; custom fields expand as in NetBox mode; every result states
   how fresh the data is, and a replica still loading its initial snapshot is a
   warning. A new **Max data age** setting makes alert rules and expression-fed
   queries refuse stale or unknown-age data. Annotations, IP enrichment,

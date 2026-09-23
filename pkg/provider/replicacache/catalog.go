@@ -216,6 +216,9 @@ func linkBaseOf(raw string) string {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return ""
 	}
+	// A query string, a fragment or credentials cannot be part of a base
+	// that paths are appended to; dropped rather than pasted into every link.
+	u.RawQuery, u.Fragment, u.RawFragment, u.User = "", "", "", nil
 	base := strings.TrimRight(u.String(), "/")
 	return strings.TrimSuffix(base, "/api")
 }
@@ -294,10 +297,35 @@ func (c *Client) fetchCatalog(ctx context.Context) (*catalog, error) {
 // panels refreshing together fetch the ~100 KB catalogue once rather than
 // twenty times, on a cold start and at every TTL boundary alike. done is
 // closed when the fetch ends; the result is read after that.
+//
+// The fetch runs detached from the caller that started it (see run): its
+// answer is every waiter's answer, so a panel navigating away must not fail
+// nineteen others with "context canceled". Each waiter, the starter included,
+// still gives up on its own context.
 type flight[T any] struct {
 	done chan struct{}
 	val  T
 	err  error
+}
+
+// flightBudget bounds a detached fetch, which no caller's context bounds any
+// more. Generous: the catalogue is one ~100 KB document, the names read one
+// small page, and the HTTP client has its own timeout underneath.
+const flightBudget = 60 * time.Second
+
+// run performs fetch on a goroutine, under ctx's values but not its
+// cancellation, and stores the outcome; finish runs under the owner's lock
+// before done is closed, so the cache and the flight pointer are updated
+// before any waiter reads them.
+func (f *flight[T]) run(ctx context.Context, fetch func(context.Context) (T, error), finish func(T, error)) {
+	go func() {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), flightBudget)
+		defer cancel()
+		val, err := fetch(dctx)
+		finish(val, err)
+		f.val, f.err = val, err
+		close(f.done)
+	}()
 }
 
 func (f *flight[T]) wait(ctx context.Context) (T, error) {
@@ -328,16 +356,15 @@ func (p *Provider) catalogue(ctx context.Context, force bool) (*catalog, error) 
 	p.catFlight = fl
 	p.catMu.Unlock()
 
-	c, err := p.client.fetchCatalog(ctx)
-	p.catMu.Lock()
-	if err == nil {
-		p.cat, p.catExpires = c, time.Now().Add(catalogTTL)
-	}
-	fl.val, fl.err = c, err
-	if p.catFlight == fl {
-		p.catFlight = nil
-	}
-	p.catMu.Unlock()
-	close(fl.done)
-	return c, err
+	fl.run(ctx, p.client.fetchCatalog, func(c *catalog, err error) {
+		p.catMu.Lock()
+		defer p.catMu.Unlock()
+		if err == nil {
+			p.cat, p.catExpires = c, time.Now().Add(catalogTTL)
+		}
+		if p.catFlight == fl {
+			p.catFlight = nil
+		}
+	})
+	return fl.wait(ctx)
 }

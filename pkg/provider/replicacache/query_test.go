@@ -1211,8 +1211,8 @@ func TestAnUnknownCustomFieldIsReportedNotInvented(t *testing.T) {
 
 // A _count suffix is not proof that the column is a list's derived count: a
 // custom field can be NAMED service_count, and NetBox shows an unset one as
-// null. The evidence is whether the BASE is a column this entity has, taken
-// from the cached custom-field names read.
+// null. The evidence is whether the BASE is a column this entity has, read off
+// the rows in hand: a defined custom field is in every row's blob.
 func TestUnsetCountNeedsEvidenceThatItIsDerived(t *testing.T) {
 	// No object anywhere has "services", so cf_services is not a column of this
 	// entity and cf_services_count is read as a field named that way.
@@ -1675,6 +1675,17 @@ func TestQuery_UnfedEntityIsNotReplicated(t *testing.T) {
 	}
 	if n := f.countRequestsFor("dcim/platforms"); n != 1 {
 		t.Errorf("the row route is authoritative; %d requests were made", n)
+	}
+	// With a filter too: an unfed entity has no columns in the catalogue, so
+	// judging the filter against it would refuse "no such column" — the wrong
+	// subject. The alert Count path always sends the rule's filters.
+	_, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/platforms", CountOnly: true,
+		Filters: []provider.Filter{{Field: "name", Operator: "ic", Value: "ios"}}})
+	if u := provider.Classify(err); u == nil || u.Kind != provider.ErrorKindNotReplicated {
+		t.Errorf("filtered query on an unfed entity: got %v / %+v, want not-replicated", err, u)
+	}
+	if n := f.countRequestsFor("dcim/platforms"); n != 2 {
+		t.Errorf("the row route must be asked; %d requests in total", n)
 	}
 
 	// The replica starts feeding platforms while the catalogue is still cached

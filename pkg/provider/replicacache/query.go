@@ -36,17 +36,24 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
-	// Deliberately not pre-empted from e.Ingested: the row route answers 404
-	// for an unfed entity, classified as not-replicated by the client, and it
-	// is current where the catalogue can be ten minutes stale.
-	if err := validateFilters(spec.Filters, e, c); err != nil {
-		return nil, err
-	}
 	q, err := buildFilterValues(spec.Filters)
 	if err != nil {
 		return nil, err
 	}
-	plan := planRequest(e, spec)
+	// An entity the catalogue has as unfed is NOT refused here: the row route
+	// answers 404 for it, classified as not-replicated by the client, and it
+	// is current where the catalogue can be ten minutes stale. Nor is the
+	// request judged against that entity's catalogue entry — it has no
+	// columns until ingested, so every filter would be refused as "no such
+	// column", the wrong subject. The bare request goes, and the service
+	// answers for itself: 404 while unfed, its own validation once fed.
+	var plan request
+	if e.Ingested {
+		if err := validateFilters(spec.Filters, e, c); err != nil {
+			return nil, err
+		}
+		plan = planRequest(e, spec)
+	}
 
 	// expand= goes with every query, count-only included: a filter on an
 	// expanded name is only valid under it, and the alert Count path sends the
@@ -484,11 +491,13 @@ func checkProjection(projected []string, rows []map[string]interface{}) error {
 // would fail merely because everything it matched left the field unset, which
 // is the healthy state of most such rules.
 //
-// Gated on the entity actually having the blob. Where it does not, a requested
-// cf_* really is a column this deployment cannot produce, and the backstop is
-// right to say so.
+// Gated on the rows carrying any custom field at all. Where they do not, a
+// requested cf_* really is a column this deployment cannot produce, and the
+// backstop is right to say so.
 func addUnsetCustomFieldColumns(spec provider.QuerySpec, rows []map[string]interface{}) []string {
-	if len(rows) == 0 || !hasColumn(rows, customFieldDataColumn) && !anyCustomField(rows) {
+	// The blob is flattened away before this runs, so "the entity has the
+	// blob" is read off the rows' cf_* keys.
+	if len(rows) == 0 || !anyCustomField(rows) {
 		return nil
 	}
 	var added []string

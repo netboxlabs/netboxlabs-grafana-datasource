@@ -67,9 +67,14 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
 - the stored columns, in table order, typed by the replica (`site_id`,
   `status`, `serial`, …);
 - **related names**, resolved by the replica itself: for every reference whose
-  target type has data, the target's name and slug appear beside the id
-  (`site`, `site_slug`, `role`, `role_slug`, `tenant`, …), as they do in NetBox
-  mode. A reference whose target has received no data is not offered, and a
+  target type has data, the target's name and slug (`site`, `site_slug`,
+  `role`, `role_slug`, `tenant`, …) are offered as columns and resolved when a
+  query selects them, joins on them, filters or sorts by them. An **All
+  columns** query returns the stored columns — the ids — and does not resolve
+  every reference: each one is a join the replica runs per page, and on a
+  table of millions of rows a single reference can take a minute. This is the
+  one place the column set differs from NetBox mode; select the names you
+  want. A reference whose target has received no data is not offered, and a
   saved panel that asks for it gets a warning naming the cause instead of a
   blank column;
 - **custom fields** as `cf_<name>` columns, expanded the same way as in NetBox

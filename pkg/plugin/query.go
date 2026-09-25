@@ -507,7 +507,6 @@ func transportCause(err error) string {
 	var (
 		dnsErr  *net.DNSError
 		netErr  net.Error
-		urlErr  *url.Error
 		hdrErr  tls.RecordHeaderError
 		verErr  *tls.CertificateVerificationError
 		unkErr  x509.UnknownAuthorityError
@@ -547,12 +546,17 @@ func transportCause(err error) string {
 		return causeNotJSON
 	}
 	// Words, for an error that carried no structure — a plain string a client
-	// layer wrapped — and only the words of its CAUSE: the request line a
-	// url.Error carries is not evidence, or a filter value would pick the
+	// layer wrapped — and only the words of the INNERMOST cause: every wrapper
+	// on the way in (a url.Error's request line, the client's "read body
+	// <url>: …") names the request, and a filter value in it would pick the
 	// category. Same order as above, for the same reason.
 	cause := err
-	if errors.As(err, &urlErr) && urlErr.Err != nil {
-		cause = urlErr.Err
+	for {
+		next := errors.Unwrap(cause)
+		if next == nil {
+			break
+		}
+		cause = next
 	}
 	words := strings.ToLower(cause.Error())
 	has := func(subs ...string) bool {

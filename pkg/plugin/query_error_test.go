@@ -180,6 +180,10 @@ func TestTransportCause(t *testing.T) {
 		// The words are read only from the CAUSE: the request line a url.Error
 		// carries is not evidence, or a filter value would pick the category.
 		{"marker word in the request URL", &url.Error{Op: "Get", URL: "http://nb/api/dcim/devices/?name=certificate&q=json", Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}, "refused"},
+		// The client wraps a body-read failure as "read body <url>: %w" — an
+		// ordinary wrapper, not a url.Error — so the words come from the
+		// innermost cause, never from any wrapper that names the request.
+		{"marker word in a plain wrapper", fmt.Errorf("read body http://nb/api/?name=certificate&q=timeout: %w", errors.New("gzip: invalid header")), "request failed"},
 		{"plain string refused", errors.New("dial tcp 172.20.0.6:9999: connect: connection refused"), "refused"},
 		{"plain string no such host", errors.New("dial tcp: lookup netbox.internal: no such host"), "resolved"},
 		{"unknown", errors.New("something else entirely"), "request failed"},

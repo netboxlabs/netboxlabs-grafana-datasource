@@ -186,6 +186,8 @@ func TestTransportCause(t *testing.T) {
 		{"marker word in a plain wrapper", fmt.Errorf("read body http://nb/api/?name=certificate&q=timeout: %w", errors.New("gzip: invalid header")), "request failed"},
 		{"plain string refused", errors.New("dial tcp 172.20.0.6:9999: connect: connection refused"), "refused"},
 		{"plain string no such host", errors.New("dial tcp: lookup netbox.internal: no such host"), "resolved"},
+		// EHOSTUNREACH stringifies as "no route to host", not "unreachable".
+		{"plain string no route", errors.New("dial tcp 10.0.0.5:8000: connect: no route to host"), "unreachable"},
 		{"unknown", errors.New("something else entirely"), "request failed"},
 	}
 	for _, tc := range cases {

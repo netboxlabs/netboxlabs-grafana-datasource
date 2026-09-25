@@ -577,7 +577,7 @@ func transportCause(err error) string {
 		return causeNoTLS
 	case has("connection refused"):
 		return causeRefused
-	case has("unreachable"):
+	case has("unreachable", "no route to host"): // EHOSTUNREACH's own words
 		return causeUnreachable
 	case has("connection reset"):
 		return causeReset

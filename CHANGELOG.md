@@ -18,18 +18,6 @@
   ID; _View in NetBox_ links come from the NetBox URL the replica reports.
   Requires a replica-cache build with the schema route (v1.35+). Guide:
   `docs/REPLICA-CACHE.md`.
-- **IP enrichment has a second source: a NetBox scope.** The query took its
-  IPs as input, which an alert rule cannot supply — rules have no variables and
-  one query cannot read another's output — so a rule over an IP-only metric
-  (flows, poller targets) could not ask "whose IP is this?". **Source: NetBox
-  scope** lists every address NetBox holds under the query's filter rows
-  (`ipam/ip-addresses` filters: a prefix, a VRF, a tenant…) and returns
-  one row per distinct host with the same columns, so a rule joins the metric's
-  IP against it in a SQL expression. A scope that overflows its Limit fails a
-  rule, and a query feeding an expression, rather than joining on a subset; a
-  dashboard keeps the partial table with a notice. Recipe:
-  `docs/alerting/ip-only-metrics.md`, including the `COALESCE` that an unmatched
-  `LEFT JOIN` row needs on Grafana 13.0.2.
 
 ## 1.0.3 (2026-10-06)
 
@@ -57,6 +45,19 @@
   listens on. They now name the cause as a category (hostname not resolved,
   connection refused, timed out, certificate not verified, response not JSON)
   with what to check; the raw error stays in the Grafana server log.
+
+- **IP enrichment has a second source: a NetBox scope.** The query took its
+  IPs as input, which an alert rule cannot supply — rules have no variables and
+  one query cannot read another's output — so a rule over an IP-only metric
+  (flows, poller targets) could not ask "whose IP is this?". **Source: NetBox
+  scope** lists every address NetBox holds under the query's filter rows
+  (`ipam/ip-addresses` filters: a prefix, a VRF, a tenant…) and returns
+  one row per distinct host with the same columns, so a rule joins the metric's
+  IP against it in a SQL expression. A scope that overflows its Limit fails a
+  rule, and a query feeding an expression, rather than joining on a subset; a
+  dashboard keeps the partial table with a notice. Recipe:
+  `docs/alerting/ip-only-metrics.md`, including the `COALESCE` that an unmatched
+  `LEFT JOIN` row needs on Grafana 13.0.2.
 
 ## 1.0.0 (2026-09-18)
 

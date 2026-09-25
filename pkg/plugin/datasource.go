@@ -82,7 +82,8 @@ func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings bac
 // missingSetting names the first required setting this datasource has not been
 // given, or "" when it can be reached. It mirrors newProvider's switch: a mode
 // added there needs its prerequisites added here, or Save & Test will check the
-// wrong ones.
+// wrong ones. Both modes read URL and APIToken; the message names the service
+// the mode talks to.
 // Trimmed, because the clients trim: a whitespace-only URL becomes an empty
 // request URL and a whitespace-only instance id an empty tenant header, so an
 // untrimmed check passed the value through to be reported as an unreachable
@@ -99,12 +100,12 @@ func missingSetting(cfg *models.PluginSettings) string {
 			return "Max data age " + strings.TrimPrefix(err.Error(), "max data age ")
 		}
 		switch {
-		case strings.TrimSpace(cfg.ReplicaCacheURL) == "":
+		case strings.TrimSpace(cfg.URL) == "":
 			return "replica-cache URL is missing"
 		case strings.TrimSpace(cfg.NetBoxID) == "":
 			return "NetBox instance ID is missing"
-		case cfg.Secrets == nil || strings.TrimSpace(cfg.Secrets.ReplicaCacheToken) == "":
-			return "replica-cache token is missing"
+		case cfg.Secrets == nil || strings.TrimSpace(cfg.Secrets.APIToken) == "":
+			return "API token is missing"
 		}
 		return ""
 	default:
@@ -135,10 +136,9 @@ func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.
 		// reached missingSetting above — the one place that can name WHICH field
 		// is absent. A provisioned datasource missing its URL reported a
 		// construction failure instead of "replica-cache URL is missing".
-		return replicacache.New(cfg.ReplicaCacheURL, cfg.Secrets.ReplicaCacheToken, cfg.NetBoxID, httpClient,
-			// The link base when the replica's catalogue does not report which
-			// NetBox it mirrors; with neither, rows carry no "View in NetBox".
-			replicacache.WithNetBoxURL(cfg.URL)), nil
+		// "View in NetBox" links come from the NetBox URL the replica's own
+		// catalogue reports; nothing is configured for them here.
+		return replicacache.New(cfg.URL, cfg.Secrets.APIToken, cfg.NetBoxID, httpClient), nil
 	default:
 		return nil, fmt.Errorf("unknown provider mode %q", cfg.Mode)
 	}

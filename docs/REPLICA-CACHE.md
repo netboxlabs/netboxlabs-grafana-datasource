@@ -20,15 +20,21 @@ needs, what it returns, and what it does not do.
 
 ## Configuration
 
-Set **Mode** to _replica-cache_ and fill in:
+Set **Mode** to _replica-cache_. The connection fields are the same as in
+NetBox mode — they name whichever service the mode reads from — plus the
+instance ID:
 
-| Field                            | Description                                                                                                                                                                                                                      |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Replica cache URL**            | Base URL of the replica-cache service. A different host from NetBox.                                                                                                                                                             |
-| **NetBox instance ID**           | Identifies which NetBox instance the cache holds (`nb-…`). Sent as the `NBC-Netbox-ID` header.                                                                                                                                   |
-| **Replica cache token**          | Bearer token for the service. Stored encrypted, separately from the NetBox API token.                                                                                                                                            |
-| **Max data age for alert rules** | Optional, e.g. `15m`. When set, alert rules and expression-fed queries refuse a result older than this, or whose age the replica cannot report. See [Freshness](#freshness).                                                     |
-| **NetBox URL**                   | Optional in this mode. The replica normally reports which NetBox it mirrors and _View in NetBox_ links are built from that; this field is the fallback when it does not. **Browser URL** rewrites those links as in NetBox mode. |
+| Field                            | Description                                                                                                                                                                            |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **URL**                          | Base URL of the replica-cache deployment.                                                                                                                                              |
+| **Browser URL**                  | Optional. Rewrites _View in NetBox_ links when users' browsers reach NetBox at a different address than the one the replica reports.                                                   |
+| **NetBox instance ID**           | The NetBox instance the replica holds (`nb-…`), sent as the `NBC-Netbox-ID` header.                                                                                                    |
+| **API token**                    | Bearer token for the replica-cache deployment. Stored encrypted.                                                                                                                       |
+| **Max data age for alert rules** | Advanced, optional, e.g. `15m`. When set, alert rules and expression-fed queries refuse a result older than this, or whose age the replica cannot report. See [Freshness](#freshness). |
+
+There is no NetBox URL to configure: _View in NetBox_ links are built from the
+NetBox URL the replica itself reports. A replica that reports none yields rows
+without a link column.
 
 **Save & test** reports how many object types the replica is configured for
 and how many of them have received data.
@@ -43,14 +49,12 @@ datasources:
     access: proxy
     jsonData:
       mode: replica-cache
-      replicaCacheUrl: ${REPLICA_CACHE_URL}
+      url: ${REPLICA_CACHE_URL}
       netboxId: ${NETBOX_ID}
       # Optional: refuse stale data in alert rules and expressions.
       # maxDataAge: 15m
-      # Optional: link base when the replica does not report its NetBox.
-      # url: ${NETBOX_URL}
     secureJsonData:
-      replicaCacheToken: ${REPLICA_CACHE_TOKEN}
+      apiToken: ${REPLICA_CACHE_TOKEN}
 ```
 
 ## What a query returns
@@ -80,7 +84,7 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
 - **custom fields** as `cf_<name>` columns, expanded the same way as in NetBox
   mode (a list field also gets its `cf_<name>_count`). Their names are read from
   a small sample of rows, because the replica's schema cannot list them;
-- `display_url`, when a NetBox URL is known (see above).
+- `display_url`, when the replica reports the NetBox it mirrors (see above).
 
 Values are the stored ones: a choice column holds `active`, not `Active`, and
 `<field>_value` aliases return the same value for panels written against

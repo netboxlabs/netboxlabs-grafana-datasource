@@ -71,15 +71,15 @@ Re-verify any NetBox version locally with [`demo/compat-check.sh`](https://githu
 
 Add the data source (**Connections → Data sources → NetBox**) and set:
 
-| Field               | Description                                                                                                                                                                                                                                                       |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Mode**            | _NetBox_ (default) reads the NetBox REST API. _replica-cache_ reads a NetBox replica-cache deployment instead, for instances too large for the API to serve interactively; it asks for its own connection fields — see [Replica-cache mode](#replica-cache-mode). |
-| **NetBox URL**      | Base URL of your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`).                                                                                                                                                                         |
-| **Browser URL**     | Optional. Where users' browsers reach NetBox when Grafana connects over an internal address (Docker/k8s service DNS). Deep links are rewritten to this base; leave empty if the URL above is browser-reachable.                                                   |
-| **API Token**       | A NetBox API token. Both classic 40-character (v1) tokens and `nbt_…` (v2) tokens are auto-detected. Stored encrypted.                                                                                                                                            |
-| **Skip TLS verify** | Accept self-signed certificates.                                                                                                                                                                                                                                  |
-| **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                                                                        |
-| **Fast paging**     | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                                                                            |
+| Field               | Description                                                                                                                                                                                                                |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Mode**            | _NetBox_ (default) reads the NetBox REST API. _replica-cache_ reads a NetBox replica-cache deployment instead, for instances too large for the API to serve interactively — see [Replica-cache mode](#replica-cache-mode). |
+| **URL**             | Base URL of the service the mode reads from: your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`), or the replica-cache deployment.                                                                |
+| **Browser URL**     | Optional. Where users' browsers reach NetBox when Grafana connects over an internal address (Docker/k8s service DNS). Deep links are rewritten to this base; leave empty if the URL above is browser-reachable.            |
+| **API token**       | The credential for that service: a NetBox API token (classic 40-character v1 or `nbt_…` v2, auto-detected) or the replica-cache bearer token. Stored encrypted.                                                            |
+| **Skip TLS verify** | Accept self-signed certificates.                                                                                                                                                                                           |
+| **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                                 |
+| **Fast paging**     | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                                     |
 
 Click **Save & test**. A healthy data source reports the connected NetBox version.
 
@@ -87,8 +87,8 @@ Click **Save & test**. A healthy data source reports the connected NetBox versio
 
 For NetBox instances too large for the REST API to answer table queries
 interactively, the data source can read from **NetBox replica-cache**, a
-read-only columnar mirror of the instance. Set **Mode** to _replica-cache_ and
-provide the replica's URL, the NetBox instance ID and the replica's token; the
+read-only columnar mirror of the instance. Set **Mode** to _replica-cache_, point
+the URL and API token at the replica and add the NetBox instance ID; the
 same panels, variables and alert rules then run against the replica, with
 related names (site, role, tenant…) resolved and sortable, custom fields
 expanded, and every result stating how fresh it is. Annotations, IP enrichment
@@ -176,7 +176,7 @@ datasources:
 ```
 
 A data source in replica-cache mode is provisioned with `mode: replica-cache`,
-`replicaCacheUrl`, `netboxId` and `secureJsonData.replicaCacheToken` — see
+`url` and `apiToken` pointing at the replica, and `netboxId` — see
 [docs/REPLICA-CACHE.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/REPLICA-CACHE.md#configuration).
 
 ## Query types

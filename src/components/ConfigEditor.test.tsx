@@ -1,6 +1,6 @@
 import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { ConfigEditor, FAST_PAGING_TOOLTIP } from './ConfigEditor';
+import { ConfigEditor, FAST_PAGING_TOOLTIP, MODE_TOOLTIP } from './ConfigEditor';
 import { NetBoxDataSourceOptions } from '../types';
 
 // @grafana/ui's Select menu (via ScrollIndicators) uses IntersectionObserver
@@ -171,47 +171,61 @@ describe('fast paging setting', () => {
 // not use — the same confusion that made Save & Test fail on a correctly
 // configured cache datasource.
 describe('replica-cache mode', () => {
-  it('defaults to NetBox mode and asks only for NetBox settings', () => {
+  // One set of connection fields for both modes: the URL and API token name
+  // whichever service the mode reads from. The instance ID is the one field
+  // only the replica needs.
+  it('asks for URL and API token in NetBox mode, and no instance ID', () => {
     setup();
-    expect(screen.getByLabelText(/API Token/i)).toBeInTheDocument();
-    expect(screen.queryByLabelText(/Replica cache URL/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('URL')).toBeInTheDocument();
+    expect(screen.getByLabelText(/API token/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/NetBox instance ID/i)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/Replica cache token/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Replica cache/i)).not.toBeInTheDocument();
   });
 
-  it('asks for the cache connection settings when that mode is selected', () => {
+  it('asks for the same URL and API token in replica-cache mode, plus the instance ID', () => {
     setup({ mode: 'replica-cache' });
-    expect(screen.getByLabelText(/Replica cache URL/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('URL')).toBeInTheDocument();
+    expect(screen.getByLabelText(/API token/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/NetBox instance ID/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Replica cache token/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Replica cache/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/NetBox URL/i)).not.toBeInTheDocument();
   });
 
-  it('hides the NetBox API token in replica-cache mode', () => {
+  it('hints the service in the placeholders rather than in the labels', () => {
     setup({ mode: 'replica-cache' });
-    expect(screen.queryByLabelText(/API Token/i)).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText('https://<id>.replica-cache.example.com')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('ff_…')).toBeInTheDocument();
   });
 
-  // The NetBox URL stays available in cache mode, because it is what builds the
-  // "View in NetBox" links that cache rows cannot carry themselves.
-  it('keeps the NetBox URL available in replica-cache mode', () => {
-    setup({ mode: 'replica-cache' });
-    expect(screen.getByLabelText(/NetBox URL/i)).toBeInTheDocument();
-  });
-
-  it('writes each cache setting into jsonData', () => {
+  it('writes the URL to jsonData.url and the list address in cache mode too', () => {
     const { onOptionsChange } = setup({ mode: 'replica-cache' });
-
-    fireEvent.change(screen.getByLabelText(/Replica cache URL/i), {
-      target: { value: 'https://cache.example.com' },
-    });
+    fireEvent.change(screen.getByLabelText('URL'), { target: { value: 'https://cache.example.com' } });
     expect(onOptionsChange).toHaveBeenCalledWith(
-      expect.objectContaining({ jsonData: expect.objectContaining({ replicaCacheUrl: 'https://cache.example.com' }) })
+      expect.objectContaining({
+        url: 'https://cache.example.com',
+        jsonData: expect.objectContaining({ url: 'https://cache.example.com' }),
+      })
     );
+  });
 
+  it('writes the instance ID into jsonData', () => {
+    const { onOptionsChange } = setup({ mode: 'replica-cache' });
     fireEvent.change(screen.getByLabelText(/NetBox instance ID/i), { target: { value: 'nb-123' } });
     expect(onOptionsChange).toHaveBeenCalledWith(
       expect.objectContaining({ jsonData: expect.objectContaining({ netboxId: 'nb-123' }) })
     );
+  });
+
+  // The token lands in secureJsonData under the one key both modes read, or
+  // it is stored in the clear.
+  it('stores the cache token as the API token secret', () => {
+    const { onOptionsChange } = setup({ mode: 'replica-cache' });
+    fireEvent.change(screen.getByLabelText(/API token/i), { target: { value: 'ff_secret' } });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ secureJsonData: expect.objectContaining({ apiToken: 'ff_secret' }) })
+    );
+    const call = onOptionsChange.mock.calls[0][0];
+    expect(call.jsonData.apiToken).toBeUndefined();
   });
 
   // Max data age only means something for a backend that reports one, and it
@@ -229,22 +243,17 @@ describe('replica-cache mode', () => {
     expect(screen.queryByLabelText(/Max data age/i)).not.toBeInTheDocument();
   });
 
-  // The cache token must land in secureJsonData, or it is stored in the clear.
-  it('stores the cache token as a secret, separate from the NetBox token', () => {
-    const { onOptionsChange } = setup({ mode: 'replica-cache' });
-
-    fireEvent.change(screen.getByLabelText(/Replica cache token/i), { target: { value: 'ff_secret' } });
-    expect(onOptionsChange).toHaveBeenCalledWith(
-      expect.objectContaining({ secureJsonData: expect.objectContaining({ replicaCacheToken: 'ff_secret' }) })
-    );
-    const call = onOptionsChange.mock.calls[0][0];
-    expect(call.jsonData.replicaCacheToken).toBeUndefined();
+  // The differences between the modes live in docs/REPLICA-CACHE.md and in the
+  // query editor at the point of failure, not in a warning label on the
+  // connection form.
+  it('keeps the mode copy free of capability caveats', () => {
+    expect(MODE_TOOLTIP).not.toMatch(/annotations|topology|IP enrichment|cannot|label/i);
   });
 });
 
-// The NetBox URL and Browser URL fields sit in the same place in both modes, so
+// The URL and Browser URL fields sit in the same place in both modes, so
 // switching Mode does not shuffle the form under the cursor. They are shared
-// settings, not mode-specific ones: the mode-specific fields follow them.
+// settings, not mode-specific ones: the mode-specific field follows them.
 describe('config field order', () => {
   const labelsInOrder = (container: HTMLElement) =>
     Array.from(container.querySelectorAll('label'))
@@ -262,45 +271,8 @@ describe('config field order', () => {
 
     expect(netboxOrder).toEqual(cacheOrder);
     expect(netboxOrder[0]).toMatch(/Mode/i);
-    expect(netboxOrder[1]).toMatch(/NetBox URL/i);
+    expect(netboxOrder[1]).toBe('URL');
     expect(netboxOrder[2]).toMatch(/Browser URL/i);
-  });
-});
-
-// Both modes' tokens share one secureJsonData, and the form can hold an unsaved
-// value for each. Replacing the object instead of merging discarded the other
-// mode's token, so switching back showed an empty field and the input was gone.
-describe('token handling across modes', () => {
-  it('keeps an unsaved cache token when the NetBox token is entered', () => {
-    const onOptionsChange = jest.fn();
-    render(
-      <ConfigEditor
-        options={{ ...makeOptions({}), secureJsonData: { replicaCacheToken: 'ff_unsaved' } } as any}
-        onOptionsChange={onOptionsChange}
-      />
-    );
-
-    fireEvent.change(screen.getByLabelText(/API Token/i), { target: { value: 'nbt_new' } });
-
-    const sent = onOptionsChange.mock.calls[0][0].secureJsonData;
-    expect(sent.apiToken).toBe('nbt_new');
-    expect(sent.replicaCacheToken).toBe('ff_unsaved');
-  });
-
-  it('keeps an unsaved NetBox token when the cache token is entered', () => {
-    const onOptionsChange = jest.fn();
-    render(
-      <ConfigEditor
-        options={{ ...makeOptions({ mode: 'replica-cache' }), secureJsonData: { apiToken: 'nbt_unsaved' } } as any}
-        onOptionsChange={onOptionsChange}
-      />
-    );
-
-    fireEvent.change(screen.getByLabelText(/Replica cache token/i), { target: { value: 'ff_new' } });
-
-    const sent = onOptionsChange.mock.calls[0][0].secureJsonData;
-    expect(sent.replicaCacheToken).toBe('ff_new');
-    expect(sent.apiToken).toBe('nbt_unsaved');
   });
 });
 
@@ -316,146 +288,4 @@ describe('ConfigEditor fast paging visibility', () => {
     setup({});
     expect(screen.getByText('Fast paging')).toBeInTheDocument();
   });
-});
-
-// The address a datasource SHOWS should be the one it queries. In cache mode
-// that is the replica-cache URL, not the optional NetBox link base — a cache
-// datasource with no NetBox URL had a blank address in the datasource list, and
-// one switched over from NetBox mode kept displaying the address it no longer
-// talks to.
-describe('ConfigEditor url mirror', () => {
-  it('mirrors the replica-cache URL in cache mode', () => {
-    const onOptionsChange = jest.fn();
-    render(
-      <ConfigEditor
-        options={
-          {
-            jsonData: { mode: 'replica-cache', replicaCacheUrl: '' },
-            secureJsonFields: {},
-            secureJsonData: {},
-            url: '',
-          } as any
-        }
-        onOptionsChange={onOptionsChange}
-      />
-    );
-    fireEvent.change(screen.getByPlaceholderText('https://<id>.replica-cache.example.com'), {
-      target: { value: 'https://cache.example.com' },
-    });
-    expect(onOptionsChange).toHaveBeenCalledWith(
-      expect.objectContaining({
-        url: 'https://cache.example.com',
-        jsonData: expect.objectContaining({ replicaCacheUrl: 'https://cache.example.com' }),
-      })
-    );
-  });
-});
-
-// Switching mode touches neither URL input, and the backfill effect only fires
-// on an EMPTY top-level url — so with both services configured, a switch left
-// the datasource list showing the address of the one no longer queried.
-describe('ConfigEditor url mirror on mode change', () => {
-  const both = {
-    url: 'https://netbox.example.com',
-    replicaCacheUrl: 'https://cache.example.com',
-  };
-
-  it('moves the mirror to the cache URL when switching to cache mode', async () => {
-    const onOptionsChange = jest.fn();
-    render(
-      <ConfigEditor
-        options={
-          {
-            jsonData: { mode: 'netbox', ...both },
-            secureJsonFields: {},
-            secureJsonData: {},
-            url: both.url,
-          } as any
-        }
-        onOptionsChange={onOptionsChange}
-      />
-    );
-    const mode = screen.getByLabelText('Mode') ?? screen.getAllByRole('combobox')[0];
-    fireEvent.keyDown(mode, { key: 'ArrowDown' });
-    fireEvent.click(await screen.findByText('Replica cache'));
-
-    expect(onOptionsChange).toHaveBeenCalledWith(
-      expect.objectContaining({
-        url: both.replicaCacheUrl,
-        jsonData: expect.objectContaining({ mode: 'replica-cache' }),
-      })
-    );
-  });
-
-  it('moves it back to the NetBox URL when switching away', async () => {
-    const onOptionsChange = jest.fn();
-    render(
-      <ConfigEditor
-        options={
-          {
-            jsonData: { mode: 'replica-cache', ...both },
-            secureJsonFields: {},
-            secureJsonData: {},
-            url: both.replicaCacheUrl,
-          } as any
-        }
-        onOptionsChange={onOptionsChange}
-      />
-    );
-    const mode = screen.getByLabelText('Mode') ?? screen.getAllByRole('combobox')[0];
-    fireEvent.keyDown(mode, { key: 'ArrowDown' });
-    fireEvent.click(await screen.findByText('NetBox API'));
-
-    expect(onOptionsChange).toHaveBeenCalledWith(
-      expect.objectContaining({
-        url: both.url,
-        jsonData: expect.objectContaining({ mode: 'netbox' }),
-      })
-    );
-  });
-});
-
-// In cache mode the NetBox URL field is the optional deep-link base, not the
-// address being queried, so editing it must leave the mirror on the cache URL —
-// otherwise correcting a link host silently relabels the datasource with the
-// service it does not talk to.
-it('keeps the mirror on the cache URL when the NetBox link base is edited', () => {
-  const onOptionsChange = jest.fn();
-  render(
-    <ConfigEditor
-      options={
-        {
-          jsonData: { mode: 'replica-cache', replicaCacheUrl: 'https://cache.example.com', url: '' },
-          secureJsonFields: {},
-          secureJsonData: {},
-          url: 'https://cache.example.com',
-        } as any
-      }
-      onOptionsChange={onOptionsChange}
-    />
-  );
-  fireEvent.change(screen.getByPlaceholderText('https://netbox.example.com'), {
-    target: { value: 'https://netbox.example.com' },
-  });
-  expect(onOptionsChange).toHaveBeenCalledWith(
-    expect.objectContaining({
-      url: 'https://cache.example.com',
-      jsonData: expect.objectContaining({ url: 'https://netbox.example.com' }),
-    })
-  );
-});
-
-// And in NetBox mode that field IS the queried address, so it still mirrors.
-it('still mirrors the NetBox URL in NetBox mode', () => {
-  const onOptionsChange = jest.fn();
-  render(
-    <ConfigEditor
-      options={{ jsonData: {}, secureJsonFields: {}, secureJsonData: {}, url: '' } as any}
-      onOptionsChange={onOptionsChange}
-    />
-  );
-  fireEvent.change(screen.getByPlaceholderText('https://netbox.example.com'), {
-    target: { value: 'https://netbox.example.com' },
-  });
-  expect(onOptionsChange).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://netbox.example.com' }));
 });

@@ -29,30 +29,16 @@ export const FAST_PAGING_TOOLTIP = [
  *
  *  Kept as a constant for the same reason as FAST_PAGING_TOOLTIP: Grafana only
  *  mounts tooltip text on hover, which jsdom does not reproduce, so asserting
- *  it through the DOM would test the tooltip library rather than the wording.
- *
- *  It has to state what replica-cache CANNOT do. The mode is chosen for speed
- *  on very large instances, and the three capabilities it drops are ones a user
- *  would otherwise discover only when a saved panel starts failing. */
-export const MODE_TOOLTIP = [
-  'Where this datasource reads from.',
-  'NetBox API queries NetBox directly and supports every feature.',
-  'Replica cache reads a columnar mirror built for instances with millions of objects, where',
-  'the REST API cannot answer a panel in time.',
-  'It cannot serve annotations, IP enrichment or topology, and those queries fail with an',
-  'explanation rather than returning nothing.',
-  'Choice columns also read as their stored value rather than their label —',
-  'status is "active", not "Active" — because the labels live in NetBox and not in the mirror.',
-].join(' ');
+ *  on the constant is how the wording stays under test. Deliberately short:
+ *  the differences between the modes live in docs/REPLICA-CACHE.md and in the
+ *  query editor at the point of failure, not on the connection form.
+ */
+export const MODE_TOOLTIP =
+  'Where this datasource reads from: the NetBox API, or a replica-cache mirror of the instance, for deployments too large for the API to serve interactively. The URL and API token below name that service.';
 
 const MODE_OPTIONS: Array<{ label: string; value: ProviderMode; description: string }> = [
-  { label: 'NetBox API', value: 'netbox', description: 'Query NetBox directly. Supports every feature.' },
-  {
-    label: 'Replica cache',
-    value: 'replica-cache',
-    description:
-      'Columnar mirror for very large instances. No annotations, IP enrichment or topology; choice columns read as stored values.',
-  },
+  { label: 'NetBox API', value: 'netbox', description: 'Query the NetBox instance directly.' },
+  { label: 'Replica cache', value: 'replica-cache', description: 'Query a replica-cache mirror of the instance.' },
 ];
 
 export function ConfigEditor(props: Props) {
@@ -76,13 +62,7 @@ export function ConfigEditor(props: Props) {
   // would be a settings migration for every existing datasource, and this is
   // presentation only. It is deliberately NOT read anywhere server-side.
   const onUrlChange = (url: string) => {
-    // The top-level mirror follows the ACTIVE service. In cache mode this field
-    // is the optional deep-link base, not the address being queried, so editing
-    // it must leave the mirror on the cache URL — otherwise correcting a link
-    // host silently relabelled the datasource with the service it does not talk
-    // to. jsonData.url is written either way; that is where the link base lives.
-    const mirror = jsonData.mode === 'replica-cache' ? (options.url ?? '') : url;
-    onOptionsChange({ ...options, url: mirror, jsonData: { ...jsonData, url } });
+    onOptionsChange({ ...options, url, jsonData: { ...jsonData, url } });
   };
 
   // Every datasource configured before the mirror above existed has its address
@@ -102,16 +82,12 @@ export function ConfigEditor(props: Props) {
   // truth. Because the guard needs an empty options.url, the write that lands
   // closes it — no render loop.
   // Unset means NetBox, matching the backend default in LoadPluginSettings.
-  // Declared before the URL mirror below, which needs it.
   const mode: ProviderMode = jsonData.mode ?? 'netbox';
   const isCache = mode === 'replica-cache';
 
-  // The address a datasource SHOWS should be the one it queries. In cache mode
-  // that is the replica-cache URL, not the optional NetBox link base: a cache
-  // datasource with no NetBox URL had a blank address in the datasource list,
-  // and one switched over from NetBox mode kept displaying the NetBox address
-  // it no longer talks to.
-  const mirroredUrl = (isCache ? jsonData.replicaCacheUrl : jsonData.url) ?? '';
+  // The address a datasource SHOWS is the one it queries: jsonData.url names
+  // whichever service the mode reads from.
+  const mirroredUrl = jsonData.url ?? '';
   const topLevelUrl = options.url ?? '';
   useEffect(() => {
     if (mirroredUrl !== '' && topLevelUrl === '') {
@@ -123,10 +99,10 @@ export function ConfigEditor(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mirroredUrl, topLevelUrl]);
 
-  // Merges rather than replaces. Both modes' tokens live in one secureJsonData,
-  // and a form can hold an unsaved value for each: entering a cache token,
-  // switching to NetBox mode and typing an API token used to discard the first,
-  // so switching back showed an empty field and the user's input was gone.
+  // One token for both modes: the credential for whichever service the URL
+  // names. Switching mode on a saved datasource therefore points the same
+  // URL and token at a different service, and Save & test says so until they
+  // are re-entered — clearer than carrying two half-filled sets around.
   const onTokenChange = (event: ChangeEvent<HTMLInputElement>) => {
     onOptionsChange({ ...options, secureJsonData: { ...secureJsonData, apiToken: event.target.value } });
   };
@@ -139,18 +115,6 @@ export function ConfigEditor(props: Props) {
     });
   };
 
-  const onCacheTokenChange = (event: ChangeEvent<HTMLInputElement>) => {
-    onOptionsChange({ ...options, secureJsonData: { ...secureJsonData, replicaCacheToken: event.target.value } });
-  };
-
-  const onResetCacheToken = () => {
-    onOptionsChange({
-      ...options,
-      secureJsonFields: { ...secureJsonFields, replicaCacheToken: false },
-      secureJsonData: { ...secureJsonData, replicaCacheToken: '' },
-    });
-  };
-
   return (
     <>
       <FieldSet label="Connection">
@@ -160,37 +124,24 @@ export function ConfigEditor(props: Props) {
             width={40}
             options={MODE_OPTIONS}
             value={mode}
-            onChange={(v) => {
-              // The mirror moves with the mode. Neither URL input is touched by
-              // this change, and the backfill effect below only fires on an
-              // EMPTY top-level url — so with both services configured, a
-              // switch left the datasource list showing the address of the one
-              // no longer being queried.
-              const next = (v.value ?? 'netbox') as ProviderMode;
-              const active = next === 'replica-cache' ? jsonData.replicaCacheUrl : jsonData.url;
-              onOptionsChange({
-                ...options,
-                url: active ?? '',
-                jsonData: { ...jsonData, mode: next },
-              });
-            }}
+            onChange={(v) => onJsonChange({ mode: (v.value ?? 'netbox') as ProviderMode })}
           />
         </InlineField>
 
         <InlineField
-          label="NetBox URL"
+          label="URL"
           labelWidth={20}
           tooltip={
             isCache
-              ? 'Optional in this mode. Used only to build "View in NetBox" links when the replica does not report which NetBox instance it mirrors; without either, rows have no links.'
-              : 'Base URL of the NetBox instance, without /api'
+              ? 'Base URL of the replica-cache deployment this datasource reads from.'
+              : 'Base URL of the NetBox instance, without /api.'
           }
         >
           <Input
             id="config-url"
             width={40}
             value={jsonData.url ?? ''}
-            placeholder="https://netbox.example.com"
+            placeholder={isCache ? 'https://<id>.replica-cache.example.com' : 'https://netbox.example.com'}
             onChange={(e: ChangeEvent<HTMLInputElement>) => onUrlChange(e.target.value)}
           />
         </InlineField>
@@ -198,7 +149,7 @@ export function ConfigEditor(props: Props) {
         <InlineField
           label="Browser URL"
           labelWidth={20}
-          tooltip="Where users' browsers reach NetBox, if different from the URL above (e.g. Grafana connects via an internal service name). Used to build 'View in NetBox' links. Leave empty if both match."
+          tooltip="Where users' browsers reach NetBox, if different from the address Grafana uses (e.g. Grafana connects via an internal service name). 'View in NetBox' links are rewritten to it. Leave empty if both match."
         >
           <Input
             id="config-public-url"
@@ -210,94 +161,38 @@ export function ConfigEditor(props: Props) {
         </InlineField>
 
         {isCache && (
-          <>
-            <InlineField
-              label="Replica cache URL"
-              labelWidth={20}
-              tooltip="Base URL of the replica-cache service. This is a different host from NetBox."
-            >
-              <Input
-                required
-                id="config-replica-cache-url"
-                width={40}
-                value={jsonData.replicaCacheUrl ?? ''}
-                placeholder="https://<id>.replica-cache.example.com"
-                onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                  onOptionsChange({
-                    ...options,
-                    url: e.target.value,
-                    jsonData: { ...jsonData, replicaCacheUrl: e.target.value },
-                  })
-                }
-              />
-            </InlineField>
-
-            <InlineField
-              label="NetBox instance ID"
-              labelWidth={20}
-              tooltip="Identifies which NetBox instance the cache holds. Sent as the NBC-Netbox-ID header; the service rejects requests without it."
-            >
-              <Input
-                required
-                id="config-netbox-id"
-                width={40}
-                value={jsonData.netboxId ?? ''}
-                placeholder="nb-…"
-                onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ netboxId: e.target.value })}
-              />
-            </InlineField>
-
-            <InlineField
-              label="Replica cache token"
-              labelWidth={20}
-              tooltip="Bearer token for the replica-cache service. Separate from the NetBox API token — they are different services with independently issued credentials."
-            >
-              <SecretInput
-                required
-                id="config-replica-cache-token"
-                width={40}
-                isConfigured={Boolean(secureJsonFields?.replicaCacheToken)}
-                value={secureJsonData?.replicaCacheToken ?? ''}
-                placeholder="ff_…"
-                onReset={onResetCacheToken}
-                onChange={onCacheTokenChange}
-              />
-            </InlineField>
-
-            <InlineField
-              label="Max data age for alert rules"
-              labelWidth={26}
-              tooltip="Optional. A Go duration such as 15m or 2h. When set, alert rules and expression-fed queries refuse results older than this, or whose age the replica cannot report, instead of evaluating a stale inventory. Dashboards only show the age. Leave empty to never refuse on age; a replica still loading its initial snapshot is refused regardless."
-            >
-              <Input
-                id="config-max-data-age"
-                width={20}
-                value={jsonData.maxDataAge ?? ''}
-                placeholder="15m"
-                onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ maxDataAge: e.target.value })}
-              />
-            </InlineField>
-          </>
-        )}
-
-        {/* Hidden in replica-cache mode: that backend authenticates with its
-            own token and never sends this one, so asking for it would imply it
-            is needed — the confusion that made Save & Test fail on a correctly
-            configured cache datasource. */}
-        {!isCache && (
-          <InlineField label="API Token" labelWidth={20} tooltip="NetBox API token (v1 or v2)">
-            <SecretInput
+          <InlineField
+            label="NetBox instance ID"
+            labelWidth={20}
+            tooltip="The NetBox instance the replica holds (nb-…), sent as the NBC-Netbox-ID header."
+          >
+            <Input
               required
-              id="config-api-token"
+              id="config-netbox-id"
               width={40}
-              isConfigured={Boolean(secureJsonFields?.apiToken)}
-              value={secureJsonData?.apiToken ?? ''}
-              placeholder="nbt_… or a 40-character token"
-              onReset={onResetToken}
-              onChange={onTokenChange}
+              value={jsonData.netboxId ?? ''}
+              placeholder="nb-…"
+              onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ netboxId: e.target.value })}
             />
           </InlineField>
         )}
+
+        <InlineField
+          label="API token"
+          labelWidth={20}
+          tooltip={isCache ? 'Bearer token for the replica-cache deployment.' : 'NetBox API token (v1 or v2).'}
+        >
+          <SecretInput
+            required
+            id="config-api-token"
+            width={40}
+            isConfigured={Boolean(secureJsonFields?.apiToken)}
+            value={secureJsonData?.apiToken ?? ''}
+            placeholder={isCache ? 'ff_…' : 'nbt_… or a 40-character token'}
+            onReset={onResetToken}
+            onChange={onTokenChange}
+          />
+        </InlineField>
       </FieldSet>
 
       <FieldSet label="Advanced">
@@ -340,6 +235,24 @@ export function ConfigEditor(props: Props) {
               id="config-fast-paging"
               value={Boolean(jsonData.fastPagingNoTotals)}
               onChange={(e) => onJsonChange({ fastPagingNoTotals: e.currentTarget.checked })}
+            />
+          </InlineField>
+        )}
+
+        {/* Replica-cache only: the replica reports how current its data is,
+            and this is the one dial on that. NetBox mode reads live data. */}
+        {isCache && (
+          <InlineField
+            label="Max data age for alert rules"
+            labelWidth={26}
+            tooltip="Optional. A Go duration such as 15m or 2h. When set, alert rules and expression-fed queries refuse results older than this, or whose age the replica cannot report, instead of evaluating a stale inventory. Dashboards only show the age. Leave empty to never refuse on age; a replica still loading its initial snapshot is refused regardless."
+          >
+            <Input
+              id="config-max-data-age"
+              width={20}
+              value={jsonData.maxDataAge ?? ''}
+              placeholder="15m"
+              onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ maxDataAge: e.target.value })}
             />
           </InlineField>
         )}

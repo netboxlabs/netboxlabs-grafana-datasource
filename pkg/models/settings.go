@@ -26,8 +26,10 @@ const (
 
 // PluginSettings holds the non-secret configuration for a datasource instance.
 type PluginSettings struct {
-	// URL is the base URL of the NetBox instance, e.g.
-	// https://netbox.example.com — without a trailing /api.
+	// URL is the base URL of the service this datasource reads from: the
+	// NetBox instance (https://netbox.example.com, without a trailing /api) in
+	// NetBox mode, the replica-cache deployment in replica-cache mode. One
+	// field for both, because a datasource talks to exactly one of them.
 	URL string `json:"url"`
 	// PublicURL, when set, is where users' browsers reach NetBox if that
 	// differs from URL (compose/k8s service DNS). Deep-link URLs in results
@@ -35,14 +37,6 @@ type PluginSettings struct {
 	PublicURL string `json:"publicUrl"`
 	// Mode selects the enrichment backend. Defaults to "netbox".
 	Mode ProviderMode `json:"mode"`
-	// ReplicaCacheURL is the replica-cache service root, used when Mode is
-	// "replica-cache". It is a separate field from URL rather than a reuse of it
-	// because the two are different services with different hostnames, and a
-	// datasource may need both: URL supplies the deep links that point a user at
-	// the NetBox UI for a row read from the cache, since the cache serves
-	// database rows that carry no such link. URL is optional in this mode — when
-	// it is unset the rows simply carry no "View in NetBox" link.
-	ReplicaCacheURL string `json:"replicaCacheUrl"`
 	// NetBoxID identifies the NetBox instance the cache is holding, sent as the
 	// NBC-Netbox-ID header. The service rejects requests without it.
 	NetBoxID string `json:"netboxId"`
@@ -103,13 +97,10 @@ func (s *PluginSettings) MaxDataAgeDuration() (time.Duration, error) {
 // SecretPluginSettings holds values that are encrypted at rest by Grafana and
 // only ever decrypted server-side.
 type SecretPluginSettings struct {
-	// APIToken is the NetBox API token used for `Authorization: Token <token>`.
+	// APIToken is the credential for the service URL names: a NetBox API token
+	// (`Authorization: Token <token>`) in NetBox mode, the replica-cache bearer
+	// token in replica-cache mode. One field, as URL is one field.
 	APIToken string `json:"apiToken"`
-	// ReplicaCacheToken is the bearer token for the replica-cache service. It is
-	// held separately from APIToken because they are credentials for different
-	// services: they are issued, rotated and revoked independently, and a
-	// datasource configured for both must carry both.
-	ReplicaCacheToken string `json:"replicaCacheToken"`
 }
 
 // LoadPluginSettings parses datasource instance settings, applies defaults and
@@ -136,7 +127,6 @@ func LoadPluginSettings(source backend.DataSourceInstanceSettings) (*PluginSetti
 
 func loadSecretPluginSettings(source map[string]string) *SecretPluginSettings {
 	return &SecretPluginSettings{
-		APIToken:          source["apiToken"],
-		ReplicaCacheToken: source["replicaCacheToken"],
+		APIToken: source["apiToken"],
 	}
 }

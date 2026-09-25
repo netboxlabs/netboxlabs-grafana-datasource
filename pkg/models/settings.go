@@ -32,8 +32,10 @@ type PluginSettings struct {
 	// field for both, because a datasource talks to exactly one of them.
 	URL string `json:"url"`
 	// PublicURL, when set, is where users' browsers reach NetBox if that
-	// differs from URL (compose/k8s service DNS). Deep-link URLs in results
-	// are rewritten from URL's base to PublicURL's. Empty = no rewrite.
+	// differs from the base the links are built from — URL in NetBox mode
+	// (compose/k8s service DNS), the NetBox URL the replica reports in
+	// replica-cache mode. Deep-link URLs in results are rewritten from that
+	// base to PublicURL's. Empty = no rewrite.
 	PublicURL string `json:"publicUrl"`
 	// Mode selects the enrichment backend. Defaults to "netbox".
 	Mode ProviderMode `json:"mode"`

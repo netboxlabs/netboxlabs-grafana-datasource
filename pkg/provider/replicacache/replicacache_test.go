@@ -287,8 +287,8 @@ func TestFieldValuesPushesTextSearchForTextColumns(t *testing.T) {
 // with no bearing on it.
 func TestCacheFailuresNameCacheSettings(t *testing.T) {
 	cases := map[int][]string{
-		401: {"replica-cache token", "NetBox instance ID"},
-		403: {"replica-cache token"},
+		401: {"API token", "NetBox instance ID"},
+		403: {"API token"},
 		404: {"replica-cache URL"},
 		503: {"not a NetBox failure"},
 	}

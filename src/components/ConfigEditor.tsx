@@ -149,7 +149,11 @@ export function ConfigEditor(props: Props) {
         <InlineField
           label="Browser URL"
           labelWidth={20}
-          tooltip="Where users' browsers reach NetBox, if different from the address Grafana uses (e.g. Grafana connects via an internal service name). 'View in NetBox' links are rewritten to it. Leave empty if both match."
+          tooltip={
+            isCache
+              ? "Where users' browsers reach the NetBox the replica mirrors, if different from the address the replica reports. 'View in NetBox' links are rewritten to it. Leave empty if both match."
+              : "Where users' browsers reach NetBox, if different from the address Grafana uses (e.g. Grafana connects via an internal service name). 'View in NetBox' links are rewritten to it. Leave empty if both match."
+          }
         >
           <Input
             id="config-public-url"

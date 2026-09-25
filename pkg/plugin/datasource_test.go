@@ -527,17 +527,16 @@ func TestQueryData_FastPaging_AlertRulesAreUnaffected(t *testing.T) {
 	})
 }
 
-// The two backends authenticate with different credentials against different
-// services. Checking NetBox's prerequisites against a replica-cache datasource
-// failed Save & Test on a correctly provisioned instance, before the provider
-// was ever reached.
+// Both modes read the same URL and API token fields — they name whichever
+// service the mode talks to — and replica-cache additionally needs the
+// instance id. Save & Test names the missing one in the mode's own words.
 func TestMissingSettingIsModeAware(t *testing.T) {
 	full := func() *models.PluginSettings {
 		return &models.PluginSettings{
-			Mode:            models.ModeReplicaCache,
-			ReplicaCacheURL: "https://cache.example.com",
-			NetBoxID:        "nb-1",
-			Secrets:         &models.SecretPluginSettings{ReplicaCacheToken: "ff_x"},
+			Mode:     models.ModeReplicaCache,
+			URL:      "https://cache.example.com",
+			NetBoxID: "nb-1",
+			Secrets:  &models.SecretPluginSettings{APIToken: "ff_x"},
 		}
 	}
 
@@ -550,9 +549,9 @@ func TestMissingSettingIsModeAware(t *testing.T) {
 
 	t.Run("replica-cache reports its own missing settings", func(t *testing.T) {
 		cases := map[string]func(*models.PluginSettings){
-			"replica-cache URL is missing":  func(c *models.PluginSettings) { c.ReplicaCacheURL = "" },
+			"replica-cache URL is missing":  func(c *models.PluginSettings) { c.URL = "" },
 			"NetBox instance ID is missing": func(c *models.PluginSettings) { c.NetBoxID = "" },
-			"replica-cache token is missing": func(c *models.PluginSettings) {
+			"API token is missing": func(c *models.PluginSettings) {
 				c.Secrets = &models.SecretPluginSettings{}
 			},
 		}
@@ -602,12 +601,12 @@ func TestReplicaCacheHealthNamesTheMissingSetting(t *testing.T) {
 		want string
 	}{
 		{"no url", `{"mode":"replica-cache","netboxId":"nb-1"}`, "replica-cache URL is missing"},
-		{"no instance id", `{"mode":"replica-cache","replicaCacheUrl":"http://c"}`, "NetBox instance ID is missing"},
+		{"no instance id", `{"mode":"replica-cache","url":"http://c"}`, "NetBox instance ID is missing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst, err := NewDatasource(context.Background(), backend.DataSourceInstanceSettings{
 				JSONData:                []byte(tc.json),
-				DecryptedSecureJSONData: map[string]string{"replicaCacheToken": "t"},
+				DecryptedSecureJSONData: map[string]string{"apiToken": "t"},
 			})
 			if err != nil {
 				t.Fatalf("construction must succeed so Save & Test can explain: %v", err)
@@ -635,14 +634,14 @@ func TestReplicaCacheHealthNamesTheMissingSetting(t *testing.T) {
 // an outage message for the configuration problem this check exists to name.
 func TestWhitespaceOnlySettingsAreMissing(t *testing.T) {
 	for _, tc := range []struct{ name, json, want string }{
-		{"blank url", `{"mode":"replica-cache","replicaCacheUrl":"   ","netboxId":"nb-1"}`, "replica-cache URL is missing"},
-		{"blank instance id", `{"mode":"replica-cache","replicaCacheUrl":"http://c","netboxId":"\t"}`, "NetBox instance ID is missing"},
+		{"blank url", `{"mode":"replica-cache","url":"   ","netboxId":"nb-1"}`, "replica-cache URL is missing"},
+		{"blank instance id", `{"mode":"replica-cache","url":"http://c","netboxId":"\t"}`, "NetBox instance ID is missing"},
 		{"blank netbox url", `{"url":" "}`, "NetBox URL is missing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst, err := NewDatasource(context.Background(), backend.DataSourceInstanceSettings{
 				JSONData:                []byte(tc.json),
-				DecryptedSecureJSONData: map[string]string{"replicaCacheToken": "t", "apiToken": "t"},
+				DecryptedSecureJSONData: map[string]string{"apiToken": "t"},
 			})
 			if err != nil {
 				t.Fatalf("NewDatasource: %v", err)

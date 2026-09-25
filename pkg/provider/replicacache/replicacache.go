@@ -36,11 +36,6 @@ import (
 // Provider is the replica-cache implementation of provider.Provider.
 type Provider struct {
 	client *Client
-	// netboxURL is the configured NetBox URL: the link base when the catalogue
-	// does not report which NetBox the replica mirrors (see linkBase). Empty,
-	// with no catalogue URL either, means no links are produced.
-	netboxURL string
-
 	// Custom-field names per object type, from one bounded row read each,
 	// kept for catalogTTL. See customFieldNames.
 	cfMu      sync.Mutex
@@ -66,37 +61,16 @@ const customFieldDataColumn = "custom_field_data"
 // row whose blob is empty or unreadable.
 const customFieldSampleRows = 20
 
-// Option configures a Provider.
-type Option func(*Provider)
-
-// WithNetBoxURL supplies the NetBox instance this cache mirrors, so rows can
-// carry a link back to the object in the NetBox UI when the replica's
-// catalogue does not name it (linkBase prefers the catalogue's).
-func WithNetBoxURL(base string) Option {
-	// Normalized exactly as netbox.NewClient normalizes it, and for the same
-	// reason: the setting explicitly tolerates a trailing "/api", so a
-	// datasource configured in NetBox mode and then switched here carries that
-	// suffix. Stored raw it produced "View in NetBox" links to
-	// https://host/api/dcim/devices/<id>/ — the REST response for the object
-	// rather than its page.
-	return func(p *Provider) {
-		base = strings.TrimRight(strings.TrimSpace(base), "/")
-		p.netboxURL = strings.TrimSuffix(base, "/api")
-	}
-}
-
 // New builds a replica-cache provider. netboxID is the tenant identifier sent
-// as NBC-Netbox-ID; the service rejects requests without it.
-func New(base, token, netboxID string, httpClient *http.Client, opts ...Option) *Provider {
-	p := &Provider{
+// as NBC-Netbox-ID; the service rejects requests without it. The NetBox the
+// replica mirrors — the base of every "View in NetBox" link — is not
+// configured here: the catalogue reports it (see linkBase).
+func New(base, token, netboxID string, httpClient *http.Client) *Provider {
+	return &Provider{
 		client:    NewClient(base, token, netboxID, httpClient),
 		cfNames:   map[string]cfEntry{},
 		cfFlights: map[string]*flight[cfEntry]{},
 	}
-	for _, opt := range opts {
-		opt(p)
-	}
-	return p
 }
 
 func (p *Provider) Name() string { return "replica-cache" }
@@ -111,10 +85,10 @@ func (p *Provider) Name() string { return "replica-cache" }
 // user an internal, unreachable NetBox URL.
 //
 // It is the same base the links were built from (linkBase): the NetBox the
-// catalogue says the replica mirrors, else the configured NetBox URL. Read
-// from the cached catalogue only — this must stay cheap — and the cache root
-// when neither is known: nothing is linkable then, so there is nothing to
-// rewrite, and the value is only ever used as a prefix to match.
+// catalogue says the replica mirrors. Read from the cached catalogue only —
+// this must stay cheap — and the cache root when none is known: nothing is
+// linkable then, so there is nothing to rewrite, and the value is only ever
+// used as a prefix to match.
 func (p *Provider) BaseURL() string {
 	p.catMu.Lock()
 	c := p.cat
@@ -341,12 +315,13 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 }
 
 // linkBase is the NetBox instance deep links point at: the one the catalogue
-// reports, else the NetBox URL the datasource is configured with.
+// reports, and nothing else. A replica that reports none yields rows without a
+// link column rather than links built from a guess.
 func (p *Provider) linkBase(c *catalog) string {
-	if c != nil && c.NetBoxURL != "" {
-		return c.NetBoxURL
+	if c == nil {
+		return ""
 	}
-	return p.netboxURL
+	return c.NetBoxURL
 }
 
 // customFieldNames reads one bounded page projected to the blob and flattens

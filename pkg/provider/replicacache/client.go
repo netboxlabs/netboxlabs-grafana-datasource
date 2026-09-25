@@ -118,7 +118,7 @@ func (e *APIError) Classification() *provider.UpstreamError {
 		// would send a reader to fix a field that has no bearing on the failure.
 		// 403 is a tenant/token mismatch, so the instance ID is as likely to be
 		// wrong as the token.
-		c.Detail = "Replica cache rejected the credentials. Check the replica-cache token and the NetBox instance ID."
+		c.Detail = "Replica cache rejected the credentials. Check the API token and the NetBox instance ID."
 	case 404:
 		// Two different 404s. An entity the replica is configured for but has
 		// received nothing for says so in the body; the provider normally

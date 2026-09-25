@@ -101,13 +101,13 @@ export interface NetBoxVariableQuery extends DataQuery {
 }
 
 export interface NetBoxDataSourceOptions extends DataSourceJsonData {
+  /** Base URL of the service this datasource reads from: NetBox, or the
+   * replica-cache deployment when mode is 'replica-cache'. */
   url?: string;
   /** Browser-facing NetBox base URL, if different from url (e.g. Grafana
    * reaches NetBox via internal service DNS). Used to rewrite deep links. */
   publicUrl?: string;
   mode?: ProviderMode;
-  /** replica-cache service root. Required when mode is 'replica-cache'. */
-  replicaCacheUrl?: string;
   /** Identifies the NetBox instance the cache mirrors, sent as NBC-Netbox-ID.
    * Required when mode is 'replica-cache'. */
   netboxId?: string;
@@ -130,11 +130,9 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
 
 /** Secret values — never returned to the frontend after being set. */
 export interface NetBoxSecureJsonData {
+  /** Credential for the service `url` names: a NetBox API token, or the
+   * replica-cache bearer token when mode is 'replica-cache'. */
   apiToken?: string;
-  /** Bearer token for replica-cache. Held separately from apiToken because the
-   * two are credentials for different services, issued and rotated
-   * independently. */
-  replicaCacheToken?: string;
 }
 
 export interface ObjectTypeOption {

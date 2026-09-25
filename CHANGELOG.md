@@ -36,6 +36,36 @@
   devices and a full inventory read on every run, past which the metrics should
   carry NetBox labels from collection instead.
 
+- **Replica-cache mode.** A data source can read from a NetBox replica-cache
+  deployment instead of the REST API (**Mode** → _replica-cache_), for
+  instances too large for the API to serve table queries interactively. The
+  data source reads the replica's schema route for object types, columns,
+  types, operators and references, so nothing is sampled or guessed; related
+  names (site, role, tenant…) are resolved by the replica when selected and
+  can be sorted and filtered on; custom fields expand as in NetBox mode; every result states
+  how fresh the data is, and a replica still loading its initial snapshot is a
+  warning. A new **Max data age** setting makes alert rules and expression-fed
+  queries refuse stale or unknown-age data. Annotations, IP enrichment,
+  topology and tags are not available in this mode and fail with an explicit
+  message. The connection fields are the same in both modes — URL and API
+  token name whichever service the mode reads from — plus the NetBox instance
+  ID; _View in NetBox_ links come from the NetBox URL the replica reports.
+  Requires a replica-cache build with the schema route (v1.35+). Guide:
+  `docs/REPLICA-CACHE.md`.
+
+- **IP enrichment has a second source: a NetBox scope.** The query took its
+  IPs as input, which an alert rule cannot supply — rules have no variables and
+  one query cannot read another's output — so a rule over an IP-only metric
+  (flows, poller targets) could not ask "whose IP is this?". **Source: NetBox
+  scope** lists every address NetBox holds under the query's filter rows
+  (`ipam/ip-addresses` filters: a prefix, a VRF, a tenant…) and returns
+  one row per distinct host with the same columns, so a rule joins the metric's
+  IP against it in a SQL expression. A scope that overflows its Limit fails a
+  rule, and a query feeding an expression, rather than joining on a subset; a
+  dashboard keeps the partial table with a notice. Recipe:
+  `docs/alerting/ip-only-metrics.md`, including the `COALESCE` that an unmatched
+  `LEFT JOIN` row needs on Grafana 13.0.2.
+
 ## 1.0.3 (2026-10-06)
 
 - **Build dependencies updated for new advisories.** `source-map-js` 1.2.2 fixes
@@ -62,35 +92,6 @@
   listens on. They now name the cause as a category (hostname not resolved,
   connection refused, timed out, certificate not verified, response not JSON)
   with what to check; the raw error stays in the Grafana server log.
-
-- **Replica-cache mode.** A data source can read from a NetBox replica-cache
-  deployment instead of the REST API (**Mode** → _replica-cache_), for
-  instances too large for the API to serve table queries interactively. The
-  data source reads the replica's schema route for object types, columns,
-  types, operators and references, so nothing is sampled or guessed; related
-  names (site, role, tenant…) are resolved by the replica when selected and
-  can be sorted and filtered on; custom fields expand as in NetBox mode; every result states
-  how fresh the data is, and a replica still loading its initial snapshot is a
-  warning. A new **Max data age** setting makes alert rules and expression-fed
-  queries refuse stale or unknown-age data. Annotations, IP enrichment,
-  topology and tags are not available in this mode and fail with an explicit
-  message. The connection fields are the same in both modes — URL and API
-  token name whichever service the mode reads from — plus the NetBox instance
-  ID; _View in NetBox_ links come from the NetBox URL the replica reports.
-  Requires a replica-cache build with the schema route (v1.35+). Guide:
-  `docs/REPLICA-CACHE.md`.
-- **IP enrichment has a second source: a NetBox scope.** The query took its
-  IPs as input, which an alert rule cannot supply — rules have no variables and
-  one query cannot read another's output — so a rule over an IP-only metric
-  (flows, poller targets) could not ask "whose IP is this?". **Source: NetBox
-  scope** lists every address NetBox holds under the query's filter rows
-  (`ipam/ip-addresses` filters: a prefix, a VRF, a tenant…) and returns
-  one row per distinct host with the same columns, so a rule joins the metric's
-  IP against it in a SQL expression. A scope that overflows its Limit fails a
-  rule, and a query feeding an expression, rather than joining on a subset; a
-  dashboard keeps the partial table with a notice. Recipe:
-  `docs/alerting/ip-only-metrics.md`, including the `COALESCE` that an unmatched
-  `LEFT JOIN` row needs on Grafana 13.0.2.
 
 ## 1.0.0 (2026-09-18)
 

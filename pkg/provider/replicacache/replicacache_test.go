@@ -206,21 +206,28 @@ func TestQueryPropagatesUpstreamFailure(t *testing.T) {
 }
 
 // BaseURL is what the plugin layer uses as the prefix when rewriting links from
-// an internal host to a browser-facing one. The deep links point at NetBox, so
-// returning the cache root left that prefix matching nothing and handed the
-// user an internal, unreachable NetBox URL.
+// an internal host to a browser-facing one. The deep links point at the NetBox
+// the catalogue reports, so returning the cache root while links exist would
+// leave that prefix matching nothing and hand the user an unreachable URL.
 func TestBaseURLIsTheLinkBase(t *testing.T) {
 	f := newFakeService()
-	srv := f.start(t)
-
-	withNetBox := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.internal/"))
-	if got := withNetBox.BaseURL(); got != "https://netbox.internal" {
+	f.schema.NetBoxURL = "https://netbox.internal/"
+	p := newTestProvider(t, f)
+	if _, err := p.ObjectTypes(context.Background()); err != nil { // the catalogue is read once
+		t.Fatal(err)
+	}
+	if got := p.BaseURL(); got != "https://netbox.internal" {
 		t.Errorf("BaseURL = %q, want the NetBox base the links were built from", got)
 	}
 
-	// Nothing is linkable without a NetBox URL, so there is nothing to rewrite
-	// and the cache root is a harmless fallback.
+	// Nothing is linkable when the replica reports no NetBox, so there is
+	// nothing to rewrite and the cache root is a harmless fallback.
+	f2 := newFakeService()
+	srv := f2.start(t)
 	without := New(srv.URL, "t", "nb", srv.Client())
+	if _, err := without.ObjectTypes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if got := without.BaseURL(); got != srv.URL {
 		t.Errorf("BaseURL = %q, want the cache root as fallback", got)
 	}
@@ -280,8 +287,8 @@ func TestFieldValuesPushesTextSearchForTextColumns(t *testing.T) {
 // with no bearing on it.
 func TestCacheFailuresNameCacheSettings(t *testing.T) {
 	cases := map[int][]string{
-		401: {"replica-cache token", "NetBox instance ID"},
-		403: {"replica-cache token"},
+		401: {"API token", "NetBox instance ID"},
+		403: {"API token"},
 		404: {"replica-cache URL"},
 		503: {"not a NetBox failure"},
 	}
@@ -516,21 +523,20 @@ func TestMalformedValueRowIsRejected(t *testing.T) {
 	}
 }
 
-// The URL setting explicitly tolerates a trailing "/api", so a datasource
-// configured in NetBox mode and switched here carries it. Stored raw it made
-// "View in NetBox" open the REST response for the object rather than its page.
+// The route's netbox_url is normalised the way the NetBox provider normalises
+// its own URL: a trailing "/api" or slash would make "View in NetBox" open the
+// REST response for the object rather than its page.
 func TestNetBoxURLIsNormalizedForDeepLinks(t *testing.T) {
-	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
-	srv := f.start(t)
-
 	for _, base := range []string{
 		"https://netbox.example.com/api",
 		"https://netbox.example.com/api/",
 		"https://netbox.example.com/",
 		"  https://netbox.example.com  ",
 	} {
-		p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL(base))
+		f := newFakeService()
+		f.schema.NetBoxURL = base
+		f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+		p := newTestProvider(t, f)
 		res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
 		if err != nil {
 			t.Fatalf("%q: %v", base, err)
@@ -763,8 +769,8 @@ func TestFields_AreTheCatalogueColumnsPlusExpansions(t *testing.T) {
 	f.entities["dcim/devices"] = []map[string]interface{}{
 		{"id": float64(1), "name": "a", "custom_field_data": `{"lifecycle_phase":"production","tags_count":2}`},
 	}
-	srv := f.start(t)
-	p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.example.com"))
+	f.schema.NetBoxURL = "https://netbox.example.com"
+	p := newTestProvider(t, f)
 
 	fields, err := p.Fields(context.Background(), "dcim/devices")
 	if err != nil {
@@ -842,8 +848,8 @@ func TestFields_EmptyTableStillListsTheCatalogueColumns(t *testing.T) {
 // no fields; and nothing is read from it, since the row route answers 404.
 func TestFields_UnfedEntityHasNoFieldsAndReadsNoRows(t *testing.T) {
 	f := newFakeService()
-	srv := f.start(t)
-	p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.example.com"))
+	f.schema.NetBoxURL = "https://netbox.example.com"
+	p := newTestProvider(t, f)
 
 	fields, err := p.Fields(context.Background(), "dcim/platforms")
 	if err != nil || len(fields) != 0 {
@@ -914,43 +920,41 @@ func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 	}
 }
 
-// Deep links point at the NetBox the replica reports it mirrors, when it does;
-// the configured NetBox URL is the fallback for a replica that does not say.
-// BaseURL has to agree with whichever base the links were built from, or the
-// plugin's public-URL rewrite matches nothing.
-func TestLinks_PreferTheCatalogueNetBoxURL(t *testing.T) {
+// Deep links point at the NetBox the replica reports it mirrors — the one
+// source, since a cache-mode datasource is not configured with a NetBox URL
+// any more (DATA-320 makes every tenant report one). A replica that reports
+// none yields rows without a link column, not links to nowhere; BaseURL agrees
+// with whichever base the links were built from, or the plugin's public-URL
+// rewrite matches nothing.
+func TestLinks_ComeFromTheCatalogueNetBoxURL(t *testing.T) {
 	f := newFakeService()
-	f.mu.Lock()
 	f.schema.NetBoxURL = "https://nb.example.com"
-	f.mu.Unlock()
 	f.entities["dcim/devices"] = []map[string]interface{}{{"id": 7, "name": "a", "custom_field_data": `{}`}}
-	srv := f.start(t)
-	p := New(srv.URL, "tok", "nb-1", srv.Client(), WithNetBoxURL("https://override.example.com/api"))
+	p := newTestProvider(t, f)
 
 	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "display_url"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Rows[0]["display_url"] != "https://nb.example.com/dcim/devices/7/" {
-		t.Errorf("display_url = %v (the replica's own NetBox wins)", res.Rows[0]["display_url"])
+		t.Errorf("display_url = %v", res.Rows[0]["display_url"])
 	}
 	if p.BaseURL() != "https://nb.example.com" {
 		t.Errorf("BaseURL = %q must match the base the links were built from", p.BaseURL())
 	}
 
-	f.mu.Lock()
-	f.schema.NetBoxURL = ""
-	f.mu.Unlock()
-	p = New(srv.URL, "tok", "nb-1", srv.Client(), WithNetBoxURL("https://override.example.com/api"))
+	f2 := newFakeService()
+	f2.entities["dcim/devices"] = f.entities["dcim/devices"]
+	p = newTestProvider(t, f2)
 	res, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "display_url"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Rows[0]["display_url"] != "https://override.example.com/dcim/devices/7/" {
-		t.Errorf("display_url = %v (the configured URL is the fallback)", res.Rows[0]["display_url"])
+	if _, ok := res.Rows[0]["display_url"]; ok || slices.Contains(res.Columns, "display_url") {
+		t.Errorf("a replica that reports no NetBox yields no link column, got %v", res.Rows[0])
 	}
-	if p.BaseURL() != "https://override.example.com" {
-		t.Errorf("BaseURL = %q", p.BaseURL())
+	if !strings.Contains(strings.Join(res.Warnings, " "), "display_url") {
+		t.Errorf("the requested link column is reported missing: %v", res.Warnings)
 	}
 }
 

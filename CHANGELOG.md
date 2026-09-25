@@ -38,8 +38,11 @@
   warning. A new **Max data age** setting makes alert rules and expression-fed
   queries refuse stale or unknown-age data. Annotations, IP enrichment,
   topology and tags are not available in this mode and fail with an explicit
-  message. Requires a replica-cache build with the schema route (v1.35+).
-  Guide: `docs/REPLICA-CACHE.md`.
+  message. The connection fields are the same in both modes — URL and API
+  token name whichever service the mode reads from — plus the NetBox instance
+  ID; _View in NetBox_ links come from the NetBox URL the replica reports.
+  Requires a replica-cache build with the schema route (v1.35+). Guide:
+  `docs/REPLICA-CACHE.md`.
 - **IP enrichment has a second source: a NetBox scope.** The query took its
   IPs as input, which an alert rule cannot supply — rules have no variables and
   one query cannot read another's output — so a rule over an IP-only metric

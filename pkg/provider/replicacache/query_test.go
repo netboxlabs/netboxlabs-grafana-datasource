@@ -360,8 +360,8 @@ func TestQueryNotesWhenSortTargetHasNoData(t *testing.T) {
 func TestQuerySynthesizesNetBoxDeepLinks(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(7, "CORE-7", 4001)}
-	srv := f.start(t)
-	p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.example.com/"))
+	f.schema.NetBoxURL = "https://netbox.example.com/"
+	p := newTestProvider(t, f)
 
 	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
 	if err != nil {
@@ -382,7 +382,7 @@ func TestQuerySynthesizesNetBoxDeepLinks(t *testing.T) {
 	}
 }
 
-// Without a NetBox URL there is nothing to link to, and inventing one would
+// When the replica reports no NetBox there is nothing to link to, and inventing one would
 // produce links that 404.
 func TestQueryOmitsDeepLinksWithoutANetBoxURL(t *testing.T) {
 	f := newFakeService()
@@ -394,7 +394,7 @@ func TestQueryOmitsDeepLinksWithoutANetBoxURL(t *testing.T) {
 		t.Fatalf("Query: %v", err)
 	}
 	if _, ok := res.Rows[0]["display_url"]; ok {
-		t.Error("no NetBox URL is configured, so no link should be produced")
+		t.Error("the replica reports no NetBox, so no link should be produced")
 	}
 }
 
@@ -403,8 +403,8 @@ func TestQueryOmitsDeepLinksWithoutANetBoxURL(t *testing.T) {
 func TestQueryProjectsTheDeepLinkColumn(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(7, "CORE-7", 4001)}
-	srv := f.start(t)
-	p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.example.com"))
+	f.schema.NetBoxURL = "https://netbox.example.com"
+	p := newTestProvider(t, f)
 
 	res, err := p.Query(context.Background(), provider.QuerySpec{
 		ObjectType: "dcim/devices",
@@ -1641,8 +1641,8 @@ func TestQuery_UsesTheCataloguePrimaryKey(t *testing.T) {
 		{"contenttype_ptr_id": 1, "public": true},
 		{"contenttype_ptr_id": 2, "public": false},
 	}
-	srv := f.start(t)
-	p := New(srv.URL, "t", "nb", srv.Client(), WithNetBoxURL("https://netbox.example.com"))
+	f.schema.NetBoxURL = "https://netbox.example.com"
+	p := newTestProvider(t, f)
 
 	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "core/object-types", Fields: []string{"public", "display_url"}})
 	if err != nil {

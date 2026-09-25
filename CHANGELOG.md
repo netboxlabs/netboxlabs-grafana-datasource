@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.1 (2026-09-25)
 
 - **Connection failures no longer print the target's address.** _Save & test_
   and query errors for an unreachable NetBox said what kind of failure it was

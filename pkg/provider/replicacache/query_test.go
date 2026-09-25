@@ -1631,6 +1631,101 @@ func TestQuery_TextMatchSendsTheValueLiterally(t *testing.T) {
 	}
 }
 
+// DATA-408: on a replica that lists them, the anchored matches are pushed
+// down under their wire names with the value bare (the service's operators
+// are literal and case-insensitive, like ilike), and the rows come back
+// through the usual path. The row sets assert the fake's emulation of the
+// service, not the service; the wire assertions are the behaviour under test.
+func TestQuery_AnchoredTextMatchesArePushedDownWhenCatalogued(t *testing.T) {
+	f := newFakeService()
+	f.schema = withAnchoredText(devicesSchema())
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": 1, "name": "CORE-N9504-01", "custom_field_data": `{}`},
+		{"id": 2, "name": "SPINE-CORE-01", "custom_field_data": `{}`},
+		{"id": 3, "name": "core-n9504-02", "custom_field_data": `{}`},
+	}
+	p := newTestProvider(t, f)
+	for _, tc := range []struct {
+		op, wire, value string
+		want            []string
+	}{
+		{"isw", "istartswith", "core", []string{"CORE-N9504-01", "core-n9504-02"}},
+		{"iew", "iendswith", "-01", []string{"CORE-N9504-01", "SPINE-CORE-01"}},
+		{"ie", "iexact", "core-n9504-01", []string{"CORE-N9504-01"}},
+	} {
+		t.Run(tc.op, func(t *testing.T) {
+			res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"}, Ordering: "id",
+				Filters: []provider.Filter{{Field: "name", Operator: tc.op, Value: tc.value}}})
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			param := "filter[name]__" + tc.wire
+			req, ok := f.requestWith("dcim/devices", param)
+			if !ok {
+				t.Fatalf("no request carried %s", param)
+			}
+			if got := req.query.Get(param); got != tc.value {
+				t.Errorf("%s = %q, want the value sent bare", param, got)
+			}
+			var got []string
+			for _, r := range res.Rows {
+				got = append(got, r["name"].(string))
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("rows = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// On a replica that lists only ilike (before DATA-408), a saved query with an
+// anchored match is refused before anything is sent, with the reason naming
+// the match that works — never sent as a contains that matches more rows.
+func TestQuery_AnchoredTextMatchIsRefusedWhenTheCatalogueLacksIt(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{{"id": 1, "name": "CORE-N9504-01", "custom_field_data": `{}`}}
+	p := newTestProvider(t, f)
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"},
+		Filters: []provider.Filter{{Field: "name", Operator: "isw", Value: "core"}}})
+	var unsupported *UnsupportedFilterError
+	if !errors.As(err, &unsupported) || !strings.Contains(unsupported.Reason, "contains") {
+		t.Fatalf("want an UnsupportedFilterError pointing at contains, got %v", err)
+	}
+	if _, ok := f.requestWith("dcim/devices", "filter[name]__istartswith"); ok {
+		t.Error("the operator must not be sent to a replica that does not list it")
+	}
+}
+
+// An unfed entity is not judged against its (empty) catalogue entry, but the
+// operator vocabulary is the build's, not the entity's: on a replica whose
+// catalogue lists the anchored matches nowhere, a starts-with on an unfed
+// entity is refused before sending, like everywhere else — not sent to be
+// answered with a bare HTTP 400 once the entity is fed. On a DATA-408 build
+// it goes through, and the row route answers for itself.
+func TestQuery_AnchoredTextMatchOnAnUnfedEntityFollowsTheBuild(t *testing.T) {
+	spec := provider.QuerySpec{ObjectType: "dcim/platforms", Fields: []string{"name"},
+		Filters: []provider.Filter{{Field: "name", Operator: "isw", Value: "ios"}}}
+
+	f := newFakeService()
+	p := newTestProvider(t, f)
+	_, err := p.Query(context.Background(), spec)
+	var unsupported *UnsupportedFilterError
+	if !errors.As(err, &unsupported) || !strings.Contains(unsupported.Reason, "contains") {
+		t.Fatalf("pre-408 build: want the contains-pointing refusal, got %v", err)
+	}
+	if _, ok := f.requestWith("dcim/platforms", "filter[name]__istartswith"); ok {
+		t.Error("pre-408 build: the operator must not be sent")
+	}
+
+	f = newFakeService()
+	f.schema = withAnchoredText(devicesSchema())
+	p = newTestProvider(t, f)
+	_, _ = p.Query(context.Background(), spec)
+	if _, ok := f.requestWith("dcim/platforms", "filter[name]__istartswith"); !ok {
+		t.Error("DATA-408 build: the request goes, and the service answers for the unfed entity")
+	}
+}
+
 // Not every entity is keyed by "id": core/object-types is keyed by
 // contenttype_ptr_id (measured on staging). The catalogue names the primary
 // key, and every place that reads a row's identity — the duplicate and

@@ -274,6 +274,11 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		}
 		frame := buildCountFrame(qm.ObjectType, res.Total)
 		frame.RefID = q.RefID
+		// A dashboard was let through: state the gap on the frame as the row
+		// shapes do. Not resultNotices — its truncation notice would read
+		// "Showing 1 of N" on every count, since one row is fetched beside the
+		// total by design. buildCountFrame always sets Meta.
+		frame.Meta.Notices = append(frame.Meta.Notices, reportedNotices(res)...)
 		return backend.DataResponse{Frames: data.Frames{frame}}
 	}
 

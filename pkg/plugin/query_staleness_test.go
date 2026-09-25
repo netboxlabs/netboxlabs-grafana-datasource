@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"context"
+	"github.com/grafana/grafana-plugin-sdk-go/data"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -139,6 +141,45 @@ func TestQuery_MaxDataAgeIsIgnoredOutsideCacheMode(t *testing.T) {
 // evaluates a single number with no rows to reveal anything: the loading
 // warning and Max data age refuse it exactly as they refuse the other shapes.
 // Truncation must NOT: a count reads Total and returns one row by design.
+// A dashboard count is not refused (partial beats none), so the gap has to be
+// stated on the frame as the row shapes state it: the provider's warnings and
+// notes become notices. Never the truncation notice — a count fetches one row
+// beside a total by design, and "Showing 1 of 42" would be false.
+func TestQuery_CountCarriesTheProviderNoticesForADashboard(t *testing.T) {
+	yes := true
+	count := backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices","count":true}`)}
+	loading := "This replica is still loading its initial snapshot; results may be incomplete and their age is unknown."
+	ageUnknown := "The replica reports no commit time for dcim/devices, so the age of these rows is unknown."
+	for _, tc := range []struct {
+		name string
+		res  *provider.Result
+		want []data.Notice
+	}{
+		{"loading replica", &provider.Result{Total: 42, Rows: []map[string]interface{}{{"id": 1}}, Warnings: []string{loading}},
+			[]data.Notice{{Severity: data.NoticeSeverityWarning, Text: loading}}},
+		{"age unknown", &provider.Result{Total: 42, Rows: []map[string]interface{}{{"id": 1}}, SnapshotComplete: &yes, Notes: []string{ageUnknown}},
+			[]data.Notice{{Severity: data.NoticeSeverityInfo, Text: ageUnknown}}},
+		{"healthy: no truncation notice for the one fetched row", &provider.Result{Total: 42, Rows: []map[string]interface{}{{"id": 1}}, SnapshotComplete: &yes}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDatasource(&fakeProvider{result: tc.res})
+			d.cfg.Mode = models.ModeReplicaCache
+			resp := d.query(context.Background(), count, consumerDashboard)
+			if resp.Error != nil {
+				t.Fatalf("refused: %v", resp.Error)
+			}
+			frame := resp.Frames[0]
+			var got []data.Notice
+			if frame.Meta != nil {
+				got = frame.Meta.Notices
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("notices = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestQuery_CountRefusesOnLoadingAndStaleness(t *testing.T) {
 	old := time.Now().Add(-134 * time.Minute)
 	fresh := time.Now().Add(-time.Minute)

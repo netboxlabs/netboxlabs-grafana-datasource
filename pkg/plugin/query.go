@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"slices"
 	"strings"
 	"syscall"

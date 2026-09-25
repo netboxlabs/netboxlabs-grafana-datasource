@@ -243,11 +243,12 @@ describe('replica-cache mode', () => {
     expect(screen.queryByLabelText(/Max data age/i)).not.toBeInTheDocument();
   });
 
-  // One token field for both modes means a stored NetBox token would otherwise
-  // survive a switch to replica-cache and, the moment the URL is pointed at
-  // the replica, be sent to a service it was never issued for. Switching mode
-  // is switching service, so the credential is cleared and must be re-entered.
-  it('clears the stored token when the mode changes', async () => {
+  // One URL and one token for both modes means a switch would otherwise keep
+  // the old service's address and credential: a stored NetBox token pointed at
+  // the replica the moment the URL is edited, or a freshly entered replica
+  // token sent to the NetBox host that the URL still names. Switching mode is
+  // switching service, so both are cleared and must be re-entered.
+  it('clears the stored token and the URL when the mode changes', async () => {
     const onOptionsChange = jest.fn();
     render(
       <ConfigEditor
@@ -270,7 +271,8 @@ describe('replica-cache mode', () => {
 
     expect(onOptionsChange).toHaveBeenCalledWith(
       expect.objectContaining({
-        jsonData: expect.objectContaining({ mode: 'replica-cache' }),
+        url: '',
+        jsonData: expect.objectContaining({ mode: 'replica-cache', url: '' }),
         secureJsonFields: expect.objectContaining({ apiToken: false }),
         secureJsonData: expect.objectContaining({ apiToken: '' }),
       })

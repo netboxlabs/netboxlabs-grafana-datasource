@@ -100,8 +100,9 @@ export function ConfigEditor(props: Props) {
   }, [mirroredUrl, topLevelUrl]);
 
   // One token for both modes: the credential for whichever service the URL
-  // names. A mode switch clears it (see the Mode picker), so a credential is
-  // re-entered for the new service rather than carried across.
+  // names. A mode switch clears both (see the Mode picker), so the address and
+  // the credential are re-entered for the new service rather than carried
+  // across.
   const onTokenChange = (event: ChangeEvent<HTMLInputElement>) => {
     onOptionsChange({ ...options, secureJsonData: { ...secureJsonData, apiToken: event.target.value } });
   };
@@ -124,15 +125,17 @@ export function ConfigEditor(props: Props) {
             options={MODE_OPTIONS}
             value={mode}
             onChange={(v) => {
-              // Switching mode is switching service. The one token field would
-              // otherwise carry the old service's credential over, and the
-              // moment the URL is pointed at the new service it would be sent
-              // to a host it was never issued for. Cleared here, so it has to
-              // be re-entered; Save & test says "API token is missing" until
+              // Switching mode is switching service. The one URL and one token
+              // would otherwise carry the old service's address and credential
+              // over: a stored NetBox token sent to the replica the moment the
+              // URL is edited, or a freshly entered replica token sent to the
+              // NetBox host the URL still names. Both are cleared, so both
+              // have to be re-entered; Save & test names the missing one until
               // then.
               onOptionsChange({
                 ...options,
-                jsonData: { ...jsonData, mode: (v.value ?? 'netbox') as ProviderMode },
+                url: '',
+                jsonData: { ...jsonData, mode: (v.value ?? 'netbox') as ProviderMode, url: '' },
                 secureJsonFields: { ...secureJsonFields, apiToken: false },
                 secureJsonData: { ...secureJsonData, apiToken: '' },
               });

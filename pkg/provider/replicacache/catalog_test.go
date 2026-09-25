@@ -141,7 +141,7 @@ func TestCatalog_DataAsOfLayouts(t *testing.T) {
 
 // netbox_url is upstream-controlled and becomes a link target, so only an
 // http(s) URL with a host is accepted, with the /api suffix a NetBox base
-// often carries stripped as WithNetBoxURL strips it.
+// often carries stripped as the NetBox provider strips it.
 func TestCatalog_NetBoxURLIsValidated(t *testing.T) {
 	for raw, want := range map[string]string{
 		"https://nb.example.com":      "https://nb.example.com",

@@ -208,9 +208,9 @@ func (doc schemaDoc) toCatalog() (*catalog, error) {
 
 // linkBaseOf accepts the route's netbox_url as a link base only when it is an
 // http(s) URL with a host: it is upstream-controlled and becomes the target of
-// every "View in NetBox" link. Normalised as WithNetBoxURL normalises the
-// configured field — no trailing slash, no /api — so both build the same
-// paths. Anything else is ignored and the configured URL stays the base.
+// every "View in NetBox" link. Normalised as the NetBox provider normalises
+// its own URL — no trailing slash, no /api — so both build the same paths.
+// Anything else is ignored, and the replica has no link base.
 func linkBaseOf(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {

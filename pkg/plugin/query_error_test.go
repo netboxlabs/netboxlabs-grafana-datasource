@@ -161,6 +161,9 @@ func TestTransportCause(t *testing.T) {
 		want string
 	}{
 		{"dns", &net.DNSError{Err: "no such host", Name: "netbox.internal", IsNotFound: true}, "resolved"},
+		// A resolver that never answers is a timeout, not "could not be
+		// resolved": *net.DNSError is a net.Error too, and Timeout() decides.
+		{"dns timeout", &net.DNSError{Err: "i/o timeout", Name: "netbox.internal", IsTimeout: true}, "timed out"},
 		{"refused", &url.Error{Op: "Get", URL: "http://10.0.0.5:8000/api/status/", Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}, "refused"},
 		{"unreachable", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH}, "unreachable"},
 		{"timeout", fmt.Errorf("request failed: %w", context.DeadlineExceeded), "timed out"},

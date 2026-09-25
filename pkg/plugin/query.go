@@ -517,15 +517,17 @@ func transportCause(err error) string {
 		typeErr *json.UnmarshalTypeError
 	)
 	// Structured causes first, the more specific type before the more generic
-	// one: a stalled TLS handshake is a net.Error timeout whose text mentions
-	// TLS, so the timeout arm precedes the handshake arm.
+	// one, and a timeout before anything a timeout can also be: a resolver
+	// that never answers is a *net.DNSError and a stalled TLS handshake says
+	// "TLS handshake", but both implement net.Error with Timeout() true, and
+	// "timed out" is the sentence the reader can act on.
 	switch {
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
+		return causeTimeout
 	case errors.As(err, &dnsErr):
 		return causeUnresolved
 	case errors.As(err, &verErr) || errors.As(err, &unkErr) || errors.As(err, &hostErr) || errors.As(err, &certErr):
 		return causeCertificate
-	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
-		return causeTimeout
 	case errors.As(err, &hdrErr):
 		return causeNoTLS
 	case errors.Is(err, context.Canceled):

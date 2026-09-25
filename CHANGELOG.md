@@ -1,31 +1,6 @@
 # Changelog
 
-## 1.0.3 (2026-10-06)
-
-- **Build dependencies updated for new advisories.** `source-map-js` 1.2.2 fixes
-  a high-severity denial of service (CVE-2026-93749) and
-  `postcss-selector-parser` 7.1.6 a medium one. `sprintf-js` has no fixed
-  release; its advisory is recorded in `osv-scanner.toml` with the reasoning.
-  All three are build and test tooling only and are not part of the shipped
-  plugin, so the plugin itself does not change.
-
-## 1.0.2 (2026-10-02)
-
-- **The topology hint follows the Grafana theme.** The help text under the
-  _Topology_ and _Topology edges_ query types was styled with fixed inline
-  values; it now takes its colour, size and spacing from the Grafana theme, so
-  it reads as secondary text in light and dark alike.
-- **The plugin is signed**, so Grafana loads it without allowing unsigned
-  plugins.
-
-## 1.0.1 (2026-09-25)
-
-- **Connection failures no longer print the target's address.** _Save & test_
-  and query errors for an unreachable NetBox said what kind of failure it was
-  by quoting the raw transport error — including the host and port NetBox
-  listens on. They now name the cause as a category (hostname not resolved,
-  connection refused, timed out, certificate not verified, response not JSON)
-  with what to check; the raw error stays in the Grafana server log.
+## Unreleased
 
 - **Replica-cache mode.** A data source can read from a NetBox replica-cache
   deployment instead of the REST API (**Mode** → _replica-cache_), for
@@ -55,6 +30,33 @@
   dashboard keeps the partial table with a notice. Recipe:
   `docs/alerting/ip-only-metrics.md`, including the `COALESCE` that an unmatched
   `LEFT JOIN` row needs on Grafana 13.0.2.
+
+## 1.0.3 (2026-10-06)
+
+- **Build dependencies updated for new advisories.** `source-map-js` 1.2.2 fixes
+  a high-severity denial of service (CVE-2026-93749) and
+  `postcss-selector-parser` 7.1.6 a medium one. `sprintf-js` has no fixed
+  release; its advisory is recorded in `osv-scanner.toml` with the reasoning.
+  All three are build and test tooling only and are not part of the shipped
+  plugin, so the plugin itself does not change.
+
+## 1.0.2 (2026-10-02)
+
+- **The topology hint follows the Grafana theme.** The help text under the
+  _Topology_ and _Topology edges_ query types was styled with fixed inline
+  values; it now takes its colour, size and spacing from the Grafana theme, so
+  it reads as secondary text in light and dark alike.
+- **The plugin is signed**, so Grafana loads it without allowing unsigned
+  plugins.
+
+## 1.0.1 (2026-09-25)
+
+- **Connection failures no longer print the target's address.** _Save & test_
+  and query errors for an unreachable NetBox said what kind of failure it was
+  by quoting the raw transport error — including the host and port NetBox
+  listens on. They now name the cause as a category (hostname not resolved,
+  connection refused, timed out, certificate not verified, response not JSON)
+  with what to check; the raw error stays in the Grafana server log.
 
 ## 1.0.0 (2026-09-18)
 

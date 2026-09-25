@@ -100,9 +100,8 @@ export function ConfigEditor(props: Props) {
   }, [mirroredUrl, topLevelUrl]);
 
   // One token for both modes: the credential for whichever service the URL
-  // names. Switching mode on a saved datasource therefore points the same
-  // URL and token at a different service, and Save & test says so until they
-  // are re-entered — clearer than carrying two half-filled sets around.
+  // names. A mode switch clears it (see the Mode picker), so a credential is
+  // re-entered for the new service rather than carried across.
   const onTokenChange = (event: ChangeEvent<HTMLInputElement>) => {
     onOptionsChange({ ...options, secureJsonData: { ...secureJsonData, apiToken: event.target.value } });
   };
@@ -124,7 +123,20 @@ export function ConfigEditor(props: Props) {
             width={40}
             options={MODE_OPTIONS}
             value={mode}
-            onChange={(v) => onJsonChange({ mode: (v.value ?? 'netbox') as ProviderMode })}
+            onChange={(v) => {
+              // Switching mode is switching service. The one token field would
+              // otherwise carry the old service's credential over, and the
+              // moment the URL is pointed at the new service it would be sent
+              // to a host it was never issued for. Cleared here, so it has to
+              // be re-entered; Save & test says "API token is missing" until
+              // then.
+              onOptionsChange({
+                ...options,
+                jsonData: { ...jsonData, mode: (v.value ?? 'netbox') as ProviderMode },
+                secureJsonFields: { ...secureJsonFields, apiToken: false },
+                secureJsonData: { ...secureJsonData, apiToken: '' },
+              });
+            }}
           />
         </InlineField>
 

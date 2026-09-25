@@ -243,6 +243,40 @@ describe('replica-cache mode', () => {
     expect(screen.queryByLabelText(/Max data age/i)).not.toBeInTheDocument();
   });
 
+  // One token field for both modes means a stored NetBox token would otherwise
+  // survive a switch to replica-cache and, the moment the URL is pointed at
+  // the replica, be sent to a service it was never issued for. Switching mode
+  // is switching service, so the credential is cleared and must be re-entered.
+  it('clears the stored token when the mode changes', async () => {
+    const onOptionsChange = jest.fn();
+    render(
+      <ConfigEditor
+        options={
+          {
+            ...makeOptions(
+              { mode: 'netbox', url: 'https://netbox.example.com' },
+              { url: 'https://netbox.example.com' }
+            ),
+            secureJsonFields: { apiToken: true },
+            secureJsonData: { apiToken: 'nbt_unsaved' },
+          } as any
+        }
+        onOptionsChange={onOptionsChange}
+      />
+    );
+    const mode = screen.getByLabelText('Mode');
+    fireEvent.keyDown(mode, { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByText('Replica cache'));
+
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jsonData: expect.objectContaining({ mode: 'replica-cache' }),
+        secureJsonFields: expect.objectContaining({ apiToken: false }),
+        secureJsonData: expect.objectContaining({ apiToken: '' }),
+      })
+    );
+  });
+
   // The differences between the modes live in docs/REPLICA-CACHE.md and in the
   // query editor at the point of failure, not in a warning label on the
   // connection form.

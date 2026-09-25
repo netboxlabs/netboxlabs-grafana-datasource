@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -143,6 +145,27 @@ func TestCheckHealth(t *testing.T) {
 		res, _ := d.CheckHealth(context.Background(), &backend.CheckHealthRequest{})
 		if res.Status != backend.HealthStatusOk {
 			t.Errorf("status = %v, want ok", res.Status)
+		}
+	})
+	// Save & test is read by whoever configures the datasource, and its
+	// message is stored with the datasource; it says what kind of failure
+	// happened and where to look, never the address, port or path the raw
+	// transport error carries. The raw error goes to the server log.
+	t.Run("unreachable NetBox is reported without its address", func(t *testing.T) {
+		raw := fmt.Errorf("request failed: %w", &url.Error{Op: "Get", URL: "http://10.0.0.5:8000/api/status/",
+			Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}})
+		d := newTestDatasource(&fakeProvider{healthErr: raw})
+		res, _ := d.CheckHealth(context.Background(), &backend.CheckHealthRequest{})
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("status = %v, want error", res.Status)
+		}
+		if !strings.Contains(res.Message, "refused") || !strings.Contains(res.Message, "log") {
+			t.Errorf("message = %q, want the cause and where the detail is", res.Message)
+		}
+		for _, leak := range []string{"10.0.0.5", "8000", "/api/status", "dial tcp"} {
+			if strings.Contains(res.Message, leak) {
+				t.Errorf("message %q leaks %q", res.Message, leak)
+			}
 		}
 	})
 }

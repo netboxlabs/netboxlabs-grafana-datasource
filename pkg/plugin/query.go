@@ -2,12 +2,16 @@ package plugin
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
+	"io"
+	"net"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
@@ -471,47 +475,132 @@ func healthErrorMessage(err error) string {
 		}
 		return fmt.Sprintf("NetBox returned HTTP %d", u.Status)
 	}
-	return "Cannot reach NetBox: " + upstreamDetail(err)
+	return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
 }
 
-// maxUpstreamDetail bounds the free-form tail of a user-facing error. It matches
-// netbox.snippet()'s and truncateURL's cap for the same reason: these strings
-// land side by side in the same Grafana toast.
+// maxUpstreamDetail bounds a user-supplied string echoed in a user-facing
+// error (an object type name). It matches netbox.snippet()'s and truncateURL's
+// cap for the same reason: these strings land side by side in the same
+// Grafana toast.
 const maxUpstreamDetail = 300
 
-// upstreamDetail renders a non-APIError upstream failure — a transport error, a
-// decode error — as a BOUNDED string that still names the actual cause.
+// transportCause names why a request never got an answer, in words that carry
+// no address, port, path or raw error text.
 //
-// The APIError path was already sanitized; this one was not, and that is the
-// whole bug. A transport error is not an APIError, so it fell straight through
-// to err.Error() verbatim and netbox.truncateURL (added on this branch for
-// exactly this) never ran. Measured on the commonest failure there is — NetBox
-// unreachable, 400 IPs — the toast was 12,480 characters of repeated ?address=
-// parameters with "connection refused" at the very end.
+// The raw error is the operator's to read: it goes to the Grafana server log
+// in full on every path that calls this (queryErrorResponse, CheckHealth). It
+// is not something a panel toast or Save & test should print to every viewer,
+// and the plugin catalogue review said so — a transport error such as
+// `dial tcp 172.20.0.6:9999: connect: connection refused` names the host and
+// port NetBox listens on to anyone who can open the dashboard.
 //
-// Head-truncating that string would have cut off the one part worth reading, so
-// a *url.Error is UNWRAPPED to its cause instead: url.Error.Error() is
-// `Get "<url>": <cause>`, and the cause ("dial tcp 172.20.0.6:9999: connect:
-// connection refused") is short, specific, and free of the request line. Errors
-// that are not url.Errors are truncated instead — they have no comparable
-// structure, and their URL, when they carry one, is already truncateURL'd at the
-// client layer.
-//
-// The raw error still reaches the operator log in full via queryErrorResponse.
-func upstreamDetail(err error) string {
+// So the cause is a CATEGORY, decided from the error's type where Go gives it
+// one (DNS, refused, timeout, certificate, unreadable body) and from its words
+// for a plain-string error a client layer wrapped; either way only this
+// function's own sentences are emitted. Each sentence says what the reader
+// can act on: the URL, the timeout, the TLS setting.
+func transportCause(err error) string {
 	if err == nil {
 		return ""
 	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) && urlErr.Err != nil {
-		err = urlErr.Err
+	var (
+		dnsErr  *net.DNSError
+		netErr  net.Error
+		hdrErr  tls.RecordHeaderError
+		verErr  *tls.CertificateVerificationError
+		unkErr  x509.UnknownAuthorityError
+		hostErr x509.HostnameError
+		certErr x509.CertificateInvalidError
+		synErr  *json.SyntaxError
+		typeErr *json.UnmarshalTypeError
+	)
+	// Structured causes first, the more specific type before the more generic
+	// one, and a timeout before anything a timeout can also be: a resolver
+	// that never answers is a *net.DNSError and a stalled TLS handshake says
+	// "TLS handshake", but both implement net.Error with Timeout() true, and
+	// "timed out" is the sentence the reader can act on.
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
+		return causeTimeout
+	case errors.As(err, &dnsErr):
+		return causeUnresolved
+	case errors.As(err, &verErr) || errors.As(err, &unkErr) || errors.As(err, &hostErr) || errors.As(err, &certErr):
+		return causeCertificate
+	case errors.As(err, &hdrErr):
+		return causeNoTLS
+	case errors.Is(err, context.Canceled):
+		return "the request was cancelled"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return causeRefused
+	case errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH):
+		return causeUnreachable
+	case errors.Is(err, syscall.ECONNRESET):
+		return causeReset
+	case errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF):
+		// Raised while READING a body whose connection closed early (the client
+		// wraps it as "read body …"), before any decoding: a transport failure,
+		// not a response in the wrong shape.
+		return causeClosed
+	case errors.As(err, &synErr) || errors.As(err, &typeErr):
+		return causeNotJSON
 	}
-	s := err.Error()
-	if len(s) > maxUpstreamDetail {
-		return s[:maxUpstreamDetail] + "…"
+	// Words, for an error that carried no structure — a plain string a client
+	// layer wrapped — and only the words of the INNERMOST cause: every wrapper
+	// on the way in (a url.Error's request line, the client's "read body
+	// <url>: …") names the request, and a filter value in it would pick the
+	// category. Same order as above, for the same reason.
+	cause := err
+	for {
+		next := errors.Unwrap(cause)
+		if next == nil {
+			break
+		}
+		cause = next
 	}
-	return s
+	words := strings.ToLower(cause.Error())
+	has := func(subs ...string) bool {
+		for _, sub := range subs {
+			if strings.Contains(words, sub) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case has("no such host", "server misbehaving"):
+		return causeUnresolved
+	case has("certificate"):
+		return causeCertificate
+	case has("timeout", "timed out", "deadline exceeded"):
+		return causeTimeout
+	case has("tls handshake", "http response to https"):
+		return causeNoTLS
+	case has("connection refused"):
+		return causeRefused
+	case has("unreachable", "no route to host"): // EHOSTUNREACH's own words
+		return causeUnreachable
+	case has("connection reset"):
+		return causeReset
+	case has("unexpected eof", "closed"):
+		return causeClosed
+	case has("json"):
+		return causeNotJSON
+	}
+	return "the request failed"
 }
+
+// The sentences transportCause emits, each saying what the reader can act on.
+const (
+	causeUnresolved  = "the hostname could not be resolved"
+	causeCertificate = "the TLS certificate could not be verified (Skip TLS verify accepts self-signed certificates)"
+	causeTimeout     = "the request timed out (raise Timeout in the datasource settings if NetBox is slow)"
+	causeNoTLS       = "the server did not answer with TLS (check the URL scheme)"
+	causeRefused     = "the connection was refused"
+	causeUnreachable = "the host is unreachable"
+	causeReset       = "the connection was reset"
+	causeClosed      = "the connection closed before the response was complete"
+	causeNotJSON     = "the response could not be read as JSON (is this the NetBox base URL, not a proxy or login page?)"
+)
 
 // queryErrorMessage maps an upstream error to a concise, user-facing message so
 // raw NetBox API errors (500/405/etc.) and exception bodies aren't surfaced to
@@ -551,7 +640,7 @@ func queryErrorMessage(err error) string {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
 		}
 	}
-	return "Couldn't reach NetBox: " + upstreamDetail(err)
+	return "Couldn't reach NetBox: " + transportCause(err) + ". The Grafana server log has the full error."
 }
 
 // queryErrorResponse logs the raw upstream error (sanitized) and returns a data

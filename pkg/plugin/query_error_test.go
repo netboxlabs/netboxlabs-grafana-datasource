@@ -170,7 +170,13 @@ func TestTransportCause(t *testing.T) {
 		{"tls verification", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, "certificate"},
 		{"plain http to https port", tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}, "TLS"},
 		{"json syntax", fmt.Errorf("decode http://nb/api/: %w", &json.SyntaxError{Offset: 1}), "JSON"},
-		{"truncated body", io.ErrUnexpectedEOF, "JSON"},
+		{"truncated body", fmt.Errorf("read body http://nb/api/: %w", io.ErrUnexpectedEOF), "complete"},
+		// A handshake that stalls is a TIMEOUT (net.Error with Timeout()), even
+		// though its text says "TLS handshake"; the scheme advice would be wrong.
+		{"tls handshake timeout", &url.Error{Op: "Get", URL: "https://nb/api/", Err: timeoutErr("net/http: TLS handshake timeout")}, "timed out"},
+		// The words are read only from the CAUSE: the request line a url.Error
+		// carries is not evidence, or a filter value would pick the category.
+		{"marker word in the request URL", &url.Error{Op: "Get", URL: "http://nb/api/dcim/devices/?name=certificate&q=json", Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}, "refused"},
 		{"plain string refused", errors.New("dial tcp 172.20.0.6:9999: connect: connection refused"), "refused"},
 		{"plain string no such host", errors.New("dial tcp: lookup netbox.internal: no such host"), "resolved"},
 		{"unknown", errors.New("something else entirely"), "request failed"},
@@ -192,6 +198,14 @@ func TestTransportCause(t *testing.T) {
 		t.Errorf("nil error → %q, want empty", got)
 	}
 }
+
+// timeoutErr is what net/http returns for a stalled handshake: a net.Error
+// whose Timeout() is true and whose text mentions TLS.
+type timeoutErr string
+
+func (e timeoutErr) Error() string   { return string(e) }
+func (e timeoutErr) Timeout() bool   { return true }
+func (e timeoutErr) Temporary() bool { return true }
 
 // TestIsAlertRequest pins the header read. The SDK's GetHTTPHeader cannot be used
 // here: backend/http_headers.go only surfaces the OAuth/cookie keys and keys

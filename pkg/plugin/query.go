@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"slices"
 	"strings"
 	"syscall"
@@ -506,6 +507,7 @@ func transportCause(err error) string {
 	var (
 		dnsErr  *net.DNSError
 		netErr  net.Error
+		urlErr  *url.Error
 		hdrErr  tls.RecordHeaderError
 		verErr  *tls.CertificateVerificationError
 		unkErr  x509.UnknownAuthorityError
@@ -513,43 +515,87 @@ func transportCause(err error) string {
 		certErr x509.CertificateInvalidError
 		synErr  *json.SyntaxError
 		typeErr *json.UnmarshalTypeError
-		// The words are read only when a type check has not already decided,
-		// and only once: stringifying comes last, not first.
-		lowered  string
-		contains = func(subs ...string) bool {
-			if lowered == "" {
-				lowered = strings.ToLower(err.Error())
-			}
-			for _, sub := range subs {
-				if strings.Contains(lowered, sub) {
-					return true
-				}
-			}
-			return false
-		}
 	)
+	// Structured causes first, the more specific type before the more generic
+	// one: a stalled TLS handshake is a net.Error timeout whose text mentions
+	// TLS, so the timeout arm precedes the handshake arm.
 	switch {
-	case errors.As(err, &dnsErr) || contains("no such host", "server misbehaving"):
-		return "the hostname could not be resolved"
-	case errors.As(err, &verErr) || errors.As(err, &unkErr) || errors.As(err, &hostErr) || errors.As(err, &certErr) || contains("certificate"):
-		return "the TLS certificate could not be verified (Skip TLS verify accepts self-signed certificates)"
-	case errors.As(err, &hdrErr) || contains("tls handshake", "http response to https"):
-		return "the server did not answer with TLS (check the URL scheme)"
-	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) || contains("timeout", "timed out", "deadline exceeded"):
-		return "the request timed out (raise Timeout in the datasource settings if NetBox is slow)"
+	case errors.As(err, &dnsErr):
+		return causeUnresolved
+	case errors.As(err, &verErr) || errors.As(err, &unkErr) || errors.As(err, &hostErr) || errors.As(err, &certErr):
+		return causeCertificate
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
+		return causeTimeout
+	case errors.As(err, &hdrErr):
+		return causeNoTLS
 	case errors.Is(err, context.Canceled):
 		return "the request was cancelled"
-	case errors.Is(err, syscall.ECONNREFUSED) || contains("connection refused"):
-		return "the connection was refused"
-	case errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) || contains("unreachable"):
-		return "the host is unreachable"
-	case errors.Is(err, syscall.ECONNRESET) || contains("connection reset"):
-		return "the connection was reset"
-	case errors.As(err, &synErr) || errors.As(err, &typeErr) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) || contains("json", "unexpected eof"):
-		return "the response could not be read as JSON (is this the NetBox base URL, not a proxy or login page?)"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return causeRefused
+	case errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH):
+		return causeUnreachable
+	case errors.Is(err, syscall.ECONNRESET):
+		return causeReset
+	case errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF):
+		// Raised while READING a body whose connection closed early (the client
+		// wraps it as "read body …"), before any decoding: a transport failure,
+		// not a response in the wrong shape.
+		return causeClosed
+	case errors.As(err, &synErr) || errors.As(err, &typeErr):
+		return causeNotJSON
+	}
+	// Words, for an error that carried no structure — a plain string a client
+	// layer wrapped — and only the words of its CAUSE: the request line a
+	// url.Error carries is not evidence, or a filter value would pick the
+	// category. Same order as above, for the same reason.
+	cause := err
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		cause = urlErr.Err
+	}
+	words := strings.ToLower(cause.Error())
+	has := func(subs ...string) bool {
+		for _, sub := range subs {
+			if strings.Contains(words, sub) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case has("no such host", "server misbehaving"):
+		return causeUnresolved
+	case has("certificate"):
+		return causeCertificate
+	case has("timeout", "timed out", "deadline exceeded"):
+		return causeTimeout
+	case has("tls handshake", "http response to https"):
+		return causeNoTLS
+	case has("connection refused"):
+		return causeRefused
+	case has("unreachable"):
+		return causeUnreachable
+	case has("connection reset"):
+		return causeReset
+	case has("unexpected eof", "closed"):
+		return causeClosed
+	case has("json"):
+		return causeNotJSON
 	}
 	return "the request failed"
 }
+
+// The sentences transportCause emits, each saying what the reader can act on.
+const (
+	causeUnresolved  = "the hostname could not be resolved"
+	causeCertificate = "the TLS certificate could not be verified (Skip TLS verify accepts self-signed certificates)"
+	causeTimeout     = "the request timed out (raise Timeout in the datasource settings if NetBox is slow)"
+	causeNoTLS       = "the server did not answer with TLS (check the URL scheme)"
+	causeRefused     = "the connection was refused"
+	causeUnreachable = "the host is unreachable"
+	causeReset       = "the connection was reset"
+	causeClosed      = "the connection closed before the response was complete"
+	causeNotJSON     = "the response could not be read as JSON (is this the NetBox base URL, not a proxy or login page?)"
+)
 
 // queryErrorMessage maps an upstream error to a concise, user-facing message so
 // raw NetBox API errors (500/405/etc.) and exception bodies aren't surfaced to

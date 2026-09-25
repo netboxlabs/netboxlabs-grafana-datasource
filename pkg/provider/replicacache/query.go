@@ -46,13 +46,17 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// request judged against that entity's catalogue entry — it has no
 	// columns until ingested, so every filter would be refused as "no such
 	// column", the wrong subject. The bare request goes, and the service
-	// answers for itself: 404 while unfed, its own validation once fed.
+	// answers for itself: 404 while unfed, its own validation once fed. The
+	// one thing judged without columns is the operator vocabulary, which is
+	// the build's (validateTextOperators).
 	var plan request
 	if e.Ingested {
 		if err := validateFilters(spec.Filters, e, c); err != nil {
 			return nil, err
 		}
 		plan = planRequest(e, spec)
+	} else if err := validateTextOperators(spec.Filters, c); err != nil {
+		return nil, err
 	}
 
 	// expand= goes with every query, count-only included: a filter on an

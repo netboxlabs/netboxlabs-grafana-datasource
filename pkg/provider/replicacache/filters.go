@@ -10,8 +10,11 @@ import (
 )
 
 // The operator vocabulary in provider.Filter is NetBox's set of DRF lookups.
-// replica-cache implements a much smaller one — eq, in, isnull, ilike, gt, lt —
-// and its own documentation is explicit that gte/lte are absent.
+// replica-cache implements a much smaller one — eq, in, isnull, ilike, gt, lt,
+// and on a build with DATA-408 the anchored text matches istartswith,
+// iendswith and iexact — and its own documentation is explicit that gte/lte
+// are absent. Which of them a column takes is the catalogue's word, per
+// column, and nothing is offered or sent that it does not list.
 //
 // Rather than widen the seam's vocabulary for the smaller backend, this file
 // translates what it can and REFUSES what it cannot. Refusing matters more than
@@ -31,6 +34,19 @@ const (
 	opEmpty   = "empty"
 	opNEmpty  = "nempty"
 )
+
+// wireTextOperator is the service's name for each of the seam's text matches.
+// ilike is a case-insensitive CONTAINS on the literal value (measured:
+// ilike=core matched CORE-N9504-01, while %core% matched nothing); the other
+// three are DATA-408's anchored and whole-value matches, literal and
+// case-insensitive in the same way. Every value goes as written: there is
+// nothing to wrap and nothing to escape.
+var wireTextOperator = map[string]string{
+	opIContns: "ilike",
+	opIStarts: "istartswith",
+	opIEnds:   "iendswith",
+	opIExact:  "iexact",
+}
 
 // UnsupportedFilterError is a filter the backend cannot express. It is the
 // user's input rather than an upstream failure, so it classifies as a bad
@@ -131,24 +147,19 @@ func buildFilterValues(filters []provider.Filter) (url.Values, error) {
 			}
 			seen[key] = true
 			q.Set(param(f.Field, op), values[0])
-		case opIExact, opIStarts, opIEnds:
-			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: textMatchReason}
-		case opIContns:
+		case opIContns, opIStarts, opIEnds, opIExact:
 			if len(values) > 1 {
 				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 					Reason: "this backend cannot combine several values for a text match; select one value or filter on equality"}
 			}
-			key := f.Field + "|ilike"
+			wire := wireTextOperator[op]
+			key := f.Field + "|" + wire
 			if seen[key] {
 				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-					Reason: "two text matches are applied to this field; this backend cannot combine them, so remove one"}
+					Reason: "the same text match is applied twice to this field; this backend cannot combine them, so remove one"}
 			}
 			seen[key] = true
-			// The value goes as written. The backend's ilike is a
-			// case-insensitive contains on the LITERAL value — measured:
-			// ilike=core matched CORE-N9504-01, while %core% matched nothing —
-			// so there is nothing to wrap and nothing to escape.
-			q.Set(param(f.Field, "ilike"), values[0])
+			q.Set(param(f.Field, wire), values[0])
 		default:
 			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 				Reason: "this backend supports only equality, text match, greater/less than and is-empty"}
@@ -175,10 +186,12 @@ func param(field, op string) string {
 	return "filter[" + field + "]__" + op
 }
 
-// textMatchReason is why an anchored or whole-value text match is refused:
-// the backend's one text match is a contains, and every near-miss (send the
-// value and hope) matches MORE rows than asked for while looking healthy.
-const textMatchReason = "this backend's only text match is a case-insensitive contains: it cannot anchor a match to the start or end of a value, nor compare whole values case-insensitively. Use contains, equality (which is case-sensitive), or a datasource in NetBox mode"
+// textMatchReason is why an anchored or whole-value text match is refused on
+// a replica whose catalogue lists ilike alone: its one text match is a
+// contains, and every near-miss (send the value and hope) matches MORE rows
+// than asked for while looking healthy. A build that lists istartswith,
+// iendswith and iexact (DATA-408) never gets here.
+const textMatchReason = "this replica's only text match is a case-insensitive contains: it cannot anchor a match to the start or end of a value, nor compare whole values case-insensitively (a newer replica-cache build adds those). Use contains, equality (which is case-sensitive), or a datasource in NetBox mode"
 
 func splitValues(s string) []string {
 	var out []string
@@ -199,21 +212,22 @@ func boolString(b bool) string {
 
 // seamOperators translates a catalogue column's operators into the editor's
 // tokens. eq and in collapse to "" (the editor sends a CSV for several
-// values); ilike is the contains match and nothing else; isnull becomes
-// empty/nempty only where "empty" and NULL coincide — a nullable non-text
-// column. On text the two diverge (see emptyOnTextReason), and on a NOT NULL
-// column nothing is ever empty.
+// values); each text match is offered exactly when the catalogue lists its
+// wire name (ilike is the contains match and nothing else; the anchored
+// matches arrive with DATA-408); isnull becomes empty/nempty only where
+// "empty" and NULL coincide — a nullable non-text column. On text the two
+// diverge (see emptyOnTextReason), and on a NOT NULL column nothing is ever
+// empty.
 func seamOperators(col column) []string {
 	var out []string
 	has := func(op string) bool { return slices.Contains(col.Operators, op) }
 	if has("eq") || has("in") {
 		out = append(out, opExact)
 	}
-	if has("ilike") {
-		// ilike is a case-insensitive CONTAINS on the literal value, so it is
-		// offered as exactly that; starts-with, ends-with and case-insensitive
-		// equality have no expression here (see textMatchReason).
-		out = append(out, opIContns)
+	for _, op := range []string{opIContns, opIStarts, opIEnds, opIExact} {
+		if has(wireTextOperator[op]) {
+			out = append(out, op)
+		}
 	}
 	if has("gt") {
 		out = append(out, opGT)
@@ -269,7 +283,11 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 		} else {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: "this replica has no such column to filter on"}
 		}
-		if (op == opIExact || op == opIStarts || op == opIEnds) && slices.Contains(col.Operators, "ilike") {
+		// An anchored match on a text column of a replica that lists only
+		// ilike gets the reason that names what does work, not the generic
+		// "does not take that operator".
+		if wire, anchored := wireTextOperator[op]; anchored && op != opIContns &&
+			slices.Contains(col.Operators, "ilike") && !slices.Contains(col.Operators, wire) {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: textMatchReason}
 		}
 		if op == opEmpty || op == opNEmpty {
@@ -292,6 +310,9 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 // target entity's own column when the catalogue has it (it lists every served
 // entity), else a text stand-in — every declared target column (name, slug,
 // label, address, prefix, cid, model, mac_address, ssid) is text in NetBox.
+// The stand-in takes the text matches the BUILD offers (see offersOperator),
+// so it neither withholds an anchored match a DATA-408 build has nor sends
+// one to a build that lacks it.
 func targetColumn(c *catalog, ref *reference, name string) column {
 	if c != nil {
 		if t, ok := c.Entities[strings.TrimPrefix(ref.Path, "/v1/")]; ok {
@@ -300,7 +321,54 @@ func targetColumn(c *catalog, ref *reference, name string) column {
 			}
 		}
 	}
-	return column{Name: name, Type: "VARCHAR", Nullable: true, Operators: []string{"eq", "gt", "lt", "in", "isnull", "ilike"}}
+	ops := []string{"eq", "gt", "lt", "in", "isnull", "ilike"}
+	for _, op := range []string{opIStarts, opIEnds, opIExact} {
+		if c.offersOperator(wireTextOperator[op]) {
+			ops = append(ops, wireTextOperator[op])
+		}
+	}
+	return column{Name: name, Type: "VARCHAR", Nullable: true, Operators: ops}
+}
+
+// offersOperator reports whether this replica-cache BUILD has a filter
+// operator: the catalogue is derived from the handler's own operator specs,
+// so an operator listed on any column anywhere is one the handler knows, and
+// one listed nowhere is one it refuses. It stands in for a per-column answer
+// where there is no column to ask — an entity not yet fed has none — and
+// only the text matches are ever asked about.
+func (c *catalog) offersOperator(wire string) bool {
+	if c == nil {
+		return false
+	}
+	for _, e := range c.Entities {
+		for _, col := range e.Columns {
+			if slices.Contains(col.Operators, wire) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// validateTextOperators is the part of validateFilters that needs no column:
+// an anchored text match on a build whose catalogue lists it nowhere is
+// refused before sending, with the reason that names what does work. It runs
+// for an entity the catalogue has as unfed — validateFilters cannot, that
+// entry has no columns — because the vocabulary is the build's, not the
+// entity's, and the request would otherwise go out to be answered with a bare
+// HTTP 400 the moment the entity is fed.
+func validateTextOperators(filters []provider.Filter, c *catalog) error {
+	for _, f := range filters {
+		op := f.Operator
+		wire, isText := wireTextOperator[op]
+		if f.Field == "" || !isText || op == opIContns || len(splitValues(f.Value)) == 0 {
+			continue
+		}
+		if !c.offersOperator(wire) {
+			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: textMatchReason}
+		}
+	}
+	return nil
 }
 
 // emptyOnTextReason is the DATA-206 refusal, stated from the catalogue: the

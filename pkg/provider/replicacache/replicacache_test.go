@@ -920,6 +920,40 @@ func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 	}
 }
 
+// A replica that lists DATA-408's operators gets them offered, on text columns
+// and expanded names only; the translator accepts every one advertised.
+func TestFilterFields_OffersAnchoredMatchesWhenTheCatalogueListsThem(t *testing.T) {
+	f := newFakeService()
+	f.schema = withAnchoredText(devicesSchema())
+	p := newTestProvider(t, f)
+	ff, err := p.FilterFields(context.Background(), "dcim/devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := map[string][]string{}
+	for _, x := range ff {
+		ops[x.Name] = x.Operators
+	}
+	for name, want := range map[string][]string{
+		"name":      {"", "ic", "isw", "iew", "ie", "gt", "lt"},
+		"site":      {"", "ic", "isw", "iew", "ie", "gt", "lt"},
+		"site_slug": {"", "ic", "isw", "iew", "ie", "gt", "lt"},
+		"id":        {"", "gt", "lt"},
+		"position":  {"", "gt", "lt", "empty", "nempty"},
+	} {
+		if !slices.Equal(ops[name], want) {
+			t.Errorf("%s: %v, want %v", name, ops[name], want)
+		}
+	}
+	for name, list := range ops {
+		for _, op := range list {
+			if _, err := buildFilterValues([]provider.Filter{{Field: name, Operator: op, Value: "1"}}); err != nil {
+				t.Errorf("%s advertises %q but the translator rejects it: %v", name, op, err)
+			}
+		}
+	}
+}
+
 // Deep links point at the NetBox the replica reports it mirrors — the one
 // source, since a cache-mode datasource is not configured with a NetBox URL
 // any more (DATA-320 makes every tenant report one). A replica that reports

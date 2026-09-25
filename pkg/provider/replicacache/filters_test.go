@@ -46,6 +46,23 @@ func TestBuildFilterValues(t *testing.T) {
 			want:    map[string]string{"filter[name]__ilike": "50%"},
 		},
 		{
+			// DATA-408: the anchored and whole-value matches are separate
+			// operators with Django's lookup names, literal like ilike.
+			name:    "starts-with becomes istartswith, value bare",
+			filters: []provider.Filter{{Field: "name", Operator: "isw", Value: "core"}},
+			want:    map[string]string{"filter[name]__istartswith": "core"},
+		},
+		{
+			name:    "ends-with becomes iendswith",
+			filters: []provider.Filter{{Field: "name", Operator: "iew", Value: "-01"}},
+			want:    map[string]string{"filter[name]__iendswith": "-01"},
+		},
+		{
+			name:    "case-insensitive equality becomes iexact",
+			filters: []provider.Filter{{Field: "name", Operator: "ie", Value: "core-n9504-01"}},
+			want:    map[string]string{"filter[name]__iexact": "core-n9504-01"},
+		},
+		{
 			name:    "empty asks isnull true",
 			filters: []provider.Filter{{Field: "tenant_id", Operator: "empty"}},
 			want:    map[string]string{"filter[tenant_id]__isnull": "true"},
@@ -84,19 +101,19 @@ func TestBuildFilterValues(t *testing.T) {
 	}
 }
 
-// The backend's one text match is a contains: it cannot anchor to the start or
-// end of a value, nor compare whole values case-insensitively. Each of these
-// has a tempting near-miss (send the value and hope), and every near-miss
-// matches MORE rows than asked for while looking healthy.
-func TestBuildFilterValuesRefusesAnchoredAndWholeValueTextMatches(t *testing.T) {
-	for _, op := range []string{opIExact, opIStarts, opIEnds} {
-		_, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: op, Value: "core"}})
+// No text match can be unioned: replica-cache has no OR, so "name starts with
+// A or B" has no expression. Each of the four is refused for several values,
+// and for a repeat on one field, rather than narrowed to the first value.
+func TestBuildFilterValuesRefusesSeveralValuesForAnyTextMatch(t *testing.T) {
+	for _, op := range []string{opIContns, opIExact, opIStarts, opIEnds} {
+		_, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: op, Value: "core, spine"}})
 		var unsupported *UnsupportedFilterError
-		if !errors.As(err, &unsupported) {
-			t.Fatalf("%q: want *UnsupportedFilterError, got %v", op, err)
+		if !errors.As(err, &unsupported) || !strings.Contains(unsupported.Reason, "several values") {
+			t.Fatalf("%q with two values: want the several-values refusal, got %v", op, err)
 		}
-		if !strings.Contains(unsupported.Reason, "contains") {
-			t.Errorf("%q: the reason should point at the match that does work: %q", op, unsupported.Reason)
+		_, err = buildFilterValues([]provider.Filter{{Field: "name", Operator: op, Value: "core"}, {Field: "name", Operator: op, Value: "spine"}})
+		if !errors.As(err, &unsupported) || !strings.Contains(unsupported.Reason, "applied twice") {
+			t.Fatalf("%q twice on one field: want the applied-twice refusal, got %v", op, err)
 		}
 	}
 }
@@ -291,6 +308,10 @@ func TestSeamOperators_TranslateTheCatalogue(t *testing.T) {
 		want []string
 	}{
 		{"nullable text", column{Type: "VARCHAR", Nullable: true, Operators: text}, []string{"", "ic", "gt", "lt"}},
+		// DATA-408: a replica that lists the anchored matches gets them offered,
+		// in the editor's tokens; one that lists only ilike does not (above).
+		{"text with the anchored matches", column{Type: "VARCHAR", Nullable: true, Operators: append(slices.Clone(text), "istartswith", "iendswith", "iexact")},
+			[]string{"", "ic", "isw", "iew", "ie", "gt", "lt"}},
 		{"nullable number", column{Type: "BIGINT", Nullable: true, Operators: all}, []string{"", "gt", "lt", "empty", "nempty"}},
 		{"not null number", column{Type: "BIGINT", Operators: all}, []string{"", "gt", "lt"}},
 		{"nullable timestamp", column{Type: "TIMESTAMP WITH TIME ZONE", Nullable: true, Operators: all}, []string{"", "gt", "lt", "empty", "nempty"}},
@@ -325,6 +346,7 @@ func TestValidateFilters_AgainstTheCatalogue(t *testing.T) {
 		{"expanded slug, contains", provider.Filter{Field: "site_slug", Operator: "ic", Value: "ams"}, true},
 		{"starts-with is not a match this backend has", provider.Filter{Field: "name", Operator: "isw", Value: "core"}, false},
 		{"case-insensitive equality neither", provider.Filter{Field: "name", Operator: "ie", Value: "core"}, false},
+		{"nor on an expanded name", provider.Filter{Field: "site", Operator: "isw", Value: "dc-"}, false},
 		{"unavailable expansion", provider.Filter{Field: "platform", Value: "x"}, false},
 		{"cf_ is not filterable", provider.Filter{Field: "cf_lifecycle_phase", Value: "x"}, false},
 		{"blank row is ignored", provider.Filter{Field: "", Value: ""}, true},
@@ -349,13 +371,59 @@ func TestValidateFilters_AgainstTheCatalogue(t *testing.T) {
 	}
 }
 
-// A saved query with an anchored match is told what does work here, in the
-// same words buildFilterValues uses, whichever check meets it first.
+// A saved query with an anchored match is told what does work on this
+// replica, not the generic "does not take that operator".
 func TestValidateFilters_ExplainsTheTextMatchLimit(t *testing.T) {
 	c := catalogFromFake(t, devicesSchema())
 	err := validateFilters([]provider.Filter{{Field: "name", Operator: "isw", Value: "core"}}, c.Entities["dcim/devices"], c)
 	if err == nil || !strings.Contains(err.Error(), "contains") {
 		t.Errorf("the refusal should point at the match that does work: %v", err)
+	}
+}
+
+// A replica that lists the anchored matches (DATA-408) takes them on the
+// columns it lists them for — stored text, and an expanded name whose target
+// column lists them — and on nothing else.
+func TestValidateFilters_AcceptsAnchoredMatchesTheCatalogueLists(t *testing.T) {
+	c := catalogFromFake(t, withAnchoredText(devicesSchema()))
+	e := c.Entities["dcim/devices"]
+	for _, tc := range []struct {
+		name string
+		f    provider.Filter
+		ok   bool
+	}{
+		{"starts-with on text", provider.Filter{Field: "name", Operator: "isw", Value: "core"}, true},
+		{"ends-with on text", provider.Filter{Field: "name", Operator: "iew", Value: "-01"}, true},
+		{"case-insensitive equality on text", provider.Filter{Field: "name", Operator: "ie", Value: "core"}, true},
+		{"starts-with on an expanded name", provider.Filter{Field: "site", Operator: "isw", Value: "dc-"}, true},
+		{"ends-with on an expanded slug", provider.Filter{Field: "site_slug", Operator: "iew", Value: "-east"}, true},
+		{"starts-with on a number", provider.Filter{Field: "id", Operator: "isw", Value: "1"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateFilters([]provider.Filter{tc.f}, e, c); (err == nil) != tc.ok {
+				t.Fatalf("err = %v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+}
+
+// The catalogue lists every served entity, so an expansion's target is
+// normally there; when it is not, the stand-in text column takes what the
+// BUILD offers — the anchored matches on a DATA-408 build — so a filter on it
+// is neither refused for the wrong reason nor sent to a build that lacks it.
+func TestValidateFilters_StandInTargetFollowsTheBuild(t *testing.T) {
+	f := provider.Filter{Field: "site", Operator: "isw", Value: "dc-"}
+	anchored := withAnchoredText(devicesSchema())
+	delete(anchored.Entities, "/v1/dcim/sites")
+	c := catalogFromFake(t, anchored)
+	if err := validateFilters([]provider.Filter{f}, c.Entities["dcim/devices"], c); err != nil {
+		t.Errorf("a DATA-408 build takes starts-with on a stand-in: %v", err)
+	}
+	plain := devicesSchema()
+	delete(plain.Entities, "/v1/dcim/sites")
+	c = catalogFromFake(t, plain)
+	if err := validateFilters([]provider.Filter{f}, c.Entities["dcim/devices"], c); err == nil || !strings.Contains(err.Error(), "contains") {
+		t.Errorf("a pre-408 build refuses it, pointing at contains: %v", err)
 	}
 }
 

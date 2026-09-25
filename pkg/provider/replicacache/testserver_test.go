@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -269,9 +270,39 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "unknown column: "+col)
 			return
 		}
-		if c, isStored := stored[col]; op == "ilike" && isStored && c.Type != "VARCHAR" {
-			writeErr(w, 400, fmt.Sprintf("operator ilike requires a text column: %s is %s", col, c.Type))
-			return
+		// An expanded name filters on the target's column, so it is gated by
+		// that column's catalogue entry, as a stored one is by its own.
+		c, isStored := stored[col]
+		if !isStored {
+			for _, x := range expansions {
+				tc := ""
+				if col == x.key {
+					tc = x.cols[0]
+				} else if strings.HasPrefix(col, x.key+"_") && slices.Contains(x.cols[1:], strings.TrimPrefix(col, x.key+"_")) {
+					tc = strings.TrimPrefix(col, x.key+"_")
+				}
+				if tc == "" {
+					continue
+				}
+				for _, sc := range f.schema.Entities["/v1/"+x.target].Columns {
+					if sc.Name == tc {
+						c, isStored = sc, true
+					}
+				}
+			}
+		}
+		if isStored {
+			if isTextOperator(op) && c.Type != "VARCHAR" {
+				writeErr(w, 400, fmt.Sprintf("operator %s requires a text column: %s is %s", op, col, c.Type))
+				return
+			}
+			// The catalogue is derived from the handler's own operator specs,
+			// so an operator it does not list is one the handler refuses — a
+			// build before DATA-408 answers istartswith this way.
+			if c.Operators != nil && !slices.Contains(c.Operators, op) {
+				writeErr(w, 400, "invalid filter operator: "+op)
+				return
+			}
 		}
 		var keep []map[string]interface{}
 		for _, row := range filtered {
@@ -397,8 +428,20 @@ func matches(v interface{}, op, want string) bool {
 		// The service's ilike is a case-insensitive contains on the literal
 		// value; a % in the value is that character.
 		return strings.Contains(strings.ToLower(s), strings.ToLower(want))
+	// DATA-408: literal and case-insensitive like ilike, anchored.
+	case "istartswith":
+		return strings.HasPrefix(strings.ToLower(s), strings.ToLower(want))
+	case "iendswith":
+		return strings.HasSuffix(strings.ToLower(s), strings.ToLower(want))
+	case "iexact":
+		return strings.EqualFold(s, want)
 	}
 	return true
+}
+
+// isTextOperator is the service's type gate: these four bind VARCHAR alone.
+func isTextOperator(op string) bool {
+	return op == "ilike" || slices.Contains(anchoredTextOperators, op)
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
@@ -525,6 +568,25 @@ func devicesSchema() *fakeSchema {
 }
 
 func strp(s string) *string { return &s }
+
+// anchoredTextOperators are DATA-408's three operators: case-insensitive
+// starts-with, ends-with and exact match, literal like ilike, listed by the
+// catalogue on text columns only.
+var anchoredTextOperators = []string{"istartswith", "iendswith", "iexact"}
+
+// withAnchoredText is a replica-cache build that ships DATA-408: every VARCHAR
+// column of every entity lists the three anchored matches beside ilike.
+func withAnchoredText(s *fakeSchema) *fakeSchema {
+	for path, e := range s.Entities {
+		for i, c := range e.Columns {
+			if c.Type == "VARCHAR" {
+				e.Columns[i].Operators = append(slices.Clone(c.Operators), anchoredTextOperators...)
+			}
+		}
+		s.Entities[path] = e
+	}
+	return s
+}
 
 // addEntity registers an ingested entity with plain columns, for tests that
 // use an object type the devices fixture does not carry. cols is "name:TYPE";

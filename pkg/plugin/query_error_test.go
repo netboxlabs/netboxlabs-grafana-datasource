@@ -1,10 +1,17 @@
 package plugin
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -29,7 +36,7 @@ func TestQueryErrorMessage(t *testing.T) {
 		{"401", &netbox.APIError{Status: 401, Body: "x"}, "Authentication failed", ""},
 		{"403", &netbox.APIError{Status: 403, Body: "x"}, "Authentication failed", ""},
 		{"404", &netbox.APIError{Status: 404, Body: "x"}, "HTTP 404", ""},
-		{"non-api", errors.New("dial tcp: connection refused"), "Couldn't reach NetBox", ""},
+		{"non-api", errors.New("dial tcp 172.20.0.6:9999: connect: connection refused"), "Couldn't reach NetBox", "172.20.0.6"},
 		// A mistyped annotation object type is the user's input, not an outage.
 		// Unclassified it fell through every case above into the transport
 		// message, so "dcim.devices" (the plural, which does not exist) was
@@ -110,27 +117,80 @@ func TestQueryErrorMessage_BatchedTransportFailureIsBounded(t *testing.T) {
 	if len(got) > bound {
 		t.Errorf("message is %d chars, want <= %d\n%s", len(got), bound, got)
 	}
-	if !strings.Contains(got, "connection refused") {
+	if !strings.Contains(got, "refused") {
 		t.Errorf("message %q dropped the actual cause", got)
 	}
-	if strings.Contains(got, "address=") {
-		t.Errorf("message %q still carries the batched request line", got)
+	// The cause is named as a category, never as the raw error: the address,
+	// port and request line the raw error carries are the operator's to read
+	// in the server log, not something every viewer of a panel toast sees.
+	for _, leak := range []string{"address=", "172.20.0.6", "9999", "dial tcp"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("message %q leaks %q", got, leak)
+		}
 	}
 
-	t.Run("health check is bounded the same way", func(t *testing.T) {
-		if msg := healthErrorMessage(err); len(msg) > bound || !strings.Contains(msg, "connection refused") {
+	t.Run("health check is bounded and sanitized the same way", func(t *testing.T) {
+		msg := healthErrorMessage(err)
+		if len(msg) > bound || !strings.Contains(msg, "refused") {
 			t.Errorf("healthErrorMessage = %q (%d chars)", msg, len(msg))
+		}
+		for _, leak := range []string{"172.20.0.6", "9999", "address="} {
+			if strings.Contains(msg, leak) {
+				t.Errorf("healthErrorMessage %q leaks %q", msg, leak)
+			}
 		}
 	})
 
-	t.Run("a non-url.Error is truncated rather than unwrapped", func(t *testing.T) {
-		// Decode errors carry no url.Error to unwrap, so the generic cap is what
-		// bounds them.
+	t.Run("a decode failure names the shape, not the request", func(t *testing.T) {
 		msg := queryErrorMessage(fmt.Errorf("decode %s: unexpected end of JSON input", rawURL))
-		if len(msg) > bound {
-			t.Errorf("message is %d chars, want <= %d", len(msg), bound)
+		if len(msg) > bound || !strings.Contains(msg, "JSON") || strings.Contains(msg, "netbox:9999") {
+			t.Errorf("message = %q (%d chars)", msg, len(msg))
 		}
 	})
+}
+
+// transportCause turns the error behind "cannot reach NetBox" into a sentence
+// that says what kind of failure it was and nothing that identifies the
+// target: no host, port, path or raw error text. Structured net errors are
+// classified by type; a plain-string error (a wrapped message from a client
+// layer) by its words, still emitting only our own sentence.
+func TestTransportCause(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"dns", &net.DNSError{Err: "no such host", Name: "netbox.internal", IsNotFound: true}, "resolved"},
+		{"refused", &url.Error{Op: "Get", URL: "http://10.0.0.5:8000/api/status/", Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}, "refused"},
+		{"unreachable", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH}, "unreachable"},
+		{"timeout", fmt.Errorf("request failed: %w", context.DeadlineExceeded), "timed out"},
+		{"cancelled", context.Canceled, "cancelled"},
+		{"tls unknown authority", x509.UnknownAuthorityError{}, "certificate"},
+		{"tls hostname", x509.HostnameError{Host: "netbox.internal", Certificate: &x509.Certificate{}}, "certificate"},
+		{"tls verification", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, "certificate"},
+		{"plain http to https port", tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}, "TLS"},
+		{"json syntax", fmt.Errorf("decode http://nb/api/: %w", &json.SyntaxError{Offset: 1}), "JSON"},
+		{"truncated body", io.ErrUnexpectedEOF, "JSON"},
+		{"plain string refused", errors.New("dial tcp 172.20.0.6:9999: connect: connection refused"), "refused"},
+		{"plain string no such host", errors.New("dial tcp: lookup netbox.internal: no such host"), "resolved"},
+		{"unknown", errors.New("something else entirely"), "request failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transportCause(tc.err)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("transportCause(%v) = %q, want it to mention %q", tc.err, got, tc.want)
+			}
+			for _, leak := range []string{"10.0.0.5", "8000", "netbox.internal", "172.20.0.6", "9999", "http://", "dial tcp"} {
+				if strings.Contains(got, leak) {
+					t.Errorf("transportCause(%v) = %q leaks %q", tc.err, got, leak)
+				}
+			}
+		})
+	}
+	if got := transportCause(nil); got != "" {
+		t.Errorf("nil error → %q, want empty", got)
+	}
 }
 
 // TestIsAlertRequest pins the header read. The SDK's GetHTTPHeader cannot be used

@@ -2,12 +2,16 @@ package plugin
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
+	"io"
+	"net"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
@@ -471,46 +475,80 @@ func healthErrorMessage(err error) string {
 		}
 		return fmt.Sprintf("NetBox returned HTTP %d", u.Status)
 	}
-	return "Cannot reach NetBox: " + upstreamDetail(err)
+	return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
 }
 
-// maxUpstreamDetail bounds the free-form tail of a user-facing error. It matches
-// netbox.snippet()'s and truncateURL's cap for the same reason: these strings
-// land side by side in the same Grafana toast.
+// maxUpstreamDetail bounds a user-supplied string echoed in a user-facing
+// error (an object type name). It matches netbox.snippet()'s and truncateURL's
+// cap for the same reason: these strings land side by side in the same
+// Grafana toast.
 const maxUpstreamDetail = 300
 
-// upstreamDetail renders a non-APIError upstream failure — a transport error, a
-// decode error — as a BOUNDED string that still names the actual cause.
+// transportCause names why a request never got an answer, in words that carry
+// no address, port, path or raw error text.
 //
-// The APIError path was already sanitized; this one was not, and that is the
-// whole bug. A transport error is not an APIError, so it fell straight through
-// to err.Error() verbatim and netbox.truncateURL (added on this branch for
-// exactly this) never ran. Measured on the commonest failure there is — NetBox
-// unreachable, 400 IPs — the toast was 12,480 characters of repeated ?address=
-// parameters with "connection refused" at the very end.
+// The raw error is the operator's to read: it goes to the Grafana server log
+// in full on every path that calls this (queryErrorResponse, CheckHealth). It
+// is not something a panel toast or Save & test should print to every viewer,
+// and the plugin catalogue review said so — a transport error such as
+// `dial tcp 172.20.0.6:9999: connect: connection refused` names the host and
+// port NetBox listens on to anyone who can open the dashboard.
 //
-// Head-truncating that string would have cut off the one part worth reading, so
-// a *url.Error is UNWRAPPED to its cause instead: url.Error.Error() is
-// `Get "<url>": <cause>`, and the cause ("dial tcp 172.20.0.6:9999: connect:
-// connection refused") is short, specific, and free of the request line. Errors
-// that are not url.Errors are truncated instead — they have no comparable
-// structure, and their URL, when they carry one, is already truncateURL'd at the
-// client layer.
-//
-// The raw error still reaches the operator log in full via queryErrorResponse.
-func upstreamDetail(err error) string {
+// So the cause is a CATEGORY, decided from the error's type where Go gives it
+// one (DNS, refused, timeout, certificate, unreadable body) and from its words
+// for a plain-string error a client layer wrapped; either way only this
+// function's own sentences are emitted. Each sentence says what the reader
+// can act on: the URL, the timeout, the TLS setting.
+func transportCause(err error) string {
 	if err == nil {
 		return ""
 	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) && urlErr.Err != nil {
-		err = urlErr.Err
+	var (
+		dnsErr  *net.DNSError
+		netErr  net.Error
+		hdrErr  tls.RecordHeaderError
+		verErr  *tls.CertificateVerificationError
+		unkErr  x509.UnknownAuthorityError
+		hostErr x509.HostnameError
+		certErr x509.CertificateInvalidError
+		synErr  *json.SyntaxError
+		typeErr *json.UnmarshalTypeError
+		// The words are read only when a type check has not already decided,
+		// and only once: stringifying comes last, not first.
+		lowered  string
+		contains = func(subs ...string) bool {
+			if lowered == "" {
+				lowered = strings.ToLower(err.Error())
+			}
+			for _, sub := range subs {
+				if strings.Contains(lowered, sub) {
+					return true
+				}
+			}
+			return false
+		}
+	)
+	switch {
+	case errors.As(err, &dnsErr) || contains("no such host", "server misbehaving"):
+		return "the hostname could not be resolved"
+	case errors.As(err, &verErr) || errors.As(err, &unkErr) || errors.As(err, &hostErr) || errors.As(err, &certErr) || contains("certificate"):
+		return "the TLS certificate could not be verified (Skip TLS verify accepts self-signed certificates)"
+	case errors.As(err, &hdrErr) || contains("tls handshake", "http response to https"):
+		return "the server did not answer with TLS (check the URL scheme)"
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) || contains("timeout", "timed out", "deadline exceeded"):
+		return "the request timed out (raise Timeout in the datasource settings if NetBox is slow)"
+	case errors.Is(err, context.Canceled):
+		return "the request was cancelled"
+	case errors.Is(err, syscall.ECONNREFUSED) || contains("connection refused"):
+		return "the connection was refused"
+	case errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) || contains("unreachable"):
+		return "the host is unreachable"
+	case errors.Is(err, syscall.ECONNRESET) || contains("connection reset"):
+		return "the connection was reset"
+	case errors.As(err, &synErr) || errors.As(err, &typeErr) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) || contains("json", "unexpected eof"):
+		return "the response could not be read as JSON (is this the NetBox base URL, not a proxy or login page?)"
 	}
-	s := err.Error()
-	if len(s) > maxUpstreamDetail {
-		return s[:maxUpstreamDetail] + "…"
-	}
-	return s
+	return "the request failed"
 }
 
 // queryErrorMessage maps an upstream error to a concise, user-facing message so
@@ -551,7 +589,7 @@ func queryErrorMessage(err error) string {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
 		}
 	}
-	return "Couldn't reach NetBox: " + upstreamDetail(err)
+	return "Couldn't reach NetBox: " + transportCause(err) + ". The Grafana server log has the full error."
 }
 
 // queryErrorResponse logs the raw upstream error (sanitized) and returns a data

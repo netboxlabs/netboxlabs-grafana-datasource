@@ -204,9 +204,16 @@ func canonicalIP(addr string) string {
 // request, and the decision not to send one. A separate validator would be free
 // to disagree with the canonicalisation and reintroduce the class of bug
 // canonicalIP was written to close.
+//
+// A zoned value ("fe80::1%eth0") parses, but it is not an address NetBox can
+// hold: an inet carries no zone, so no record's canonical form ever has one and
+// the key could never match. It is therefore not an address here either — not
+// sent, and not asked about in the prefix fallback. Sending it cost nothing
+// against NetBox (?address= answers 200 with count 0); a list-valued host lookup
+// refuses the whole list for one such value.
 func canonicalIPOK(addr string) (string, bool) {
 	host := hostOf(addr)
-	if a, err := netip.ParseAddr(host); err == nil {
+	if a, err := netip.ParseAddr(host); err == nil && a.Zone() == "" {
 		return a.Unmap().String(), true
 	}
 	return host, false
@@ -1431,15 +1438,29 @@ func applyVMColumns(row map[string]interface{}, vm map[string]interface{}, ipID 
 // correctly, and the second cannot be distinguished from it by anything the
 // user could act on. Only the request failure means "we could not ask", which
 // is the case a blank column silently misrepresents.
+//
+// Every page is read. NetBox orders the containing prefixes VRF first (global
+// first), then shortest first, so with a hierarchy held in several VRFs the
+// longest can sit past the first page; reading one page kept whatever fitted.
+// Each page is one attempt, like the request before it: this hop does not
+// retry (see prefixFallbackWorkers).
 func (p *Provider) applyPrefixColumns(ctx context.Context, row map[string]interface{}, ip string) error {
 	q := url.Values{}
 	q.Set("contains", ip)
 	q.Set("limit", "100")
-	var page listPage
-	if err := p.client.getJSON(ctx, p.client.apiURL("ipam/prefixes", q), &page); err != nil {
-		return err
+	var results []json.RawMessage
+	for next := p.client.apiURL("ipam/prefixes", q); next != "" && len(results) < MaxLimit; {
+		page, err := p.client.getListPage(ctx, next)
+		if err != nil {
+			return err
+		}
+		results = append(results, page.Results...)
+		next = ""
+		if page.Next != nil {
+			next = *page.Next
+		}
 	}
-	best := pickLongestPrefix(page.Results)
+	best := pickLongestPrefix(results)
 	if best == nil {
 		return nil
 	}
@@ -1877,8 +1898,18 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 			// Queued, not requested: the request itself is made below. The tally
 			// of what was ASKED is still taken here, in input order, because it
 			// counts rows rather than outcomes.
+			//
+			// NetBox is asked about the HOST, the canonical form the address hop
+			// sends, not the caller's spelling: "10.1.2.5/24" made NetBox match
+			// the /24 network (>>=) and miss a /30 holding the host, and
+			// "::ffff:10.1.2.5" matched no IPv4 prefix. A value that is not an
+			// address is not asked about at all; NetBox answers it with nothing,
+			// so its row is the same. It still counts in the tally, as it does in
+			// the address hop: one row per input.
 			prefixDeg.total++
-			prefixJobs = append(prefixJobs, prefixJob{row: row, ip: ip})
+			if host, ok := canonicalIPOK(ip); ok {
+				prefixJobs = append(prefixJobs, prefixJob{row: row, ip: host})
+			}
 		default:
 			// This IP has no address record and no prefix_* column was selected,
 			// so there is nothing left to fill. The row is complete: match_count

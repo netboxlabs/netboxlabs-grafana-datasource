@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **IP enrichment's prefix fallback asks about the host.** An input written
+  with a mask (`10.1.2.5/24`) made NetBox match the `/24` network, so a more
+  specific prefix holding the address was missed; an IPv4-mapped input
+  (`::ffff:10.1.2.5`) matched no IPv4 prefix. The fallback now looks up the
+  address itself, as the address lookup already did, reads every page of
+  containing prefixes instead of the first 100, and skips values that are not
+  addresses (including zoned IPv6, which no NetBox record can match).
+
 - **Replica-cache mode.** A data source can read from a NetBox replica-cache
   deployment instead of the REST API (**Mode** → _replica-cache_), for
   instances too large for the API to serve table queries interactively. The

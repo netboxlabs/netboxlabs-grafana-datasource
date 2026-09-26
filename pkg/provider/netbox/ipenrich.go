@@ -191,8 +191,9 @@ func hostOf(addr string) string {
 // IPv4 and already-canonical input are unchanged: netip renders them back exactly
 // as given. Unmap folds an IPv4-mapped IPv6 literal ("::ffff:10.20.0.1") onto the
 // IPv4 address it denotes, which is the same record in NetBox; on anything else it
-// is a no-op. Unparseable input (a hostname, a typo, an empty string) falls back
-// to the bare hostOf slice, so it behaves exactly as it did before.
+// is a no-op. Unparseable input (a hostname, a typo, an empty string) and a zoned
+// IPv6 value (see canonicalIPOK) fall back to the bare hostOf slice, a key no
+// record can have.
 func canonicalIP(addr string) string {
 	c, _ := canonicalIPOK(addr)
 	return c
@@ -205,16 +206,20 @@ func canonicalIP(addr string) string {
 // to disagree with the canonicalisation and reintroduce the class of bug
 // canonicalIP was written to close.
 //
-// A zoned value ("fe80::1%eth0") parses, but it is not an address NetBox can
-// hold: an inet carries no zone, so no record's canonical form ever has one and
-// the key could never match. It is therefore not an address here either — not
-// sent, and not asked about in the prefix fallback. Sending it cost nothing
+// A zoned IPv6 value ("fe80::1%eth0") parses, but it is not an address NetBox
+// can hold: an inet carries no zone, so no record's canonical form ever has one
+// and the key could never match. It is therefore not an address here either —
+// not sent, and not asked about in the prefix fallback. Sending it cost nothing
 // against NetBox (?address= answers 200 with count 0); a list-valued host lookup
-// refuses the whole list for one such value.
+// refuses the whole list for one such value. The check follows Unmap, so an
+// IPv4-mapped value with a zone ("::ffff:10.0.0.1%eth0") still denotes its IPv4
+// address, which has none, as it always did.
 func canonicalIPOK(addr string) (string, bool) {
 	host := hostOf(addr)
-	if a, err := netip.ParseAddr(host); err == nil && a.Zone() == "" {
-		return a.Unmap().String(), true
+	if a, err := netip.ParseAddr(host); err == nil {
+		if a = a.Unmap(); a.Zone() == "" {
+			return a.String(), true
+		}
 	}
 	return host, false
 }
@@ -512,8 +517,9 @@ func (p *Provider) fetchAddressRecords(ctx context.Context, ips []string) (addre
 		deg:    degradation{total: len(ips)},
 	}
 
-	// A value netip cannot parse is never SENT. It is not an error condition and
-	// is not reported as one: the row is built exactly as before, with
+	// A value that is not an address — one netip cannot parse, or a zoned IPv6
+	// value (see canonicalIPOK) — is never SENT. It is not an error condition
+	// and is not reported as one: the row is built exactly as before, with
 	// match_count 0 and blank columns, because that is what the answer would have
 	// been anyway.
 	//
@@ -1429,8 +1435,8 @@ func applyVMColumns(row map[string]interface{}, vm map[string]interface{}, ipID 
 	row[isPrimaryIPColumn] = isPrimaryIP(vm, ipID)
 }
 
-// applyPrefixColumns is the fallback for IPs with no address record: today's
-// longest-containing-prefix lookup, unchanged, on a much smaller set.
+// applyPrefixColumns is the fallback for IPs with no address record: the
+// longest prefix NetBox's ?contains= returns for the value prefixQuery built.
 //
 // It returns an error ONLY for a failed request, so the caller can report the
 // gap. "No prefix contains this IP" and an unflattenable payload are not
@@ -1439,17 +1445,20 @@ func applyVMColumns(row map[string]interface{}, vm map[string]interface{}, ipID 
 // user could act on. Only the request failure means "we could not ask", which
 // is the case a blank column silently misrepresents.
 //
-// Every page is read. NetBox orders the containing prefixes VRF first (global
-// first), then shortest first, so with a hierarchy held in several VRFs the
-// longest can sit past the first page; reading one page kept whatever fitted.
-// Each page is one attempt, like the request before it: this hop does not
-// retry (see prefixFallbackWorkers).
-func (p *Provider) applyPrefixColumns(ctx context.Context, row map[string]interface{}, ip string) error {
+// Every page is read, up to prefixPageCap. NetBox orders the containing
+// prefixes VRF first (global first), then shortest first, so with a hierarchy
+// held in several VRFs the longest can sit past the first page; reading one
+// page kept whatever fitted. A page that fails fails the lookup — a half-read
+// answer can be a shorter prefix than the one the failed page held. Each page
+// is one attempt, like the request before it: this hop does not retry (see
+// prefixFallbackWorkers).
+func (p *Provider) applyPrefixColumns(ctx context.Context, row map[string]interface{}, contains string) error {
 	q := url.Values{}
-	q.Set("contains", ip)
+	q.Set("contains", contains)
 	q.Set("limit", "100")
 	var results []json.RawMessage
-	for next := p.client.apiURL("ipam/prefixes", q); next != "" && len(results) < MaxLimit; {
+	next := p.client.apiURL("ipam/prefixes", q)
+	for pages := 0; next != "" && pages < prefixPageCap; pages++ {
 		page, err := p.client.getListPage(ctx, next)
 		if err != nil {
 			return err
@@ -1498,14 +1507,48 @@ func (p *Provider) applyPrefixColumns(ctx context.Context, row map[string]interf
 // version returned correctly. That is the opposite of the trade being made here.
 const prefixFallbackWorkers = 8
 
-// prefixJob is one IP's prefix fallback: the row to fill, the IP to ask NetBox
-// about, and where the outcome lands. The error is a FIELD rather than a channel
-// send because the caller folds the failures back in INPUT order — see
-// runPrefixFallback.
+// prefixPageCap bounds the pages one containing-prefix lookup reads: 100
+// pages of 100 is 10,000 prefixes, far past any containment chain (at most 33
+// lengths for IPv4 and 129 for IPv6 per VRF), and it stops a next link that
+// never ends from holding the request until the context expires.
+const prefixPageCap = 100
+
+// prefixQuery is the ?contains= value for an input IP, or false for a value
+// that is not an address (nothing is asked; NetBox answers such a value with
+// nothing, so the row is the same). NetBox has two rules: a bare value is
+// strict (prefix >> address, so a prefix equal to the address is left out),
+// and a value with a mask is inclusive on the value's NETWORK (prefix >>=
+// network). The caller's spelling used to go straight through, so
+// "10.1.2.5/24" asked about the /24 network and missed a /30 holding the host,
+// and "::ffff:10.1.2.5" matched no IPv4 prefix.
+//
+// Now the host is asked about, in the rule the spelling already chose: a bare
+// value stays strict, and a masked one asks about the host's own single-host
+// prefix (10.1.2.5/32, /128 for IPv6), whose inclusive answer is every prefix
+// holding the host, an equal one included — what a /32 value always got.
+func prefixQuery(ip string) (string, bool) {
+	host, ok := canonicalIPOK(ip)
+	if !ok {
+		return "", false
+	}
+	if !strings.Contains(ip, "/") {
+		return host, true
+	}
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return "", false
+	}
+	return netip.PrefixFrom(a, a.BitLen()).String(), true
+}
+
+// prefixJob is one IP's prefix fallback: the row to fill, the ?contains= value
+// to ask NetBox (see prefixQuery), and where the outcome lands. The error is a
+// FIELD rather than a channel send because the caller folds the failures back
+// in INPUT order — see runPrefixFallback.
 type prefixJob struct {
-	row map[string]interface{}
-	ip  string
-	err error
+	row      map[string]interface{}
+	contains string
+	err      error
 }
 
 // runPrefixFallback fills prefix_* on every job's row, up to
@@ -1533,8 +1576,8 @@ type prefixJob struct {
 //     the same error the serial version picked: the earliest failing IP in the
 //     caller's own order, not whichever request happened to lose the race.
 //
-// Cancellation behaves as it did. Each job carries the caller's ctx into
-// getJSON; on a cancelled context the outstanding requests fail immediately and
+// Cancellation behaves as it did. Each job carries the caller's ctx into each
+// page request; on a cancelled context the outstanding requests fail immediately and
 // the queued ones fail without touching the network, exactly as the serial loop
 // did when its ctx expired mid-walk. The pool always drains, so no goroutine
 // outlives the call.
@@ -1566,7 +1609,7 @@ func (p *Provider) runPrefixFallback(ctx context.Context, jobs []prefixJob) {
 		go func(j *prefixJob) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			j.err = p.applyPrefixColumns(ctx, j.row, j.ip)
+			j.err = p.applyPrefixColumns(ctx, j.row, j.contains)
 		}(&jobs[i])
 	}
 	wg.Wait()
@@ -1593,8 +1636,9 @@ func project(row map[string]interface{}, fields []string) map[string]interface{}
 func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string, limit int) (*provider.Result, error) {
 	// The limit matters more here than for a batched object query: when a
 	// prefix_* column is selected the fallback below issues one ?contains=
-	// request per unmatched IP and cannot be batched (contains takes a single
-	// value), so it is a request-count ceiling. runPrefixFallback runs those
+	// lookup per unmatched IP — one request, more only when a page overflows —
+	// and cannot be batched (contains takes a single value), so it is a
+	// request-count ceiling. runPrefixFallback runs those
 	// requests prefixFallbackWorkers at a time rather than one at a time, which
 	// cuts the wall clock by that factor but leaves the count — and the load
 	// NetBox sees — proportional to the limit. A caller that really wants more
@@ -1731,7 +1775,7 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 	//
 	// The prefix one is the expensive skip, and remains so after
 	// runPrefixFallback made it concurrent. NetBox's ?contains= takes a single
-	// value, so the hop is one REQUEST per unmatched IP however it is scheduled —
+	// value, so the hop is one lookup per unmatched IP however it is scheduled —
 	// ~20 ms each against the demo NetBox, ~0.35 s each against a large remote NetBox —
 	// and concurrency divides the wall clock without removing a single request.
 	// No prefix_* column is in defaultIPEnrichFields at all, so the default panel
@@ -1899,16 +1943,14 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 			// of what was ASKED is still taken here, in input order, because it
 			// counts rows rather than outcomes.
 			//
-			// NetBox is asked about the HOST, the canonical form the address hop
-			// sends, not the caller's spelling: "10.1.2.5/24" made NetBox match
-			// the /24 network (>>=) and miss a /30 holding the host, and
-			// "::ffff:10.1.2.5" matched no IPv4 prefix. A value that is not an
-			// address is not asked about at all; NetBox answers it with nothing,
-			// so its row is the same. It still counts in the tally, as it does in
-			// the address hop: one row per input.
+			// NetBox is asked about the host the value names (prefixQuery), not
+			// the caller's spelling. A value that is not an address is not asked
+			// about at all; NetBox answers it with nothing, so its row is the
+			// same. It still counts in the tally, as it does in the address hop:
+			// one row per input.
 			prefixDeg.total++
-			if host, ok := canonicalIPOK(ip); ok {
-				prefixJobs = append(prefixJobs, prefixJob{row: row, ip: host})
+			if contains, ok := prefixQuery(ip); ok {
+				prefixJobs = append(prefixJobs, prefixJob{row: row, contains: contains})
 			}
 		default:
 			// This IP has no address record and no prefix_* column was selected,

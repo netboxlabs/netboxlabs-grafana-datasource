@@ -131,6 +131,21 @@ func TestBuildFilterValues_AddressColumnsMatchLikeNetBox(t *testing.T) {
 			map[string]string{"filter[address]__eq": "2001:db8::1"}},
 		{"several masked addresses are one in list", []provider.Filter{{Field: "address", Value: "10.0.16.1/21, 10.0.16.2/21"}},
 			map[string]string{"filter[address]__in": "10.0.16.1/21,10.0.16.2/21"}},
+		// PostgreSQL prints an IPv4-compatible IPv6 address (the first 96 bits
+		// zero) with its low 32 bits dotted, where netip prints hex; the stored
+		// text is PostgreSQL's, so equality has to be written its way.
+		{"an IPv4-compatible address is written as PostgreSQL prints it", []provider.Filter{{Field: "address", Value: "::a00:1/64"}},
+			map[string]string{"filter[address]__eq": "::10.0.0.1/64"}},
+		{"already in PostgreSQL's form it is unchanged", []provider.Filter{{Field: "address", Value: "::0.1.0.2/64"}},
+			map[string]string{"filter[address]__eq": "::0.1.0.2/64"}},
+		{"a low address with a zero seventh word stays hex, in both", []provider.Filter{{Field: "address", Value: "::100/128"}},
+			map[string]string{"filter[address]__eq": "::100"}},
+		{"a bare IPv4-compatible host goes out in PostgreSQL's form too", []provider.Filter{{Field: "address", Value: "::a00:1"}},
+			map[string]string{"filter[address]__host": "::10.0.0.1"}},
+		// NetBox ORs the masked value with the bare one; every record the masked
+		// value matches has that host, so the OR is the host match alone.
+		{"a masked value its bare host already covers is merged", []provider.Filter{{Field: "address", Value: "10.0.0.1, 10.0.0.1/24"}},
+			map[string]string{"filter[address]__host": "10.0.0.1"}},
 		// NetBox compares HOST(address) with the text, so a value that is no
 		// address, or carries a zone, matches nothing there. Here host would
 		// refuse the whole list for it, so it is left out instead.

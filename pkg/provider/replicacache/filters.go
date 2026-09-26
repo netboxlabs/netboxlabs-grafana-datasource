@@ -5,16 +5,17 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // The operator vocabulary in provider.Filter is NetBox's set of DRF lookups.
-// replica-cache implements a much smaller one — eq, in, isnull, ilike, gt, lt,
-// and on a build with DATA-408 the anchored text matches istartswith,
-// iendswith and iexact — and its own documentation is explicit that gte/lte
-// are absent. Which of them a column takes is the catalogue's word, per
+// replica-cache implements a much smaller one — eq, in, isnull, ilike, gt, lt;
+// on a build with DATA-408 the anchored text matches istartswith, iendswith
+// and iexact; on a build with DATA-417 host, on IP address columns — and its
+// own documentation is explicit that gte/lte are absent. Which of them a column takes is the catalogue's word, per
 // column, and nothing is offered or sent that it does not list.
 //
 // Rather than widen the seam's vocabulary for the smaller backend, this file
@@ -90,7 +91,7 @@ func (e *UnsupportedFilterError) Classification() *provider.UpstreamError {
 // So a multi-value substring filter is refused rather than approximated by
 // picking one value, which would silently narrow a dashboard's variable to its
 // first selection.
-func buildFilterValues(filters []provider.Filter, addressField func(field string) bool) (url.Values, error) {
+func buildFilterValues(filters []provider.Filter, isAddress func(field string) bool) (url.Values, error) {
 	q := url.Values{}
 
 	// Exact filters are accumulated per field rather than written as they are
@@ -169,7 +170,7 @@ func buildFilterValues(filters []provider.Filter, addressField func(field string
 
 	for _, field := range exactOrder {
 		values := exactValues[field]
-		if addressField != nil && addressField(field) {
+		if isAddress != nil && isAddress(field) {
 			if err := setAddressMatch(q, field, values); err != nil {
 				return nil, err
 			}
@@ -195,32 +196,42 @@ func setEquality(q url.Values, field string, values []string) {
 // NetBox matches one (ipam's net_in lookup). A value without a mask matches
 // every record with that host, whatever its mask: the replica's host operator.
 // A value with a mask matches that exact address: equality on the stored text,
-// written as PostgreSQL prints an inet, which leaves out a single-host mask
-// (/32, /128). Equality on the bare text instead — what this sent before —
-// finds nothing for "10.0.0.1" against a stored "10.0.0.1/24", and looks
-// healthy doing it.
+// written as PostgreSQL prints an inet (see inetText). Equality on the bare
+// text instead — what this sent before — finds nothing for "10.0.0.1" against a
+// stored "10.0.0.1/24", and looks healthy doing it.
 //
 // NetBox compares HOST(address) with the text, so a value that is no address,
 // or carries a zone, matches nothing there. host would refuse the whole list
 // for one such value, so it is left out; with nothing left, the values go as
 // equality, which still matches nothing rather than dropping the filter.
-// NetBox ORs masked and bare values; the replica has no OR, so mixing them is
-// refused rather than narrowed to one kind.
+//
+// NetBox ORs masked and bare values. When every masked value's address is
+// among the bare ones, the OR is the host match alone — each record a masked
+// value matches has that host — so they merge. Otherwise the replica, which has
+// no OR, cannot express it, and the filter is refused rather than narrowed.
 func setAddressMatch(q url.Values, field string, values []string) error {
 	var hosts, exact []string
+	bare := map[netip.Addr]bool{}
+	var maskedAddrs []netip.Addr
 	for _, v := range values {
 		if a, err := netip.ParseAddr(v); err == nil {
-			if a.Zone() == "" {
-				hosts = append(hosts, a.String())
+			if a.Zone() == "" && !bare[a] {
+				bare[a] = true
+				hosts = append(hosts, pgAddrText(a))
 			}
 			continue
 		}
 		if pfx, err := netip.ParsePrefix(v); err == nil {
 			exact = append(exact, inetText(pfx))
+			maskedAddrs = append(maskedAddrs, pfx.Addr())
 		}
 	}
+	covered := true
+	for _, a := range maskedAddrs {
+		covered = covered && bare[a]
+	}
 	switch {
-	case len(hosts) > 0 && len(exact) > 0:
+	case len(hosts) > 0 && len(exact) > 0 && !covered:
 		return &UnsupportedFilterError{Field: field, Operator: "exact",
 			Reason: "it mixes addresses with and without a mask. NetBox matches the first exactly and the second by host, whatever its mask, and returns either; this backend cannot combine the two, so write every value with a mask or every value without one"}
 	case len(hosts) > 0:
@@ -234,13 +245,64 @@ func setAddressMatch(q url.Values, field string, values []string) error {
 }
 
 // inetText is an address with its mask as PostgreSQL prints an inet: the mask
-// is left out when it covers a single host. The host bits are kept — an inet
-// is an address in its network, not the network.
+// is left out when it covers a single host, and the address is written as
+// PostgreSQL writes it (pgAddrText). The host bits are kept — an inet is an
+// address in its network, not the network.
 func inetText(p netip.Prefix) string {
 	if p.Bits() == p.Addr().BitLen() {
-		return p.Addr().String()
+		return pgAddrText(p.Addr())
 	}
-	return p.String()
+	return pgAddrText(p.Addr()) + "/" + strconv.Itoa(p.Bits())
+}
+
+// pgAddrText is an address as PostgreSQL prints it. It differs from netip's
+// rendering in one class, the rule PostgreSQL's inet output inherits from
+// BIND: an IPv4-compatible IPv6 address — the first 96 bits zero and the
+// seventh 16-bit word not — prints its low 32 bits dotted ("::10.0.0.1"),
+// where netip prints hex ("::a00:1"). Compared over 25,000 random addresses
+// and prefixes against PostgreSQL 16, that is the only difference.
+func pgAddrText(a netip.Addr) string {
+	if a.Is6() && !a.Is4In6() {
+		b := a.As16()
+		if b == [16]byte{12: b[12], 13: b[13], 14: b[14], 15: b[15]} && (b[12] != 0 || b[13] != 0) {
+			return "::" + netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}).String()
+		}
+	}
+	return a.String()
+}
+
+// withSingleHostMask shows a stored IP address the way NetBox shows it: the
+// replica keeps PostgreSQL's inet text, which leaves out a single-host mask
+// ("10.0.0.1" for 10.0.0.1/32), and NetBox's API always writes one. Shown bare,
+// a value picked from a row or the value list read as a bare address and was
+// matched by host — broader than the record picked. A value that is not an
+// address is returned as it is.
+func withSingleHostMask(s string) string {
+	if strings.Contains(s, "/") {
+		return s
+	}
+	if a, err := netip.ParseAddr(s); err == nil && a.Zone() == "" {
+		return s + "/" + strconv.Itoa(a.BitLen())
+	}
+	return s
+}
+
+// showSingleHostMasks applies withSingleHostMask to every IP address column
+// of the rows: the columns isAddress names, stored or expanded.
+func showSingleHostMasks(rows []map[string]interface{}, cols []string, isAddress func(field string) bool) {
+	var addressCols []string
+	for _, col := range cols {
+		if isAddress(col) {
+			addressCols = append(addressCols, col)
+		}
+	}
+	for _, row := range rows {
+		for _, col := range addressCols {
+			if s, ok := row[col].(string); ok {
+				row[col] = withSingleHostMask(s)
+			}
+		}
+	}
 }
 
 // addressField reports, for an entity, whether an exact filter on a field

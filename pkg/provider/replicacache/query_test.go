@@ -1752,6 +1752,7 @@ func TestQuery_ExactAddressFilterMatchesLikeNetBox(t *testing.T) {
 		{"10.0.0.1/32", "filter[address]__eq", []string{"3"}},
 		{"10.0.16.1/21", "filter[address]__eq", []string{"1"}},
 		{"10.0.16.1, not-an-address", "filter[address]__host", []string{"1", "4"}},
+		{"not-an-address", "filter[address]__eq", nil},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
 			res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "ipam/ip-addresses",
@@ -1771,6 +1772,58 @@ func TestQuery_ExactAddressFilterMatchesLikeNetBox(t *testing.T) {
 				t.Errorf("ids = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// The replica stores a single-host record as PostgreSQL prints it, with no
+// mask ("10.0.0.1"); NetBox shows the same record as "10.0.0.1/32". Shown bare,
+// a value picked from the rows or the value list read as a bare address and
+// matched by host, broader than the record picked (it also caught 10.0.0.1/24),
+// and a multi-select holding it beside a masked value was refused as a mix.
+// Shown with its mask, the picked value matches that record alone.
+func TestQuery_SingleHostAddressesShowTheirMask(t *testing.T) {
+	f := newFakeService()
+	f.addAddressEntity(true)
+	f.entities["ipam/ip-addresses"] = []map[string]interface{}{
+		{"id": 1, "address": "10.0.0.1"},
+		{"id": 2, "address": "10.0.0.1/24"},
+		{"id": 3, "address": "2001:db8::1"},
+		{"id": 4, "address": "10.0.16.1/21"},
+	}
+	p := newTestProvider(t, f)
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "ipam/ip-addresses", Fields: []string{"id", "address"}, Ordering: "id"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var shown []string
+	for _, r := range res.Rows {
+		shown = append(shown, fmt.Sprint(r["address"]))
+	}
+	if want := []string{"10.0.0.1/32", "10.0.0.1/24", "2001:db8::1/128", "10.0.16.1/21"}; !slices.Equal(shown, want) {
+		t.Errorf("addresses shown = %v, want %v", shown, want)
+	}
+
+	values, err := p.FieldValues(context.Background(), "ipam/ip-addresses", "address", "", 100)
+	if err != nil {
+		t.Fatalf("FieldValues: %v", err)
+	}
+	if !slices.Contains(values, "10.0.0.1/32") || slices.Contains(values, "10.0.0.1") {
+		t.Errorf("values = %v; the single-host record must be offered with its mask", values)
+	}
+
+	// Picking two offered values — the single host and a masked one — matches
+	// exactly those two records, no refusal and nothing broader.
+	res, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "ipam/ip-addresses", Fields: []string{"id", "address"}, Ordering: "id",
+		Filters: []provider.Filter{{Field: "address", Value: "10.0.0.1/32, 10.0.16.1/21"}}})
+	if err != nil {
+		t.Fatalf("filtering on offered values: %v", err)
+	}
+	var ids []string
+	for _, r := range res.Rows {
+		ids = append(ids, fmt.Sprint(r["id"]))
+	}
+	if !slices.Equal(ids, []string{"1", "4"}) {
+		t.Errorf("ids = %v, want [1 4]: the two records picked, not every record with host 10.0.0.1", ids)
 	}
 }
 

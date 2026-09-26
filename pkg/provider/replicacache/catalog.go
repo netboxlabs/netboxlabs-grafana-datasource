@@ -47,7 +47,7 @@ type column struct {
 	Name      string
 	Type      string // DuckDB vocabulary, verbatim: VARCHAR, BIGINT, BOOLEAN, …
 	Nullable  bool
-	Operators []string // eq gt lt in isnull; ilike on VARCHAR; istartswith iendswith iexact on VARCHAR from DATA-408
+	Operators []string // eq gt lt in isnull; ilike on VARCHAR; istartswith iendswith iexact on VARCHAR from DATA-408; host on IP address columns from DATA-417
 	Ref       *reference
 }
 

@@ -5,10 +5,12 @@
 - **IP enrichment's prefix fallback asks about the host.** An input written
   with a mask (`10.1.2.5/24`) made NetBox match the `/24` network, so a more
   specific prefix holding the address was missed; an IPv4-mapped input
-  (`::ffff:10.1.2.5`) matched no IPv4 prefix. The fallback now looks up the
-  address itself, as the address lookup already did, reads every page of
-  containing prefixes instead of the first 100, and skips values that are not
-  addresses (including zoned IPv6, which no NetBox record can match).
+  (`::ffff:10.1.2.5`) matched no IPv4 prefix. A masked input now asks about
+  the host's own `/32` (or `/128`), which finds every prefix holding it, and a
+  bare input keeps NetBox's strict rule, so the inputs that worked answer as
+  before. The fallback also reads every page of containing prefixes instead of
+  the first 100, and skips values that are not addresses, including a zoned
+  IPv6 address, which no NetBox record can hold.
 
 - **Replica-cache mode.** A data source can read from a NetBox replica-cache
   deployment instead of the REST API (**Mode** → _replica-cache_), for
@@ -20,8 +22,9 @@
   how fresh the data is, and a replica still loading its initial snapshot is a
   warning. Text filters follow the replica's schema: _contains_ on text
   columns, and _starts with_, _ends with_ and _= (ci)_ on a build that lists
-  them; equality on an IP address matches by host when the value has no mask,
-  as in NetBox. A new **Max data age** setting makes alert rules and expression-fed
+  them. On a build that lists `host`, equality on an IP address matches by
+  host when the value has no mask, as NetBox's address filter does, and a
+  single-host address is shown with its mask. A new **Max data age** setting makes alert rules and expression-fed
   queries refuse stale or unknown-age data. Annotations, IP enrichment,
   topology and tags are not available in this mode and fail with an explicit
   message. The connection fields are the same in both modes — URL and API

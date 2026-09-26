@@ -315,7 +315,7 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		var keep []map[string]interface{}
+		keep := []map[string]interface{}{} // the service answers [], never null, when nothing matches
 		for _, row := range filtered {
 			if matches(row[col], op, vs[0]) {
 				keep = append(keep, row)

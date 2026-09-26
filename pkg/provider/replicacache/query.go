@@ -86,6 +86,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
+	showSingleHostMasks(rows, cols, addressField(e, c))
 	if asOf == nil {
 		asOf = e.DataAsOf
 	}

@@ -177,11 +177,10 @@ longest containing prefix:
    **Selecting fields is also a performance choice.** Each group of columns costs the
    lookup that fills it, and a group you don't select is not looked up. That matters most
    for `prefix_*`: NetBox's `?contains=` takes one address at a time, so the fallback is
-   one request per IP with no address record and cannot be batched. Eight run at once,
-   so a 1,000-IP panel of external addresses takes about 2.5 s against a local NetBox
-   (~20 ms per request) and about 45 s against NetBox Cloud (~0.35 s per request). A
-   value that is not an address is not looked up, and NetBox is asked about the host
-   whatever mask the value carries. The default field
+   one lookup per IP with no address record and cannot be batched. Eight run at once,
+   which shortens the wait but not the work: a 1,000-IP panel of external addresses is
+   1,000 requests, and at NetBox Cloud's ~0.35 s per request that is still around 45 s.
+   A value that is not an address is not looked up. The default field
    selection contains no `prefix_*` column and therefore makes no prefix request at all;
    add one only when you want prefix context. `device_*` costs one extra batched request
    for the whole IP list. `is_primary_ip` costs up to two: the same device request (shared

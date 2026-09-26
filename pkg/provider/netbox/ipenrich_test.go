@@ -2747,13 +2747,22 @@ func TestCanonicalIPOK_RejectsZones(t *testing.T) {
 	if c, ok := canonicalIPOK("fe80::1"); !ok || c != "fe80::1" {
 		t.Errorf(`canonicalIPOK("fe80::1") = %q, %v; the same address without a zone is fine`, c, ok)
 	}
+	// An IPv4-mapped value denotes its IPv4 address, which carries no zone:
+	// Unmap drops it, and the value resolves as it always did.
+	if c, ok := canonicalIPOK("::ffff:10.1.2.9%eth0"); !ok || c != "10.1.2.9" {
+		t.Errorf(`canonicalIPOK("::ffff:10.1.2.9%%eth0") = %q, %v; want 10.1.2.9, true`, c, ok)
+	}
 }
 
-// The prefix fallback asks NetBox about the HOST, the canonical form the
-// address hop already sends. The caller's spelling changed the question:
-// "10.1.2.5/24" made NetBox match the /24 network (>>=) and miss the /30 that
-// holds the host, "::ffff:10.1.2.5" matched no IPv4 prefix at all, and junk or
-// a zoned value was asked about for nothing.
+// The prefix fallback asks NetBox about the host the value names, keeping the
+// answer every spelling that worked already got. NetBox's ?contains= has two
+// rules: a bare value is strict (prefix >> address), a value with a mask is
+// inclusive on the value's NETWORK (prefix >>= network). The caller's spelling
+// went straight through, so "10.1.2.5/24" asked about the /24 network and missed
+// the /30 holding the host, and "::ffff:10.1.2.5" matched no IPv4 prefix. Now a
+// masked value asks about the host's own single-host prefix (10.1.2.5/32), which
+// is what a /32 value always asked, and a bare one stays strict; values that are
+// not addresses are not asked about at all.
 func TestResolveIPs_PrefixFallbackAsksAboutTheHost(t *testing.T) {
 	var mu sync.Mutex
 	var addressed, contained []string
@@ -2772,8 +2781,10 @@ func TestResolveIPs_PrefixFallbackAsksAboutTheHost(t *testing.T) {
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch c {
-		case "10.1.2.5": // NetBox's strict >> on the host: every prefix holding it
+		case "10.1.2.5": // strict >>: the equal /32 is not among them
 			_, _ = w.Write([]byte(`{"count":3,"next":null,"results":[{"id":1,"prefix":"10.0.0.0/8"},{"id":2,"prefix":"10.1.2.0/24"},{"id":3,"prefix":"10.1.2.4/30"}]}`))
+		case "10.1.2.5/32": // >>= on the single-host network: every prefix holding the host
+			_, _ = w.Write([]byte(`{"count":4,"next":null,"results":[{"id":1,"prefix":"10.0.0.0/8"},{"id":2,"prefix":"10.1.2.0/24"},{"id":3,"prefix":"10.1.2.4/30"},{"id":4,"prefix":"10.1.2.5/32"}]}`))
 		case "10.1.2.5/24": // >>= on the network 10.1.2.0/24: the /30 is not among them
 			_, _ = w.Write([]byte(`{"count":2,"next":null,"results":[{"id":1,"prefix":"10.0.0.0/8"},{"id":2,"prefix":"10.1.2.0/24"}]}`))
 		default:
@@ -2783,7 +2794,7 @@ func TestResolveIPs_PrefixFallbackAsksAboutTheHost(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	ips := []string{"10.1.2.5/24", "::ffff:10.1.2.5", "bogus", "fe80::1%eth0"}
+	ips := []string{"10.1.2.5/24", "::ffff:10.1.2.5", "10.1.2.5/32", "10.1.2.5", "bogus", "fe80::1%eth0"}
 	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
 	res, err := p.ResolveIPs(context.Background(), ips, []string{"ip", "prefix_cidr"}, 0)
 	if err != nil {
@@ -2792,18 +2803,14 @@ func TestResolveIPs_PrefixFallbackAsksAboutTheHost(t *testing.T) {
 	if len(res.Rows) != len(ips) {
 		t.Fatalf("got %d rows, want one per input", len(res.Rows))
 	}
-	for i, want := range []interface{}{"10.1.2.4/30", "10.1.2.4/30", nil, nil} {
+	for i, want := range []interface{}{"10.1.2.5/32", "10.1.2.4/30", "10.1.2.5/32", "10.1.2.4/30", nil, nil} {
 		if got := res.Rows[i]["prefix_cidr"]; got != want {
 			t.Errorf("row %q prefix_cidr = %v, want %v", ips[i], got, want)
 		}
 	}
-	for _, c := range contained {
-		if c != "10.1.2.5" {
-			t.Errorf("?contains=%q was asked; only the canonical host 10.1.2.5 should be", c)
-		}
-	}
-	if len(contained) != 2 {
-		t.Errorf("asked ?contains= %d times (%v), want 2: one per input that is an address", len(contained), contained)
+	slices.Sort(contained)
+	if want := []string{"10.1.2.5", "10.1.2.5", "10.1.2.5/32", "10.1.2.5/32"}; !slices.Equal(contained, want) {
+		t.Errorf("?contains= asked %v, want %v: the host each value names, and nothing for a non-address", contained, want)
 	}
 	for _, a := range addressed {
 		if strings.Contains(a, "%") {
@@ -2812,6 +2819,74 @@ func TestResolveIPs_PrefixFallbackAsksAboutTheHost(t *testing.T) {
 	}
 	if len(res.Warnings) != 0 {
 		t.Errorf("Warnings = %v; values that are not addresses are absent data, not failures", res.Warnings)
+	}
+}
+
+// A page that fails after the first is a failed lookup, stated as one: the
+// row keeps blank prefix_* columns rather than the first page's answer, which
+// could be a shorter prefix than the one the failed page held.
+func TestResolveIPs_PrefixFallbackFailedPageIsStated(t *testing.T) {
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("offset") != "" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":2,"next":%q,"results":[{"id":1,"prefix":"10.0.0.0/8"}]}`,
+			srv.URL+"/api/ipam/prefixes/?contains=10.1.2.5&limit=100&offset=1")
+	})
+	srv = httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), []string{"10.1.2.5"}, []string{"ip", "prefix_cidr"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if got := res.Rows[0]["prefix_cidr"]; got != nil {
+		t.Errorf("prefix_cidr = %v, want blank: a half-read answer can be the wrong prefix", got)
+	}
+	if len(res.Warnings) == 0 {
+		t.Error("a failed page must be stated as a failed prefix lookup")
+	}
+}
+
+// A next link that never ends (a proxy looping, a server bug) cannot hold the
+// request until the context expires: the walk stops after a bounded number of
+// pages.
+func TestResolveIPs_PrefixFallbackWalkIsBounded(t *testing.T) {
+	var srv *httptest.Server
+	var calls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":1,"next":%q,"results":[]}`, srv.URL+"/api/ipam/prefixes/?contains=10.1.2.5&limit=100&offset=1")
+	})
+	srv = httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := p.ResolveIPs(ctx, []string{"10.1.2.5"}, []string{"ip", "prefix_cidr"}, 0); err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the walk ran until the deadline; it must stop on its own")
+	}
+	if n := calls.Load(); n > int64(prefixPageCap) {
+		t.Errorf("%d page requests, want at most %d", n, prefixPageCap)
 	}
 }
 

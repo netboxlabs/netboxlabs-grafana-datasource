@@ -509,6 +509,9 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	if err != nil {
 		return nil, err
 	}
+	// An IP address is offered as the rows show it, with a single-host mask,
+	// so that the value picked matches that record and no other.
+	isAddress := addressField(e, c)
 	needle := strings.ToLower(q)
 	seen := map[string]bool{}
 	seenIDs := map[int]bool{}
@@ -560,6 +563,9 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errRowWithoutField, Message: rowShapeGuidance}
 		}
 		s := valueString(v)
+		if isAddress(field) {
+			s = withSingleHostMask(s)
+		}
 		if s == "" || seen[s] {
 			continue
 		}

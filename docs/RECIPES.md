@@ -177,8 +177,11 @@ longest containing prefix:
    **Selecting fields is also a performance choice.** Each group of columns costs the
    lookup that fills it, and a group you don't select is not looked up. That matters most
    for `prefix_*`: NetBox's `?contains=` takes one address at a time, so the fallback is
-   one request per IP with no address record and cannot be batched — measured at ~20 ms
-   per IP, or ~20 s for a 1,000-IP panel of external addresses. The default field
+   one request per IP with no address record and cannot be batched. Eight run at once,
+   so a 1,000-IP panel of external addresses takes about 2.5 s against a local NetBox
+   (~20 ms per request) and about 45 s against NetBox Cloud (~0.35 s per request). A
+   value that is not an address is not looked up, and NetBox is asked about the host
+   whatever mask the value carries. The default field
    selection contains no `prefix_*` column and therefore makes no prefix request at all;
    add one only when you want prefix context. `device_*` costs one extra batched request
    for the whole IP list. `is_primary_ip` costs up to two: the same device request (shared
@@ -186,6 +189,7 @@ longest containing prefix:
    VM's primary address — unlike its name — is not carried inside the address record.
    Both are gated on the column: a query that doesn't select it asks NetBox about no
    virtual machine at all.
+
 3. The result is a table keyed by `ip`. Use it standalone, or **Join by field** on `ip`
    against your flow table (rename the flow label to `ip` with an _organize fields_
    transform, or set a join key output accordingly).
@@ -287,6 +291,7 @@ context column blank — signal too (unknown/external traffic).
   IP-shaped value on `device`, `instance`, `interface` or `job` — so on this stack the
   device-name join in step 4 is the one that works. Check your own with
   `label_values(<your metric>, instance)` before designing around either.
+
 - **`match_count`** — how many NetBox address records matched the IP, before the row you
   see was picked. `1` is the normal case. `> 1` means NetBox genuinely holds several
   address records for that host — an anycast address registered once per device, or a
@@ -311,7 +316,7 @@ context column blank — signal too (unknown/external traffic).
 
 - **`address_assigned_object_type`** — what the address record is assigned to, as
   NetBox's own raw relation string: `dcim.interface`, `virtualization.vminterface`, or
-  `ipam.fhrpgroup`. Blank means unassigned — but blank is not *self*-evidence of that, and
+  `ipam.fhrpgroup`. Blank means unassigned — but blank is not _self_-evidence of that, and
   the difference matters when you build an alert on it. Three different situations all
   leave it empty: an address record that really is assigned to nothing; an IP that matched
   no address record at all, which never reaches this column; and an IP whose address lookup
@@ -322,7 +327,7 @@ context column blank — signal too (unknown/external traffic).
   is the signal for a **VRRP/HSRP virtual address**. The two look like they should overlap
   and don't: a virtual address is shared across a redundant pair much as an anycast address
   is shared across several devices, but NetBox models it as a single address record
-  assigned to an FHRP group — the redundant interfaces are members of the *group*, not
+  assigned to an FHRP group — the redundant interfaces are members of the _group_, not
   separate address records — so `match_count` is **1**, exactly like an ordinary address.
   (Verified: an FHRP-assigned address returns `match_count = 1`.) `match_count` rises only
   when NetBox genuinely holds several address records for the same host, which is the
@@ -424,7 +429,7 @@ filters so every match fits.
 
 - With the inputs hidden, the panel shows only the expression's own error
   (`could not run sql expression [J] because it selects from the results of query
-  [NB] which has an error`). Unhide **NB**, or open the query inspector, to read
+[NB] which has an error`). Unhide **NB**, or open the query inspector, to read
   the message above.
 - The same applies when part of the result could not be measured or a lookup
   failed: anything a plain query would have stated in a notice.

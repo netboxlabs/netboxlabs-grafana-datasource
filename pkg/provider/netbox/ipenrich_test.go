@@ -2734,6 +2734,119 @@ func TestCanonicalIP(t *testing.T) {
 	}
 }
 
+// A zone is never part of an address NetBox stores (an inet carries none), so a
+// zoned value can never match a record and is not an address here. Sending it
+// cost nothing against NetBox (?address= answers 200 with count 0), but a
+// list-valued host lookup refuses the whole list for one such value.
+func TestCanonicalIPOK_RejectsZones(t *testing.T) {
+	for _, in := range []string{"fe80::1%eth0", "fe80::1%eth0/64", "fe80::1%25eth0", " fe80::1%eth0 "} {
+		if _, ok := canonicalIPOK(in); ok {
+			t.Errorf("canonicalIPOK(%q) ok = true; a zoned value is not an address NetBox can hold", in)
+		}
+	}
+	if c, ok := canonicalIPOK("fe80::1"); !ok || c != "fe80::1" {
+		t.Errorf(`canonicalIPOK("fe80::1") = %q, %v; the same address without a zone is fine`, c, ok)
+	}
+}
+
+// The prefix fallback asks NetBox about the HOST, the canonical form the
+// address hop already sends. The caller's spelling changed the question:
+// "10.1.2.5/24" made NetBox match the /24 network (>>=) and miss the /30 that
+// holds the host, "::ffff:10.1.2.5" matched no IPv4 prefix at all, and junk or
+// a zoned value was asked about for nothing.
+func TestResolveIPs_PrefixFallbackAsksAboutTheHost(t *testing.T) {
+	var mu sync.Mutex
+	var addressed, contained []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		addressed = append(addressed, r.URL.Query()["address"]...)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		c := r.URL.Query().Get("contains")
+		mu.Lock()
+		contained = append(contained, c)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch c {
+		case "10.1.2.5": // NetBox's strict >> on the host: every prefix holding it
+			_, _ = w.Write([]byte(`{"count":3,"next":null,"results":[{"id":1,"prefix":"10.0.0.0/8"},{"id":2,"prefix":"10.1.2.0/24"},{"id":3,"prefix":"10.1.2.4/30"}]}`))
+		case "10.1.2.5/24": // >>= on the network 10.1.2.0/24: the /30 is not among them
+			_, _ = w.Write([]byte(`{"count":2,"next":null,"results":[{"id":1,"prefix":"10.0.0.0/8"},{"id":2,"prefix":"10.1.2.0/24"}]}`))
+		default:
+			_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ips := []string{"10.1.2.5/24", "::ffff:10.1.2.5", "bogus", "fe80::1%eth0"}
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), ips, []string{"ip", "prefix_cidr"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Rows) != len(ips) {
+		t.Fatalf("got %d rows, want one per input", len(res.Rows))
+	}
+	for i, want := range []interface{}{"10.1.2.4/30", "10.1.2.4/30", nil, nil} {
+		if got := res.Rows[i]["prefix_cidr"]; got != want {
+			t.Errorf("row %q prefix_cidr = %v, want %v", ips[i], got, want)
+		}
+	}
+	for _, c := range contained {
+		if c != "10.1.2.5" {
+			t.Errorf("?contains=%q was asked; only the canonical host 10.1.2.5 should be", c)
+		}
+	}
+	if len(contained) != 2 {
+		t.Errorf("asked ?contains= %d times (%v), want 2: one per input that is an address", len(contained), contained)
+	}
+	for _, a := range addressed {
+		if strings.Contains(a, "%") {
+			t.Errorf("?address=%q was sent; a zoned value is not an address", a)
+		}
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("Warnings = %v; values that are not addresses are absent data, not failures", res.Warnings)
+	}
+}
+
+// NetBox orders containing prefixes VRF-first and shortest first, so with a
+// hierarchy held in several VRFs the longest can sit on a later page. The
+// fallback follows next instead of reading the first page alone.
+func TestResolveIPs_PrefixFallbackReadsEveryPage(t *testing.T) {
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("offset") == "" {
+			_, _ = fmt.Fprintf(w, `{"count":2,"next":%q,"results":[{"id":1,"prefix":"10.0.0.0/8"}]}`,
+				srv.URL+"/api/ipam/prefixes/?contains=10.1.2.5&limit=100&offset=1")
+			return
+		}
+		_, _ = w.Write([]byte(`{"count":2,"next":null,"results":[{"id":2,"prefix":"10.1.2.4/30"}]}`))
+	})
+	srv = httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(context.Background(), []string{"10.1.2.5"}, []string{"ip", "prefix_cidr"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if got := res.Rows[0]["prefix_cidr"]; got != "10.1.2.4/30" {
+		t.Errorf("prefix_cidr = %v, want 10.1.2.4/30 from the second page", got)
+	}
+}
+
 // TestResolveIPs_NonCanonicalFormsResolve is the end-to-end proof for B3. The
 // mock deliberately matches ?address= LITERALLY, exactly as NetBox's filter does
 // — so a request that still sent the caller's spelling gets nothing back, and

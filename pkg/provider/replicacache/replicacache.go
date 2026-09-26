@@ -488,7 +488,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	// locally, the same answer as for a column that cannot be searched upstream.
 	pushDown := q != "" && slices.Contains(col.Operators, "ilike") && literalPushable(q)
 	if pushDown {
-		fv, err := buildFilterValues([]provider.Filter{{Field: field, Operator: opIContns, Value: q}})
+		fv, err := buildFilterValues([]provider.Filter{{Field: field, Operator: opIContns, Value: q}}, nil)
 		if err != nil {
 			return nil, err
 		}

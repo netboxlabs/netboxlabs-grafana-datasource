@@ -88,7 +88,9 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
 
 Values are the stored ones: a choice column holds `active`, not `Active`, and
 `<field>_value` aliases return the same value for panels written against
-NetBox mode.
+NetBox mode. One exception keeps IP addresses as NetBox shows them: the
+replica stores a single-host address without its mask (`10.0.0.1`), and it is
+shown with it (`10.0.0.1/32`, `/128` for IPv6), in rows and in the value list.
 
 **Filters** offer, per column, the operators the replica accepts on it: equality
 (multi-value → `in`), a case-insensitive **contains** on text columns, and,
@@ -100,16 +102,18 @@ nullable non-text columns. Related names filter too (`site contains ams`,
 `%` or `_` in a value is that character, not a wildcard.
 
 **Equality on an IP address** (`address`, an IP range's `start_address` and
-`end_address`, and related names such as `primary_ip4`) follows NetBox's rule
-on a build whose schema lists the replica's `host` operator on the column: a
-value without a mask matches every record with that address, whatever its mask
+`end_address`) matches the way NetBox matches an address filter, on a build
+whose schema lists the replica's `host` operator on the column: a value without
+a mask matches every record with that address, whatever its mask
 (`address = 10.0.0.1` finds `10.0.0.1/24`), and a value with a mask matches
-that exact address (`10.0.0.1/32` finds a single-host record). A value that is
-not an address matches nothing, as in NetBox. One filter cannot mix values with
-and without a mask; it fails with a message instead. On a build without `host`
-the comparison is on the stored text.
+that exact address (`10.0.0.1/32` finds the single-host record only). A value
+that is not an address matches nothing. Related names that hold an address,
+such as `primary_ip4`, match the same way; NetBox itself has no such filter.
+A filter that mixes values with and without a mask fails with a message, unless
+every masked value's address is also listed without one. On a build without
+`host` the comparison is on the stored text.
 
-Two things are deliberately not offered:
+Three things are deliberately not offered:
 
 - _starts with_, _ends with_ and _= (ci)_ on a replica whose schema lists only
   `ilike`. That build's one text match is a contains; anchoring it or matching

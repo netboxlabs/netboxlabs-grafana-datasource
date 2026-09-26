@@ -12,7 +12,8 @@
   how fresh the data is, and a replica still loading its initial snapshot is a
   warning. Text filters follow the replica's schema: _contains_ on text
   columns, and _starts with_, _ends with_ and _= (ci)_ on a build that lists
-  them. A new **Max data age** setting makes alert rules and expression-fed
+  them; equality on an IP address matches by host when the value has no mask,
+  as in NetBox. A new **Max data age** setting makes alert rules and expression-fed
   queries refuse stale or unknown-age data. Annotations, IP enrichment,
   topology and tags are not available in this mode and fail with an explicit
   message. The connection fields are the same in both modes — URL and API

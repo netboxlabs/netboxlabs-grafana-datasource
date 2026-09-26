@@ -85,7 +85,7 @@ func TestBuildFilterValues(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := buildFilterValues(tc.filters)
+			got, err := buildFilterValues(tc.filters, nil)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -101,17 +101,90 @@ func TestBuildFilterValues(t *testing.T) {
 	}
 }
 
+// An exact filter on an IP address column follows NetBox's own rule (ipam's
+// net_in lookup): a value without a mask matches every record with that host,
+// whatever its mask; a value with a mask matches that exact address. The first
+// is the replica's host operator. The second is equality on the stored text,
+// which PostgreSQL prints without a single-host mask (/32, /128).
+func TestBuildFilterValues_AddressColumnsMatchLikeNetBox(t *testing.T) {
+	isAddress := func(field string) bool { return field == "address" }
+	for _, tc := range []struct {
+		name    string
+		filters []provider.Filter
+		want    map[string]string
+	}{
+		{"a bare address matches by host", []provider.Filter{{Field: "address", Value: "10.0.0.1"}},
+			map[string]string{"filter[address]__host": "10.0.0.1"}},
+		{"several bare addresses are one host list", []provider.Filter{{Field: "address", Value: "10.0.0.1, 10.0.0.2"}},
+			map[string]string{"filter[address]__host": "10.0.0.1,10.0.0.2"}},
+		{"rows on one field union into the list", []provider.Filter{{Field: "address", Value: "10.0.0.1"}, {Field: "address", Operator: "exact", Value: "10.0.0.2"}},
+			map[string]string{"filter[address]__host": "10.0.0.1,10.0.0.2"}},
+		{"IPv6 is written canonically", []provider.Filter{{Field: "address", Value: "2001:0DB8::0001"}},
+			map[string]string{"filter[address]__host": "2001:db8::1"}},
+		{"a mapped address stays IPv6, as NetBox compares it", []provider.Filter{{Field: "address", Value: "::ffff:10.0.0.1"}},
+			map[string]string{"filter[address]__host": "::ffff:10.0.0.1"}},
+		{"a masked address matches exactly", []provider.Filter{{Field: "address", Value: "10.0.16.1/21"}},
+			map[string]string{"filter[address]__eq": "10.0.16.1/21"}},
+		{"a single-host mask is written as PostgreSQL prints it", []provider.Filter{{Field: "address", Value: "10.0.0.1/32"}},
+			map[string]string{"filter[address]__eq": "10.0.0.1"}},
+		{"an IPv6 single-host mask too", []provider.Filter{{Field: "address", Value: "2001:DB8::1/128"}},
+			map[string]string{"filter[address]__eq": "2001:db8::1"}},
+		{"several masked addresses are one in list", []provider.Filter{{Field: "address", Value: "10.0.16.1/21, 10.0.16.2/21"}},
+			map[string]string{"filter[address]__in": "10.0.16.1/21,10.0.16.2/21"}},
+		// NetBox compares HOST(address) with the text, so a value that is no
+		// address, or carries a zone, matches nothing there. Here host would
+		// refuse the whole list for it, so it is left out instead.
+		{"a value that is no address is left out of the host list", []provider.Filter{{Field: "address", Value: "10.0.0.1, bogus"}},
+			map[string]string{"filter[address]__host": "10.0.0.1"}},
+		{"so is an address with a zone", []provider.Filter{{Field: "address", Value: "10.0.0.1, fe80::1%eth0"}},
+			map[string]string{"filter[address]__host": "10.0.0.1"}},
+		// With nothing left, the filter must still match nothing: dropping it
+		// would return every row.
+		{"nothing valid still matches nothing", []provider.Filter{{Field: "address", Value: "bogus"}},
+			map[string]string{"filter[address]__eq": "bogus"}},
+		{"any other column is untouched", []provider.Filter{{Field: "name", Value: "10.0.0.1"}},
+			map[string]string{"filter[name]__eq": "10.0.0.1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildFilterValues(tc.filters, isAddress)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got.Get(k) != v {
+					t.Errorf("param %q = %q, want %q (all: %v)", k, got.Get(k), v, got)
+				}
+			}
+		})
+	}
+}
+
+// NetBox ORs the two kinds of value (masked exactly, bare by host); the
+// replica ANDs its filters and has no OR, so a filter mixing them is refused
+// rather than narrowed to one kind.
+func TestBuildFilterValues_RefusesMixingMaskedAndBareAddresses(t *testing.T) {
+	_, err := buildFilterValues([]provider.Filter{{Field: "address", Value: "10.0.0.1, 10.0.0.2/24"}},
+		func(field string) bool { return field == "address" })
+	var u *UnsupportedFilterError
+	if !errors.As(err, &u) || !strings.Contains(u.Reason, "mask") {
+		t.Fatalf("want a refusal explaining the mix of masked and bare addresses, got %v", err)
+	}
+}
+
 // No text match can be unioned: replica-cache has no OR, so "name starts with
 // A or B" has no expression. Each of the four is refused for several values,
 // and for a repeat on one field, rather than narrowed to the first value.
 func TestBuildFilterValuesRefusesSeveralValuesForAnyTextMatch(t *testing.T) {
 	for _, op := range []string{opIContns, opIExact, opIStarts, opIEnds} {
-		_, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: op, Value: "core, spine"}})
+		_, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: op, Value: "core, spine"}}, nil)
 		var unsupported *UnsupportedFilterError
 		if !errors.As(err, &unsupported) || !strings.Contains(unsupported.Reason, "several values") {
 			t.Fatalf("%q with two values: want the several-values refusal, got %v", op, err)
 		}
-		_, err = buildFilterValues([]provider.Filter{{Field: "name", Operator: op, Value: "core"}, {Field: "name", Operator: op, Value: "spine"}})
+		_, err = buildFilterValues([]provider.Filter{{Field: "name", Operator: op, Value: "core"}, {Field: "name", Operator: op, Value: "spine"}}, nil)
 		if !errors.As(err, &unsupported) || !strings.Contains(unsupported.Reason, "applied twice") {
 			t.Fatalf("%q twice on one field: want the applied-twice refusal, got %v", op, err)
 		}
@@ -124,7 +197,7 @@ func TestBuildFilterValuesRefusesSeveralValuesForAnyTextMatch(t *testing.T) {
 func TestBuildFilterValuesRefusesUnsupportedOperators(t *testing.T) {
 	for _, op := range []string{"gte", "lte", "n", "nic", "nie", "nisw", "niew", "regex", "iregex"} {
 		t.Run(op, func(t *testing.T) {
-			_, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: op, Value: "x"}})
+			_, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: op, Value: "x"}}, nil)
 			if err == nil {
 				t.Fatalf("operator %q was accepted; it must be refused, not approximated", op)
 			}
@@ -149,7 +222,7 @@ func TestBuildFilterValuesRefusesUnsupportedOperators(t *testing.T) {
 // A multi-value substring filter cannot be expressed, and picking the first
 // value would silently narrow a dashboard variable to one of its selections.
 func TestBuildFilterValuesRefusesMultiValueTextMatch(t *testing.T) {
-	_, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: "ic", Value: "core,edge"}})
+	_, err := buildFilterValues([]provider.Filter{{Field: "name", Operator: "ic", Value: "core,edge"}}, nil)
 	if err == nil {
 		t.Fatal("want an error for a multi-value substring match, got none")
 	}
@@ -160,7 +233,7 @@ func TestBuildFilterValuesRefusesMultiValueTextMatch(t *testing.T) {
 }
 
 func TestBuildFilterValuesRefusesMultiValueComparison(t *testing.T) {
-	if _, err := buildFilterValues([]provider.Filter{{Field: "id", Operator: "gt", Value: "1,2"}}); err == nil {
+	if _, err := buildFilterValues([]provider.Filter{{Field: "id", Operator: "gt", Value: "1,2"}}, nil); err == nil {
 		t.Fatal("want an error for a multi-value comparison, got none")
 	}
 }
@@ -172,7 +245,7 @@ func TestBuildFilterValuesUnionsRepeatedExactFilters(t *testing.T) {
 	got, err := buildFilterValues([]provider.Filter{
 		{Field: "status", Value: "active"},
 		{Field: "status", Value: "planned"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -190,7 +263,7 @@ func TestBuildFilterValuesUnionsMixedExactSources(t *testing.T) {
 	got, err := buildFilterValues([]provider.Filter{
 		{Field: "status", Value: "active,planned"},
 		{Field: "status", Value: "offline"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -201,7 +274,7 @@ func TestBuildFilterValuesUnionsMixedExactSources(t *testing.T) {
 
 // A single exact filter still uses eq rather than a one-element in.
 func TestBuildFilterValuesKeepsSingleExactAsEq(t *testing.T) {
-	got, err := buildFilterValues([]provider.Filter{{Field: "status", Value: "active"}})
+	got, err := buildFilterValues([]provider.Filter{{Field: "status", Value: "active"}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -216,7 +289,7 @@ func TestBuildFilterValuesKeepsFieldsSeparate(t *testing.T) {
 		{Field: "status", Value: "active"},
 		{Field: "status", Value: "planned"},
 		{Field: "name", Value: "CORE-1"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -246,7 +319,7 @@ func TestBuildFilterValuesRefusesRepeatedNonExactOperators(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := buildFilterValues(tc.filters); err == nil {
+			if _, err := buildFilterValues(tc.filters, nil); err == nil {
 				t.Fatal("want a refusal, got none: silently dropping one narrows the result")
 			}
 		})
@@ -258,7 +331,7 @@ func TestBuildFilterValuesAllowsARangeOnOneField(t *testing.T) {
 	got, err := buildFilterValues([]provider.Filter{
 		{Field: "id", Operator: "gt", Value: "5"},
 		{Field: "id", Operator: "lt", Value: "10"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("a range must be allowed: %v", err)
 	}
@@ -289,7 +362,7 @@ func TestIsEmptyRefusalDoesNotRecommendADiscardedFilter(t *testing.T) {
 	// Why that advice was wrong: an equality filter with an empty value emits
 	// no parameter at all. Same as NetBox mode, which drops empties too — so
 	// this is consistency, not a gap to close here.
-	q, err := buildFilterValues([]provider.Filter{{Field: "serial", Operator: "exact", Value: ""}})
+	q, err := buildFilterValues([]provider.Filter{{Field: "serial", Operator: "exact", Value: ""}}, nil)
 	if err != nil {
 		t.Fatalf("buildFilterValues: %v", err)
 	}

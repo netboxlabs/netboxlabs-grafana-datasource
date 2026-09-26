@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"slices"
 	"sort"
@@ -304,6 +305,16 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// host (DATA-417) takes IP addresses with no mask or zone, and one bad
+		// element refuses the whole list, as the service does.
+		if op == "host" {
+			for _, h := range strings.Split(vs[0], ",") {
+				if a, err := netip.ParseAddr(h); err != nil || a.Zone() != "" {
+					writeErr(w, 400, "invalid filter value for "+col+": host takes IP addresses with no mask or zone")
+					return
+				}
+			}
+		}
 		var keep []map[string]interface{}
 		for _, row := range filtered {
 			if matches(row[col], op, vs[0]) {
@@ -435,8 +446,43 @@ func matches(v interface{}, op, want string) bool {
 		return strings.HasSuffix(strings.ToLower(s), strings.ToLower(want))
 	case "iexact":
 		return strings.EqualFold(s, want)
+	case "host":
+		// The stored inet text's address, compared as an address with any
+		// listed one; the mask plays no part.
+		if v == nil {
+			return false
+		}
+		a, err := netip.ParseAddr(strings.SplitN(s, "/", 2)[0])
+		if err != nil {
+			return false
+		}
+		for _, w := range strings.Split(want, ",") {
+			if b, err := netip.ParseAddr(w); err == nil && a == b {
+				return true
+			}
+		}
+		return false
 	}
 	return true
+}
+
+// addAddressEntity adds ipam/ip-addresses as a replica with the host operator
+// (DATA-417) serves it: address is VARCHAR and lists host beside the text
+// operators. withHost false is a build before host.
+func (f *fakeService) addAddressEntity(withHost bool) {
+	f.addEntity("ipam/ip-addresses", "id:BIGINT:pk", "address:VARCHAR")
+	if !withHost {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e := f.schema.Entities["/v1/ipam/ip-addresses"]
+	for i := range e.Columns {
+		if e.Columns[i].Name == "address" {
+			e.Columns[i].Operators = append(e.Columns[i].Operators, "host")
+		}
+	}
+	f.schema.Entities["/v1/ipam/ip-addresses"] = e
 }
 
 // isTextOperator is the service's type gate: these four bind VARCHAR alone.

@@ -97,8 +97,19 @@ on a replica-cache build that lists them (`istartswith`, `iendswith`,
 columns as well; greater/less than; and _is empty_ / _has any value_ on
 nullable non-text columns. Related names filter too (`site contains ams`,
 `site starts with dc-`). Every text match is case-insensitive and literal: a
-`%` or `_` in a value is that character, not a wildcard. Two things are
-deliberately not offered:
+`%` or `_` in a value is that character, not a wildcard.
+
+**Equality on an IP address** (`address`, an IP range's `start_address` and
+`end_address`, and related names such as `primary_ip4`) follows NetBox's rule
+on a build whose schema lists the replica's `host` operator on the column: a
+value without a mask matches every record with that address, whatever its mask
+(`address = 10.0.0.1` finds `10.0.0.1/24`), and a value with a mask matches
+that exact address (`10.0.0.1/32` finds a single-host record). A value that is
+not an address matches nothing, as in NetBox. One filter cannot mix values with
+and without a mask; it fails with a message instead. On a build without `host`
+the comparison is on the stored text.
+
+Two things are deliberately not offered:
 
 - _starts with_, _ends with_ and _= (ci)_ on a replica whose schema lists only
   `ilike`. That build's one text match is a contains; anchoring it or matching

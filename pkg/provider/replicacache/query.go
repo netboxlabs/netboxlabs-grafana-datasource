@@ -36,7 +36,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
-	q, err := buildFilterValues(spec.Filters)
+	q, err := buildFilterValues(spec.Filters, addressField(e, c))
 	if err != nil {
 		return nil, err
 	}

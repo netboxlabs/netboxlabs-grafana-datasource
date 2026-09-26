@@ -1726,6 +1726,106 @@ func TestQuery_AnchoredTextMatchOnAnUnfedEntityFollowsTheBuild(t *testing.T) {
 	}
 }
 
+// NetBox matches an exact address filter by host when the value has no mask
+// (ipam's net_in lookup), so "address = 10.0.16.1" finds 10.0.16.1/21 and
+// 10.0.16.1/24 alike. The replica stores the inet text, and equality on it
+// found nothing while looking healthy. Where the schema lists host on the
+// column, a bare value goes out as host; a masked one stays equality, in the
+// form PostgreSQL prints (a /32 has no mask in the stored text).
+func TestQuery_ExactAddressFilterMatchesLikeNetBox(t *testing.T) {
+	f := newFakeService()
+	f.addAddressEntity(true)
+	f.entities["ipam/ip-addresses"] = []map[string]interface{}{
+		{"id": 1, "address": "10.0.16.1/21"},
+		{"id": 2, "address": "10.0.16.2/21"},
+		{"id": 3, "address": "10.0.0.1"}, // a /32: PostgreSQL prints it without the mask
+		{"id": 4, "address": "10.0.16.1/24"},
+	}
+	p := newTestProvider(t, f)
+	for _, tc := range []struct {
+		value, wire string
+		want        []string
+	}{
+		{"10.0.16.1", "filter[address]__host", []string{"1", "4"}},
+		{"10.0.16.1, 10.0.16.2", "filter[address]__host", []string{"1", "2", "4"}},
+		{"10.0.0.1", "filter[address]__host", []string{"3"}},
+		{"10.0.0.1/32", "filter[address]__eq", []string{"3"}},
+		{"10.0.16.1/21", "filter[address]__eq", []string{"1"}},
+		{"10.0.16.1, not-an-address", "filter[address]__host", []string{"1", "4"}},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "ipam/ip-addresses",
+				Fields: []string{"id", "address"}, Ordering: "id",
+				Filters: []provider.Filter{{Field: "address", Value: tc.value}}})
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if _, ok := f.requestWith("ipam/ip-addresses", tc.wire); !ok {
+				t.Errorf("no request carried %s", tc.wire)
+			}
+			var got []string
+			for _, r := range res.Rows {
+				got = append(got, fmt.Sprint(r["id"]))
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("ids = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// An expanded name whose target column lists host matches the same way:
+// "primary_ip4 = 10.0.0.11" finds the device whose primary address is
+// 10.0.0.11/21. Measured on staging: host works on an expanded name.
+func TestQuery_ExactAddressFilterOnAnExpandedNameMatchesByHost(t *testing.T) {
+	f := newFakeService()
+	f.addAddressEntity(true)
+	f.entities["ipam/ip-addresses"] = []map[string]interface{}{{"id": 1865, "address": "10.0.0.11/21"}}
+	e := f.schema.Entities["/v1/dcim/devices"]
+	e.Columns = append(e.Columns, fakeColumn{Name: "primary_ip4_id", Type: "BIGINT", Nullable: true, Operators: []string{"eq", "gt", "lt", "in", "isnull"}})
+	f.schema.Entities["/v1/dcim/devices"] = e
+	f.addReference("dcim/devices", "primary_ip4_id", "ipam/ip-addresses", "primary_ip4", "address")
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": 1, "name": "a", "primary_ip4_id": 1865, "custom_field_data": `{}`},
+		{"id": 2, "name": "b", "primary_ip4_id": nil, "custom_field_data": `{}`},
+	}
+	p := newTestProvider(t, f)
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "primary_ip4"},
+		Filters: []provider.Filter{{Field: "primary_ip4", Value: "10.0.0.11"}}})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	req, ok := f.requestWith("dcim/devices", "filter[primary_ip4]__host")
+	if !ok {
+		t.Fatal("the expanded address name should be matched by host")
+	}
+	if !strings.Contains(req.query.Get("expand"), "primary_ip4") {
+		t.Errorf("expand = %q, want primary_ip4 expanded for the filter", req.query.Get("expand"))
+	}
+	if len(res.Rows) != 1 || res.Rows[0]["name"] != "a" {
+		t.Errorf("rows = %v, want device a alone", res.Rows)
+	}
+}
+
+// A build whose schema does not list host keeps equality on the text, as
+// before: host is never sent to a replica that would refuse it.
+func TestQuery_ExactAddressFilterStaysEqualityWithoutHost(t *testing.T) {
+	f := newFakeService()
+	f.addAddressEntity(false)
+	f.entities["ipam/ip-addresses"] = []map[string]interface{}{{"id": 1, "address": "10.0.16.1/21"}}
+	p := newTestProvider(t, f)
+	if _, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "ipam/ip-addresses", Fields: []string{"id", "address"},
+		Filters: []provider.Filter{{Field: "address", Value: "10.0.16.1"}}}); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if _, ok := f.requestWith("ipam/ip-addresses", "filter[address]__host"); ok {
+		t.Error("host must not be sent to a build whose schema does not list it")
+	}
+	if _, ok := f.requestWith("ipam/ip-addresses", "filter[address]__eq"); !ok {
+		t.Error("a build without host keeps equality")
+	}
+}
+
 // Not every entity is keyed by "id": core/object-types is keyed by
 // contenttype_ptr_id (measured on staging). The catalogue names the primary
 // key, and every place that reads a row's identity — the duplicate and

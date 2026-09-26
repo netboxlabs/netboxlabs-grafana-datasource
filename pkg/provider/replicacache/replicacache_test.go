@@ -913,7 +913,7 @@ func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 	// Every advertised operator is one the translator accepts.
 	for name, list := range ops {
 		for _, op := range list {
-			if _, err := buildFilterValues([]provider.Filter{{Field: name, Operator: op, Value: "1"}}); err != nil {
+			if _, err := buildFilterValues([]provider.Filter{{Field: name, Operator: op, Value: "1"}}, nil); err != nil {
 				t.Errorf("%s advertises %q but the translator rejects it: %v", name, op, err)
 			}
 		}
@@ -947,7 +947,7 @@ func TestFilterFields_OffersAnchoredMatchesWhenTheCatalogueListsThem(t *testing.
 	}
 	for name, list := range ops {
 		for _, op := range list {
-			if _, err := buildFilterValues([]provider.Filter{{Field: name, Operator: op, Value: "1"}}); err != nil {
+			if _, err := buildFilterValues([]provider.Filter{{Field: name, Operator: op, Value: "1"}}, nil); err != nil {
 				t.Errorf("%s advertises %q but the translator rejects it: %v", name, op, err)
 			}
 		}

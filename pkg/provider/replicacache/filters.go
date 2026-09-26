@@ -2,6 +2,7 @@ package replicacache
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -89,7 +90,7 @@ func (e *UnsupportedFilterError) Classification() *provider.UpstreamError {
 // So a multi-value substring filter is refused rather than approximated by
 // picking one value, which would silently narrow a dashboard's variable to its
 // first selection.
-func buildFilterValues(filters []provider.Filter) (url.Values, error) {
+func buildFilterValues(filters []provider.Filter, addressField func(field string) bool) (url.Values, error) {
 	q := url.Values{}
 
 	// Exact filters are accumulated per field rather than written as they are
@@ -168,15 +169,95 @@ func buildFilterValues(filters []provider.Filter) (url.Values, error) {
 
 	for _, field := range exactOrder {
 		values := exactValues[field]
-		if len(values) == 1 {
-			q.Set(param(field, "eq"), values[0])
+		if addressField != nil && addressField(field) {
+			if err := setAddressMatch(q, field, values); err != nil {
+				return nil, err
+			}
 			continue
 		}
-		// `in` takes the comma-separated union of every exact value asked for,
-		// whether they arrived as one multi-value variable or as several rows.
-		q.Set(param(field, "in"), strings.Join(values, ","))
+		setEquality(q, field, values)
 	}
 	return q, nil
+}
+
+// setEquality writes an exact filter: eq for one value, and `in` for the
+// comma-separated union of several, whether they arrived as one multi-value
+// variable or as several rows.
+func setEquality(q url.Values, field string, values []string) {
+	if len(values) == 1 {
+		q.Set(param(field, "eq"), values[0])
+		return
+	}
+	q.Set(param(field, "in"), strings.Join(values, ","))
+}
+
+// setAddressMatch writes an exact filter on an IP address column the way
+// NetBox matches one (ipam's net_in lookup). A value without a mask matches
+// every record with that host, whatever its mask: the replica's host operator.
+// A value with a mask matches that exact address: equality on the stored text,
+// written as PostgreSQL prints an inet, which leaves out a single-host mask
+// (/32, /128). Equality on the bare text instead — what this sent before —
+// finds nothing for "10.0.0.1" against a stored "10.0.0.1/24", and looks
+// healthy doing it.
+//
+// NetBox compares HOST(address) with the text, so a value that is no address,
+// or carries a zone, matches nothing there. host would refuse the whole list
+// for one such value, so it is left out; with nothing left, the values go as
+// equality, which still matches nothing rather than dropping the filter.
+// NetBox ORs masked and bare values; the replica has no OR, so mixing them is
+// refused rather than narrowed to one kind.
+func setAddressMatch(q url.Values, field string, values []string) error {
+	var hosts, exact []string
+	for _, v := range values {
+		if a, err := netip.ParseAddr(v); err == nil {
+			if a.Zone() == "" {
+				hosts = append(hosts, a.String())
+			}
+			continue
+		}
+		if pfx, err := netip.ParsePrefix(v); err == nil {
+			exact = append(exact, inetText(pfx))
+		}
+	}
+	switch {
+	case len(hosts) > 0 && len(exact) > 0:
+		return &UnsupportedFilterError{Field: field, Operator: "exact",
+			Reason: "it mixes addresses with and without a mask. NetBox matches the first exactly and the second by host, whatever its mask, and returns either; this backend cannot combine the two, so write every value with a mask or every value without one"}
+	case len(hosts) > 0:
+		q.Set(param(field, "host"), strings.Join(hosts, ","))
+	case len(exact) > 0:
+		setEquality(q, field, exact)
+	default:
+		setEquality(q, field, values)
+	}
+	return nil
+}
+
+// inetText is an address with its mask as PostgreSQL prints an inet: the mask
+// is left out when it covers a single host. The host bits are kept — an inet
+// is an address in its network, not the network.
+func inetText(p netip.Prefix) string {
+	if p.Bits() == p.Addr().BitLen() {
+		return p.Addr().String()
+	}
+	return p.String()
+}
+
+// addressField reports, for an entity, whether an exact filter on a field
+// compares IP addresses by NetBox's rule: whether the column it filters on —
+// the stored column, or an expanded name's target column — lists the
+// replica's host operator. The catalogue decides, not the column's name; a
+// build without host keeps equality on the text.
+func addressField(e entity, c *catalog) func(field string) bool {
+	return func(field string) bool {
+		if col, ok := e.column(field); ok {
+			return slices.Contains(col.Operators, "host")
+		}
+		if via, target, ok := e.expandedColumn(field); ok && via.Ref.Available {
+			return slices.Contains(targetColumn(c, via.Ref, target).Operators, "host")
+		}
+		return false
+	}
 }
 
 // param builds the service's filter parameter name. The brackets are literal

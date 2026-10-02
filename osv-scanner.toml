@@ -3,20 +3,25 @@
 # and carries a re-review date. Anything fixable is fixed instead — the fast-uri
 # and nanoid exceptions that used to live here are gone because each fix aged
 # past the .npmrc `min-release-age=7` cooldown and is now pinned in
-# package.json's overrides.
+# package.json's overrides, as are basic-ftp, brace-expansion, dompurify,
+# ip-address and moment (2026-10-02).
 
-# react-router 6.30.4 is pinned transitively by @grafana/ui@13.1.0 (via
+# react-router 6.30.4 is pinned transitively by @grafana/ui@13.1.3 (via
 # react-router-dom-v5-compat, which requires react-router 6.x). Both advisories
-# are fixed only in react-router 7.x — a major that @grafana/ui's v6 usage
-# cannot take — so this is not upgradable from here. @grafana/ui is externalized
-# by Grafana at runtime and is not bundled into the shipped plugin. Remediation
-# belongs to @grafana/ui; drop these two entries when it ships a fixed
-# react-router. ignoreUntil is a re-review date, not an expected fix date.
+# are fixed only in react-router 7.18.0 (affected ranges ">= 6.0.0, < 7.18.0"
+# and ">= 6.4.0, < 7.18.0"; no 6.x backport) — a major that @grafana/ui's v6
+# usage cannot take — so this is not upgradable from here. Re-reviewed
+# 2026-10-02: the latest @grafana/ui (13.2.3) still requires
+# react-router-dom-v5-compat ^6.26.1, which resolves react-router 6.30.6, also
+# affected. @grafana/ui is externalized by Grafana at runtime and is not bundled
+# into the shipped plugin. Remediation belongs to @grafana/ui; drop these two
+# entries when it ships a fixed react-router. ignoreUntil is a re-review date,
+# not an expected fix date.
 [[IgnoredVulns]]
 id = "GHSA-337j-9hxr-rhxg"
-ignoreUntil = 2026-10-01
-reason = "react-router 6.30.4 pinned transitively by @grafana/ui@13.1.0; fix is v7-only (incompatible). Externalized at runtime, not shipped. Re-review when @grafana/ui updates."
+ignoreUntil = 2026-11-02
+reason = "react-router 6.x pinned transitively by @grafana/ui (13.1.3 here, 13.2.3 latest); fix is v7-only (incompatible). Externalized at runtime, not shipped. Re-review when @grafana/ui updates."
 [[IgnoredVulns]]
 id = "GHSA-wrjc-x8rr-h8h6"
-ignoreUntil = 2026-10-01
-reason = "react-router 6.30.4 pinned transitively by @grafana/ui@13.1.0; fix is v7-only (incompatible). Externalized at runtime, not shipped. Re-review when @grafana/ui updates."
+ignoreUntil = 2026-11-02
+reason = "react-router 6.x pinned transitively by @grafana/ui (13.1.3 here, 13.2.3 latest); fix is v7-only (incompatible). Externalized at runtime, not shipped. Re-review when @grafana/ui updates."

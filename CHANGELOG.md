@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.2 (2026-10-02)
+
+- **The topology hint follows the Grafana theme.** The help text under the
+  _Topology_ and _Topology edges_ query types was styled with fixed inline
+  values; it now takes its colour, size and spacing from the Grafana theme, so
+  it reads as secondary text in light and dark alike.
+- **The plugin is signed**, so Grafana loads it without allowing unsigned
+  plugins.
+
 ## 1.0.1 (2026-09-25)
 
 - **Connection failures no longer print the target's address.** _Save & test_

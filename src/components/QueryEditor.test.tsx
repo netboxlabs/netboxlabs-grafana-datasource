@@ -1,5 +1,6 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { createTheme } from '@grafana/data';
 import { ORDERING_DISABLED_TOOLTIP, ORDERING_TOOLTIP, QueryEditor } from './QueryEditor';
 import { FAST_PAGING_TOOLTIP } from './ConfigEditor';
 import { IP_CONTEXT_FIELD_GROUPS, IP_CONTEXT_FIELD_OPTIONS, DEFAULT_IP_CONTEXT_FIELDS } from '../types';
@@ -672,6 +673,29 @@ describe('QueryEditor — Topology edges guidance', () => {
   it('still points the node-graph query at the node graph', () => {
     setup({ queryType: 'topology', objectType: undefined });
     expect(screen.getByText(/Node\s*Graph visualization/i)).toBeInTheDocument();
+  });
+});
+
+// Catalogue review: the hint under the topology query types is styled from the
+// Grafana theme (useStyles2 + @emotion/css), not inline CSS, so it follows the
+// theme's secondary text colour and type scale in light and dark alike.
+describe('QueryEditor — topology hint styling', () => {
+  it.each([
+    ['topology', /Node\s*Graph visualization/i],
+    ['topology-edges', /Table visualization/i],
+  ])('styles the %s hint from the theme, with no inline style', (queryType, text) => {
+    setup({ queryType, objectType: undefined });
+    const hint = screen.getByText(text);
+    expect(hint).not.toHaveAttribute('style');
+    expect(hint.className).toMatch(/\bcss-/);
+    // The values themselves come from the theme: a class carrying hard-coded
+    // ones would pass the two checks above.
+    const theme = createTheme();
+    expect(hint).toHaveStyle({
+      color: theme.colors.text.secondary,
+      fontSize: theme.typography.bodySmall.fontSize,
+      marginLeft: theme.spacing(0.5),
+    });
   });
 });
 

@@ -2,7 +2,7 @@
 
 _One of the [alerting recipes](../ALERTING.md#recipes)._
 
-The [alert-table recipe](alert-table.md) puts NetBox context on alerts *about NetBox state*. This one puts it on
+The [alert-table recipe](alert-table.md) puts NetBox context on alerts _about NetBox state_. This one puts it on
 alerts about **metrics** — SNMP, gNMI, flow, blackbox — by joining the metric to
 NetBox inside the alert rule with a **SQL expression**.
 
@@ -37,12 +37,12 @@ GROUP BY A.device,
 > **Use `LEFT JOIN`, not `JOIN`, and mean it.** An inner join silently drops any
 > metric series with no NetBox match — a device that was renamed, decommissioned
 > in NetBox but still emitting, or simply scoped out by a filter on **B**. Those
-> rows disappear *before* the `CASE` runs, so a device that is genuinely down
+> rows disappear _before_ the `CASE` runs, so a device that is genuinely down
 > produces no alert at all. Measured on a 15-device fixture with **B** filtered to
 > one site: 8 devices vanished, and all 8 would have failed silently. The
 > `COALESCE` fallbacks matter just as much — a NULL label is not a label, so
 > without them the same rows are still lost. Missing inventory should make an
-> alert *less informative*, never absent.
+> alert _less informative_, never absent.
 >
 > One consequence to expect: because the fallback changes the alert's **labels**,
 > it changes the alert's **identity**. When a device drifts out of NetBox its
@@ -75,7 +75,7 @@ Things that will catch you out:
 
 - **Format must be `Alerting`.** This is the one that costs hours. In the UI it
   is the SQL expression's Format selector; provisioned, it is `"format":
-  "alerting"` on the expression's model. Without it the expression returns a
+"alerting"` on the expression's model. Without it the expression returns a
   table and the rule fails with `unexpected field length: N instead of 1`, which
   does not hint at the cause.
 - **Raise the Limit on the NetBox query.** The query editor fills it in with
@@ -90,12 +90,13 @@ Things that will catch you out:
   ```
 
   The SQL expression then cannot run (`could not run sql expression [C] because
-  it selects from the results of query [B] which has an error`) and the whole
+it selects from the results of query [B] which has an error`) and the whole
   rule stops evaluating. The failure is loud and the message is actionable,
   which is the right behaviour — but a fleet of more than 100 devices hits it
   immediately on the editor default. The same applies to the recording rule
   below, which fails the same way and stops writing. Set the Limit above the
   scoped inventory, or filter the query so every match fits.
+
 - **Exactly one numeric column**, and it is the value. Everything else must be a
   string to become a label.
 - The SQL dialect is **MySQL-flavoured**: quote odd identifiers with backticks
@@ -104,9 +105,9 @@ Things that will catch you out:
 - A SQL expression **cannot feed another expression** — no Reduce or Threshold
   after it. It must be the condition itself, which is why the firing decision
   lives in the `CASE`.
-- SQL expressions may be behind the `sqlExpressions` feature toggle. On
-  Grafana 13.0.2 it is **not** on by default, and the query fails with
-  "sql expressions are disabled" until you set
+- SQL expressions are on by default from Grafana 13.2 (checked on 13.2.2).
+  On 13.0.x the `sqlExpressions` feature toggle is **off**, and the query fails
+  with "sql expressions are disabled" until you set
   `GF_FEATURE_TOGGLES_ENABLE=sqlExpressions`. Check your own version — the
   toggle's state shows in `/api/frontend/settings`.
 
@@ -140,6 +141,9 @@ Every rule using the join above queries NetBox on every evaluation, and nothing
 between the rule and NetBox caches. With more than a handful of rules, invert it:
 run **one recording rule** that writes NetBox inventory into Prometheus as a
 metric, then have every alert rule join Prometheus against Prometheus.
+
+This is a **Grafana-managed** recording rule. The data-source-managed kind runs
+inside the Mimir or Loki ruler and cannot query a plugin data source.
 
 The recording rule needs no SQL expression at all — the **Alert table** option
 from the [alert-table recipe](alert-table.md) already emits the exact shape a recording rule wants (one numeric
@@ -254,6 +258,20 @@ have. The trade is freshness — recorded context is only as current as the last
 recording run, so a device that moves site keeps its old labels until then. For
 inventory data that is almost always fine, but decide it rather than discover it.
 
+**Decide what crosses into Prometheus, too.** Every label value is copied into
+the time-series store and lives under the Prometheus data source's permissions
+from then on: NetBox's object permissions and this data source's permissions no
+longer apply, and each value reaches everyone who can query that store, every
+alert label and every notification. Record identifiers, names and slugs — the
+four fields above, `id` if you join on it — and nothing else: no contact names,
+emails or phones (the [who-do-I-page recipe](who-do-i-page.md) keeps those in
+annotations), no `description` or `comments`, no custom fields. Free text is
+where credentials and personal data hide, and a label cannot be redacted once
+written. Cardinality is the other ceiling: this shape is one series per device,
+so scope query **A** to the devices the rules are about, or record aggregates
+(a SQL expression with `GROUP BY site`), before a hosted stack's series limit
+does it for you.
+
 Two prerequisites that fail unhelpfully if missed:
 
 - The Prometheus data source needs `prometheusType: Prometheus` in its
@@ -262,6 +280,13 @@ Two prerequisites that fail unhelpfully if missed:
   which does not name the cause.
 - Prometheus itself must run with `--web.enable-remote-write-receiver`, which is
   off by default.
+
+On Grafana Cloud, recording rules are on by default and write to the hosted
+`grafanacloud-prom` data source unless you pick a target; a Prometheus on a
+private network is reached through Private Data Source Connect. On OSS and
+Enterprise they have to be enabled, and from Grafana 12.1 a rule saved without a
+target falls back to `default_datasource_uid` in the `[recording_rules]`
+section of the configuration.
 
 For an alert keyed by **IP** rather than device name — flow records, for example
 — point query **B** at `ipam/ip-addresses` and give it a **join key** of
@@ -290,8 +315,8 @@ reasons given above.
 > you actually mean. If your estate genuinely needs to alert on shared addresses,
 > carry the disambiguator (VRF, or the assigned device) into both the join key
 > and the labels, rather than joining on the bare address.
-An IP that NetBox has never seen is common and interesting, and it must still
-alert. Get the transform name wrong
-and it silently does nothing — the column is renamed but keeps its mask, and the
-join then matches no rows with no error to explain why. The same key is used for dashboards in
-[Recipe 3 of RECIPES.md](../RECIPES.md#recipe-3-enrich-flows-or-logs-by-ip).
+> An IP that NetBox has never seen is common and interesting, and it must still
+> alert. Get the transform name wrong
+> and it silently does nothing — the column is renamed but keeps its mask, and the
+> join then matches no rows with no error to explain why. The same key is used for dashboards in
+> [Recipe 3 of RECIPES.md](../RECIPES.md#recipe-3-enrich-flows-or-logs-by-ip).

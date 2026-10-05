@@ -36,7 +36,7 @@ func newTestProvider(t *testing.T, f *fakeService) *Provider {
 // Only what is asked for: an unprojected query returns the stored columns,
 // because expanding every reference on a large table is what made the
 // default query time out (dcim/interfaces: one reference alone took 62 s for
-// 100 rows on staging, and all eight answered 503).
+// 100 rows on a large replica, and all eight answered 503).
 func TestQueryExpandsForeignKeysToNames(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
@@ -1829,7 +1829,7 @@ func TestQuery_SingleHostAddressesShowTheirMask(t *testing.T) {
 
 // An expanded name whose target column lists host matches the same way:
 // "primary_ip4 = 10.0.0.11" finds the device whose primary address is
-// 10.0.0.11/21. Measured on staging: host works on an expanded name.
+// 10.0.0.11/21. Measured on a live replica: host works on an expanded name.
 func TestQuery_ExactAddressFilterOnAnExpandedNameMatchesByHost(t *testing.T) {
 	f := newFakeService()
 	f.addAddressEntity(true)
@@ -1880,9 +1880,9 @@ func TestQuery_ExactAddressFilterStaysEqualityWithoutHost(t *testing.T) {
 }
 
 // Not every entity is keyed by "id": core/object-types is keyed by
-// contenttype_ptr_id (measured on staging). The catalogue names the primary
-// key, and every place that reads a row's identity — the duplicate and
-// missing-id checks, the deep link, autocomplete — reads that column.
+// contenttype_ptr_id (measured on a live replica). The catalogue names the
+// primary key, and every place that reads a row's identity — the duplicate
+// and missing-id checks, the deep link, autocomplete — reads that column.
 func TestQuery_UsesTheCataloguePrimaryKey(t *testing.T) {
 	f := newFakeService()
 	f.entities["core/object-types"] = []map[string]interface{}{

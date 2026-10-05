@@ -553,7 +553,7 @@ type fakeReference struct {
 	Available bool     `json:"available"`
 }
 
-// devicesSchema is the staging dcim/devices catalogue cut down to what the
+// devicesSchema is a live replica's dcim/devices catalogue cut down to what the
 // tests exercise: text, number, boolean and VARCHAR-timestamp columns
 // (DATA-250), custom_field_data, the columns deviceFixture carries, and
 // references — available ones with and without a slug, and one whose target

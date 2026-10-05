@@ -14,8 +14,8 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
-// Max data age is opt-in: a replica can legitimately report no age (staging
-// sits at null through a 6.8M-row initial load), so nothing is refused unless
+// Max data age is opt-in: a replica can legitimately report no age (a large
+// one sits at null through a 6.8M-row initial load), so nothing is refused unless
 // the datasource says how old is too old. Once it does, the strict consumers
 // refuse a result older than that or of unknown age; a dashboard only shows
 // the age.

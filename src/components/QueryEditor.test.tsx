@@ -676,9 +676,6 @@ describe('QueryEditor — Topology edges guidance', () => {
   });
 });
 
-// Catalogue review: the hint under the topology query types is styled from the
-// Grafana theme (useStyles2 + @emotion/css), not inline CSS, so it follows the
-// theme's secondary text colour and type scale in light and dark alike.
 describe('QueryEditor — topology hint styling', () => {
   it.each([
     ['topology', /Node\s*Graph visualization/i],

@@ -25,3 +25,14 @@ reason = "react-router 6.x pinned transitively by @grafana/ui (13.1.3 here, 13.2
 id = "GHSA-wrjc-x8rr-h8h6"
 ignoreUntil = 2026-11-02
 reason = "react-router 6.x pinned transitively by @grafana/ui (13.1.3 here, 13.2.3 latest); fix is v7-only (incompatible). Externalized at runtime, not shipped. Re-review when @grafana/ui updates."
+
+# braces <= 3.0.3: stack-exhaustion DoS through deeply nested brace patterns.
+# There is no patched version: 3.0.3 is the latest release of braces, and the
+# advisory lists no fix. It is a development dependency only
+# (eslint-webpack-plugin -> micromatch -> braces), which expands the lint
+# plugin's own file globs at build time; it is not in the shipped plugin and
+# never sees user input. Re-review when braces or micromatch ships a fix.
+[[IgnoredVulns]]
+id = "GHSA-vfj7-8cjw-p6xm"
+ignoreUntil = 2026-11-02
+reason = "braces <= 3.0.3 has no patched release; dev-only via eslint-webpack-plugin -> micromatch, build-time globs from this repo, not shipped. Re-review when a fix ships."

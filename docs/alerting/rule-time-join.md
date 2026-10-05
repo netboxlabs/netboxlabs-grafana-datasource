@@ -155,23 +155,24 @@ column, the rest labels):
   fleet size
 - Record: metric `netbox_device_info`, from `A`, target the Prometheus data source
 
-The join keys do the label design. Each one names the label after the metric
-label it will be joined on (`device`) or after a key that survives a rename
-(`netbox_id`, the slugs — see [JOIN-KEYS.md](../JOIN-KEYS.md)); a join key's
-source column is read but not emitted, so only the return fields and the
-join-key outputs become labels. That yields one series per device, with nothing
-to `label_replace` later:
+The join keys do the label design. Each output is named after the metric label
+it joins on (`device`), or after a key that survives a rename: `netbox_id` and
+the slugs, as [JOIN-KEYS.md](../JOIN-KEYS.md) explains. A join key's source
+column is read but not emitted, so the labels are exactly the return fields and
+the join-key outputs. That yields one series per device, with nothing to
+`label_replace` later:
 
 ```
 netbox_device_info{device="AMS1-leaf-01", netbox_id="7", site="ams1", role="leaf", tenant_slug="grafana-demo"} 1
 ```
 
-The demo ships this rule provisioned — `provisioning/alerting/netbox-device-info.yml`
-— and it is the copy to start from. Two spellings to get right when provisioning
-your own: the target data source is `targetDatasourceUid` in a provisioning file
-and `target_datasource_uid` on the HTTP API (the same split as `keepFiringFor` /
-`keep_firing_for`), and the wrong one is dropped silently — the rule then fails
-with `remote write failed: data source uid not specified and no default set`.
+The demo ships this rule provisioned in
+`provisioning/alerting/netbox-device-info.yml`; start from that copy. When you
+provision your own, mind one spelling. The target data source is
+`targetDatasourceUid` in a provisioning file and `target_datasource_uid` on the
+HTTP API, the same split as `keepFiringFor` and `keep_firing_for`. The wrong
+spelling is dropped without a warning, and the rule then fails with
+`remote write failed: data source uid not specified and no default set`.
 
 Alert rules then never touch NetBox. They are plain PromQL — no SQL expression,
 no `Alerting` format, no cell limit, no feature toggle. Build the rule the
@@ -258,20 +259,21 @@ ones and every device comes back twice.
 
 One more consequence of the two-arm form: if the recording rule stops, the
 recorded series age out of Prometheus and every device falls through to the
-fallback arm. It does stop, and loudly: with the Limit below the fleet size the
-rule goes to `Error` with `Alert query returned 5 of 15 matching objects, so it
-would alert on an incomplete result…` (the wording is alerting's, because a
-recording rule is evaluated as one) and nothing is written — measured, the last
-sample simply ages. A recorded subset would have been far worse than none. Alerts keep
-firing, which is the point, but they lose their context labels and therefore
-their routing. Alert on the recording rule's own health so that degradation is
-visible rather than inferred from suddenly-unrouted pages.
+fallback arm. A truncated inventory does stop it, and visibly. With the Limit
+below the fleet size, the rule goes to `Error` with
+`Alert query returned 5 of 15 matching objects, so it would alert on an incomplete result…`.
+The message speaks of an alert query because a recording rule is evaluated as
+one. Nothing is written, and on the demo the last sample simply aged out, which
+is far better than recording a subset. Alerts keep firing, which is the point,
+but they lose their context labels and therefore their routing. Alert on the
+recording rule's own health so that degradation is visible rather than inferred
+from suddenly-unrouted pages.
 
 A caveat that follows from the same behaviour: a NetBox field that is empty
 produces an **absent** label on the recorded series, because Prometheus drops
 empty label values. Devices with no tenant simply have no `tenant_slug` label,
-and `group_left(tenant_slug)` then copies nothing. If the fields you route on are not
-reliably populated, add a SQL expression to the recording rule and apply the
+and `group_left(tenant_slug)` then copies nothing. If the fields you route on
+are not reliably populated, add a SQL expression to the recording rule and apply the
 same `COALESCE(NULLIF(col, ''), 'unknown')` treatment — you lose the
 no-expression simplicity, but you get a label that always exists.
 
@@ -314,10 +316,10 @@ For an alert keyed by **IP** rather than device name — flow records, for examp
 — the [IP-only metrics recipe](ip-only-metrics.md) is the direct route: the
 **NetBox scope** source of the IP-enrichment query returns one row per address
 under a prefix, VRF or tenant, already resolved to its device, VM and interface.
-The older form below still works: point query **B** at `ipam/ip-addresses` and give it a **join key** of
-`address` → `src_ip` with the **IP host** transform (`iphost` when provisioning
-as JSON), which drops the mask so `10.112.128.1/24` matches a label of
-`10.112.128.1`. The join key renames the column in the returned frame, so the SQL
+The older form below still works: point query **B** at `ipam/ip-addresses` and
+give it a **join key** of `address` → `src_ip` with the **IP host** transform
+(`iphost` when provisioning as JSON), which drops the mask so `10.112.128.1/24`
+matches a label of `10.112.128.1`. The join key renames the column in the returned frame, so the SQL
 then reads `FROM A LEFT JOIN B ON A.src_ip = B.src_ip` — a **left** join, with
 `COALESCE(NULLIF(col, ''), 'unknown')` on every NetBox column, for exactly the
 reasons given above.

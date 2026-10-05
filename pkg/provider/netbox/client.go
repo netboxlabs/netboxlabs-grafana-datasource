@@ -26,12 +26,15 @@ type Client struct {
 	http  *http.Client
 
 	// branchNames/branchIDs cache the netbox-branching branch list so the Branch
-	// field can accept a name or a schema id. Both empty after a failed/absent
-	// fetch (e.g. branching not installed), in which case values pass through.
-	branchMu     sync.Mutex
-	branchNames  map[string]string // branch name -> schema id
-	branchIDs    map[string]bool   // known schema ids
-	branchExpiry time.Time
+	// field can accept a name or a schema id. Both empty after a failed fetch, in
+	// which case values pass through. branchingAbsent records that the list
+	// answered 404: netbox-branching is not installed, NetBox ignores the
+	// header, and every value means main.
+	branchMu        sync.Mutex
+	branchNames     map[string]string // branch name -> schema id
+	branchIDs       map[string]bool   // known schema ids
+	branchingAbsent bool
+	branchExpiry    time.Time
 }
 
 // NewClient builds a NetBox API client over the given HTTP client. base may
@@ -228,8 +231,8 @@ type noBranchResolveKey struct{}
 // resolveBranch maps a Branch field value to a netbox-branching schema id.
 // NetBox's X-NetBox-Branch header only accepts the schema id, but users expect
 // to use the branch name: a name resolves to its schema id; a value that is
-// already a schema id (or is unknown, or branching isn't installed) passes
-// through unchanged so NetBox makes the final call.
+// already a schema id, or is unknown, passes through unchanged so NetBox makes
+// the final call. Without netbox-branching every value resolves to main ("").
 func (c *Client) resolveBranch(ctx context.Context, value string) string {
 	// "" and "main"/"Main" mean the default branch (NetBox-branching's base, which
 	// is addressed by sending NO header). NetBox does not list the default as a
@@ -241,8 +244,8 @@ func (c *Client) resolveBranch(ctx context.Context, value string) string {
 	c.branchMu.Lock()
 	defer c.branchMu.Unlock()
 	if c.branchNames == nil || time.Now().After(c.branchExpiry) {
-		if names, ids, ok := c.fetchBranches(ctx); ok {
-			c.branchNames, c.branchIDs = names, ids
+		if names, ids, absent, ok := c.fetchBranches(ctx); ok {
+			c.branchNames, c.branchIDs, c.branchingAbsent = names, ids, absent
 			c.branchExpiry = time.Now().Add(branchTTL)
 		} else {
 			// Transient failure (timeout/5xx): keep any prior cache and retry
@@ -252,6 +255,12 @@ func (c *Client) resolveBranch(ctx context.Context, value string) string {
 			}
 			c.branchExpiry = time.Now().Add(branchRetryTTL)
 		}
+	}
+	// Without netbox-branching NetBox ignores the header and answers from main,
+	// so the value IS main: no header, and main's cache entries. Passing it
+	// through instead keyed a cache entry on whatever string a caller sent.
+	if c.branchingAbsent {
+		return ""
 	}
 	// A known schema id wins over a name: a branch name can collide with another
 	// branch's schema id (both are short alphanumerics), and the schema id is the
@@ -265,14 +274,24 @@ func (c *Client) resolveBranch(ctx context.Context, value string) string {
 	return value
 }
 
+// branchKey is the branch a request made with ctx is answered from, as the
+// key the per-branch caches use: "" for main, otherwise the branch's schema id.
+// It is resolveBranch applied to the context's value, so a name and its schema
+// id share one entry, and on a NetBox without netbox-branching every value is
+// main, as NetBox treats it.
+func (c *Client) branchKey(ctx context.Context) string {
+	return c.resolveBranch(ctx, provider.BranchFromContext(ctx))
+}
+
 // fetchBranches reads the branch list into a name -> schema id map and a set of
 // known schema ids. The fetch carries no branch header (the list lives on main)
 // and is flagged to skip resolution, so it does not recurse through
-// resolveBranch. Returns empty maps if branching isn't installed or the list
-// can't be read; callers then pass values through.
-func (c *Client) fetchBranches(ctx context.Context) (map[string]string, map[string]bool, bool) {
-	names := map[string]string{}
-	ids := map[string]bool{}
+// resolveBranch. absent reports an authoritative 404 (netbox-branching is not
+// installed); ok is false when the list could not be read, and the maps are
+// then empty and callers pass values through.
+func (c *Client) fetchBranches(ctx context.Context) (names map[string]string, ids map[string]bool, absent, ok bool) {
+	names = map[string]string{}
+	ids = map[string]bool{}
 	ctx = context.WithValue(ctx, noBranchResolveKey{}, struct{}{})
 	next := c.apiURL("plugins/branching/branches", url.Values{"limit": {"1000"}})
 	// Follow pagination so a name on a later page still resolves; the page cap
@@ -285,9 +304,9 @@ func (c *Client) fetchBranches(ctx context.Context) (map[string]string, map[stri
 			// report failure and let the caller retry soon.
 			var apiErr *APIError
 			if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
-				return names, ids, true
+				return names, ids, true, true
 			}
-			return names, ids, false
+			return names, ids, false, false
 		}
 		for _, raw := range page.Results {
 			var b struct {
@@ -305,10 +324,10 @@ func (c *Client) fetchBranches(ctx context.Context) (map[string]string, map[stri
 			break
 		}
 		if next, err = c.nextPageURL(next, *page.Next); err != nil {
-			return names, ids, false
+			return names, ids, false, false
 		}
 	}
-	return names, ids, true
+	return names, ids, false, true
 }
 
 // BranchingInstalled probes the netbox-branching branches endpoint to detect

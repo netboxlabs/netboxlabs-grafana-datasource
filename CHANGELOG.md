@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **The API token only goes to the configured NetBox URL.** Paging and
+  object-type discovery followed the URLs NetBox writes into its responses,
+  which NetBox builds from the request as it arrived: behind a proxy that does
+  not pass `X-Forwarded-Proto`/`X-Forwarded-Host`, they name plain http or the
+  proxy's upstream host, and the token went with them. Every request is now
+  built on the configured URL, and one that would leave it is refused.
+- **Branch caches stay bounded.** The schema, field and custom-field caches were
+  keyed on the branch value as the query sent it, so on a NetBox without
+  netbox-branching every new value cached another entry and downloaded the
+  OpenAPI schema again. Values are resolved first: a branch name and its schema
+  id share one entry, and without netbox-branching every value is main, as
+  NetBox treats it, so no `X-NetBox-Branch` header is sent. Expired entries are
+  dropped, and panels opening together on a cold cache share one schema
+  download.
+
 ## 1.0.3 (2026-10-06)
 
 - **Build dependencies updated for new advisories.** `source-map-js` 1.2.2 fixes

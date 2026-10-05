@@ -144,14 +144,14 @@ func TestFetchBranches_TransientVsAuthoritative(t *testing.T) {
 		return NewClient(srv.URL, "t", &http.Client{Timeout: 5 * time.Second})
 	}
 
-	if _, _, ok := client(http.StatusInternalServerError, `oops`).fetchBranches(context.Background()); ok {
-		t.Error("5xx should be a transient failure (ok=false)")
+	if _, _, absent, ok := client(http.StatusInternalServerError, `oops`).fetchBranches(context.Background()); ok || absent {
+		t.Errorf("5xx should be a transient failure: ok=%v absent=%v, want false/false", ok, absent)
 	}
-	if names, _, ok := client(http.StatusNotFound, `{"detail":"Not found."}`).fetchBranches(context.Background()); !ok || len(names) != 0 {
-		t.Errorf("404 should be authoritative empty: ok=%v names=%d, want true/0", ok, len(names))
+	if names, _, absent, ok := client(http.StatusNotFound, `{"detail":"Not found."}`).fetchBranches(context.Background()); !ok || !absent || len(names) != 0 {
+		t.Errorf("404 should be authoritative absence: ok=%v absent=%v names=%d, want true/true/0", ok, absent, len(names))
 	}
-	if names, _, ok := client(0, `{"count":1,"next":null,"results":[{"name":"b","schema_id":"s1"}]}`).fetchBranches(context.Background()); !ok || names["b"] != "s1" {
-		t.Errorf("success should populate: ok=%v names=%v, want true/{b:s1}", ok, names)
+	if names, _, absent, ok := client(0, `{"count":1,"next":null,"results":[{"name":"b","schema_id":"s1"}]}`).fetchBranches(context.Background()); !ok || absent || names["b"] != "s1" {
+		t.Errorf("success should populate: ok=%v absent=%v names=%v, want true/false/{b:s1}", ok, absent, names)
 	}
 }
 
@@ -206,12 +206,14 @@ func TestResolveBranch_NoBranchingPlugin(t *testing.T) {
 	srv := branchResolveServer(t, &got, `{"detail":"Not found."}`, http.StatusNotFound)
 	c := NewClient(srv.URL, "t", &http.Client{Timeout: 5 * time.Second})
 
-	// Branching absent: the list fetch 404s, so a name passes through unresolved.
+	// Branching absent: the list fetch 404s, NetBox would ignore the header and
+	// answer from main, so the value is main and no header is sent.
+	got = "unset"
 	if _, err := c.getBytes(provider.WithBranch(context.Background(), "demo-branch"), srv.URL+"/api/x/"); err != nil {
 		t.Fatalf("getBytes: %v", err)
 	}
-	if got != "demo-branch" {
-		t.Errorf("header = %q, want demo-branch (passthrough when branching absent)", got)
+	if got != "" {
+		t.Errorf("header = %q, want none (no branching: every value is main)", got)
 	}
 }
 

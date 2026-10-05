@@ -98,6 +98,9 @@ type Provider struct {
 	// branch may define custom-field filters (cf_*) main lacks, so main and each
 	// branch must cache separately — mirroring the fields cache.
 	schemaByBranch map[string]schemaCacheEntry
+	// schemaFlightByBranch is the in-progress schema fetch per branch, so
+	// panels opening together on a cold cache wait for one download.
+	schemaFlightByBranch map[string]*schemaFlight
 
 	// customFieldsByBranch caches the custom-field type index (see
 	// customFieldTypes) keyed the same way, for the same reason: a branch can
@@ -169,6 +172,26 @@ type schemaCacheEntry struct {
 type fieldsCacheEntry struct {
 	fields []provider.Field
 	expiry time.Time
+}
+
+// schemaFlight is one OpenAPI schema fetch that every caller arriving while it
+// runs waits for; entry and err are set before done closes.
+type schemaFlight struct {
+	done  chan struct{}
+	entry schemaCacheEntry
+	err   error
+}
+
+// dropExpired deletes the entries of m that expired before now. The caches it
+// runs on are only ever overwritten by their own key, so without it a key that
+// is never asked again — a branch since merged and deleted — stayed for the
+// life of the process. Callers hold p.mu, and call it when they write.
+func dropExpired[V any](m map[string]V, now time.Time, expiry func(V) time.Time) {
+	for k, v := range m {
+		if !now.Before(expiry(v)) {
+			delete(m, k)
+		}
+	}
 }
 
 // Option configures a Provider at construction.
@@ -1205,10 +1228,11 @@ func (p *Provider) getListPageRetryN(ctx context.Context, rawURL string) (listPa
 func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Field, error) {
 	// Partition the cache by branch: a branch may define custom fields that main
 	// (or another branch) does not, so main and each branch must cache their
-	// field sets separately. The null byte cannot appear in an object-type path
-	// or a branch schema id, so it is a collision-free key separator.
+	// field sets separately. The key is the branch as resolved (branchKey), not
+	// the value the query carried. The null byte cannot appear in an object-type
+	// path or a branch schema id, so it is a collision-free key separator.
 	cacheKey := objectType
-	if branch := provider.BranchFromContext(ctx); branch != "" {
+	if branch := p.client.branchKey(ctx); branch != "" {
 		cacheKey = objectType + "\x00" + branch
 	}
 
@@ -1268,6 +1292,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 
 	if cacheable {
 		p.mu.Lock()
+		dropExpired(p.fields, time.Now(), func(e fieldsCacheEntry) time.Time { return e.expiry })
 		p.fields[cacheKey] = fieldsCacheEntry{fields: fields, expiry: expiry}
 		p.mu.Unlock()
 	}
@@ -1285,25 +1310,65 @@ func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provi
 	return entry.filters[objectType], nil
 }
 
-// schema fetches, parses and caches the OpenAPI schema for the context's
-// branch. One fetch feeds both derivations: the filter params FilterFields
-// serves, and the dimension index FieldValues resolves against.
+// schema returns the parsed OpenAPI schema for the context's branch, from the
+// cache or from one fetch shared by every caller that arrives while it runs.
+// One fetch feeds both derivations: the filter params FilterFields serves, and
+// the dimension index FieldValues resolves against.
 //
 // A failure to parse the dimension index is NOT fatal — FilterFields is the
 // long-standing consumer and must keep working — so the entry is cached with a
 // nil index and FieldValues falls back to sampling.
 func (p *Provider) schema(ctx context.Context) (schemaCacheEntry, error) {
-	branch := provider.BranchFromContext(ctx)
+	branch := p.client.branchKey(ctx)
 
 	p.mu.Lock()
 	if e, ok := p.schemaByBranch[branch]; ok && time.Now().Before(e.expiry) {
 		p.mu.Unlock()
 		return e, nil
 	}
+	flight := p.schemaFlightByBranch[branch]
+	if flight == nil {
+		flight = &schemaFlight{done: make(chan struct{})}
+		if p.schemaFlightByBranch == nil {
+			p.schemaFlightByBranch = map[string]*schemaFlight{}
+		}
+		p.schemaFlightByBranch[branch] = flight
+		// Detached from this caller's cancellation, as the custom-field fetch
+		// is: the callers waiting on it are not all this one, and a panel
+		// closed mid-download must not fail the others. The HTTP client's
+		// timeout still bounds it.
+		go p.runSchemaFetch(context.WithoutCancel(ctx), branch, flight)
+	}
 	p.mu.Unlock()
 
-	// The fetch carries the branch via ctx (X-NetBox-Branch), so the parsed
-	// result is cached under that branch, never shared with main/other branches.
+	select {
+	case <-flight.done:
+		return flight.entry, flight.err
+	case <-ctx.Done():
+		return schemaCacheEntry{}, ctx.Err()
+	}
+}
+
+// runSchemaFetch downloads and parses the schema for branch, publishes it to
+// the cache on success, and retires the flight under the same lock.
+func (p *Provider) runSchemaFetch(ctx context.Context, branch string, flight *schemaFlight) {
+	flight.entry, flight.err = p.fetchSchema(ctx)
+	p.mu.Lock()
+	if flight.err == nil {
+		if p.schemaByBranch == nil {
+			p.schemaByBranch = map[string]schemaCacheEntry{}
+		}
+		dropExpired(p.schemaByBranch, time.Now(), func(e schemaCacheEntry) time.Time { return e.expiry })
+		p.schemaByBranch[branch] = flight.entry
+	}
+	delete(p.schemaFlightByBranch, branch)
+	p.mu.Unlock()
+	close(flight.done)
+}
+
+// fetchSchema downloads and parses the OpenAPI schema. The fetch carries the
+// branch via ctx (X-NetBox-Branch), so the result belongs to that branch alone.
+func (p *Provider) fetchSchema(ctx context.Context) (schemaCacheEntry, error) {
 	raw, err := p.client.getBytes(ctx, p.client.apiURL("schema", url.Values{"format": {"json"}}))
 	if err != nil {
 		return schemaCacheEntry{}, fmt.Errorf("fetch OpenAPI schema: %w", err)
@@ -1318,15 +1383,7 @@ func (p *Provider) schema(ctx context.Context) (schemaCacheEntry, error) {
 			"error", logSafe(err.Error()))
 		dims = nil
 	}
-
-	entry := schemaCacheEntry{filters: parsed, dims: dims, expiry: time.Now().Add(schemaTTL)}
-	p.mu.Lock()
-	if p.schemaByBranch == nil {
-		p.schemaByBranch = map[string]schemaCacheEntry{}
-	}
-	p.schemaByBranch[branch] = entry
-	p.mu.Unlock()
-	return entry, nil
+	return schemaCacheEntry{filters: parsed, dims: dims, expiry: time.Now().Add(schemaTTL)}, nil
 }
 
 // FieldValues returns distinct values of a column for autocomplete.

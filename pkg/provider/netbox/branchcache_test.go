@@ -134,8 +134,10 @@ func TestBranchCaches_NameAndSchemaIDAreOneEntry(t *testing.T) {
 }
 
 // Entries were only ever overwritten by the same key, so a branch that was
-// merged and deleted stayed cached for the life of the process. Writing any
-// entry now drops the ones that have expired.
+// merged and deleted stayed cached for the life of the process. Writing a
+// schema or fields entry now drops the ones that have expired. The custom-field
+// index is the exception: an expired SUCCESSFUL index is the fallback a failed
+// refetch publishes back (customFieldTypes), so it must outlive its expiry.
 func TestBranchCaches_ExpiredEntriesAreDroppedOnWrite(t *testing.T) {
 	srv := newBranchCacheServer(t, "", 0)
 	p := New(srv.URL, "tok", &http.Client{Timeout: 5 * time.Second})
@@ -146,7 +148,7 @@ func TestBranchCaches_ExpiredEntriesAreDroppedOnWrite(t *testing.T) {
 	if p.customFieldsByBranch == nil {
 		p.customFieldsByBranch = map[string]customFieldTypesEntry{}
 	}
-	p.customFieldsByBranch["gone"] = customFieldTypesEntry{expiry: past}
+	p.customFieldsByBranch["gone"] = customFieldTypesEntry{ok: true, expiry: past}
 	p.mu.Unlock()
 
 	if _, err := p.FilterFields(context.Background(), "ipam/prefixes"); err != nil {
@@ -175,8 +177,8 @@ func TestBranchCaches_ExpiredEntriesAreDroppedOnWrite(t *testing.T) {
 	if _, ok := p.fields["dcim/devices\x00gone"]; ok {
 		t.Error("expired fields entry survived a write")
 	}
-	if _, ok := p.customFieldsByBranch["gone"]; ok {
-		t.Error("expired custom-field entry survived a write")
+	if _, ok := p.customFieldsByBranch["gone"]; !ok {
+		t.Error("an expired successful custom-field index was dropped; it is a failed refetch's fallback")
 	}
 }
 

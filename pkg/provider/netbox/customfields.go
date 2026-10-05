@@ -225,7 +225,7 @@ type customFieldsFlight struct {
 // longer would outlive the retry that repairs it. validUntil is zero for the
 // stand-in.
 func (p *Provider) customFieldTypes(ctx context.Context) customFieldIndex {
-	branch := p.client.branchKey(ctx)
+	ctx, branch := p.client.pinBranch(ctx)
 
 	p.mu.Lock()
 	e, ok := p.customFieldsByBranch[branch]
@@ -301,7 +301,7 @@ func (f *customFieldsFlight) fallback() customFieldIndex {
 // budget. The index being replaced rides on the flight as previous: a fetch
 // that fails publishes it back rather than a failure entry.
 func (p *Provider) refreshCustomFieldTypes(ctx context.Context, seen customFieldIndex) customFieldIndex {
-	branch := p.client.branchKey(ctx)
+	ctx, branch := p.client.pinBranch(ctx)
 	p.mu.Lock()
 	e, ok := p.customFieldsByBranch[branch]
 	if !ok || !e.fetchedAt.Equal(seen.fetchedAt) {
@@ -414,7 +414,10 @@ func (p *Provider) runCustomFieldsFetch(ctx context.Context, branch string, flig
 			entry.expiry = now.Add(customFieldsRetryTTL)
 		}
 	}
-	dropExpired(p.customFieldsByBranch, now, func(e customFieldTypesEntry) time.Time { return e.expiry })
+	// No dropExpired here, unlike the schema and fields caches: an expired
+	// successful index is the fallback a failed refetch publishes back (see
+	// customFieldTypes), so it has to outlive its expiry. Entries are a few
+	// names and types per branch actually queried.
 	p.customFieldsByBranch[branch] = entry
 	// Retire the flight under the SAME lock that published the outcome, so a
 	// caller arriving now sees one or the other and never a gap between them.
@@ -488,7 +491,7 @@ func (p *Provider) resolveCustomFieldByName(ctx context.Context, index customFie
 		typ, declared = customFieldType(cf.Type.Value)
 	}
 
-	branch := p.client.branchKey(ctx)
+	_, branch := p.client.pinBranch(ctx)
 	p.mu.Lock()
 	e, ok := p.customFieldsByBranch[branch]
 	if ok && e.fetchedAt.Equal(index.fetchedAt) {

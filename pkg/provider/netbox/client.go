@@ -21,9 +21,10 @@ import (
 // settings, so Grafana's proxy/TLS/timeout config and Private Data Source
 // Connect (PDC) are honored automatically.
 type Client struct {
-	base  string // base URL without trailing slash, e.g. https://netbox.example.com
-	token string
-	http  *http.Client
+	base   string   // base URL without trailing slash, e.g. https://netbox.example.com
+	origin *url.URL // base, parsed once: the only scheme and host a request may go to
+	token  string
+	http   *http.Client
 
 	// branchNames/branchIDs cache the netbox-branching branch list so the Branch
 	// field can accept a name or a schema id. Both empty after a failed fetch, in
@@ -39,13 +40,39 @@ type Client struct {
 
 // NewClient builds a NetBox API client over the given HTTP client. base may
 // include or omit a trailing "/api"; it is normalized to the instance root.
+//
+// The client gets its own copy of httpClient with a redirect policy that
+// refuses any hop off the configured origin: a redirect is a URL the server
+// chose, like `next`, and Go keeps Authorization when only the scheme changes,
+// so a 301 to http:// on the same host would send the token in clear text. The
+// copy shares httpClient's transport, so Grafana's proxy, TLS and PDC settings
+// still apply, and the caller's client is left as it was.
 func NewClient(base, token string, httpClient *http.Client) *Client {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	base = strings.TrimSuffix(base, "/api")
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{base: base, token: token, http: httpClient}
+	c := &Client{base: base, token: token}
+	if u, err := url.Parse(base); err == nil && u.Host != "" {
+		c.origin = u
+	}
+	hc := *httpClient
+	follow := hc.CheckRedirect
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !c.onOrigin(req.URL) {
+			return errOffOrigin
+		}
+		if follow != nil {
+			return follow(req, via)
+		}
+		if len(via) >= 10 { // net/http's own limit when CheckRedirect is nil
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	c.http = &hc
+	return c
 }
 
 // BaseURL returns the instance root URL.
@@ -93,7 +120,13 @@ func (c *Client) apiURL(path string, query url.Values) string {
 // (USE_X_FORWARDED_HOST, SECURE_PROXY_SSL_HEADER), so behind a proxy that does
 // not pass X-Forwarded-Proto/-Host it names plain http or the proxy's upstream
 // host — and the page request carries the API token.
+//
+// An empty link ends the walk, as it always did: rebuilding it would be this
+// page's path with no query, the whole unfiltered collection.
 func (c *Client) nextPageURL(current, next string) (string, error) {
+	if strings.TrimSpace(next) == "" {
+		return "", nil
+	}
 	cur, err := url.Parse(current)
 	if err != nil {
 		return "", fmt.Errorf("parse page URL: %w", err)
@@ -107,18 +140,12 @@ func (c *Client) nextPageURL(current, next string) (string, error) {
 	return cur.String(), nil
 }
 
-// onOrigin reports whether rawURL has the configured URL's scheme and host
-// (port included). It is the line getBytes holds: the token goes nowhere else.
-func (c *Client) onOrigin(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	b, err := url.Parse(c.base)
-	if err != nil {
-		return false
-	}
-	return strings.EqualFold(u.Scheme, b.Scheme) && strings.EqualFold(u.Host, b.Host)
+// onOrigin reports whether u has the configured URL's scheme and host (port
+// included). It is the line getBytes and every redirect hold: the token goes
+// nowhere else.
+func (c *Client) onOrigin(u *url.URL) bool {
+	return c.origin != nil && u != nil &&
+		strings.EqualFold(u.Scheme, c.origin.Scheme) && strings.EqualFold(u.Host, c.origin.Host)
 }
 
 // errOffOrigin is getBytes refusing a URL that leaves the configured NetBox. No
@@ -165,20 +192,26 @@ func (c *Client) getListPage(ctx context.Context, rawURL string) (listPage, erro
 
 // getBytes performs an authenticated GET and returns the raw response body.
 func (c *Client) getBytes(ctx context.Context, rawURL string) ([]byte, error) {
-	if !c.onOrigin(rawURL) {
-		return nil, errOffOrigin
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
+	}
+	if !c.onOrigin(req.URL) {
+		return nil, errOffOrigin
 	}
 	if c.token != "" {
 		req.Header.Set("Authorization", authHeader(c.token))
 	}
 	req.Header.Set("Accept", "application/json")
-	if branch := provider.BranchFromContext(ctx); branch != "" && ctx.Value(noBranchResolveKey{}) == nil {
+	if ctx.Value(noBranchResolveKey{}) == nil {
 		// A resolved value of "" means the default (main) branch — send no header.
-		if resolved := c.resolveBranch(ctx, branch); resolved != "" {
+		resolved, pinned := ctx.Value(pinnedBranchKey{}).(string)
+		if !pinned {
+			if branch := provider.BranchFromContext(ctx); branch != "" {
+				resolved = c.resolveBranch(ctx, branch)
+			}
+		}
+		if resolved != "" {
 			req.Header.Set("X-NetBox-Branch", resolved)
 		}
 	}
@@ -274,13 +307,22 @@ func (c *Client) resolveBranch(ctx context.Context, value string) string {
 	return value
 }
 
-// branchKey is the branch a request made with ctx is answered from, as the
-// key the per-branch caches use: "" for main, otherwise the branch's schema id.
-// It is resolveBranch applied to the context's value, so a name and its schema
-// id share one entry, and on a NetBox without netbox-branching every value is
-// main, as NetBox treats it.
-func (c *Client) branchKey(ctx context.Context) string {
-	return c.resolveBranch(ctx, provider.BranchFromContext(ctx))
+// pinnedBranchKey carries a branch already resolved by pinBranch, so the
+// requests made under it send exactly the branch their result is cached under.
+type pinnedBranchKey struct{}
+
+// pinBranch resolves the context's branch once and returns it with a context
+// that carries it: "" for main, otherwise the branch's schema id. The per-branch
+// caches key on it, and getBytes sends it as the header, so the key and the
+// branch a fetch actually read cannot drift apart if the branch list refreshes
+// in between. A name and its schema id share one key, and on a NetBox without
+// netbox-branching every value is main, as NetBox treats it.
+func (c *Client) pinBranch(ctx context.Context) (context.Context, string) {
+	if v, ok := ctx.Value(pinnedBranchKey{}).(string); ok {
+		return ctx, v
+	}
+	v := c.resolveBranch(ctx, provider.BranchFromContext(ctx))
+	return context.WithValue(ctx, pinnedBranchKey{}, v), v
 }
 
 // fetchBranches reads the branch list into a name -> schema id map and a set of

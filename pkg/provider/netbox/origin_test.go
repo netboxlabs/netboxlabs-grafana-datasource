@@ -300,4 +300,80 @@ func TestNextPageURL(t *testing.T) {
 	if _, err := c.nextPageURL(current, "http://[::1"); err == nil {
 		t.Error("an unparseable next was accepted")
 	}
+	// An empty link is the end of the walk, as it always was: it must not
+	// become this page's path with no query, which is the whole unfiltered table.
+	for _, next := range []string{"", "  "} {
+		if got, err := c.nextPageURL(current, next); err != nil || got != "" {
+			t.Errorf("nextPageURL(%q) = %q, %v; want \"\" (end of the walk)", next, got, err)
+		}
+	}
+}
+
+// A redirect is a URL the server chose, like `next`. Go follows it and keeps
+// Authorization when only the scheme changes, so a 301 to http:// on the same
+// host would send the token in clear text. The client refuses any hop that
+// leaves the configured origin.
+func TestGetBytes_RedirectOffTheConfiguredOriginIsNotFollowed(t *testing.T) {
+	t.Run("another host", func(t *testing.T) {
+		other := newElsewhere(t)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, other.URL+r.URL.RequestURI(), http.StatusMovedPermanently)
+		}))
+		defer srv.Close()
+		c := NewClient(srv.URL, "secret-token", &http.Client{Timeout: 5 * time.Second})
+		if _, err := c.getBytes(context.Background(), srv.URL+"/api/dcim/devices/"); err == nil {
+			t.Error("a redirect to another host was followed")
+		}
+		if n := other.hits.Load(); n != 0 {
+			t.Errorf("%d request(s) followed the redirect to another host", n)
+		}
+	})
+	// Same host, plain http. A TLS test server rejects a plaintext request
+	// before any handler sees it, which would hide the downgrade (the token is
+	// already on the wire by then), so the policy itself is asked.
+	t.Run("plain http on the same host", func(t *testing.T) {
+		c := NewClient("https://netbox.example.com", "secret-token", nil)
+		policy := c.http.CheckRedirect
+		if policy == nil {
+			t.Fatal("no redirect policy")
+		}
+		hop := func(raw string) *http.Request {
+			u, err := url.Parse(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return &http.Request{URL: u}
+		}
+		via := []*http.Request{hop("https://netbox.example.com/api/dcim/devices/")}
+		if err := policy(hop("http://netbox.example.com/api/dcim/devices/"), via); err == nil {
+			t.Error("a redirect from https to http on the same host was allowed")
+		}
+		if err := policy(hop("https://netbox.example.com/api/dcim/devices/?page=2"), via); err != nil {
+			t.Errorf("a same-origin redirect was refused: %v", err)
+		}
+	})
+	t.Run("same origin still followed", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/old/", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/api/new/", http.StatusMovedPermanently)
+		})
+		mux.HandleFunc("/api/new/", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		c := NewClient(srv.URL, "secret-token", &http.Client{Timeout: 5 * time.Second})
+		if _, err := c.getBytes(context.Background(), srv.URL+"/api/old/"); err != nil {
+			t.Errorf("a same-origin redirect failed: %v", err)
+		}
+	})
+}
+
+// The caller's client is not changed: the redirect policy is this client's.
+func TestNewClient_DoesNotChangeTheCallersHTTPClient(t *testing.T) {
+	hc := &http.Client{Timeout: 5 * time.Second}
+	NewClient("https://netbox.example.com", "t", hc)
+	if hc.CheckRedirect != nil {
+		t.Error("NewClient set CheckRedirect on the caller's http.Client")
+	}
 }

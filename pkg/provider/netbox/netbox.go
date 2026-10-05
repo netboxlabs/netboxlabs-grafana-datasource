@@ -312,7 +312,7 @@ func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) 
 		if app == "status" {
 			continue
 		}
-		models, err := p.urlMap(ctx, p.client.apiURL(url.PathEscape(app), nil))
+		models, err := p.urlMap(ctx, p.client.apiURL(app, nil))
 		if err != nil {
 			continue // tolerate individual app discovery failures
 		}
@@ -341,7 +341,7 @@ func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) 
 func (p *Provider) discoverPlugins(ctx context.Context, plugins map[string]string) []provider.ObjectType {
 	var types []provider.ObjectType
 	for plugin := range plugins {
-		sub, err := p.urlMap(ctx, p.client.apiURL("plugins/"+url.PathEscape(plugin), nil))
+		sub, err := p.urlMap(ctx, p.client.apiURL("plugins/"+plugin, nil))
 		if err != nil {
 			// Direct collection (e.g. installed-plugins).
 			types = append(types, provider.ObjectType{
@@ -1231,8 +1231,9 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	// field sets separately. The key is the branch as resolved (branchKey), not
 	// the value the query carried. The null byte cannot appear in an object-type
 	// path or a branch schema id, so it is a collision-free key separator.
+	ctx, branch := p.client.pinBranch(ctx)
 	cacheKey := objectType
-	if branch := p.client.branchKey(ctx); branch != "" {
+	if branch != "" {
 		cacheKey = objectType + "\x00" + branch
 	}
 
@@ -1319,7 +1320,7 @@ func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provi
 // long-standing consumer and must keep working — so the entry is cached with a
 // nil index and FieldValues falls back to sampling.
 func (p *Provider) schema(ctx context.Context) (schemaCacheEntry, error) {
-	branch := p.client.branchKey(ctx)
+	ctx, branch := p.client.pinBranch(ctx)
 
 	p.mu.Lock()
 	if e, ok := p.schemaByBranch[branch]; ok && time.Now().Before(e.expiry) {
@@ -1333,11 +1334,7 @@ func (p *Provider) schema(ctx context.Context) (schemaCacheEntry, error) {
 			p.schemaFlightByBranch = map[string]*schemaFlight{}
 		}
 		p.schemaFlightByBranch[branch] = flight
-		// Detached from this caller's cancellation, as the custom-field fetch
-		// is: the callers waiting on it are not all this one, and a panel
-		// closed mid-download must not fail the others. The HTTP client's
-		// timeout still bounds it.
-		go p.runSchemaFetch(context.WithoutCancel(ctx), branch, flight)
+		go p.runSchemaFetch(ctx, branch, flight)
 	}
 	p.mu.Unlock()
 
@@ -1351,8 +1348,15 @@ func (p *Provider) schema(ctx context.Context) (schemaCacheEntry, error) {
 
 // runSchemaFetch downloads and parses the schema for branch, publishes it to
 // the cache on success, and retires the flight under the same lock.
+//
+// The fetch is detached from the starting caller's cancellation, as the
+// custom-field and object-type fetches are: the callers waiting on it are not
+// all that one, and a panel closed mid-download must not fail the others. It
+// gets the same budget they do instead.
 func (p *Provider) runSchemaFetch(ctx context.Context, branch string, flight *schemaFlight) {
-	flight.entry, flight.err = p.fetchSchema(ctx)
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.objectTypeFetchBudget())
+	defer cancel()
+	flight.entry, flight.err = p.fetchSchema(fetchCtx)
 	p.mu.Lock()
 	if flight.err == nil {
 		if p.schemaByBranch == nil {

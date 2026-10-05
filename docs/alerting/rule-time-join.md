@@ -174,6 +174,22 @@ HTTP API, the same split as `keepFiringFor` and `keep_firing_for`. The wrong
 spelling is dropped without a warning, and the rule then fails with
 `remote write failed: data source uid not specified and no default set`.
 
+**Join against the newest series per device.** When a device's site, role or
+tenant changes in NetBox, the next run writes a series with the new labels, and
+Grafana does not mark the old one stale. Prometheus keeps returning it until it
+ages out of its five-minute lookback, so for a few minutes the device has two
+series, and a plain `group_left` refuses the whole expression. Measured on the
+demo after one role change: both joins below failed with
+`found duplicate series for the match group` for four minutes, which puts every
+alert built on them into error. Keep only each device's newest series:
+
+```promql
+netbox_device_info
+  and (timestamp(netbox_device_info) == on(device) group_left() max by (device) (timestamp(netbox_device_info)))
+```
+
+The examples below use it.
+
 Alert rules then never touch NetBox. They are plain PromQL — no SQL expression,
 no `Alerting` format, no cell limit, no feature toggle. Build the rule the
 ordinary Grafana way, three steps:
@@ -183,7 +199,10 @@ ordinary Grafana way, three steps:
 - **C** — **Threshold**, `IS ABOVE 0` on **B**, set as the rule's condition
 
 ```promql
-  (device_up < bool 1) * on(device) group_left(site, role, tenant_slug) netbox_device_info
+  (device_up < bool 1) * on(device) group_left(site, role, tenant_slug) (
+    netbox_device_info
+      and (timestamp(netbox_device_info) == on(device) group_left() max by (device) (timestamp(netbox_device_info)))
+  )
 or
   (device_up < bool 1) unless on(device) netbox_device_info
 ```
@@ -194,7 +213,10 @@ every series, and wrapping it in `avg by (site) (…)` aggregates, without a SQL
 expression or a cell limit in sight:
 
 ```promql
-device_cpu_percent * on(device) group_left(site, role) netbox_device_info
+device_cpu_percent * on(device) group_left(site, role) (
+  netbox_device_info
+    and (timestamp(netbox_device_info) == on(device) group_left() max by (device) (timestamp(netbox_device_info)))
+)
 ```
 
 > **Instant, and reduce before you threshold.** Unlike the SQL variant — where
@@ -234,16 +256,21 @@ ones and every device comes back twice.
 > ```
 >
 > That takes down **every** alert using this recipe, not just the affected
-> device. Check before relying on it:
+> device. The newest-series filter does not hide it, because two devices with
+> one name are written in the same run and share a timestamp. Check before
+> relying on it; a device edited in the last five minutes does not show up here:
 >
 > ```promql
-> count by (device) (netbox_device_info) > 1
+> count by (device) (
+>   netbox_device_info
+>     and (timestamp(netbox_device_info) == on(device) group_left() max by (device) (timestamp(netbox_device_info)))
+> ) > 1
 > ```
 >
 > Any result means you cannot key on name. Either join on something genuinely
 > unique that both sides carry — an IP address is usually the best candidate —
-> or collapse the duplicates deliberately with
-> `topk by (device) (1, netbox_device_info)`, understanding that the surviving
+> or collapse the duplicates deliberately with `topk by (device) (1, …)` around
+> the newest-series expression, understanding that the surviving
 > series' site and role are then arbitrary among the duplicates. Silently wrong
 > context is its own hazard; prefer the unique key.
 >

@@ -207,12 +207,12 @@ type expansion struct{ key, via, target string }
 // a join key, a filter, the ordering. An unprojected query ("All columns")
 // returns the stored columns, ids included, and NOT every related name the
 // catalogue could resolve: each expansion is a join the service runs per
-// page, and one is enough to sink the query. Measured on staging's 12.9M-row
-// dcim/interfaces at 100 rows: seven of its references cost 1.4–9 s each,
-// expand=lag alone 62 s, and all eight together answered 503 — on the table
-// this backend exists to serve, from the editor's default query. NetBox-mode
-// parity for the unprojected column set is the price; the editor offers every
-// related name, and a panel that wants one selects it.
+// page, and one is enough to sink the query. Measured on a large replica's
+// 12.9M-row dcim/interfaces at 100 rows: seven of its references cost 1.4–9 s
+// each, expand=lag alone 62 s, and all eight together answered 503 — on the
+// table this backend exists to serve, from the editor's default query.
+// NetBox-mode parity for the unprojected column set is the price; the editor
+// offers every related name, and a panel that wants one selects it.
 func planRequest(e entity, spec provider.QuerySpec) request {
 	r := request{unavailable: map[string]bool{}}
 	wantAll := len(spec.Fields) == 0

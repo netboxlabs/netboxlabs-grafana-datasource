@@ -179,7 +179,7 @@ longest containing prefix:
    for `prefix_*`: NetBox's `?contains=` takes one address at a time, so the fallback is
    one lookup per IP with no address record and cannot be batched. Eight run at once,
    which shortens the wait but not the work: a 1,000-IP panel of external addresses is
-   1,000 requests, and at NetBox Cloud's ~0.35 s per request that is still around 45 s.
+   1,000 requests; at ~0.35 s each against a large remote NetBox, that is still around 45 s.
    A value that is not an address is not looked up. The default field
    selection contains no `prefix_*` column and therefore makes no prefix request at all;
    add one only when you want prefix context. `device_*` costs one extra batched request

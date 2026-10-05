@@ -211,3 +211,21 @@ func TestSchema_ConcurrentColdCallersShareOneFetch(t *testing.T) {
 		t.Errorf("schema fetched %d times by 8 concurrent cold callers, want 1", n)
 	}
 }
+
+// A pin answers for the value it was made from. A context re-scoped to another
+// branch after pinning is resolved afresh, never sent the old branch.
+func TestPinBranch_ARescopedContextIsResolvedAfresh(t *testing.T) {
+	srv := newBranchCacheServer(t, `{"count":2,"next":null,"results":[{"name":"one","schema_id":"aaaa1111"},{"name":"two","schema_id":"bbbb2222"}]}`, 0)
+	c := NewClient(srv.URL, "tok", &http.Client{Timeout: 5 * time.Second})
+
+	ctx, first := c.pinBranch(provider.WithBranch(context.Background(), "one"))
+	if first != "aaaa1111" {
+		t.Fatalf("pin(one) = %q, want aaaa1111", first)
+	}
+	if _, again := c.pinBranch(ctx); again != "aaaa1111" {
+		t.Errorf("re-pinning the same context = %q, want the pin aaaa1111", again)
+	}
+	if _, other := c.pinBranch(provider.WithBranch(ctx, "two")); other != "bbbb2222" {
+		t.Errorf("pin after re-scoping to two = %q, want bbbb2222", other)
+	}
+}

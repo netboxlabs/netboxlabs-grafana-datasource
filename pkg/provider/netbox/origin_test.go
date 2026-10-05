@@ -2,6 +2,7 @@ package netbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -300,9 +301,10 @@ func TestNextPageURL(t *testing.T) {
 	if _, err := c.nextPageURL(current, "http://[::1"); err == nil {
 		t.Error("an unparseable next was accepted")
 	}
-	// An empty link is the end of the walk, as it always was: it must not
-	// become this page's path with no query, which is the whole unfiltered table.
-	for _, next := range []string{"", "  "} {
+	// An empty link is the end of the walk, as it always was, and so is one with
+	// no query (NetBox's always carries the paging state): neither may become
+	// this page's path with no query, which is the whole unfiltered table.
+	for _, next := range []string{"", "  ", "https://netbox.example.com/netbox/api/dcim/devices/", "https://netbox.example.com/netbox/api/dcim/devices/?", "#x"} {
 		if got, err := c.nextPageURL(current, next); err != nil || got != "" {
 			t.Errorf("nextPageURL(%q) = %q, %v; want \"\" (end of the walk)", next, got, err)
 		}
@@ -375,5 +377,73 @@ func TestNewClient_DoesNotChangeTheCallersHTTPClient(t *testing.T) {
 	NewClient("https://netbox.example.com", "t", hc)
 	if hc.CheckRedirect != nil {
 		t.Error("NewClient set CheckRedirect on the caller's http.Client")
+	}
+}
+
+// A refused redirect is permanent: the same request is refused the same way.
+// It must not be retried as if the connection had dropped.
+func TestGetListPage_ARefusedRedirectIsNotRetried(t *testing.T) {
+	other := newElsewhere(t)
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Redirect(w, r, other.URL+r.URL.RequestURI(), http.StatusMovedPermanently)
+	}))
+	defer srv.Close()
+	p := New(srv.URL, "secret-token", &http.Client{Timeout: 5 * time.Second})
+	if _, _, err := p.getListPageRetryN(context.Background(), srv.URL+"/api/dcim/devices/"); err == nil {
+		t.Fatal("a redirect off the configured origin was followed")
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("NetBox was asked %d times, want 1 (a refused redirect is not transient)", n)
+	}
+}
+
+// Upgrading to https on the same host is the redirect a NetBox configured with
+// an http:// URL commonly answers with. It moves the token to a safer channel
+// on the same host, and it worked before the redirect policy existed.
+func TestGetBytes_HTTPSUpgradeOnTheSameHostIsFollowed(t *testing.T) {
+	var auth atomic.Value
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth.Store(r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer secure.Close()
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, secure.URL+r.URL.RequestURI(), http.StatusMovedPermanently)
+	}))
+	defer plain.Close()
+
+	c := NewClient(plain.URL, "secret-token", secure.Client())
+	if _, err := c.getBytes(context.Background(), plain.URL+"/api/status/"); err != nil {
+		t.Fatalf("an http to https upgrade on the same host was refused: %v", err)
+	}
+	if got, _ := auth.Load().(string); got != "Token secret-token" {
+		t.Errorf("Authorization after the upgrade = %q, want the token", got)
+	}
+}
+
+// A port spelled out is the same origin as the scheme's default left implicit.
+func TestRedirectPolicy_DefaultPortsAreTheSameOrigin(t *testing.T) {
+	for _, tc := range []struct{ base, hop string }{
+		{"https://netbox.example.com:443", "https://netbox.example.com/api/dcim/devices/"},
+		{"https://netbox.example.com", "https://NetBox.Example.com:443/api/dcim/devices/"},
+		{"http://netbox.example.com:80", "http://netbox.example.com/api/dcim/devices/"},
+	} {
+		c := NewClient(tc.base, "t", nil)
+		u, _ := url.Parse(tc.hop)
+		if err := c.http.CheckRedirect(&http.Request{URL: u}, []*http.Request{{URL: u}}); err != nil {
+			t.Errorf("base %s, redirect to %s refused: %v", tc.base, tc.hop, err)
+		}
+	}
+}
+
+// A configured URL with no scheme cannot be checked against anything; it is
+// reported as what it is rather than as a refusal.
+func TestGetBytes_AConfiguredURLWithoutASchemeSaysSo(t *testing.T) {
+	c := NewClient("netbox.example.com", "t", nil)
+	_, err := c.getBytes(context.Background(), c.apiURL("status", nil))
+	if !errors.Is(err, errNotAbsoluteURL) {
+		t.Errorf("err = %v, want errNotAbsoluteURL", err)
 	}
 }

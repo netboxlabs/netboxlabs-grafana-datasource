@@ -392,6 +392,8 @@ func (p *Provider) urlMap(ctx context.Context, rawURL string) (map[string]string
 
 // Query executes an object query and returns flattened, joinable rows.
 func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provider.Result, error) {
+	// One branch for every request and cache key this call makes (pinBranch).
+	ctx, _ = p.client.pinBranch(ctx)
 	if spec.ObjectType == "" {
 		return nil, fmt.Errorf("objectType is required")
 	}
@@ -1089,6 +1091,11 @@ func retryable(ctx context.Context, err error) bool {
 		}
 		return false
 	}
+	// Refused by this client, not failed on the wire: the same request would be
+	// refused the same way.
+	if errors.Is(err, errOffOrigin) || errors.Is(err, errTooManyRedirects) || errors.Is(err, errNotAbsoluteURL) {
+		return false
+	}
 	return transientTransport(err)
 }
 
@@ -1228,7 +1235,7 @@ func (p *Provider) getListPageRetryN(ctx context.Context, rawURL string) (listPa
 func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Field, error) {
 	// Partition the cache by branch: a branch may define custom fields that main
 	// (or another branch) does not, so main and each branch must cache their
-	// field sets separately. The key is the branch as resolved (branchKey), not
+	// field sets separately. The key is the branch as resolved (pinBranch), not
 	// the value the query carried. The null byte cannot appear in an object-type
 	// path or a branch schema id, so it is a collision-free key separator.
 	ctx, branch := p.client.pinBranch(ctx)
@@ -1418,6 +1425,8 @@ func (p *Provider) fetchSchema(ctx context.Context) (schemaCacheEntry, error) {
 // than an error; the result is re-checked against the response as well, so a
 // rejected projection degrades to a full fetch instead of an empty dropdown.
 func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string, limit int) ([]string, error) {
+	// One branch for every request and cache key this call makes (pinBranch).
+	ctx, _ = p.client.pinBranch(ctx)
 	if field == "" {
 		return nil, fmt.Errorf("field is required")
 	}
@@ -1675,6 +1684,8 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 
 // Changes returns change-log events within a time window for annotations.
 func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]provider.Change, error) {
+	// One branch for every request and cache key this call makes (pinBranch).
+	ctx, _ = p.client.pinBranch(ctx)
 	limit := spec.Limit
 	if limit <= 0 || limit > MaxLimit {
 		limit = defaultLimit

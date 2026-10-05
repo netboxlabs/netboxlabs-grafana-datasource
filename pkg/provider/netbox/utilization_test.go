@@ -514,7 +514,7 @@ func TestQuery_UtilizationReportsItsCost(t *testing.T) {
 // newUtilizationServer serves `rows` leaf prefixes and answers every child
 // lookup after `delay`, counting the lookups. delay 0 is a healthy NetBox (the
 // bundled demo answers a child lookup in ~20ms); a non-zero delay stands in for
-// the throttled cloud instance the old fixed row cap was calibrated against.
+// the slow remote instance the old fixed row cap was calibrated against.
 func newUtilizationServer(t *testing.T, rows int, delay time.Duration, lookups *atomic.Int64) string {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -809,7 +809,7 @@ func TestUtilizationBudget(t *testing.T) {
 		want    time.Duration
 	}{
 		// The default timeout reproduces the bound the old constant encoded: ~20s
-		// measures ~150 rows on the throttled instance it was calibrated against.
+		// measures ~150 rows on the slow instance it was calibrated against.
 		{"unset falls back to the settings default", 0, 20 * time.Second},
 		{"the default timeout", 30 * time.Second, 20 * time.Second},
 		{"a short timeout is obeyed, not floored", 3 * time.Second, 2 * time.Second},

@@ -16,7 +16,7 @@ import (
 
 // newUtilizationNetBox serves `rows` leaf prefixes and answers every child
 // lookup instantly, standing in for a healthy NetBox — the local instance where
-// a child lookup costs ~20ms, not the deliberately throttled cloud instance the
+// a child lookup costs ~20ms, not the slow remote instance the
 // old row cap was calibrated against.
 func newUtilizationNetBox(t *testing.T, rows int, delay time.Duration) *netbox.Provider {
 	t.Helper()
@@ -65,7 +65,7 @@ func newUtilizationNetBox(t *testing.T, rows int, delay time.Duration) *netbox.P
 // The cap itself is not the bug — a bound on an unbounded fan-out is right. The
 // bug is that a deliberate bound was reported through the channel reserved for
 // "a lookup failed", and that the bound was a constant calibrated against one
-// throttled instance rather than anything about THIS one.
+// slow instance rather than anything about THIS one.
 func TestQuery_AlertTable_UtilizationOverTheOldRowCapStillReturnsRows(t *testing.T) {
 	const rows = 200 // > the old fixed cap of 150
 	d := newTestDatasource(newUtilizationNetBox(t, rows, 0))

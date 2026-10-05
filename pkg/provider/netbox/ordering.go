@@ -111,7 +111,7 @@ import (
 // the mistake a deny-list makes by default, and the one an allow-list cannot
 // make at all. Excluding a field that sorts nothing costs a user nothing.
 //
-// COST, measured on the large Cloud instance (4.6.4, 6.8M devices) and NOT
+// COST, measured on a large instance (NetBox 4.6.4, 6.8M devices) and NOT
 // reproducible on the bundled demo, which is far too small to time. Sorting is
 // not free at scale and this list does not pretend otherwise: with the projection
 // `id` measured 4.4s, `name` 3.5s, `site` 2.3s, `device_type` 21.2s and `role`

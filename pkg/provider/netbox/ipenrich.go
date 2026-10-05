@@ -1472,7 +1472,7 @@ func (p *Provider) applyPrefixColumns(ctx context.Context, row map[string]interf
 // 8 rather than "one per IP": the fallback runs at up to the 1,000-IP default
 // limit (MaxLimit 10,000 if the caller asks), and an unbounded fan-out would
 // point ten thousand simultaneous requests at an instance that answers a single
-// one in ~0.35 s. NetBox Cloud sheds that load with 502/503 — which this hop
+// one in ~0.35 s. A busy instance sheds that load with 502/503 — which this hop
 // does not retry — so the "faster" version would degrade rows that the serial
 // version returned correctly. That is the opposite of the trade being made here.
 const prefixFallbackWorkers = 8
@@ -1493,7 +1493,7 @@ type prefixJob struct {
 // NetBox's ?contains= takes a single value, so this hop cannot be batched the
 // way the address and device hops are — but the requests are INDEPENDENT of one
 // another, and running them one at a time was costing a request's full latency
-// per unmatched IP. Measured against NetBox Cloud staging (25 unmatched IPs, all
+// per unmatched IP. Measured against a large remote NetBox (25 unmatched IPs, all
 // of them inside a real prefix): 8.87 s serial, and the same instance answers a
 // single ?contains= in ~0.35 s. At the 1,000-IP default limit the serial form is
 // ~6 minutes, which no dashboard waits for.
@@ -1711,7 +1711,7 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 	// The prefix one is the expensive skip, and remains so after
 	// runPrefixFallback made it concurrent. NetBox's ?contains= takes a single
 	// value, so the hop is one REQUEST per unmatched IP however it is scheduled —
-	// ~20 ms each against the demo NetBox, ~0.35 s each against NetBox Cloud —
+	// ~20 ms each against the demo NetBox, ~0.35 s each against a large remote NetBox —
 	// and concurrency divides the wall clock without removing a single request.
 	// No prefix_* column is in defaultIPEnrichFields at all, so the default panel
 	// over external/unknown addresses paid the whole of it for nothing: measured

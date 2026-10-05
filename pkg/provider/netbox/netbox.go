@@ -1030,7 +1030,7 @@ var retryBackoff = []time.Duration{500 * time.Millisecond, 1500 * time.Milliseco
 // says "not now" rather than "not ever".
 //
 // Two kinds qualify, and both were observed aborting real paged walks against
-// NetBox Cloud. An upstream/gateway STATUS (502/503/504) is the load-shedding
+// a large remote NetBox. An upstream/gateway STATUS (502/503/504) is the load-shedding
 // answer a busy instance gives. A TRANSPORT failure is the same event seen one
 // layer down — the run that motivated this died with "read: connection reset by
 // peer" on page 18 of 20, which is not an APIError at all, so a status-only rule
@@ -1156,7 +1156,7 @@ func transientTransport(err error) bool {
 // Paging is where a transient upstream failure is most expensive: a walk of N
 // pages fails if ANY one of them does, so the chance of losing the whole query
 // grows with the result size — exactly the case this provider is being made to
-// support. Measured against NetBox Cloud staging, a 20-page topology walk
+// support. Measured against a large remote NetBox, a 20-page topology walk
 // aborted on most real runs (502/503, and a connection reset on page 18 of 20)
 // with no retry anywhere in the path. The user saw an error toast and an empty
 // panel for something that succeeded on the next attempt.

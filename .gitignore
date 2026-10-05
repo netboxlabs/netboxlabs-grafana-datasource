@@ -53,3 +53,7 @@ ci/
 *.zip
 /netboxlabs-netbox-datasource/
 /netboxlabs-grafana-datasource*/
+
+# Python bytecode from the demo and e2e helper scripts
+__pycache__/
+*.pyc

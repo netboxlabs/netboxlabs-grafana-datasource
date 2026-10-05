@@ -2,23 +2,14 @@
 
 ## Unreleased
 
-- **Recording NetBox into Prometheus, validated and shipped.** The "record the
-  NetBox side once" recipe in `docs/alerting/rule-time-join.md` is now backed
-  by a provisioned Grafana-managed recording rule in the demo
-  (`provisioning/alerting/netbox-device-info.yml`) that writes
-  `netbox_device_info{device, netbox_id, site, role, tenant_slug} 1` per
-  device. The labels come from join keys — `name → device`, `id → netbox_id`,
-  `site_slug → site`, `role_slug → role` — so they match metric labels and
-  survive a rename, and a join key's source is not emitted, so no
-  `label_replace` is needed on the PromQL side. Measured on the demo: the
-  `group_left` joins work, a Limit below the fleet size fails the rule and
-  stops writing rather than recording a subset, and two prerequisites fail
-  unhelpfully without the recipe's notes: the Prometheus data source must
-  declare `prometheusType: Prometheus` (Grafana otherwise writes to Mimir's
-  `/api/v1/push` and every write 404s — now set in `datasources.yml`) and the
-  demo's Prometheus now runs with `--web.enable-remote-write-receiver`. The
-  target data source is `targetDatasourceUid` in a provisioning file and
-  `target_datasource_uid` on the API; the wrong spelling is dropped silently.
+- **Record NetBox inventory into Prometheus.** A new recipe, with a
+  provisioned example in the demo, uses a Grafana-managed recording rule to
+  write `netbox_device_info{device, netbox_id, site, role, tenant_slug} 1` per
+  device. Dashboards and alert rules then join NetBox context in PromQL with
+  `group_left`, without a SQL expression or its cell limit. If the inventory is
+  larger than the query's Limit, the rule fails rather than record a subset.
+  See _Cutting the cost: record the NetBox side once_ in
+  `docs/alerting/rule-time-join.md`.
 
 ## 1.0.3 (2026-10-06)
 

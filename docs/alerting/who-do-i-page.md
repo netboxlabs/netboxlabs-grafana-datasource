@@ -46,6 +46,7 @@ contact-assignments query filtered by `$device`, showing contact name, role,
 email, phone. In notifications, put the resolved contact in an **annotation**
 (not a label; contacts change).
 
-The productized version of this (configurable precedence, business-hours
-routing, escalation targets, PagerDuty/Opsgenie mapping) is the managed
-alert-enrichment service (commercial), not this plugin.
+Configurable precedence, business-hours routing, escalation targets and
+PagerDuty/Opsgenie mapping are out of scope for this plugin. Build them in the
+alerting pipeline, with notification policies and your on-call tool, on top of
+the labels and annotations above.

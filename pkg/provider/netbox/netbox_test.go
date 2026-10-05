@@ -506,11 +506,11 @@ func retryingServer(t *testing.T, status, fail int) (*Provider, *int) {
 	return New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second}), &calls
 }
 
-// TestFetchRows_RetriesTransientUpstream: NetBox Cloud answers 502/503 under
-// load, and a paged walk fails if ANY of its pages does — so the chance of
+// TestFetchRows_RetriesTransientUpstream: a busy NetBox behind a gateway answers
+// 502/503 under load, and a paged walk fails if ANY of its pages does — so the chance of
 // losing a whole query grows with the result size, which is precisely the case
 // this provider has to support. Measured before this retry existed: 3 of 4 real
-// topology runs against the staging instance aborted on a 5xx mid-walk, and the
+// topology runs against a large remote instance aborted on a 5xx mid-walk, and the
 // user got an error toast and an empty panel for a query that worked next try.
 func TestFetchRows_RetriesTransientUpstream(t *testing.T) {
 	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {

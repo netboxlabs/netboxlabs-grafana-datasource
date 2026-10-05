@@ -256,7 +256,7 @@ func TestQuery_OrderingYieldsToACallersOwnOrderingFilter(t *testing.T) {
 }
 
 // A count query reads the envelope and no rows at all, so a sort is pure upstream
-// cost: on the large Cloud instance (6.8M devices) ordering by role measured 27.6s
+// cost: on a large instance (6.8M devices) ordering by role measured 27.6s
 // against 0.9s natural.
 func TestQuery_CountOnlyNeverSorts(t *testing.T) {
 	nb := newRecordingNetBox(t, 1, intp(4200))

@@ -121,7 +121,7 @@ func setVRF(q url.Values, vrf *vrfRef) {
 //
 // Some bound is required, because there is no cheap version of this work to fall
 // back on (see enrichUtilization: NetBox publishes utilization nowhere).
-// Measured against NetBox Cloud staging, a 50-prefix page costs 119 extra
+// Measured against a large remote NetBox, a 50-prefix page costs 119 extra
 // requests and 7.5s — about 2.4 requests and 0.15s per row at 8 concurrent
 // workers (medians of three paced samples; the request count is exact and
 // reproduces, the time moves with that instance's load — see enrichUtilization).
@@ -136,8 +136,8 @@ func setVRF(q url.Values, vrf *vrfRef) {
 // to be a fixed 150 rows, derived from a heavier state of that same instance
 // than the one measured above — 200 rows in 26.5s — rounded down to leave
 // headroom inside a 30s timeout. That the two disagree is the point. The flaw
-// is not the arithmetic, it is that the arithmetic describes ONE deliberately
-// throttled instance and was then applied to every instance regardless. A
+// is not the arithmetic, it is that the arithmetic describes ONE slow
+// instance and was then applied to every instance regardless. A
 // healthy NetBox answers a child lookup in ~20ms; the bundled demo measures its
 // whole prefix table in well under a second, and refusing to measure row 151
 // there protects nobody from anything. It did break a live alert rule.
@@ -159,7 +159,7 @@ const (
 	// long this datasource may take; two thirds of it go to measurement, leaving a
 	// third for the list fetch itself and for the rows still in flight when the
 	// budget runs out. At the default 30s timeout that is 20s, which on the
-	// throttled instance the old constant was calibrated against measures ~150
+	// slow instance the old constant was calibrated against measures ~150
 	// rows: the same bound, on the same instance, derived instead of guessed.
 	utilizationBudgetNum = 2
 	utilizationBudgetDen = 3
@@ -470,7 +470,7 @@ func (p *Provider) utilizedChildRanges(ctx context.Context, cost *utilCost, cidr
 // only spend requests, never change a number.
 //
 // This is not hypothetical. NetBox stores an IP range's `size` as a
-// denormalized column populated on save; the bulk-loaded staging instance
+// denormalized column populated on save; a bulk-loaded test instance
 // leaves it 0 on all 4,000 of its ranges, so a 10-row page spent 60 upstream
 // requests to compute ten guaranteed zeroes.
 //
@@ -663,15 +663,15 @@ func wantsUtilization(fields []string) bool {
 // like a genuine zero, and the two carry opposite conclusions: "this prefix is
 // empty" versus "we do not know". The upstream this exists for returns 502/503
 // under load, so the failing case is routine rather than exotic; five of these
-// lookups failed in a single measured 10-row page on NetBox Cloud staging, and
+// lookups failed in a single measured 10-row page on a large remote NetBox, and
 // before this the user was told nothing at all.
 //
 // The two counts are reported separately because they are not the same problem:
 // see errUnsizeable.
 //
 // It also returns a NOTE stating what the columns cost. Selecting them turns a
-// one-request query into one that fans out per row: against NetBox Cloud staging
-// a 10-prefix page goes from 1 request and 0.30s to 34 requests and 3.6s
+// one-request query into one that fans out per row: against a large remote
+// NetBox, a 10-prefix page goes from 1 request and 0.30s to 34 requests and 3.6s
 // (medians of six paced samples), and nothing in the UI hinted at that.
 //
 // Trust the request count, not the clock. 33 extra requests for those ten rows

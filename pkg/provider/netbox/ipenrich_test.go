@@ -4084,7 +4084,7 @@ func TestResolveIPs_MalformedValuesDoNotConsumeTheBatchBudget(t *testing.T) {
 // changed at all. NetBox's ?contains= takes ONE value, so the fallback is one
 // request per unmatched IP however it is scheduled; running them one after
 // another made the wall clock the sum of every round trip — 8.87 s for 25 IPs
-// against NetBox Cloud staging, ~6 minutes at the 1,000-IP default limit, which
+// against a large remote NetBox, ~6 minutes at the 1,000-IP default limit, which
 // no dashboard waits for.
 //
 // The server side proves it directly rather than timing it: every handler blocks
@@ -4094,7 +4094,7 @@ func TestResolveIPs_MalformedValuesDoNotConsumeTheBatchBudget(t *testing.T) {
 // times as many IPs as workers and the gate opens at the worker count, so an
 // unbounded fan-out would show a peak of len(ips) here; the semaphore is what
 // keeps it at 8, and 8 is deliberate: an unbounded 1,000-request burst is what
-// makes NetBox Cloud answer 502/503, and this hop does not retry.
+// makes a busy instance answer 502/503, and this hop does not retry.
 func TestResolveIPs_PrefixFallbackIsConcurrentAndBounded(t *testing.T) {
 	var ips []string
 	for i := 0; i < prefixFallbackWorkers*3; i++ {
@@ -4156,7 +4156,7 @@ func TestResolveIPs_PrefixFallbackIsConcurrentAndBounded(t *testing.T) {
 		t.Errorf("peak concurrent prefix requests = %d: the hop is serial again, so its wall clock is the sum of one round trip per unmatched IP", got)
 	}
 	if got != prefixFallbackWorkers {
-		t.Errorf("peak concurrent prefix requests = %d, want exactly %d: above it the pool is unbounded and a 1,000-IP query becomes a 1,000-request burst NetBox Cloud answers with 502/503",
+		t.Errorf("peak concurrent prefix requests = %d, want exactly %d: above it the pool is unbounded and a 1,000-IP query becomes a 1,000-request burst a busy instance answers with 502/503",
 			got, prefixFallbackWorkers)
 	}
 }

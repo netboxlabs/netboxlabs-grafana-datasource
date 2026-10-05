@@ -1,5 +1,15 @@
-# This GitHub Action automates the process of building Grafana plugins.
-# (For more information, see https://github.com/grafana/plugin-actions/blob/main/build-plugin/README.md)
+# Builds, signs and drafts a GitHub release for a v* tag.
+#
+# These are the steps of grafana/plugin-actions/build-plugin (v1.2.0), inlined
+# so that every action that handles the signing token is pinned. build-plugin
+# was pinned here, but it calls grafana/plugin-actions/package-plugin@main, so
+# whatever sat on Grafana's main branch at release time built and signed the
+# archive. package-plugin is pinned below to the commit that built and signed
+# v1.0.2; move the pin deliberately, after reading the diff.
+#
+# Left out from build-plugin: its changelog generator and build attestation,
+# both off by default there and unused here. The draft release is created with
+# the gh CLI on the runner instead of a third-party action.
 name: Release
 
 on:
@@ -7,19 +17,21 @@ on:
     tags:
       - 'v*' # Run workflow on version tags, e.g. v1.0.0.
 
-permissions: read-all
+permissions: {}
 
 jobs:
   release:
     permissions:
-      contents: write
+      contents: write # create the draft release and upload its assets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
-      - uses: grafana/plugin-actions/build-plugin@8b12a2d6fa5fc0939a6bf75905453d4b505ef29a # build-plugin/v1.2.0
+      - name: Build, sign and package the plugin
+        id: package
+        uses: grafana/plugin-actions/package-plugin@613a0361142648e6fecfd5f5719e5a283e7faf52 # main as of 2026-10-05, the commit that built v1.0.2
         with:
           # The action defaults to Go 1.25 with GOTOOLCHAIN=local, and go.mod asks
           # for 1.26.x, so mage failed before building anything on the first tag
@@ -27,9 +39,32 @@ jobs:
           # CI uses go-version-file, which this action does not offer.
           go-version: '1.26'
           node-version: '22'
-          # Signs the release with a Grafana access policy token (plugins:write),
+          # Signs the archive with a Grafana access policy token (plugins:write),
           # kept in the repository secret GRAFANA_ACCESS_POLICY_TOKEN. With the
           # secret unset the action skips signing and warns, so a tag still
           # builds an unsigned archive.
           # https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token
           policy_token: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
+
+      - name: Check the tag matches the plugin version
+        env:
+          PLUGIN_VERSION: ${{ steps.package.outputs.plugin-version }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ "v${PLUGIN_VERSION}" != "${TAG}" ]; then
+            echo "::error::Tag ${TAG} does not match the plugin version; the tag should be v${PLUGIN_VERSION}."
+            exit 1
+          fi
+
+      - name: Release notes from the changelog
+        run: awk '/^## / {s++} s == 1 {print}' CHANGELOG.md > release_notes.md
+
+      - name: Create a draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          ARCHIVE_SHA1: ${{ steps.package.outputs.archive-sha1sum }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "$TAG" --notes-file release_notes.md "$ARCHIVE" "$ARCHIVE_SHA1"

@@ -188,9 +188,13 @@ or
 ```
 
 Verified on the demo: 15 devices, one down, exactly one instance fires, carrying
-`site`, `role` and `tenant_slug`. Dashboards join the same way — `device_cpu_percent
-* on(device) group_left(site, role) netbox_device_info` enriches every series, and
-`avg by (site) (…)` aggregates without a SQL expression or a cell limit in sight.
+`site`, `role` and `tenant_slug`. Dashboards join the same way. This enriches
+every series, and wrapping it in `avg by (site) (…)` aggregates, without a SQL
+expression or a cell limit in sight:
+
+```promql
+device_cpu_percent * on(device) group_left(site, role) netbox_device_info
+```
 
 > **Instant, and reduce before you threshold.** Unlike the SQL variant — where
 > the expression must itself be the condition — this is a normal Prometheus
@@ -243,7 +247,7 @@ ones and every device comes back twice.
 > context is its own hazard; prefer the unique key.
 >
 > It must be `topk`, not `max`. A `max by (device)` aggregation **drops every
-> label not named in `by`**, so `site`, `role` and `tenant` are gone before
+> label not named in `by`**, so `site`, `role` and `tenant_slug` are gone before
 > `group_left` can copy them — the alerts then fire with none of the routing
 > labels this recipe exists to provide, and nothing errors to say so. `topk`
 > selects a whole series and keeps its labels intact.
@@ -265,8 +269,8 @@ visible rather than inferred from suddenly-unrouted pages.
 
 A caveat that follows from the same behaviour: a NetBox field that is empty
 produces an **absent** label on the recorded series, because Prometheus drops
-empty label values. Devices with no tenant simply have no `tenant` label, and
-`group_left(tenant)` then copies nothing. If the fields you route on are not
+empty label values. Devices with no tenant simply have no `tenant_slug` label,
+and `group_left(tenant_slug)` then copies nothing. If the fields you route on are not
 reliably populated, add a SQL expression to the recording rule and apply the
 same `COALESCE(NULLIF(col, ''), 'unknown')` treatment — you lose the
 no-expression simplicity, but you get a label that always exists.
@@ -281,7 +285,7 @@ the time-series store and lives under the Prometheus data source's permissions
 from then on: NetBox's object permissions and this data source's permissions no
 longer apply, and each value reaches everyone who can query that store, every
 alert label and every notification. Record identifiers, names and slugs — the
-four fields above, `id` if you join on it — and nothing else: no contact names,
+labels above — and nothing else: no contact names,
 emails or phones (the [who-do-I-page recipe](who-do-i-page.md) keeps those in
 annotations), no `description` or `comments`, no custom fields. Free text is
 where credentials and personal data hide, and a label cannot be redacted once

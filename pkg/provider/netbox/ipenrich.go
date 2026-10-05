@@ -31,9 +31,9 @@ const chunkBudgetBytes = 6144
 //
 // TWO of them, and the second is the one that is easy to miss. fetchList adds
 // "&limit=<min(limit, pageSize)>" to the first page, which is ours to measure.
-// Every page after that is fetched from NetBox's own `next` URL, followed
-// verbatim (netbox.go, `next = *page.Next`), and DRF builds that by adding
-// "&offset=<n>" to the query it received. So a batch that fits on page 1 can
+// Every page after that is fetched with the query of NetBox's own `next` URL
+// (nextPageURL keeps our origin and path and takes that query whole), and DRF
+// builds it by adding "&offset=<n>" to the query it received. So a batch that fits on page 1 can
 // still exceed the ceiling on page 2, and nothing in this file constructs that
 // URL to notice.
 //

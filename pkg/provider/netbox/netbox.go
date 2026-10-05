@@ -272,6 +272,12 @@ func (p *Provider) ObjectTypes(ctx context.Context) ([]provider.ObjectType, erro
 // collection, so nothing is hard-coded: GET /api/ yields {app: url} (dcim,
 // ipam, …) and each app index yields {model: url}. Plugin endpoints are
 // handled by discoverPlugins.
+//
+// Only the keys are used. Each one is the path segment its URL names, and the
+// next index is built from it on the configured URL: the values are absolute
+// URLs NetBox wrote from the request as it arrived, which behind a proxy that
+// does not pass X-Forwarded-Proto/-Host name plain http or another host (see
+// nextPageURL). Queries already address object types by these keys.
 func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) {
 	root, err := p.urlMap(ctx, p.client.apiURL("", nil))
 	if err != nil {
@@ -279,11 +285,11 @@ func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) 
 	}
 
 	var types []provider.ObjectType
-	for app, appURL := range root {
+	for app := range root {
 		if app == "status" {
 			continue
 		}
-		models, err := p.urlMap(ctx, appURL)
+		models, err := p.urlMap(ctx, p.client.apiURL(url.PathEscape(app), nil))
 		if err != nil {
 			continue // tolerate individual app discovery failures
 		}
@@ -311,8 +317,8 @@ func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) 
 // either a plugin sub-app (a URL map of its models) or a direct collection.
 func (p *Provider) discoverPlugins(ctx context.Context, plugins map[string]string) []provider.ObjectType {
 	var types []provider.ObjectType
-	for plugin, pURL := range plugins {
-		sub, err := p.urlMap(ctx, pURL)
+	for plugin := range plugins {
+		sub, err := p.urlMap(ctx, p.client.apiURL("plugins/"+url.PathEscape(plugin), nil))
 		if err != nil {
 			// Direct collection (e.g. installed-plugins).
 			types = append(types, provider.ObjectType{
@@ -1013,7 +1019,9 @@ func (p *Provider) fetchList(ctx context.Context, objectType string, q url.Value
 		if page.Next == nil {
 			break
 		}
-		next = *page.Next
+		if next, err = p.client.nextPageURL(next, *page.Next); err != nil {
+			return listResult{}, err
+		}
 	}
 	if len(out.rows) > limit {
 		out.rows = out.rows[:limit]

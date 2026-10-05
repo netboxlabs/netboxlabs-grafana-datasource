@@ -80,6 +80,49 @@ func (c *Client) apiURL(path string, query url.Values) string {
 	return u
 }
 
+// nextPageURL is the URL of the page after current, given the `next` link
+// NetBox returned with it.
+//
+// Only the query is taken from `next`: it is where NetBox puts the paging state
+// (offset, or start for cursor paging) beside the filters it was sent. Scheme,
+// host, port and path stay those of current, which was built from the
+// configured URL. NetBox writes `next` from the request as it arrived
+// (USE_X_FORWARDED_HOST, SECURE_PROXY_SSL_HEADER), so behind a proxy that does
+// not pass X-Forwarded-Proto/-Host it names plain http or the proxy's upstream
+// host — and the page request carries the API token.
+func (c *Client) nextPageURL(current, next string) (string, error) {
+	cur, err := url.Parse(current)
+	if err != nil {
+		return "", fmt.Errorf("parse page URL: %w", err)
+	}
+	nx, err := url.Parse(next)
+	if err != nil {
+		return "", fmt.Errorf("parse NetBox's next link: %w", err)
+	}
+	cur.RawQuery = nx.RawQuery
+	cur.Fragment = ""
+	return cur.String(), nil
+}
+
+// onOrigin reports whether rawURL has the configured URL's scheme and host
+// (port included). It is the line getBytes holds: the token goes nowhere else.
+func (c *Client) onOrigin(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	b, err := url.Parse(c.base)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Scheme, b.Scheme) && strings.EqualFold(u.Host, b.Host)
+}
+
+// errOffOrigin is getBytes refusing a URL that leaves the configured NetBox. No
+// code path builds one; it is here so that one added later fails instead of
+// sending the token elsewhere.
+var errOffOrigin = errors.New("refusing to send a request outside the configured NetBox URL")
+
 // getJSON performs an authenticated GET and decodes the JSON body into out.
 func (c *Client) getJSON(ctx context.Context, rawURL string, out interface{}) error {
 	body, err := c.getBytes(ctx, rawURL)
@@ -119,6 +162,9 @@ func (c *Client) getListPage(ctx context.Context, rawURL string) (listPage, erro
 
 // getBytes performs an authenticated GET and returns the raw response body.
 func (c *Client) getBytes(ctx context.Context, rawURL string) ([]byte, error) {
+	if !c.onOrigin(rawURL) {
+		return nil, errOffOrigin
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -258,7 +304,9 @@ func (c *Client) fetchBranches(ctx context.Context) (map[string]string, map[stri
 		if page.Next == nil {
 			break
 		}
-		next = *page.Next
+		if next, err = c.nextPageURL(next, *page.Next); err != nil {
+			return names, ids, false
+		}
 	}
 	return names, ids, true
 }

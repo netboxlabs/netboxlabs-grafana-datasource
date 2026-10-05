@@ -21,6 +21,10 @@ permissions: {}
 
 jobs:
   release:
+    # Keep the signing token as a secret of this environment, not of the
+    # repository, and limit the environment to v* tags, so that only a release
+    # tag can read it.
+    environment: release
     permissions:
       contents: write # create the draft release and upload its assets
     runs-on: ubuntu-latest
@@ -40,9 +44,9 @@ jobs:
           go-version: '1.26'
           node-version: '22'
           # Signs the archive with a Grafana access policy token (plugins:write),
-          # kept in the repository secret GRAFANA_ACCESS_POLICY_TOKEN. With the
-          # secret unset the action skips signing and warns, so a tag still
-          # builds an unsigned archive.
+          # kept in the secret GRAFANA_ACCESS_POLICY_TOKEN. With the secret unset
+          # the action skips signing and warns, so a tag still builds an
+          # unsigned archive.
           # https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token
           policy_token: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
 

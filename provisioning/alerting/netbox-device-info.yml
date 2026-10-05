@@ -11,6 +11,11 @@
 # dev stack Prometheus is not running, so this rule sits in Error there, like
 # the demo dashboard's telemetry panels.
 #
+# Join against each device's newest series, not netbox_device_info as is: a
+# NetBox edit to a device's site, role or tenant leaves the old series visible
+# for up to five minutes, and a plain group_left then fails with "found
+# duplicate series". The recipe gives the expression.
+#
 # Spelling: the target data source is targetDatasourceUid in this file and
 # target_datasource_uid on the HTTP API — the same split as keepFiringFor /
 # keep_firing_for — and the wrong one is dropped silently (the rule then fails

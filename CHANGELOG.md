@@ -1,16 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- **Record NetBox inventory into Prometheus.** A new recipe, with a
-  provisioned example in the demo, uses a Grafana-managed recording rule to
-  write `netbox_device_info{device, netbox_id, site, role, tenant_slug} 1` per
-  device. Dashboards and alert rules then join NetBox context in PromQL with
-  `group_left`, without a SQL expression or its cell limit. If the inventory is
-  larger than the query's Limit, the rule fails rather than record a subset.
-  See _Cutting the cost: record the NetBox side once_ in
-  `docs/alerting/rule-time-join.md`.
-
 ## 1.0.3 (2026-10-06)
 
 - **Build dependencies updated for new advisories.** `source-map-js` 1.2.2 fixes
@@ -21,6 +10,15 @@
   plugin, so the plugin itself does not change.
 
 ## 1.0.2 (2026-10-02)
+
+- **Record NetBox inventory into Prometheus.** A new recipe, with a
+  provisioned example in the demo, uses a Grafana-managed recording rule to
+  write `netbox_device_info{device, netbox_id, site, role, tenant_slug} 1` per
+  device. Dashboards and alert rules then join NetBox context in PromQL with
+  `group_left`, without a SQL expression or its cell limit. If the inventory is
+  larger than the query's Limit, the rule fails rather than record a subset.
+  See _Cutting the cost: record the NetBox side once_ in
+  `docs/alerting/rule-time-join.md`.
 
 - **The topology hint follows the Grafana theme.** The help text under the
   _Topology_ and _Topology edges_ query types was styled with fixed inline

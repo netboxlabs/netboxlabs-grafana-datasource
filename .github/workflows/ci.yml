@@ -39,8 +39,6 @@ jobs:
       plugin-version: ${{ steps.metadata.outputs.plugin-version }}
       has-e2e: ${{ steps.check-for-e2e.outputs.has-e2e }}
       has-backend: ${{ steps.check-for-backend.outputs.has-backend }}
-    env:
-      GRAFANA_ACCESS_POLICY_TOKEN: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -103,9 +101,10 @@ jobs:
             echo "has-e2e=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Sign plugin
-        run: npm run sign
-        if: ${{ env.GRAFANA_ACCESS_POLICY_TOKEN != '' }}
+      # No signing here. This job runs on every push and pull request, and a signing
+      # token in it would be visible to every step (dependency install scripts
+      # included) and would put the NetBox Labs signature on unreviewed branch
+      # builds. Releases are signed in release.yml, from a v* tag.
 
       - name: Get plugin metadata
         id: metadata
@@ -121,7 +120,8 @@ jobs:
           echo "archive=${GRAFANA_PLUGIN_ARTIFACT}" >> $GITHUB_OUTPUT
 
       - name: Package plugin
-        # Submit this artifact to the catalog. The archive's top-level directory must be the
+        # An unsigned build for testing; the catalog gets the signed archive the release
+        # workflow attaches to the GitHub release. The archive's top-level directory must be the
         # plugin id, which is why it is read from dist/plugin.json rather than hardcoded. A
         # hand-made zip of a copied dist/ gets that directory name wrong and is rejected
         # (no-ident-root-dir).

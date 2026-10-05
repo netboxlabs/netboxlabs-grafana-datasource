@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { css } from '@emotion/css';
 import {
   Alert,
   InlineField,
@@ -11,8 +12,9 @@ import {
   TextArea,
   InlineSwitch,
   RadioButtonGroup,
+  useStyles2,
 } from '@grafana/ui';
-import { QueryEditorProps, SelectableValue } from '@grafana/data';
+import { GrafanaTheme2, QueryEditorProps, SelectableValue } from '@grafana/data';
 import { getTemplateSrv } from '@grafana/runtime';
 import { DataSource } from '../datasource';
 import {
@@ -103,7 +105,18 @@ const QUERY_TYPES: Array<SelectableValue<QueryType>> = [
  *  the output differs (node graph vs joinable rows). */
 const isTopologyQuery = (t?: QueryType) => t === 'topology' || t === 'topology-edges';
 
+/** Theme-derived styles, so the editor follows Grafana's colours and type scale
+ *  in light and dark rather than fixed inline values. */
+const getStyles = (theme: GrafanaTheme2) => ({
+  hint: css({
+    color: theme.colors.text.secondary,
+    fontSize: theme.typography.bodySmall.fontSize,
+    marginLeft: theme.spacing(0.5),
+  }),
+});
+
 export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) {
+  const styles = useStyles2(getStyles);
   const queryType: QueryType = query.queryType ?? 'objects';
   const branchingInstalled = useBranchingInstalled(datasource);
   const branchDisabled = branchingInstalled === false;
@@ -359,7 +372,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
 
       {isTopologyQuery(queryType) && (
         <>
-          <div style={{ opacity: 0.75, fontSize: 12, marginLeft: 4 }}>
+          <div className={styles.hint}>
             {queryType === 'topology-edges'
               ? 'Returns each link as a row (device, peer, and both roles) for joining in an alert rule — see docs/alerting/topology-suppression.md. Use a Table visualization. Filter the device set below; the filter must cover every device the rule evaluates.'
               : 'Returns NetBox devices as nodes and inter-device links as edges, colored by device status. Use the Node Graph visualization. Filter the device set below (e.g. site or role).'}

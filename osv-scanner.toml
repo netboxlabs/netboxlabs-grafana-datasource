@@ -36,3 +36,16 @@ reason = "react-router 6.x pinned transitively by @grafana/ui (13.1.3 here, 13.2
 id = "GHSA-vfj7-8cjw-p6xm"
 ignoreUntil = 2026-11-02
 reason = "braces <= 3.0.3 has no patched release; dev-only via eslint-webpack-plugin -> micromatch, build-time globs from this repo, not shipped. Re-review when a fix ships."
+
+# sprintf-js <= 1.1.3: an unbounded precision specifier in a format string
+# throws a RangeError. There is no patched version: 1.1.3 is the latest release,
+# and the advisory lists every version as affected. It is a development
+# dependency only (jest -> babel-plugin-istanbul -> @istanbuljs/load-nyc-config
+# -> js-yaml@3 -> argparse@1 -> sprintf-js), used to format argparse's own
+# messages while jest reads its coverage configuration; no format string comes
+# from input, and it is not in the shipped plugin. Re-review when sprintf-js or
+# argparse ships a fix.
+[[IgnoredVulns]]
+id = "GHSA-hp3w-g68c-fv3c"
+ignoreUntil = 2026-11-06
+reason = "sprintf-js <= 1.1.3 has no patched release; dev-only via jest coverage config (js-yaml@3 -> argparse@1), format strings are argparse's own, not shipped. Re-review when a fix ships."

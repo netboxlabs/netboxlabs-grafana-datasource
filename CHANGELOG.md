@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.3 (2026-10-06)
+
+- **Build dependencies updated for new advisories.** `source-map-js` 1.2.2 fixes
+  a high-severity denial of service (CVE-2026-93749) and
+  `postcss-selector-parser` 7.1.6 a medium one. `sprintf-js` has no fixed
+  release; its advisory is recorded in `osv-scanner.toml` with the reasoning.
+  All three are build and test tooling only and are not part of the shipped
+  plugin, so the plugin itself does not change.
+
 ## 1.0.2 (2026-10-02)
 
 - **The topology hint follows the Grafana theme.** The help text under the

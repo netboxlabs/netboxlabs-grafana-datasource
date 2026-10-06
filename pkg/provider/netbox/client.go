@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -144,14 +145,28 @@ func (c *Client) nextPageURL(current, next string) (string, error) {
 	return cur.String(), nil
 }
 
-// onOrigin reports whether u has the configured URL's scheme, host and port,
-// a scheme's default port spelled out or not. It is the line getBytes and every
-// redirect hold: the token goes nowhere else.
+// onOrigin reports whether u is within the configured URL: its scheme, host and
+// port (a scheme's default port spelled out or not), and under its path. It is
+// the line getBytes and every redirect hold: the token goes nowhere else.
 func (c *Client) onOrigin(u *url.URL) bool {
 	return c.origin != nil && u != nil &&
 		strings.EqualFold(u.Scheme, c.origin.Scheme) &&
 		strings.EqualFold(u.Hostname(), c.origin.Hostname()) &&
-		effectivePort(u) == effectivePort(c.origin)
+		effectivePort(u) == effectivePort(c.origin) &&
+		c.underBasePath(u)
+}
+
+// underBasePath reports whether u's path is the configured URL's path or below
+// it. On a shared host the prefix is what marks out NetBox: configured as
+// https://example.com/netbox, https://example.com/other is another application.
+// Both paths are cleaned first, so a dot segment cannot climb out of the prefix.
+func (c *Client) underBasePath(u *url.URL) bool {
+	base := path.Clean("/" + c.origin.Path)
+	if base == "/" {
+		return true
+	}
+	p := path.Clean("/" + u.Path)
+	return p == base || strings.HasPrefix(p, base+"/")
 }
 
 // httpsUpgrade reports whether u is the configured host over https while the
@@ -161,7 +176,8 @@ func (c *Client) onOrigin(u *url.URL) bool {
 func (c *Client) httpsUpgrade(u *url.URL) bool {
 	return c.origin != nil && u != nil &&
 		strings.EqualFold(c.origin.Scheme, "http") && strings.EqualFold(u.Scheme, "https") &&
-		strings.EqualFold(u.Hostname(), c.origin.Hostname())
+		strings.EqualFold(u.Hostname(), c.origin.Hostname()) &&
+		c.underBasePath(u)
 }
 
 // effectivePort is u's port, or its scheme's default when none is written.

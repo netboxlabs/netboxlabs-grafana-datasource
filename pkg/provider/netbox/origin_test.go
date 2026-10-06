@@ -447,3 +447,59 @@ func TestGetBytes_AConfiguredURLWithoutASchemeSaysSo(t *testing.T) {
 		t.Errorf("err = %v, want errNotAbsoluteURL", err)
 	}
 }
+
+// On a shared host the path prefix is what marks out NetBox: with the URL
+// configured as https://example.com/netbox, another application at
+// https://example.com/other is a different place, and neither a request nor a
+// redirect may take the token there. The path is cleaned first, so a dot
+// segment cannot climb out of the prefix.
+func TestRequestsAndRedirectsStayUnderTheConfiguredPath(t *testing.T) {
+	c := NewClient("https://example.com/netbox", "secret-token", &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("unexpected request to %s", r.URL)
+		return nil, fmt.Errorf("unexpected request")
+	})})
+	hop := func(raw string) *http.Request {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Request{URL: u}
+	}
+	via := []*http.Request{hop("https://example.com/netbox/api/status/")}
+	for raw, allowed := range map[string]bool{
+		"https://example.com/netbox/api/dcim/devices/":  true,
+		"https://example.com/netbox":                    true,
+		"https://example.com/netbox/":                   true,
+		"https://example.com/other-service/":            false,
+		"https://example.com/netbox-admin/":             false,
+		"https://example.com/":                          false,
+		"https://example.com/netbox/../other-service/":  false,
+		"https://example.com/netbox/api/../../secrets/": false,
+	} {
+		err := c.http.CheckRedirect(hop(raw), via)
+		if allowed && err != nil {
+			t.Errorf("redirect to %s refused: %v", raw, err)
+		}
+		if !allowed && err == nil {
+			t.Errorf("redirect to %s allowed; it leaves /netbox", raw)
+		}
+	}
+	if _, err := c.getBytes(context.Background(), "https://example.com/other-service/api/"); !errors.Is(err, errOffOrigin) {
+		t.Errorf("getBytes outside the configured path: err = %v, want errOffOrigin", err)
+	}
+
+	// No path configured: the whole origin is NetBox's.
+	root := NewClient("https://netbox.example.com", "t", nil)
+	if err := root.http.CheckRedirect(hop("https://netbox.example.com/anything/"), via); err != nil {
+		t.Errorf("a root-configured client refused a same-origin path: %v", err)
+	}
+
+	// The https upgrade keeps to the prefix too.
+	plain := NewClient("http://example.com/netbox", "t", nil)
+	if err := plain.http.CheckRedirect(hop("https://example.com/netbox/api/status/"), via); err != nil {
+		t.Errorf("an https upgrade under the prefix was refused: %v", err)
+	}
+	if err := plain.http.CheckRedirect(hop("https://example.com/other-service/"), via); err == nil {
+		t.Error("an https upgrade outside the prefix was allowed")
+	}
+}

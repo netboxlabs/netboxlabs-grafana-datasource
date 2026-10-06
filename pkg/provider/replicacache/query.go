@@ -203,16 +203,15 @@ type expansion struct{ key, via, target string }
 // warning naming the cause, never a blank column, and sorting on it a note for
 // the same reason.
 //
-// A reference is expanded only when something asks for it by name — a field,
-// a join key, a filter, the ordering. An unprojected query ("All columns")
-// returns the stored columns, ids included, and NOT every related name the
-// catalogue could resolve: each expansion is a join the service runs per
-// page, and one is enough to sink the query. Measured on a large replica's
-// 12.9M-row dcim/interfaces at 100 rows: seven of its references cost 1.4–9 s
-// each, expand=lag alone 62 s, and all eight together answered 503 — on the
-// table this backend exists to serve, from the editor's default query.
-// NetBox-mode parity for the unprojected column set is the price; the editor
-// offers every related name, and a panel that wants one selects it.
+// A reference is expanded when something asks for it by name — a field, a
+// join key, a filter, the ordering — and an unprojected query ("All columns")
+// that reads rows expands every reference whose target has data, because
+// NetBox mode returns related names by default. The service pages the rows
+// first and joins only the keys on that page (DATA-404), so resolving all of
+// them costs about what resolving none does: on a large replica's 12.9M-row
+// dcim/interfaces, all eight references on a 100-row page took 1.35 s, the
+// same as no expansion. A count-only query reads no rows and expands only
+// what its filters need.
 func planRequest(e entity, spec provider.QuerySpec) request {
 	r := request{unavailable: map[string]bool{}}
 	wantAll := len(spec.Fields) == 0
@@ -248,6 +247,16 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 	if !spec.CountOnly {
 		for _, name := range selectedFields(spec) {
 			ask(name)
+		}
+	}
+	if wantAll && !spec.CountOnly {
+		// Every reference whose target has data. One whose target has none is
+		// left out without a warning: nobody named it, and Fields does not
+		// offer it either.
+		for _, col := range e.Columns {
+			if col.Ref != nil && col.Ref.Available {
+				expandSet[col.Ref.ExpandKey] = true
+			}
 		}
 	}
 

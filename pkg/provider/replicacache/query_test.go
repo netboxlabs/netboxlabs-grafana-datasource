@@ -33,10 +33,8 @@ func newTestProvider(t *testing.T, f *fakeService) *Provider {
 
 // A panel written against the NetBox provider selects "site", not "site_id".
 // The server joins the name in under expand=; nothing is read client-side.
-// Only what is asked for: an unprojected query returns the stored columns,
-// because expanding every reference on a large table is what made the
-// default query time out (dcim/interfaces: one reference alone took 62 s for
-// 100 rows on a large replica, and all eight answered 503).
+// "All columns" resolves every reference the catalogue marks available, as
+// NetBox mode returns related names by default; the ids stay alongside.
 func TestQueryExpandsForeignKeysToNames(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
@@ -52,13 +50,22 @@ func TestQueryExpandsForeignKeysToNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if req, ok := f.requestWith("dcim/devices", "expand"); ok {
-		t.Errorf("an unprojected query expands nothing, got %v", req.query)
+	if req, ok := f.requestWith("dcim/devices", "expand"); !ok || req.query.Get("expand") != "role,tenant,site,rack" {
+		t.Errorf("an unprojected query expands every available reference, got %v", req.query)
 	}
-	if _, ok := res.Rows[0]["site"]; ok || res.Rows[0]["site_id"] != float64(4001) {
-		t.Errorf("unprojected row = %v, want the stored columns alone", res.Rows[0])
+	if res.Rows[0]["site"] != "DC-Northeast" || res.Rows[0]["role"] != "Core Switch" || res.Rows[0]["site_id"] != float64(4001) {
+		t.Errorf("unprojected row = %v, want the related names beside their ids", res.Rows[0])
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("an unavailable reference All columns never named is not a warning: %v", res.Warnings)
 	}
 
+	// A projection expands only the names it asks for. Forget the first
+	// query's requests, which expanded everything, so requestWith finds this
+	// one's.
+	f.mu.Lock()
+	f.requests = nil
+	f.mu.Unlock()
 	res, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "site", "site_slug", "role", "site_id"}})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
@@ -818,11 +825,18 @@ func TestJoinKeysFollowTheSameRule(t *testing.T) {
 	if got := expand(provider.QuerySpec{Fields: []string{"site_slug"}}); !slices.Equal(got, []string{"site"}) {
 		t.Errorf("site_slug needs the site expansion: %v", got)
 	}
-	// No projection at all expands nothing: resolving every reference on a
-	// large table is what made the default query time out (measured), so a
-	// related name is resolved when something asks for it by name.
-	if got := expand(provider.QuerySpec{}); len(got) != 0 {
-		t.Errorf("an unprojected query must not expand every reference, got %v", got)
+	// No projection at all expands every reference the catalogue marks
+	// available, in catalogue order, as NetBox mode returns related names by
+	// default. platform's target has no data, so it is left out.
+	if got := expand(provider.QuerySpec{}); !slices.Equal(got, []string{"role", "tenant", "site", "rack"}) {
+		t.Errorf("an unprojected query expands every available reference, got %v", got)
+	}
+	// A count-only caller reads no rows: only what its filters need.
+	if got := expand(provider.QuerySpec{CountOnly: true}); len(got) != 0 {
+		t.Errorf("a count-only query expands only for its filters, got %v", got)
+	}
+	if got := expand(provider.QuerySpec{CountOnly: true, Filters: []provider.Filter{{Field: "site", Operator: "ic", Value: "ams"}}}); !slices.Equal(got, []string{"site"}) {
+		t.Errorf("a count-only query filtering on site expands site alone, got %v", got)
 	}
 }
 
@@ -1519,8 +1533,8 @@ func TestPlanRequest(t *testing.T) {
 		{"key field is fetched too", provider.QuerySpec{Fields: []string{"name"}, KeyFields: []string{"rack"}}, []string{"name", "id"}, []string{"rack"}, "", "", ""},
 		{"cf pulls custom_field_data", provider.QuerySpec{Fields: []string{"cf_lifecycle_phase"}}, []string{"custom_field_data", "id"}, nil, "", "", ""},
 		{"display_url pulls nothing extra", provider.QuerySpec{Fields: []string{"display_url"}}, []string{"id"}, nil, "", "", ""},
-		{"empty fields expands nothing", provider.QuerySpec{}, nil, nil, "", "", ""},
-		{"empty fields still expands a join key", provider.QuerySpec{KeyFields: []string{"site"}}, nil, []string{"site"}, "", "", ""},
+		{"empty fields expands every available reference", provider.QuerySpec{}, nil, []string{"role", "tenant", "site", "rack"}, "", "", ""},
+		{"empty fields with a join key expands the same set", provider.QuerySpec{KeyFields: []string{"site"}}, nil, []string{"role", "tenant", "site", "rack"}, "", "", ""},
 		{"sort on physical", provider.QuerySpec{Fields: []string{"name"}, Ordering: "-name"}, []string{"name", "id"}, nil, "-name", "", ""},
 		{"sort on expansion expands it", provider.QuerySpec{Fields: []string{"name"}, Ordering: "site"}, []string{"name", "id"}, []string{"site"}, "site", "", ""},
 		{"descending sort on expansion", provider.QuerySpec{Fields: []string{"name"}, Ordering: " -site "}, []string{"name", "id"}, []string{"site"}, "-site", "", ""},

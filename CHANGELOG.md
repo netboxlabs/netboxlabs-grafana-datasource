@@ -17,8 +17,9 @@
   instances too large for the API to serve table queries interactively. The
   data source reads the replica's schema route for object types, columns,
   types, operators and references, so nothing is sampled or guessed; related
-  names (site, role, tenant…) are resolved by the replica when selected and
-  can be sorted and filtered on; custom fields expand as in NetBox mode; every result states
+  names (site, role, tenant…) are resolved by the replica, in an All columns
+  query as in NetBox mode, and can be sorted and filtered on; custom fields
+  expand as in NetBox mode; every result states
   how fresh the data is, and a replica still loading its initial snapshot is a
   warning. Text filters follow the replica's schema: _contains_ on text
   columns, and _starts with_, _ends with_ and _= (ci)_ on a build that lists

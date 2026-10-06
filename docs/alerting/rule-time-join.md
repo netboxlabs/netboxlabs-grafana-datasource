@@ -150,14 +150,45 @@ from the [alert-table recipe](alert-table.md) already emits the exact shape a re
 column, the rest labels):
 
 - Query **A** — NetBox, **Objects**, `dcim/devices`, **Alert table** enabled,
-  return fields `name`, `site`, `role`, `tenant`, **Limit** above the fleet size
+  return field `tenant_slug`, and four **join keys**: `name → device`,
+  `id → netbox_id`, `site_slug → site`, `role_slug → role`; **Limit** above the
+  fleet size
 - Record: metric `netbox_device_info`, from `A`, target the Prometheus data source
 
-That yields one series per device in Prometheus:
+The join keys do the label design. Each output is named after the metric label
+it joins on (`device`), or after a key that survives a rename: `netbox_id` and
+the slugs, as [JOIN-KEYS.md](../JOIN-KEYS.md) explains. A join key's source
+column is read but not emitted, so the labels are exactly the return fields and
+the join-key outputs. That yields one series per device, with nothing to
+`label_replace` later:
 
 ```
-netbox_device_info{name="AMS1-leaf-01", site="AMS1", role="Leaf", tenant="…"} 1
+netbox_device_info{device="AMS1-leaf-01", netbox_id="7", site="ams1", role="leaf", tenant_slug="grafana-demo"} 1
 ```
+
+The demo ships this rule provisioned in
+`provisioning/alerting/netbox-device-info.yml`; start from that copy. When you
+provision your own, mind one spelling. The target data source is
+`targetDatasourceUid` in a provisioning file and `target_datasource_uid` on the
+HTTP API, the same split as `keepFiringFor` and `keep_firing_for`. The wrong
+spelling is dropped without a warning, and the rule then fails with
+`remote write failed: data source uid not specified and no default set`.
+
+**Join against the newest series per device.** When a device's site, role or
+tenant changes in NetBox, the next run writes a series with the new labels, and
+Grafana does not mark the old one stale. Prometheus keeps returning it until it
+ages out of its five-minute lookback, so for a few minutes the device has two
+series, and a plain `group_left` refuses the whole expression. Measured on the
+demo after one role change: both joins below failed with
+`found duplicate series for the match group` for four minutes, which puts every
+alert built on them into error. Keep only each device's newest series:
+
+```promql
+netbox_device_info
+  and (timestamp(netbox_device_info) == on(device) group_left() max by (device) (timestamp(netbox_device_info)))
+```
+
+The examples below use it.
 
 Alert rules then never touch NetBox. They are plain PromQL — no SQL expression,
 no `Alerting` format, no cell limit, no feature toggle. Build the rule the
@@ -168,11 +199,24 @@ ordinary Grafana way, three steps:
 - **C** — **Threshold**, `IS ABOVE 0` on **B**, set as the rule's condition
 
 ```promql
-  (device_up < bool 1) * on(device) group_left(site, role, tenant)
-    label_replace(netbox_device_info, "device", "$1", "name", "(.*)")
+  (device_up < bool 1) * on(device) group_left(site, role, tenant_slug) (
+    netbox_device_info
+      and (timestamp(netbox_device_info) == on(device) group_left() max by (device) (timestamp(netbox_device_info)))
+  )
 or
-  (device_up < bool 1) unless on(device)
-    label_replace(netbox_device_info, "device", "$1", "name", "(.*)")
+  (device_up < bool 1) unless on(device) netbox_device_info
+```
+
+Verified on the demo: 15 devices, one down, exactly one instance fires, carrying
+`site`, `role` and `tenant_slug`. Dashboards join the same way. This enriches
+every series, and wrapping it in `avg by (site) (…)` aggregates, without a SQL
+expression or a cell limit in sight:
+
+```promql
+device_cpu_percent * on(device) group_left(site, role) (
+  netbox_device_info
+    and (timestamp(netbox_device_info) == on(device) group_left() max by (device) (timestamp(netbox_device_info)))
+)
 ```
 
 > **Instant, and reduce before you threshold.** Unlike the SQL variant — where
@@ -195,8 +239,7 @@ or
 > matching the SQL variant, after which exactly the right instance fires. Apply
 > it to **both** arms — the fallback arm needs it just as much.
 
-`label_replace` aligns the recorded `name` label with the metric's `device`
-label. The `or … unless` half is the same safeguard as the `LEFT JOIN` above:
+The `or … unless` half is the same safeguard as the `LEFT JOIN` above:
 without it, `group_left` is an inner join and any device missing from the
 recorded inventory stops alerting. Do not simplify it to a bare `or device_up` —
 the enriched series carry extra labels, so their label sets never match the plain
@@ -213,23 +256,26 @@ ones and every device comes back twice.
 > ```
 >
 > That takes down **every** alert using this recipe, not just the affected
-> device. Check before relying on it:
+> device. The newest-series filter does not hide it, because two devices with
+> one name are written in the same run and share a timestamp. Check before
+> relying on it; a device edited in the last five minutes does not show up here:
 >
 > ```promql
 > count by (device) (
->   label_replace(netbox_device_info, "device", "$1", "name", "(.*)")
+>   netbox_device_info
+>     and (timestamp(netbox_device_info) == on(device) group_left() max by (device) (timestamp(netbox_device_info)))
 > ) > 1
 > ```
 >
 > Any result means you cannot key on name. Either join on something genuinely
 > unique that both sides carry — an IP address is usually the best candidate —
-> or collapse the duplicates deliberately with
-> `topk by (device) (1, label_replace(…))`, understanding that the surviving
+> or collapse the duplicates deliberately with `topk by (device) (1, …)` around
+> the newest-series expression, understanding that the surviving
 > series' site and role are then arbitrary among the duplicates. Silently wrong
 > context is its own hazard; prefer the unique key.
 >
 > It must be `topk`, not `max`. A `max by (device)` aggregation **drops every
-> label not named in `by`**, so `site`, `role` and `tenant` are gone before
+> label not named in `by`**, so `site`, `role` and `tenant_slug` are gone before
 > `group_left` can copy them — the alerts then fire with none of the routing
 > labels this recipe exists to provide, and nothing errors to say so. `topk`
 > selects a whole series and keeps its labels intact.
@@ -238,18 +284,23 @@ ones and every device comes back twice.
 > two alert instances for one device rather than an error — but it is still
 > wrong, and the same check applies.
 
-One more consequence of the two-arm form: if the recording rule stops (it fails
-loudly, but it does stop — see the Limit note above), the recorded series age out
-of Prometheus and every device falls through to the fallback arm. Alerts keep
-firing, which is the point, but they lose their context labels and therefore
-their routing. Alert on the recording rule's own health so that degradation is
-visible rather than inferred from suddenly-unrouted pages.
+One more consequence of the two-arm form: if the recording rule stops, the
+recorded series age out of Prometheus and every device falls through to the
+fallback arm. A truncated inventory does stop it, and visibly. With the Limit
+below the fleet size, the rule goes to `Error` with
+`Alert query returned 5 of 15 matching objects, so it would alert on an incomplete result…`.
+The message speaks of an alert query because a recording rule is evaluated as
+one. Nothing is written, and on the demo the last sample simply aged out, which
+is far better than recording a subset. Alerts keep firing, which is the point,
+but they lose their context labels and therefore their routing. Alert on the
+recording rule's own health so that degradation is visible rather than inferred
+from suddenly-unrouted pages.
 
 A caveat that follows from the same behaviour: a NetBox field that is empty
 produces an **absent** label on the recorded series, because Prometheus drops
-empty label values. Devices with no tenant simply have no `tenant` label, and
-`group_left(tenant)` then copies nothing. If the fields you route on are not
-reliably populated, add a SQL expression to the recording rule and apply the
+empty label values. Devices with no tenant simply have no `tenant_slug` label,
+and `group_left(tenant_slug)` then copies nothing. If the fields you route on
+are not reliably populated, add a SQL expression to the recording rule and apply the
 same `COALESCE(NULLIF(col, ''), 'unknown')` treatment — you lose the
 no-expression simplicity, but you get a label that always exists.
 
@@ -263,7 +314,7 @@ the time-series store and lives under the Prometheus data source's permissions
 from then on: NetBox's object permissions and this data source's permissions no
 longer apply, and each value reaches everyone who can query that store, every
 alert label and every notification. Record identifiers, names and slugs — the
-four fields above, `id` if you join on it — and nothing else: no contact names,
+labels above — and nothing else: no contact names,
 emails or phones (the [who-do-I-page recipe](who-do-i-page.md) keeps those in
 annotations), no `description` or `comments`, no custom fields. Free text is
 where credentials and personal data hide, and a label cannot be redacted once
@@ -289,10 +340,13 @@ target falls back to `default_datasource_uid` in the `[recording_rules]`
 section of the configuration.
 
 For an alert keyed by **IP** rather than device name — flow records, for example
-— point query **B** at `ipam/ip-addresses` and give it a **join key** of
-`address` → `src_ip` with the **IP host** transform (`iphost` when provisioning
-as JSON), which drops the mask so `10.112.128.1/24` matches a label of
-`10.112.128.1`. The join key renames the column in the returned frame, so the SQL
+— the [IP-only metrics recipe](ip-only-metrics.md) is the direct route: the
+**NetBox scope** source of the IP-enrichment query returns one row per address
+under a prefix, VRF or tenant, already resolved to its device, VM and interface.
+The older form below still works: point query **B** at `ipam/ip-addresses` and
+give it a **join key** of `address` → `src_ip` with the **IP host** transform
+(`iphost` when provisioning as JSON), which drops the mask so `10.112.128.1/24`
+matches a label of `10.112.128.1`. The join key renames the column in the returned frame, so the SQL
 then reads `FROM A LEFT JOIN B ON A.src_ip = B.src_ip` — a **left** join, with
 `COALESCE(NULLIF(col, ''), 'unknown')` on every NetBox column, for exactly the
 reasons given above.

@@ -1,0 +1,63 @@
+# Records NetBox's device inventory into Prometheus as netbox_device_info, one
+# series per device, so alert rules and dashboards can join it in PromQL with
+# group_left and never touch NetBox at evaluation time. The recipe, and what to
+# do when it fails, is docs/alerting/rule-time-join.md ("Cutting the cost:
+# record the NetBox side once").
+#
+# Needs a Prometheus that accepts remote writes (demo/docker-compose.yaml
+# starts it with --web.enable-remote-write-receiver) and a data source that
+# says it is plain Prometheus (jsonData.prometheusType in datasources.yml;
+# without it Grafana writes to Mimir's path and every write 404s). In the plain
+# dev stack Prometheus is not running, so this rule sits in Error there, like
+# the demo dashboard's telemetry panels.
+#
+# Join against each device's newest series, not netbox_device_info as is: a
+# NetBox edit to a device's site, role or tenant leaves the old series visible
+# for up to five minutes, and a plain group_left then fails with "found
+# duplicate series". The recipe gives the expression.
+#
+# Spelling: the target data source is targetDatasourceUid in this file and
+# target_datasource_uid on the HTTP API — the same split as keepFiringFor /
+# keep_firing_for — and the wrong one is dropped silently (the rule then fails
+# with "data source uid not specified and no default set").
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: netbox-recording
+    folder: NetBox
+    interval: 1m
+    rules:
+      - uid: netbox-device-info
+        title: NetBox device info (recording)
+        condition: A
+        noDataState: OK
+        execErrState: Error
+        record:
+          metric: netbox_device_info
+          from: A
+          targetDatasourceUid: prometheus
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: netboxlabs-netbox
+            model:
+              refId: A
+              datasource: { type: netboxlabs-netbox-datasource, uid: netboxlabs-netbox }
+              queryType: objects
+              objectType: dcim/devices
+              # Alert table: string columns become labels, the value is a
+              # constant 1 per device. Join keys name the labels after the
+              # metric labels they will be joined on and after keys that
+              # survive a rename (slug, id); a join key's source column is
+              # read but not emitted, so only fields and join-key outputs
+              # become labels.
+              alertTable: true
+              fields: [tenant_slug]
+              joinKeys:
+                - { source: name, output: device, transform: none }
+                - { source: id, output: netbox_id, transform: none }
+                - { source: site_slug, output: site, transform: none }
+                - { source: role_slug, output: role, transform: none }
+              # Above the fleet size: a truncated inventory fails the rule and
+              # stops writing rather than recording a subset (see the recipe).
+              limit: 1000

@@ -105,6 +105,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// empty output column, and since the backstop covers key fields too,
 		// alert evaluation failed on it.
 		cols = append(cols, addChoiceValueAliases(selectedFields(spec), rows)...)
+		applyChoiceLabels(spec.ObjectType, rows)
 		cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
 		cols = append(cols, addUnsetCustomFieldColumns(spec, rows)...)
 		if addDeepLinks(p.linkBase(c), spec.ObjectType, rows, e.pk()) {
@@ -381,9 +382,10 @@ func restrictColumns(cols, requested []string) []string {
 //
 // There, flattenObject splits a choice object into <field> carrying the LABEL
 // ("Active") and <field>_value carrying the raw value ("active"). This backend
-// stores choices as the raw value in a plain column and publishes no labels at
-// all, so <field> already holds what <field>_value would, and a saved panel
-// selecting status_value went blank on switching modes.
+// stores choices as the raw value in a plain column, so <field> holds what
+// <field>_value should until applyChoiceLabels, which runs after this, puts the
+// label in its place; without the alias a saved panel selecting status_value
+// went blank on switching modes.
 //
 // Only requested aliases are added. Emitting <field>_value beside every string
 // column would double the width of every result for the sake of a name almost

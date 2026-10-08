@@ -83,20 +83,57 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
   a small sample of rows, because the replica's schema cannot list them;
 - `display_url`, when the replica reports the NetBox it mirrors (see above).
 
-Values are the stored ones: a choice column holds `active`, not `Active`, and
-`<field>_value` aliases return the same value for panels written against
-NetBox mode. One exception keeps IP addresses as NetBox shows them: the
-replica stores a single-host address without its mask (`10.0.0.1`), and it is
-shown with it (`10.0.0.1/32`, `/128` for IPv6), in rows and in the value list.
+Values read as they do in NetBox mode. A **choice** column shows NetBox's
+label (`Active`, `IPv4`, `1000BASE-T (1GE)`) and `<field>_value` holds the
+stored value (`active`, `4`), selected by name or returned by an All columns
+query. The labels are NetBox's built-in ones, taken from its API schema for
+NetBox 4.2 to 4.6; a value outside that list (an instance's own
+`FIELD_CHOICES`) is shown as stored. Filters, sorting and the value list use
+the stored value, as NetBox's own filters do, so a filter on a choice takes
+`active`: a label as the value (`status = Active`) fails with a message naming
+the value to use, where NetBox answers "Select a valid choice". IP addresses
+also read as in NetBox: the replica stores a single-host address without its
+mask (`10.0.0.1`), and it is shown with it (`10.0.0.1/32`, `/128` for IPv6),
+in rows and in the value list.
 
 **Filters** offer, per column, the operators the replica accepts on it: equality
 (multi-value → `in`), a case-insensitive **contains** on text columns, and,
 on a replica-cache build that lists them (`istartswith`, `iendswith`,
 `iexact` in the schema route), _starts with_, _ends with_ and _= (ci)_ on text
-columns as well; greater/less than; and _is empty_ / _has any value_ on
-nullable non-text columns. Related names filter too (`site contains ams`,
-`site starts with dc-`). Every text match is case-insensitive and literal: a
-`%` or `_` in a value is that character, not a wildcard.
+columns as well; greater/less than, and _or equal_ on whole-number and
+decimal columns; _is empty_ / _has any value_ on nullable non-text columns;
+and the negation of each match (_not equal_, _not contains_, _not starts
+with_, _not ends with_, _not (ci)_). Related names filter too (`site contains
+ams`, `site starts with dc-`). Every text match is case-insensitive and
+literal: a `%` or `_` in a value is that character, not a wildcard.
+
+The replica compares with greater and less than only, so **_or equal_** is
+sent as the strict comparison that is exactly equivalent on the column's
+type: `u_height >= 42` as `> 41`, `weight <= 10.5` on a `DECIMAL(8,2)` as
+`< 10.51`. Floating-point columns, which NetBox does not use, have no exact
+equivalent and are not offered it.
+
+The replica has no **negation**, so the data source answers one exactly
+itself, with NetBox's meaning: a row is dropped when its value matches, a row
+whose value is empty is kept, and several values drop each of them. In order of
+preference:
+
+- with an equality on the same field, the negated values are removed from it
+  (`status in (active, planned)` and _not_ `active` is sent as
+  `status = planned`);
+- on a choice column, _not_ `offline` is sent as "one of the other choices",
+  when the row counts show no row holds an empty or unlisted value;
+- otherwise the rows matching the other filters are read and tested, and the
+  total comes from row counts the replica takes for each term. Where it cannot
+  (more than three negations, or two _not contains_ on one field whose values
+  do not contain one another), the total comes from reading every row, which
+  works up to 10,000 rows: past that an alert rule or Count fails with a
+  message to narrow the other filters, and a panel shows the rows found in the
+  first 10,000 with a warning.
+
+Counts taken while the replica applies changes can disagree. They are taken
+together and retried once, and if the data still moved, the result carries a
+warning, which fails an alert rule rather than letting it act on the number.
 
 **Equality on an IP address** (`address`, an IP range's `start_address` and
 `end_address`) matches the way NetBox matches an address filter, on a build
@@ -110,7 +147,7 @@ A filter that mixes values with and without a mask fails with a message, unless
 every masked value's address is also listed without one. On a build without
 `host` the comparison is on the stored text.
 
-Three things are deliberately not offered:
+These are deliberately not offered:
 
 - _starts with_, _ends with_ and _= (ci)_ on a replica whose schema lists only
   `ilike`. That build's one text match is a contains; anchoring it or matching
@@ -120,8 +157,11 @@ Three things are deliberately not offered:
   the replica tests `IS NULL`, and the two answer opposite questions — a rule
   that switched modes would silently invert. Use a datasource in NetBox mode
   for that filter.
-- _not_, _regex_ and the other NetBox lookups the replica has no equivalent for.
-  A saved query using one fails with a message rather than being approximated.
+- _not equal_ on an IP address. NetBox matches an address by its host
+  whatever the mask, which the replica can do only as a filter it applies, not
+  one the data source excludes.
+- _regex_ and the other NetBox lookups the replica has no equivalent for. A
+  saved query using one fails with a message rather than being approximated.
 
 **Sorting** works on stored columns and on related names (`site`, `-role`).
 Sorting on a related name whose target has no data is dropped and stated in a

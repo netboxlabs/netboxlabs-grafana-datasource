@@ -895,7 +895,7 @@ func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 		"name":          {"", "ic", "gt", "lt"},              // nullable VARCHAR: contains, no is-empty
 		"serial":        {"", "ic", "gt", "lt"},              // NOT NULL VARCHAR: the same
 		"position":      {"", "gt", "lt", "empty", "nempty"}, // nullable DOUBLE: is-empty is exact
-		"id":            {"", "gt", "lt"},                    // NOT NULL BIGINT: never empty
+		"id":            {"", "gt", "gte", "lt", "lte"},      // NOT NULL BIGINT: never empty; whole numbers take >= and <=
 		"is_full_depth": {"", "gt", "lt"},                    // NOT NULL BOOLEAN
 		"site":          {"", "ic", "gt", "lt"},              // expanded name: the target's name column
 		"site_slug":     {"", "ic", "gt", "lt"},
@@ -910,11 +910,23 @@ func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 			t.Errorf("%s must not be filterable", absent)
 		}
 	}
-	// Every advertised operator is one the translator accepts.
+	// Every advertised operator is one a query accepts.
+	assertAdvertisedOperatorsAccepted(t, p, ops)
+}
+
+// assertAdvertisedOperatorsAccepted runs one query per advertised operator, so
+// the check covers every step a filter passes through — the rewrites as well
+// as the translation — not the translator alone. What the fake then answers
+// is beside the point; a refusal is what an advertised operator must never get.
+func assertAdvertisedOperatorsAccepted(t *testing.T, p *Provider, ops map[string][]string) {
+	t.Helper()
 	for name, list := range ops {
 		for _, op := range list {
-			if _, err := buildFilterValues([]provider.Filter{{Field: name, Operator: op, Value: "1"}}, nil); err != nil {
-				t.Errorf("%s advertises %q but the translator rejects it: %v", name, op, err)
+			_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
+				Filters: []provider.Filter{{Field: name, Operator: op, Value: "1"}}})
+			var refused *UnsupportedFilterError
+			if errors.As(err, &refused) {
+				t.Errorf("%s advertises %q but a query with it is refused: %v", name, op, err)
 			}
 		}
 	}
@@ -938,20 +950,14 @@ func TestFilterFields_OffersAnchoredMatchesWhenTheCatalogueListsThem(t *testing.
 		"name":      {"", "ic", "isw", "iew", "ie", "gt", "lt"},
 		"site":      {"", "ic", "isw", "iew", "ie", "gt", "lt"},
 		"site_slug": {"", "ic", "isw", "iew", "ie", "gt", "lt"},
-		"id":        {"", "gt", "lt"},
+		"id":        {"", "gt", "gte", "lt", "lte"},
 		"position":  {"", "gt", "lt", "empty", "nempty"},
 	} {
 		if !slices.Equal(ops[name], want) {
 			t.Errorf("%s: %v, want %v", name, ops[name], want)
 		}
 	}
-	for name, list := range ops {
-		for _, op := range list {
-			if _, err := buildFilterValues([]provider.Filter{{Field: name, Operator: op, Value: "1"}}, nil); err != nil {
-				t.Errorf("%s advertises %q but the translator rejects it: %v", name, op, err)
-			}
-		}
-	}
+	assertAdvertisedOperatorsAccepted(t, p, ops)
 }
 
 // Deep links point at the NetBox the replica reports it mirrors — the one

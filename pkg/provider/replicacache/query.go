@@ -39,10 +39,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err := validateChoiceValues(spec.ObjectType, spec.Filters); err != nil {
 		return nil, err
 	}
-	q, err := buildFilterValues(spec.Filters, addressField(e, c))
-	if err != nil {
-		return nil, err
-	}
+	filters := spec.Filters
 	// An entity the catalogue has as unfed is NOT refused here: the row route
 	// answers 404 for it, classified as not-replicated by the client, and it
 	// is current where the catalogue can be ten minutes stale. Nor is the
@@ -54,11 +51,18 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// the build's (validateTextOperators).
 	var plan request
 	if e.Ingested {
-		if err := validateFilters(spec.Filters, e, c); err != nil {
+		if filters, err = rewriteComparisons(filters, e, c); err != nil {
+			return nil, err
+		}
+		if err := validateFilters(filters, e, c); err != nil {
 			return nil, err
 		}
 		plan = planRequest(e, spec)
-	} else if err := validateTextOperators(spec.Filters, c); err != nil {
+	} else if err := validateTextOperators(filters, c); err != nil {
+		return nil, err
+	}
+	q, err := buildFilterValues(filters, addressField(e, c))
+	if err != nil {
 		return nil, err
 	}
 

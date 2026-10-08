@@ -400,8 +400,11 @@ func TestSeamOperators_TranslateTheCatalogue(t *testing.T) {
 		// in the editor's tokens; one that lists only ilike does not (above).
 		{"text with the anchored matches", column{Type: "VARCHAR", Nullable: true, Operators: append(slices.Clone(text), "istartswith", "iendswith", "iexact")},
 			[]string{"", "ic", "isw", "iew", "ie", "gt", "lt"}},
-		{"nullable number", column{Type: "BIGINT", Nullable: true, Operators: all}, []string{"", "gt", "lt", "empty", "nempty"}},
-		{"not null number", column{Type: "BIGINT", Operators: all}, []string{"", "gt", "lt"}},
+		{"nullable number", column{Type: "BIGINT", Nullable: true, Operators: all}, []string{"", "gt", "gte", "lt", "lte", "empty", "nempty"}},
+		{"not null number", column{Type: "BIGINT", Operators: all}, []string{"", "gt", "gte", "lt", "lte"}},
+		// >= and <= only where a strict comparison is their exact rewrite.
+		{"decimal", column{Type: "DECIMAL(8,2)", Operators: all}, []string{"", "gt", "gte", "lt", "lte"}},
+		{"floating point", column{Type: "DOUBLE", Operators: all}, []string{"", "gt", "lt"}},
 		{"nullable timestamp", column{Type: "TIMESTAMP WITH TIME ZONE", Nullable: true, Operators: all}, []string{"", "gt", "lt", "empty", "nempty"}},
 		{"equality only", column{Type: "VARCHAR", Nullable: true, Operators: []string{"eq"}}, []string{""}},
 		{"nothing", column{Type: "VARCHAR"}, nil},

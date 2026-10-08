@@ -23,7 +23,8 @@ import (
 // translating: every unsupported lookup here has a plausible-looking near-miss
 // (gte as gt, n as a negated eq the API cannot express), and silently
 // substituting one would answer a different question than the panel asked while
-// looking entirely healthy. FilterFields advertises only the operators below,
+// looking entirely healthy. A translation is made only where it is exact:
+// gte/lte on number columns with a fixed step (comparisons.go). FilterFields advertises only the operators below,
 // so the query editor never offers a combination that lands here as an error.
 const (
 	opExact   = ""
@@ -162,9 +163,16 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 			}
 			seen[key] = true
 			q.Set(param(f.Field, wire), values[0])
+		case opGTE, opLTE:
+			// rewriteComparisons turns these into gt/lt wherever it can, which
+			// needs the column's type; validateFilters refuses them on any other
+			// column, so one that reaches here is on an entity the replica has no
+			// columns for yet.
+			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+				Reason: "greater/less than or equal works on number columns once this replica has received data for this object type"}
 		default:
 			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-				Reason: "this backend supports only equality, text match, greater/less than and is-empty"}
+				Reason: "this backend supports only equality, text match, greater/less than (or equal, on number columns) and is-empty"}
 		}
 	}
 
@@ -372,11 +380,18 @@ func seamOperators(col column) []string {
 			out = append(out, op)
 		}
 	}
+	_, _, _, stepped := stepOf(col.Type)
 	if has("gt") {
 		out = append(out, opGT)
+		if stepped {
+			out = append(out, opGTE) // see rewriteComparisons
+		}
 	}
 	if has("lt") {
 		out = append(out, opLT)
+		if stepped {
+			out = append(out, opLTE)
+		}
 	}
 	if has("isnull") && col.Nullable && fieldTypeOf(col.Type) != provider.FieldTypeString {
 		out = append(out, opEmpty, opNEmpty)

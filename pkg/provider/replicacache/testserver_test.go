@@ -1,6 +1,7 @@
 package replicacache
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -418,6 +419,18 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+func toFloat(v interface{}) float64 {
+	switch n := v.(type) {
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case float64:
+		return n
+	}
+	return 0
+}
+
 func matches(v interface{}, op, want string) bool {
 	s := fmt.Sprintf("%v", v)
 	if f, ok := v.(float64); ok {
@@ -435,6 +448,23 @@ func matches(v interface{}, op, want string) bool {
 		return false
 	case "isnull":
 		return (v == nil) == (want == "true")
+	case "gt", "lt":
+		// A number compares as a number and text as text, as the service's
+		// typed columns do; NULL compares as nothing.
+		var order int
+		switch n := v.(type) {
+		case nil:
+			return false
+		case int, int64, float64:
+			w, err := strconv.ParseFloat(want, 64)
+			if err != nil {
+				return false
+			}
+			order = cmp.Compare(toFloat(n), w)
+		default:
+			order = strings.Compare(s, want)
+		}
+		return (op == "gt" && order > 0) || (op == "lt" && order < 0)
 	case "ilike":
 		// The service's ilike is a case-insensitive contains on the literal
 		// value; a % in the value is that character.

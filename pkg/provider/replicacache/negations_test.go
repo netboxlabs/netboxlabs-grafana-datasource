@@ -425,3 +425,93 @@ func TestQuery_NegatedRelatedName(t *testing.T) {
 		t.Errorf("Columns = %v, want [name]", res.Columns)
 	}
 }
+
+// The rows are tested here and the counts by the replica, so a negation is
+// offered only where the two compare alike: text, numbers and booleans. A
+// timestamp the replica casts before comparing is not one.
+func TestQuery_NegationOnlyWhereTheRowTestComparesLikeTheReplica(t *testing.T) {
+	f := newFakeService()
+	f.addEntity("dcim/cables", "id:BIGINT:pk", "label:VARCHAR", "seen:TIMESTAMP WITH TIME ZONE")
+	f.entities["dcim/cables"] = []map[string]interface{}{{"id": 1, "label": "a", "seen": "2026-05-01T10:00:00+00:00"}}
+	p := newTestProvider(t, f)
+
+	ff, err := p.FilterFields(context.Background(), "dcim/cables")
+	if err != nil {
+		t.Fatalf("FilterFields: %v", err)
+	}
+	for _, x := range ff {
+		if x.Name == "seen" && slices.Contains(x.Operators, "n") {
+			t.Errorf("seen operators = %v, want no n on a timestamp", x.Operators)
+		}
+		if x.Name == "label" && !slices.Contains(x.Operators, "n") {
+			t.Errorf("label operators = %v, want n", x.Operators)
+		}
+	}
+	_, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/cables",
+		Filters: []provider.Filter{{Field: "seen", Operator: "n", Value: "2026-05-01T10:00:00Z"}}})
+	var unsupported *UnsupportedFilterError
+	if !errors.As(err, &unsupported) {
+		t.Errorf("err = %v, want a refusal", err)
+	}
+}
+
+// A filter row with no field sends nothing in either mode; a negation must not
+// become a predicate on "", which would count every row as excluded.
+func TestQuery_NegationWithNoFieldIsIgnored(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = mixedDevices()
+	p := newTestProvider(t, f)
+
+	res := negationQuery(t, p, provider.QuerySpec{CountOnly: true, Filters: []provider.Filter{{Operator: "n", Value: "x"}}})
+	if res.Total != 6 {
+		t.Errorf("Total = %d, want 6", res.Total)
+	}
+}
+
+// A small table is answered by reading it: once the read reaches the end, the
+// rows kept are the total, and no row counts are needed.
+func TestQuery_NegationOnASmallTableReadsOnce(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = mixedDevices()
+	p := newTestProvider(t, f)
+
+	res := negationQuery(t, p, provider.QuerySpec{Filters: []provider.Filter{{Field: "name", Operator: "nic", Value: "core"}}})
+	if res.Total != 4 {
+		t.Errorf("Total = %d, want 4", res.Total)
+	}
+	if n := f.countRequestsFor("dcim/devices"); n != 1 {
+		t.Errorf("%d requests, want the one read", n)
+	}
+}
+
+// Read to the end is read to the end even when the replica hands out a cursor
+// with its last page: a strict query whose other filters match exactly 10,000
+// rows is answered, not refused as having grown.
+func TestQuery_UncountableNegationAtExactlyTheReadLimit(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = bigDevices()[:MaxLimit]
+	f.cursorOnLastPage = true
+	p := newTestProvider(t, f)
+
+	res := negationQuery(t, p, provider.QuerySpec{CountOnly: true, Filters: []provider.Filter{{Field: "name", Operator: "nic", Value: "de,ev"}}})
+	if res.Total != 0 {
+		t.Errorf("Total = %d, want 0", res.Total)
+	}
+}
+
+// The replica folds case for the counts and this code for the rows. Outside
+// ASCII the two need not agree, so such a negation is counted by reading the
+// rows, never by mixing the two.
+func TestQuery_NonASCIITextNegationIsCountedFromTheRows(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{device(1, "São Paulo", "active"), device(2, "Lisboa", "active")}
+	p := newTestProvider(t, f)
+
+	res := negationQuery(t, p, provider.QuerySpec{CountOnly: true, Filters: []provider.Filter{{Field: "name", Operator: "nic", Value: "são"}}})
+	if res.Total != 1 {
+		t.Errorf("Total = %d, want 1", res.Total)
+	}
+	if _, ok := f.requestWith("dcim/devices", "filter[name]__ilike"); ok {
+		t.Error("the replica was asked to count a non-ASCII text match")
+	}
+}

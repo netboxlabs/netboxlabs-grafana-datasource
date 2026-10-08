@@ -105,7 +105,6 @@ func TestQuery_InclusiveComparisonsRefuseWhatHasNoExactRewrite(t *testing.T) {
 		{"hexadecimal", []provider.Filter{{Field: "u_height", Operator: "gte", Value: "0x10"}}, "takes a number"},
 		{"several values", []provider.Filter{{Field: "u_height", Operator: "gte", Value: "40,42"}}, "single value"},
 		{"with gt on the same field", []provider.Filter{{Field: "u_height", Operator: "gt", Value: "40"}, {Field: "u_height", Operator: "gte", Value: "42"}}, "applied twice"},
-		{"past the column's range", []provider.Filter{{Field: "u_height", Operator: "lte", Value: "32767"}}, "outside the range"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -164,5 +163,46 @@ func TestQuery_InclusiveComparisonOnAnUnfedEntitySaysWhy(t *testing.T) {
 	}
 	if !strings.Contains(unsupported.Reason, "received data") {
 		t.Errorf("reason = %q, want it to name the missing data", unsupported.Reason)
+	}
+}
+
+// At the edge of what a type holds, the strict equivalent would be a literal
+// the type cannot hold. The filter is still exact: "<= the largest value" is
+// every row with a value, and ">= past the largest" is no row at all.
+func TestQuery_InclusiveComparisonsAtTheTypesLimits(t *testing.T) {
+	cases := []struct {
+		name    string
+		filters []provider.Filter
+		want    []string
+		sent    map[string]string
+	}{
+		{"<= the largest SMALLINT is every value", []provider.Filter{{Field: "u_height", Operator: "lte", Value: "32767"}},
+			[]string{"R1", "R2", "R3", "R4"}, map[string]string{"filter[u_height]__isnull": "false"}},
+		{">= the smallest SMALLINT is every value", []provider.Filter{{Field: "u_height", Operator: "gte", Value: "-40000"}},
+			[]string{"R1", "R2", "R3", "R4"}, map[string]string{"filter[u_height]__isnull": "false"}},
+		{"<= past the largest DECIMAL(8,2)", []provider.Filter{{Field: "weight", Operator: "lte", Value: "1000000"}},
+			[]string{"R1", "R2", "R3", "R4"}, map[string]string{"filter[weight]__isnull": "false"}},
+		{">= past the largest SMALLINT is no value", []provider.Filter{{Field: "u_height", Operator: "gte", Value: "40000"}},
+			nil, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f, p := racksFixture(t)
+			res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/racks", Filters: c.filters})
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if got := rackNames(res); !slices.Equal(got, c.want) || res.Total != len(c.want) {
+				t.Errorf("rows = %v (Total %d), want %v", got, res.Total, c.want)
+			}
+			for key, value := range c.sent {
+				if req, ok := f.requestWith("dcim/racks", key); !ok || req.query.Get(key) != value {
+					t.Errorf("sent %v, want %s=%s", req.query, key, value)
+				}
+			}
+			if c.want == nil && f.countRequestsFor("dcim/racks") != 0 {
+				t.Error("a filter no row can match still sent a request")
+			}
+		})
 	}
 }

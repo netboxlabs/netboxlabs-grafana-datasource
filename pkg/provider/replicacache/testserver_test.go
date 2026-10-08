@@ -52,6 +52,9 @@ type fakeService struct {
 	// asOfs, when non-empty, is the data_as_of of the next row responses, one
 	// each in order — a replica applying changes between requests.
 	asOfs []string
+	// cursorOnLastPage hands out a next_cursor with a full last page, as a
+	// keyset-paged service may; the page after it is empty.
+	cursorOnLastPage bool
 }
 
 type recordedRequest struct {
@@ -122,7 +125,7 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.requests = append(f.requests, recordedRequest{entity: entity, query: q})
 	rows, ok := f.entities[entity]
-	status, errBody, pageCap := f.status, f.errBody, f.pageCap
+	status, errBody, pageCap, cursorOnLastPage := f.status, f.errBody, f.pageCap, f.cursorOnLastPage
 	var se *fakeEntity
 	if f.schema != nil {
 		if e, known := f.schema.Entities["/v1/"+entity]; known {
@@ -422,7 +425,7 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	if asOf != nil {
 		resp["data_as_of"] = *asOf
 	}
-	if end < len(filtered) {
+	if end < len(filtered) || (cursorOnLastPage && end > start) {
 		resp["next_cursor"] = strconv.Itoa(end)
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -60,7 +60,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		none bool
 	)
 	if e.Ingested {
-		if filters, err = rewriteComparisons(filters, e, c); err != nil {
+		if filters, none, err = rewriteComparisons(filters, e, c); err != nil {
 			return nil, err
 		}
 		filters, negs = splitNegations(filters)
@@ -71,7 +71,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 			return nil, err
 		}
 		plan = planRequest(e, spec)
-		filters, negs, none = subtractNegations(filters, negs, e, c)
+		if !none {
+			filters, negs, none = subtractNegations(filters, negs, e, c)
+		}
 	} else if err := validateTextOperators(filters, c); err != nil {
 		return nil, err
 	}

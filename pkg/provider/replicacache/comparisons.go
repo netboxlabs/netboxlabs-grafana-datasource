@@ -93,9 +93,15 @@ func ceilTo(x *big.Rat, scale int) *big.Rat {
 // DECIMAL column. Anything else passes through for validateFilters and
 // buildFilterValues to judge as before. The entity must be ingested: the
 // rewrite needs the column's type.
-func rewriteComparisons(filters []provider.Filter, e entity, c *catalog) ([]provider.Filter, error) {
-	out := make([]provider.Filter, 0, len(filters))
+//
+// At the edge of the type the strict equivalent would be a literal the type
+// cannot hold, but the filter is still exact: <= the largest value is every
+// row with a value (is-not-empty, or nothing on a NOT NULL column), and >=
+// past the largest is no row — none.
+func rewriteComparisons(filters []provider.Filter, e entity, c *catalog) (out []provider.Filter, none bool, err error) {
+	out = make([]provider.Filter, 0, len(filters))
 	seen := map[string]bool{}
+	notEmpty := map[string]bool{}
 	for _, f := range filters {
 		op := f.Operator
 		strict, inclusive := map[string]string{opGTE: opGT, opLTE: opLT}[op]
@@ -112,21 +118,20 @@ func rewriteComparisons(filters []provider.Filter, e entity, c *catalog) ([]prov
 		refuse := func(reason string) error {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: reason}
 		}
+		// buildFilterValues makes both checks too, but after this rewrite it
+		// would name gt where the panel said gte.
 		if len(values) > 1 {
-			return nil, refuse("a comparison accepts a single value, but several were given")
+			return nil, false, refuse("a comparison accepts a single value, but several were given")
 		}
 		if seen[f.Field+"|"+strict] {
-			return nil, refuse("the same comparison is applied twice to this field; this backend cannot combine them, so remove one")
+			return nil, false, refuse("the same comparison is applied twice to this field; this backend cannot combine them, so remove one")
 		}
 		seen[f.Field+"|"+strict] = true
 
-		x, isNumber := new(big.Rat), plainDecimal.MatchString(values[0])
-		if isNumber {
-			_, isNumber = x.SetString(values[0])
-		}
+		x, isNumber := parseNumber(values[0])
 		if !isNumber {
 			if inclusive {
-				return nil, refuse(fmt.Sprintf("a %s column takes a number to compare with, and %q is not one", strings.ToLower(col.Type), values[0]))
+				return nil, false, refuse(fmt.Sprintf("a %s column takes a number to compare with, and %q is not one", strings.ToLower(col.Type), values[0]))
 			}
 			out = append(out, f) // as before: sent as given
 			continue
@@ -143,12 +148,38 @@ func rewriteComparisons(filters []provider.Filter, e entity, c *catalog) ([]prov
 			bound = ceilTo(x, scale)
 		}
 		if inclusive && (bound.Cmp(lo) < 0 || bound.Cmp(hi) > 0) {
-			return nil, refuse(fmt.Sprintf("this needs the bound %s %s, which is outside the range a %s column holds (%s to %s), so it cannot be sent",
-				strict, bound.FloatString(scale), strings.ToLower(col.Type), lo.FloatString(scale), hi.FloatString(scale)))
+			// Past the low end, >= holds for every value and <= for none; past
+			// the high end, the reverse.
+			if (bound.Cmp(lo) < 0) == (op == opLTE) {
+				return nil, true, nil
+			}
+			if !col.Nullable {
+				continue // every row has a value
+			}
+			if !slices.Contains(col.Operators, "isnull") {
+				return nil, false, refuse(fmt.Sprintf("every value a %s column holds satisfies this, so it means \"has any value\", which this column cannot be filtered on", strings.ToLower(col.Type)))
+			}
+			notEmpty[f.Field] = true
+			out = append(out, provider.Filter{Field: f.Field, Operator: opNEmpty})
+			continue
 		}
 		out = append(out, provider.Filter{Field: f.Field, Operator: strict, Value: bound.FloatString(scale)})
 	}
-	return out, nil
+	// "Has a value" beside the panel's own "is empty" on that field: no row.
+	for _, f := range out {
+		if f.Operator == opEmpty && notEmpty[f.Field] {
+			return nil, true, nil
+		}
+	}
+	return out, false, nil
+}
+
+// parseNumber reads a plain decimal exactly.
+func parseNumber(s string) (*big.Rat, bool) {
+	if !plainDecimal.MatchString(s) {
+		return nil, false
+	}
+	return new(big.Rat).SetString(s)
 }
 
 // filterColumn is the column a filter on field compares: the stored column, or

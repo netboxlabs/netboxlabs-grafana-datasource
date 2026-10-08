@@ -110,7 +110,8 @@ literal: a `%` or `_` in a value is that character, not a wildcard.
 The replica compares with greater and less than only, so **_or equal_** is
 sent as the strict comparison that is exactly equivalent on the column's
 type: `u_height >= 42` as `> 41`, `weight <= 10.5` on a `DECIMAL(8,2)` as
-`< 10.51`. Floating-point columns, which NetBox does not use, have no exact
+`< 10.51`. At the edge of the type, `<=` its largest value is _has any
+value_. Floating-point columns, which NetBox does not use, have no exact
 equivalent and are not offered it.
 
 The replica has no **negation**, so the data source answers one exactly
@@ -125,8 +126,9 @@ preference:
   when the row counts show no row holds an empty or unlisted value;
 - otherwise the rows matching the other filters are read and tested, and the
   total comes from row counts the replica takes for each term. Where it cannot
-  (more than three negations, or two _not contains_ on one field whose values
-  do not contain one another), the total comes from reading every row, which
+  (more than three negations, a _contains_ or _not contains_ beside another on
+  the same field whose values do not contain one another, or a text negation
+  with characters outside ASCII), the total comes from reading every row, which
   works up to 10,000 rows: past that an alert rule or Count fails with a
   message to narrow the other filters, and a panel shows the rows found in the
   first 10,000 with a warning.
@@ -157,6 +159,8 @@ These are deliberately not offered:
   the replica tests `IS NULL`, and the two answer opposite questions — a rule
   that switched modes would silently invert. Use a datasource in NetBox mode
   for that filter.
+- a negation on a column the replica converts before comparing (a timestamp
+  or UUID type), since the rows read here could not be tested the same way.
 - _not equal_ on an IP address. NetBox matches an address by its host
   whatever the mask, which the replica can do only as a filter it applies, not
   one the data source excludes.

@@ -24,7 +24,8 @@ import (
 // (gte as gt, n as a negated eq the API cannot express), and silently
 // substituting one would answer a different question than the panel asked while
 // looking entirely healthy. A translation is made only where it is exact:
-// gte/lte on number columns with a fixed step (comparisons.go). FilterFields advertises only the operators below,
+// gte/lte on number columns with a fixed step (comparisons.go), and the
+// negations, which are answered here (negations.go) rather than sent. FilterFields advertises only the operators below,
 // so the query editor never offers a combination that lands here as an error.
 const (
 	opExact   = ""
@@ -377,17 +378,22 @@ func boolString(b bool) string {
 func seamOperators(col column) []string {
 	var out []string
 	has := func(op string) bool { return slices.Contains(col.Operators, op) }
-	// Each match is followed by its negation (negations.go), except "not
-	// equal" on an IP address column, which NetBox matches by host.
+	// Each match is followed by its negation (negations.go) where the rows can
+	// be tested as the replica compares (rowComparable), except "not equal" on
+	// an IP address column, which NetBox matches by host.
+	negatable := rowComparable(col.Type)
 	if has("eq") || has("in") {
 		out = append(out, opExact)
-		if !has("host") {
+		if negatable && !has("host") {
 			out = append(out, "n")
 		}
 	}
 	for _, op := range []string{opIContns, opIStarts, opIEnds, opIExact} {
 		if has(wireTextOperator[op]) {
-			out = append(out, op, "n"+op)
+			out = append(out, op)
+			if negatable {
+				out = append(out, "n"+op)
+			}
 		}
 	}
 	_, _, _, stepped := stepOf(col.Type)

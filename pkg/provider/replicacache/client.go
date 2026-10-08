@@ -489,7 +489,9 @@ func (c *Client) walk(ctx context.Context, entity string, q url.Values, s scan) 
 				}
 			}
 			matched++
-			rows = append(rows, r)
+			if len(rows) < s.want {
+				rows = append(rows, r)
+			}
 		}
 
 		// Pages that individually agree with their own count can still
@@ -536,8 +538,11 @@ func (c *Client) walk(ctx context.Context, entity string, q url.Values, s scan) 
 		seenCursors[page.NextCursor] = true
 		cursor = page.NextCursor
 	}
-	if len(rows) > s.want {
-		rows = rows[:s.want]
+	// A walk stopped by scanCap after reading as many rows as the service
+	// counted has read them all, though a keyset-paged service may still have
+	// handed out a cursor with the last page.
+	if !first && scanned >= maxTotal {
+		exhausted = true
 	}
 	// The LARGEST count seen, not the first. Both are the service's own answer,
 	// but a stale one understates: with a first page of 9,999, later pages

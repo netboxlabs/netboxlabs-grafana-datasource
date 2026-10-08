@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math/big"
 	"net/url"
 	"slices"
 	"strconv"
@@ -73,7 +72,9 @@ func splitNegations(filters []provider.Filter) ([]provider.Filter, []negation) {
 	exact := map[string]int{}
 	for _, f := range filters {
 		pos, negated := negatedOperator[f.Operator]
-		if !negated {
+		// A row with no field sends nothing, negated or not; buildFilterValues
+		// skips it among the positives.
+		if !negated || f.Field == "" {
 			positives = append(positives, f)
 			continue
 		}
@@ -120,8 +121,30 @@ func validateNegations(negs []negation, e entity, c *catalog) error {
 			return &UnsupportedFilterError{Field: n.field, Operator: n.source.Operator,
 				Reason: "NetBox matches an IP address by its host whatever the mask, which this backend can test only as a filter it sends, never as one it excludes; filter on what to keep instead"}
 		}
+		if col, _ := filterColumn(e, c, n.field); !rowComparable(col.Type) {
+			return &UnsupportedFilterError{Field: n.field, Operator: n.source.Operator,
+				Reason: fmt.Sprintf("the replica converts a %s value before comparing it, which the rows read here cannot be tested against; filter on what to keep instead", strings.ToLower(col.Type))}
+		}
 	}
 	return nil
+}
+
+// rowComparable reports whether a column's stored values, as rows return
+// them, compare the way the replica compares them in a filter: text, numbers
+// and booleans. A negation is offered on those only (seamOperators), because
+// the rows are tested here while the totals come from the replica.
+func rowComparable(colType string) bool {
+	switch fieldTypeOf(colType) {
+	case provider.FieldTypeNumber, provider.FieldTypeBoolean:
+		return true
+	}
+	t := strings.ToUpper(strings.TrimSpace(colType))
+	for _, text := range []string{"VARCHAR", "TEXT", "STRING", "CHAR", "BPCHAR"} {
+		if t == text || strings.HasPrefix(t, text+"(") {
+			return true
+		}
+	}
+	return false
 }
 
 // sameValue compares two filter values as the replica compares them on a
@@ -143,13 +166,6 @@ func sameValue(colType, a, b string) bool {
 		}
 	}
 	return a == b
-}
-
-func parseNumber(s string) (*big.Rat, bool) {
-	if !plainDecimal.MatchString(s) {
-		return nil, false
-	}
-	return new(big.Rat).SetString(s)
 }
 
 func containsValue(colType string, set []string, v string) bool {
@@ -196,13 +212,13 @@ func subtractNegations(filters []provider.Filter, negs []negation, e entity, c *
 }
 
 // intersect is the filters of base AND every negation in negs taken positively
-// — one term of the inclusion–exclusion sum. Equality sets on one field
-// intersect. Two text matches of one kind on one field merge where one value
+// — one term of the inclusion–exclusion sum. Two text matches of one kind on
+// one field merge where one value
 // implies the other (a prefix of a longer prefix) and are empty where they
 // contradict (two different whole values); ok is false where the replica
 // cannot express the conjunction at all — it takes one value per match and
 // field.
-func intersect(base []provider.Filter, negs []negation, e entity, c *catalog) (out []provider.Filter, empty, ok bool) {
+func intersect(base []provider.Filter, negs []negation) (out []provider.Filter, empty, ok bool) {
 	type key struct{ field, op string }
 	text := map[key][]string{}
 	exact := map[string][]string{}
@@ -212,7 +228,7 @@ func intersect(base []provider.Filter, negs []negation, e entity, c *catalog) (o
 			exact[f.Field] = append(exact[f.Field], splitValues(f.Value)...)
 			continue
 		}
-		if _, isText := textMatch[op]; isText {
+		if _, isText := wireTextOperator[op]; isText {
 			text[key{f.Field, op}] = append(text[key{f.Field, op}], f.Value)
 			continue
 		}
@@ -223,22 +239,9 @@ func intersect(base []provider.Filter, negs []negation, e entity, c *catalog) (o
 			text[key{n.field, n.op}] = append(text[key{n.field, n.op}], n.values[0])
 			continue
 		}
-		have, ok := exact[n.field]
-		if !ok {
-			exact[n.field] = slices.Clone(n.values)
-			continue
-		}
-		col, _ := filterColumn(e, c, n.field)
-		var both []string
-		for _, v := range have {
-			if containsValue(col.Type, n.values, v) {
-				both = append(both, v)
-			}
-		}
-		if len(both) == 0 {
-			return nil, true, true
-		}
-		exact[n.field] = both
+		// One "n" per field (splitNegations), and none on a field with an
+		// equality (subtractNegations absorbed it), so nothing to intersect.
+		exact[n.field] = n.values
 	}
 	for _, field := range slices.Sorted(maps.Keys(exact)) {
 		out = append(out, provider.Filter{Field: field, Operator: opExact, Value: strings.Join(exact[field], ",")})
@@ -257,8 +260,6 @@ func intersect(base []provider.Filter, negs []negation, e entity, c *catalog) (o
 	}
 	return out, false, true
 }
-
-var textMatch = wireTextOperator
 
 // mergeTextMatches ANDs several values of one case-insensitive text match on
 // one field into the single value the replica takes. The rules compare
@@ -348,24 +349,31 @@ func (nq negatedQuery) params(filters []provider.Filter, fields []string, sorted
 	return withFields(q, fields), nil
 }
 
-// counted is an inclusion–exclusion total: base is count(base) alone, and
-// consistent says every count came from one moment of the replica.
+// counted is an inclusion–exclusion total, and consistent says every count
+// came from one moment of the replica.
 type counted struct {
-	total, base int
-	asOf        *time.Time
-	consistent  bool
+	total      int
+	asOf       *time.Time
+	consistent bool
 }
 
-// countNegated takes the inclusion–exclusion counts, concurrently, so they are
-// as close to one moment as requests can be. ok is false when there are too
-// many negations or a term the replica cannot express.
-func (p *Provider) countNegated(ctx context.Context, nq negatedQuery) (counted, bool, error) {
+// countTerms builds the inclusion–exclusion terms without sending anything:
+// one query per subset of the negations, nil for a subset known to match no
+// row. ok is false when the replica's counts cannot answer: too many
+// negations, a term it cannot express, or a text negation outside ASCII,
+// whose case folding the replica's counts and this code's row test need not
+// share (see mergeTextMatches).
+func countTerms(nq negatedQuery) ([]url.Values, bool) {
 	k := len(nq.negs)
 	if k > maxNegations {
-		return counted{}, false, nil
+		return nil, false
 	}
-	terms := 1 << k
-	queries := make([]url.Values, terms)
+	for _, n := range nq.negs {
+		if n.op != opExact && !isASCII(n.values[0]) {
+			return nil, false
+		}
+	}
+	terms := make([]url.Values, 1<<k)
 	for mask := range terms {
 		var in []negation
 		for i := range k {
@@ -373,27 +381,33 @@ func (p *Provider) countNegated(ctx context.Context, nq negatedQuery) (counted, 
 				in = append(in, nq.negs[i])
 			}
 		}
-		filters, empty, ok := intersect(nq.filters, in, nq.e, nq.c)
+		filters, empty, ok := intersect(nq.filters, in)
 		if !ok {
-			return counted{}, false, nil
+			return nil, false
 		}
 		if empty {
 			continue // a contradiction: no row, no request
 		}
 		q, err := nq.params(filters, nil, false)
 		if err != nil {
-			return counted{}, false, nil
+			return nil, false
 		}
-		queries[mask] = q
+		terms[mask] = q
 	}
+	return terms, true
+}
 
+// count takes the terms' counts concurrently, so they are as close to one
+// moment as requests can be, and sums them with alternating signs. Counts
+// from different moments are taken once more before being reported as such.
+func (p *Provider) count(ctx context.Context, nq negatedQuery, terms []url.Values) (counted, error) {
 	var res counted
 	for attempt := 0; attempt < 2; attempt++ {
-		counts, asOfs, err := p.counts(ctx, nq.spec.ObjectType, queries)
+		counts, asOfs, err := p.counts(ctx, nq.spec.ObjectType, terms)
 		if err != nil {
-			return counted{}, false, err
+			return counted{}, err
 		}
-		res = counted{base: counts[0], consistent: true}
+		res = counted{consistent: true}
 		for mask, n := range counts {
 			if bitsSet(mask)%2 == 1 {
 				n = -n
@@ -407,16 +421,14 @@ func (p *Provider) countNegated(ctx context.Context, nq negatedQuery) (counted, 
 			if res.asOf != nil && !t.Equal(*res.asOf) {
 				res.consistent = false
 			}
-			if res.asOf == nil || t.Before(*res.asOf) {
-				res.asOf = t
-			}
+			res.asOf = older(res.asOf, t)
 		}
 		if res.consistent {
 			break
 		}
 	}
 	res.total = max(res.total, 0)
-	return res, true, nil
+	return res, nil
 }
 
 func bitsSet(n int) int {
@@ -456,24 +468,46 @@ func (p *Provider) counts(ctx context.Context, entity string, queries []url.Valu
 const movingCountsWarning = "The total was counted while the replica was applying changes, so it may be off by the rows that changed during the count. Refresh to count again."
 
 // queryNegated answers a query that still has negations after
-// subtractNegations, by route 2 or 3.
+// subtractNegations, by route 2 or 3. Counts are taken only where they are
+// the answer or prove one: a read that reaches the last row has the exact
+// total already, which on a small table is the whole cost.
 func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRows, error) {
-	cnt, countable, err := p.countNegated(ctx, nq)
-	if err != nil {
-		return negatedRows{}, err
+	terms, countable := countTerms(nq)
+	var (
+		cnt     counted
+		counted bool
+	)
+	countOnce := func() error {
+		if counted {
+			return nil
+		}
+		var err error
+		cnt, err = p.count(ctx, nq, terms)
+		counted = err == nil
+		return err
 	}
-	var warnings []string
-	if countable && !cnt.consistent {
-		warnings = append(warnings, movingCountsWarning)
+	withCount := func(out negatedRows) negatedRows {
+		out.total = max(cnt.total, len(out.raws))
+		out.asOf = older(out.asOf, cnt.asOf)
+		if !cnt.consistent {
+			out.warnings = append(out.warnings, movingCountsWarning)
+		}
+		return out
 	}
 
 	if nq.spec.CountOnly && countable {
-		return negatedRows{total: cnt.total, asOf: cnt.asOf, warnings: warnings}, nil
+		if err := countOnce(); err != nil {
+			return negatedRows{}, err
+		}
+		return withCount(negatedRows{}), nil
 	}
 
 	// Route 2: the complement, used only once the counts agree with it.
-	if countable && cnt.consistent {
-		if filters, ok := complementOf(nq); ok {
+	if filters, ok := complementOf(nq); ok && countable && !nq.spec.CountOnly {
+		if err := countOnce(); err != nil {
+			return negatedRows{}, err
+		}
+		if cnt.consistent {
 			q, err := nq.params(filters, nq.fields, true)
 			if err != nil {
 				return negatedRows{}, err
@@ -523,20 +557,16 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 	if err != nil {
 		return negatedRows{}, err
 	}
-	keep, err := rowTester(nq)
-	if err != nil {
-		return negatedRows{}, err
-	}
 	want := nq.limit
 	if nq.spec.CountOnly {
 		want = 0
 	}
-	w, err := p.client.walk(ctx, nq.spec.ObjectType, q, scan{keep: keep, want: want, countAll: needAll || nq.spec.CountOnly, scanCap: MaxLimit})
+	w, err := p.client.walk(ctx, nq.spec.ObjectType, q, scan{keep: rowTester(nq), want: want, countAll: needAll, scanCap: MaxLimit})
 	if err != nil {
 		return negatedRows{}, err
 	}
 
-	out := negatedRows{raws: w.rows, asOf: older(w.asOf, cnt.asOf), warnings: warnings}
+	out := negatedRows{raws: w.rows, asOf: w.asOf}
 	if !nq.spec.CountOnly {
 		out.fields = fields
 	}
@@ -544,7 +574,10 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 	case w.exhausted:
 		out.total = w.matched
 	case countable:
-		out.total = max(cnt.total, len(w.rows))
+		if err := countOnce(); err != nil {
+			return negatedRows{}, err
+		}
+		out = withCount(out)
 	case needAll:
 		// The base outgrew MaxLimit between the count and the walk.
 		return negatedRows{}, &UnsupportedFilterError{Field: nq.negs[0].field, Operator: nq.negs[0].source.Operator,
@@ -554,9 +587,6 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 		out.warnings = append(out.warnings, fmt.Sprintf(
 			"Only the first %s rows matching the other filters were checked against the negated ones, and %s of them were kept; rows past those were not read, so more may match. Narrow the other filters.",
 			thousands(w.scanned), thousands(len(w.rows))))
-	}
-	if nq.spec.CountOnly {
-		out.raws = nil
 	}
 	return out, nil
 }
@@ -591,7 +621,7 @@ func complementOf(nq negatedQuery) ([]provider.Filter, bool) {
 // It reads the row as stored — before labels or address masks — and compares
 // as the replica does: equality by sameValue, the text matches lowercased.
 // NULL matches nothing, so a NULL row is kept, as exclude() keeps it.
-func rowTester(nq negatedQuery) (func(json.RawMessage) (bool, error), error) {
+func rowTester(nq negatedQuery) func(json.RawMessage) (bool, error) {
 	types := map[string]string{}
 	for _, n := range nq.negs {
 		col, _ := filterColumn(nq.e, nq.c, n.field)
@@ -608,7 +638,7 @@ func rowTester(nq negatedQuery) (func(json.RawMessage) (bool, error), error) {
 			}
 		}
 		return true, nil
-	}, nil
+	}
 }
 
 func matchesStored(v interface{}, colType, op string, values []string) bool {

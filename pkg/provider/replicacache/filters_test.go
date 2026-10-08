@@ -405,7 +405,9 @@ func TestSeamOperators_TranslateTheCatalogue(t *testing.T) {
 		// >= and <= only where a strict comparison is their exact rewrite.
 		{"decimal", column{Type: "DECIMAL(8,2)", Operators: all}, []string{"", "n", "gt", "gte", "lt", "lte"}},
 		{"floating point", column{Type: "DOUBLE", Operators: all}, []string{"", "n", "gt", "lt"}},
-		{"nullable timestamp", column{Type: "TIMESTAMP WITH TIME ZONE", Nullable: true, Operators: all}, []string{"", "n", "gt", "lt", "empty", "nempty"}},
+		// No negation: the replica converts a timestamp before comparing, and
+		// the rows read for a negation could not be tested the same way.
+		{"nullable timestamp", column{Type: "TIMESTAMP WITH TIME ZONE", Nullable: true, Operators: all}, []string{"", "gt", "lt", "empty", "nempty"}},
 		{"equality only", column{Type: "VARCHAR", Nullable: true, Operators: []string{"eq"}}, []string{"", "n"}},
 		{"nothing", column{Type: "VARCHAR"}, nil},
 	} {

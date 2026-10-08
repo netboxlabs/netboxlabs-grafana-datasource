@@ -36,6 +36,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
+	if err := validateChoiceValues(spec.ObjectType, spec.Filters); err != nil {
+		return nil, err
+	}
 	q, err := buildFilterValues(spec.Filters, addressField(e, c))
 	if err != nil {
 		return nil, err
@@ -105,7 +108,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// empty output column, and since the backstop covers key fields too,
 		// alert evaluation failed on it.
 		cols = append(cols, addChoiceValueAliases(selectedFields(spec), rows)...)
-		applyChoiceLabels(spec.ObjectType, rows)
+		cols = append(cols, applyChoiceLabels(spec.ObjectType, rows, len(spec.Fields) == 0)...)
 		cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
 		cols = append(cols, addUnsetCustomFieldColumns(spec, rows)...)
 		if addDeepLinks(p.linkBase(c), spec.ObjectType, rows, e.pk()) {

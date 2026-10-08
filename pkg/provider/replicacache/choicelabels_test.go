@@ -2,6 +2,9 @@ package replicacache
 
 import (
 	"context"
+	"errors"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
@@ -101,5 +104,59 @@ func TestChoiceLabels_EmbeddedMapCoversCommonChoices(t *testing.T) {
 	}
 	if _, ok := choiceLabel("dcim/devices", "name", "anything"); ok {
 		t.Error("a column that is not a choice has no labels")
+	}
+}
+
+// "All columns" in NetBox mode returns both halves of a choice: status (the
+// label) and status_value (the stored value). Labelling the column here must
+// not lose the stored value from such a query.
+func TestQuery_AllColumnsKeepsTheStoredChoiceValue(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := res.Rows[0]["status"]; got != "Active" {
+		t.Errorf("status = %v, want the label", got)
+	}
+	if got := res.Rows[0]["status_value"]; got != "active" {
+		t.Errorf("status_value = %v, want the stored value", got)
+	}
+	if !slices.Contains(res.Columns, "status_value") {
+		t.Errorf("Columns = %v, want status_value announced", res.Columns)
+	}
+	// Only choice columns get one: name is not a choice.
+	if slices.Contains(res.Columns, "name_value") {
+		t.Errorf("Columns = %v: name is not a choice and has no _value", res.Columns)
+	}
+}
+
+// Once rows read "Active", a value picked from them is a label. NetBox refuses
+// status=Active ("Select a valid choice"); sent here it would match nothing,
+// and as a negation it would match everything, with no error either way. So a
+// known label that is not also a stored value is refused, naming the value.
+func TestQuery_ALabelAsAFilterValueIsRefused(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
+		Filters: []provider.Filter{{Field: "status", Value: "planned,Active"}}})
+	var unsupported *UnsupportedFilterError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("err = %v, want an UnsupportedFilterError", err)
+	}
+	if !strings.Contains(unsupported.Reason, `"active"`) || !strings.Contains(unsupported.Reason, `"Active"`) {
+		t.Errorf("reason = %q, want it to name the stored value for the label", unsupported.Reason)
+	}
+
+	// A value outside NetBox's built-in list (FIELD_CHOICES) is not a label
+	// the map knows, so it is sent as given.
+	if _, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
+		Filters: []provider.Filter{{Field: "status", Value: "quarantined"}}}); err != nil {
+		t.Errorf("a value the map does not know was refused: %v", err)
 	}
 }

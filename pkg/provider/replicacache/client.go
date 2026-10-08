@@ -409,9 +409,6 @@ type walked struct {
 	exhausted bool
 }
 
-// walk is the cursor walk behind list and behind filters the replica cannot
-// express. A restart after a refused cursor starts the whole scan over, so no
-// row is tested or counted twice.
 // walker is a cursor walk's progress. A walk stopped by scanCap can be
 // taken further with a larger one, from where it stopped, instead of starting
 // over (walkOn).
@@ -446,13 +443,18 @@ func (w *walker) result() walked {
 	return walked{rows: w.rows, total: max(w.total, w.maxTotal), asOf: w.asOf, scanned: w.scanned, matched: w.matched, exhausted: w.exhausted}
 }
 
+// walk is the cursor walk behind list and behind filters the replica cannot
+// express. A restart after a refused cursor starts the whole scan over, so no
+// row is tested or counted twice.
 func (c *Client) walk(ctx context.Context, entity string, q url.Values, s scan) (walked, error) {
 	return c.walkOn(ctx, entity, q, s, newWalker())
 }
 
 // walkOn takes w further. Every call on one walker passes the same query and
-// scan but for scanCap.
+// scan but for scanCap. Each call has its own restart after a refused cursor,
+// as each call was its own walk before it could be resumed.
 func (c *Client) walkOn(ctx context.Context, entity string, q url.Values, s scan, w *walker) (walked, error) {
+	w.restarted = false
 	for !w.exhausted && (s.countAll || len(w.rows) < s.want) && (s.scanCap == 0 || w.scanned < s.scanCap) {
 		want := pageSize
 		if s.keep == nil {

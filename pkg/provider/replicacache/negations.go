@@ -9,6 +9,7 @@ import (
 	"maps"
 	"math/big"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -169,7 +170,6 @@ func sameValue(colType, a, b string) bool {
 			if okA && okB {
 				return x == y
 			}
-			break
 		}
 		x, okA := parseNumber(a)
 		y, okB := parseNumber(b)
@@ -191,19 +191,27 @@ func sameValue(colType, a, b string) bool {
 // value is compared as that width holds it.
 func floatBits(colType string) int {
 	switch strings.ToUpper(strings.TrimSpace(colType)) {
-	case "DOUBLE", "FLOAT8":
+	case "DOUBLE":
 		return 64
-	case "FLOAT", "REAL", "FLOAT4":
+	case "FLOAT", "REAL":
 		return 32
 	}
 	return 0
 }
 
-// parseFloat reads a plain decimal (parseNumber's syntax; the service's own
-// number text may also carry an exponent) rounded to a float of bits.
+// floatSyntax is a decimal with an optional exponent, which the replica's
+// float cast takes; not Go's hexadecimal floats, Inf, NaN or underscores.
+var floatSyntax = regexp.MustCompile(`^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$`)
+
+// parseFloat reads s rounded to a float of bits, as the replica casts a value
+// to a FLOAT or DOUBLE column. Filter values and stored values go through it
+// alike, so both sides of a comparison read a number the same way.
 func parseFloat(s string, bits int) (float64, bool) {
+	if !floatSyntax.MatchString(s) {
+		return 0, false
+	}
 	f, err := strconv.ParseFloat(s, bits)
-	return f, err == nil && !strings.ContainsAny(s, "xXpPnNiI_")
+	return f, err == nil
 }
 
 func containsValue(colType string, set []string, v string) bool {
@@ -518,6 +526,21 @@ func (p *Provider) counts(ctx context.Context, entity string, queries []url.Valu
 
 const movingCountsWarning = "The total was counted while the replica was applying changes, so it may be off by the rows that changed during the count. Refresh to count again."
 
+// withCount gives rows the counted total, at least every match the read saw
+// (matched). It warns when the counts are from different moments, or total
+// fewer matches than the read saw. Rows read at one moment and counts taken at
+// the next are otherwise what any multi-page read gives on a busy replica, and
+// a warning there would fail every alert rule on one; the answer reports the
+// older instant instead.
+func withCount(cnt counted, out negatedRows, matched int) negatedRows {
+	if !cnt.consistent || cnt.total < matched {
+		out.warnings = append(out.warnings, movingCountsWarning)
+	}
+	out.total = max(cnt.total, matched, len(out.raws))
+	out.asOf = older(out.asOf, cnt.asOf)
+	return out
+}
+
 // queryNegated answers a query that still has negations after
 // subtractNegations, by route 2 or 3. Counts are taken only where they are
 // the answer or prove one: a read that reaches the last row has the exact
@@ -537,26 +560,11 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 		taken = err == nil
 		return err
 	}
-	// withCount gives rows the counted total. It warns when the counts are
-	// from different moments, or say there are fewer matches than the rows
-	// already found. Rows read at one moment and counts taken at the next are
-	// otherwise what any multi-page read gives on a busy replica, and a
-	// warning there would fail every alert rule on one; the answer reports
-	// the older instant instead.
-	withCount := func(out negatedRows) negatedRows {
-		if !cnt.consistent || cnt.total < len(out.raws) {
-			out.warnings = append(out.warnings, movingCountsWarning)
-		}
-		out.total = max(cnt.total, len(out.raws))
-		out.asOf = older(out.asOf, cnt.asOf)
-		return out
-	}
-
 	if nq.spec.CountOnly && countable {
 		if err := countOnce(); err != nil {
 			return negatedRows{}, err
 		}
-		return withCount(negatedRows{}), nil
+		return withCount(cnt, negatedRows{}, 0), nil
 	}
 
 	// Without counts, the total has to come from reading every row: possible
@@ -649,7 +657,7 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 		if err := countOnce(); err != nil {
 			return negatedRows{}, err
 		}
-		out = withCount(out)
+		out = withCount(cnt, out, w.matched)
 	case needAll:
 		// The base outgrew MaxLimit between the count and the walk.
 		return negatedRows{}, &UnsupportedFilterError{Field: nq.negs[0].field, Operator: nq.negs[0].source.Operator,
@@ -751,11 +759,12 @@ func matchesStored(v interface{}, colType, op string, values []string) bool {
 			return false
 		}
 		if bits := floatBits(colType); bits > 0 {
-			stored, ok := parseFloat(t.String(), bits)
-			return ok && slices.ContainsFunc(values, func(v string) bool {
-				x, ok := parseFloat(v, bits)
-				return ok && plainDecimal.MatchString(v) && x == stored
-			})
+			if stored, ok := parseFloat(t.String(), bits); ok {
+				return slices.ContainsFunc(values, func(v string) bool {
+					x, ok := parseFloat(v, bits)
+					return ok && x == stored
+				})
+			}
 		}
 		// The service's own number text, which may carry an exponent that a
 		// filter value may not (parseNumber).

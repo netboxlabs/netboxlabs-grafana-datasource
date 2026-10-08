@@ -2,6 +2,7 @@ package replicacache
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -663,6 +664,8 @@ func TestQuery_NegationOnFloatColumnsComparesAtTheirWidth(t *testing.T) {
 	for _, filter := range []provider.Filter{
 		{Field: "amps", Operator: "n", Value: "0.10000000000000001"},
 		{Field: "ratio", Operator: "n", Value: "0.1"},
+		// The replica's float cast takes an exponent, and so does this.
+		{Field: "amps", Operator: "n", Value: "1e-1"},
 	} {
 		res := negationQuery(t, p, provider.QuerySpec{ObjectType: "dcim/power-feeds", Filters: []provider.Filter{filter}})
 		if got := ids(res); !slices.Equal(got, []int{2}) {
@@ -698,5 +701,21 @@ func TestQuery_ComplementFallbackContinuesTheRead(t *testing.T) {
 	}
 	if firstPages != 1 {
 		t.Errorf("the first page was read %d times, want once", firstPages)
+	}
+}
+
+// The counted total is checked against every match the read saw, not only
+// the rows it kept: a read that kept 10 of the 500 matches on its page, beside
+// a count of 300, has caught the counts out.
+func TestWithCount_ChecksTheCountAgainstEveryMatchSeen(t *testing.T) {
+	out := withCount(counted{total: 300, consistent: true}, negatedRows{raws: make([]json.RawMessage, 10)}, 500)
+	if out.total != 500 {
+		t.Errorf("total = %d, want 500: at least every match seen", out.total)
+	}
+	if !strings.Contains(strings.Join(out.warnings, " "), "changes") {
+		t.Errorf("warnings = %v, want the counts flagged", out.warnings)
+	}
+	if out := withCount(counted{total: 600, consistent: true}, negatedRows{raws: make([]json.RawMessage, 10)}, 500); len(out.warnings) != 0 || out.total != 600 {
+		t.Errorf("total %d, warnings %v; want 600 and none", out.total, out.warnings)
 	}
 }

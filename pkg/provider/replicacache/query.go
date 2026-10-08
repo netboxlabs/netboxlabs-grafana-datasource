@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"net/url"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -332,12 +331,9 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 			r.notes = append(r.notes, fmt.Sprintf("Rows are not sorted by %q: this replica has no such column.", field))
 		}
 	}
-	for _, col := range e.Columns { // catalogue order, so the parameter is deterministic
-		if col.Ref != nil && expandSet[col.Ref.ExpandKey] {
-			delete(expandSet, col.Ref.ExpandKey) // once, should two references share a key
-			r.expand = append(r.expand, col.Ref.ExpandKey)
-			r.expanded = append(r.expanded, expansion{key: col.Ref.ExpandKey, via: col.Name, target: strings.TrimPrefix(col.Ref.Path, "/v1/")})
-		}
+	for _, col := range expandColumns(e, expandSet) {
+		r.expand = append(r.expand, col.Ref.ExpandKey)
+		r.expanded = append(r.expanded, expansion{key: col.Ref.ExpandKey, via: col.Name, target: strings.TrimPrefix(col.Ref.Path, "/v1/")})
 	}
 	if wantAll || spec.CountOnly {
 		// An empty Fields means "all columns" — the contract's wording and the
@@ -391,14 +387,26 @@ func filterExpansions(e entity, filters []provider.Filter) map[string]bool {
 	return set
 }
 
-// expandList is set as an expand= list, in catalogue order so the parameter
-// is deterministic.
+// expandColumns is the reference column behind each key in set, in catalogue
+// order so the parameter is deterministic, and once per key, should two
+// references share one.
+func expandColumns(e entity, set map[string]bool) []column {
+	var out []column
+	seen := map[string]bool{}
+	for _, col := range e.Columns {
+		if col.Ref != nil && set[col.Ref.ExpandKey] && !seen[col.Ref.ExpandKey] {
+			seen[col.Ref.ExpandKey] = true
+			out = append(out, col)
+		}
+	}
+	return out
+}
+
+// expandList is set as an expand= list (see expandColumns).
 func expandList(e entity, set map[string]bool) []string {
 	var out []string
-	for _, col := range e.Columns {
-		if col.Ref != nil && set[col.Ref.ExpandKey] && !slices.Contains(out, col.Ref.ExpandKey) {
-			out = append(out, col.Ref.ExpandKey)
-		}
+	for _, col := range expandColumns(e, set) {
+		out = append(out, col.Ref.ExpandKey)
 	}
 	return out
 }

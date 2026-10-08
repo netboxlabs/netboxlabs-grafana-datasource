@@ -892,14 +892,14 @@ func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 		ops[x.Name] = x.Operators
 	}
 	for name, want := range map[string][]string{
-		"name":          {"", "ic", "gt", "lt"},              // nullable VARCHAR: contains, no is-empty
-		"serial":        {"", "ic", "gt", "lt"},              // NOT NULL VARCHAR: the same
-		"position":      {"", "gt", "lt", "empty", "nempty"}, // nullable DOUBLE: is-empty is exact
-		"id":            {"", "gt", "gte", "lt", "lte"},      // NOT NULL BIGINT: never empty; whole numbers take >= and <=
-		"is_full_depth": {"", "gt", "lt"},                    // NOT NULL BOOLEAN
-		"site":          {"", "ic", "gt", "lt"},              // expanded name: the target's name column
-		"site_slug":     {"", "ic", "gt", "lt"},
-		"rack":          {"", "ic", "gt", "lt"},
+		"name":          {"", "n", "ic", "nic", "gt", "lt"},       // nullable VARCHAR: contains, no is-empty
+		"serial":        {"", "n", "ic", "nic", "gt", "lt"},       // NOT NULL VARCHAR: the same
+		"position":      {"", "n", "gt", "lt", "empty", "nempty"}, // nullable DOUBLE: is-empty is exact
+		"id":            {"", "n", "gt", "gte", "lt", "lte"},      // NOT NULL BIGINT: never empty; whole numbers take >= and <=
+		"is_full_depth": {"", "n", "gt", "lt"},                    // NOT NULL BOOLEAN
+		"site":          {"", "n", "ic", "nic", "gt", "lt"},       // expanded name: the target's name column
+		"site_slug":     {"", "n", "ic", "nic", "gt", "lt"},
+		"rack":          {"", "n", "ic", "nic", "gt", "lt"},
 	} {
 		if !slices.Equal(ops[name], want) {
 			t.Errorf("%s: %v, want %v", name, ops[name], want)
@@ -947,11 +947,11 @@ func TestFilterFields_OffersAnchoredMatchesWhenTheCatalogueListsThem(t *testing.
 		ops[x.Name] = x.Operators
 	}
 	for name, want := range map[string][]string{
-		"name":      {"", "ic", "isw", "iew", "ie", "gt", "lt"},
-		"site":      {"", "ic", "isw", "iew", "ie", "gt", "lt"},
-		"site_slug": {"", "ic", "isw", "iew", "ie", "gt", "lt"},
-		"id":        {"", "gt", "gte", "lt", "lte"},
-		"position":  {"", "gt", "lt", "empty", "nempty"},
+		"name":      {"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie", "gt", "lt"},
+		"site":      {"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie", "gt", "lt"},
+		"site_slug": {"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie", "gt", "lt"},
+		"id":        {"", "n", "gt", "gte", "lt", "lte"},
+		"position":  {"", "n", "gt", "lt", "empty", "nempty"},
 	} {
 		if !slices.Equal(ops[name], want) {
 			t.Errorf("%s: %v, want %v", name, ops[name], want)

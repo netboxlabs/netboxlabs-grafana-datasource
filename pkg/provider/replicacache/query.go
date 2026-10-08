@@ -49,15 +49,29 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// answers for itself: 404 while unfed, its own validation once fed. The
 	// one thing judged without columns is the operator vocabulary, which is
 	// the build's (validateTextOperators).
-	var plan request
+	//
+	// Negations are answered here rather than by the service (negations.go),
+	// which needs the columns: on an unfed entity they stay among the filters
+	// and buildFilterValues refuses them, saying so.
+	var (
+		plan request
+		negs []negation
+		// none is a filter that no row can match: no request is needed.
+		none bool
+	)
 	if e.Ingested {
 		if filters, err = rewriteComparisons(filters, e, c); err != nil {
 			return nil, err
 		}
+		filters, negs = splitNegations(filters)
 		if err := validateFilters(filters, e, c); err != nil {
 			return nil, err
 		}
+		if err := validateNegations(negs, e, c); err != nil {
+			return nil, err
+		}
 		plan = planRequest(e, spec)
+		filters, negs, none = subtractNegations(filters, negs, e, c)
 	} else if err := validateTextOperators(filters, c); err != nil {
 		return nil, err
 	}
@@ -85,9 +99,29 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		q = withFields(q, plan.fields)
 	}
 
-	raws, total, asOf, err := p.client.list(ctx, spec.ObjectType, q, limit)
-	if err != nil {
-		return nil, err
+	var (
+		raws  []json.RawMessage
+		total int
+		asOf  *time.Time
+	)
+	switch {
+	case none:
+		// Left empty; the catalogue's instant stands in below.
+	case len(negs) > 0:
+		r, err := p.queryNegated(ctx, negatedQuery{spec: spec, e: e, c: c, filters: filters, negs: negs,
+			expand: plan.expand, sort: plan.sort, fields: plan.fields, limit: limit, isAddress: addressField(e, c)})
+		if err != nil {
+			return nil, err
+		}
+		raws, total, asOf = r.raws, r.total, r.asOf
+		plan.warnings = append(plan.warnings, r.warnings...)
+		if r.fields != nil {
+			projected = r.fields
+		}
+	default:
+		if raws, total, asOf, err = p.client.list(ctx, spec.ObjectType, q, limit); err != nil {
+			return nil, err
+		}
 	}
 	cols, rows, err := flattenRows(raws, projected, e.pk())
 	if err != nil {

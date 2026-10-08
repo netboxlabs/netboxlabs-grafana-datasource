@@ -49,6 +49,9 @@ type fakeService struct {
 	// catalogue changed underneath a walk. One models the case the client
 	// recovers from; two models a service that keeps refusing.
 	rejectCursors int
+	// asOfs, when non-empty, is the data_as_of of the next row responses, one
+	// each in order — a replica applying changes between requests.
+	asOfs []string
 }
 
 type recordedRequest struct {
@@ -125,6 +128,10 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 		if e, known := f.schema.Entities["/v1/"+entity]; known {
 			se = &e
 		}
+	}
+	var asOf *string
+	if len(f.asOfs) > 0 {
+		asOf, f.asOfs = &f.asOfs[0], f.asOfs[1:]
 	}
 	rejectCursor := f.rejectCursors > 0 && q.Get("cursor") != ""
 	if rejectCursor {
@@ -412,6 +419,9 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	if se != nil && se.DataAsOf != nil {
 		resp["data_as_of"] = *se.DataAsOf
 	}
+	if asOf != nil {
+		resp["data_as_of"] = *asOf
+	}
 	if end < len(filtered) {
 		resp["next_cursor"] = strconv.Itoa(end)
 	}
@@ -436,12 +446,28 @@ func matches(v interface{}, op, want string) bool {
 	if f, ok := v.(float64); ok {
 		s = strconv.FormatFloat(f, 'f', -1, 64)
 	}
+	// A number column compares by value, as the service's typed columns do:
+	// 4 equals "4.0".
+	same := func(w string) bool {
+		if f, ok := v.(float64); ok {
+			n, err := strconv.ParseFloat(w, 64)
+			return err == nil && n == f
+		}
+		if i, ok := v.(int); ok {
+			n, err := strconv.ParseFloat(w, 64)
+			return err == nil && n == float64(i)
+		}
+		return s == w
+	}
 	switch op {
 	case "eq":
-		return s == want
+		return v != nil && same(want)
 	case "in":
+		if v == nil {
+			return false
+		}
 		for _, w := range strings.Split(want, ",") {
-			if s == w {
+			if same(w) {
 				return true
 			}
 		}

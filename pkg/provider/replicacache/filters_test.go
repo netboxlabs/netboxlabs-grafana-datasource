@@ -395,18 +395,18 @@ func TestSeamOperators_TranslateTheCatalogue(t *testing.T) {
 		col  column
 		want []string
 	}{
-		{"nullable text", column{Type: "VARCHAR", Nullable: true, Operators: text}, []string{"", "ic", "gt", "lt"}},
+		{"nullable text", column{Type: "VARCHAR", Nullable: true, Operators: text}, []string{"", "n", "ic", "nic", "gt", "lt"}},
 		// DATA-408: a replica that lists the anchored matches gets them offered,
 		// in the editor's tokens; one that lists only ilike does not (above).
 		{"text with the anchored matches", column{Type: "VARCHAR", Nullable: true, Operators: append(slices.Clone(text), "istartswith", "iendswith", "iexact")},
-			[]string{"", "ic", "isw", "iew", "ie", "gt", "lt"}},
-		{"nullable number", column{Type: "BIGINT", Nullable: true, Operators: all}, []string{"", "gt", "gte", "lt", "lte", "empty", "nempty"}},
-		{"not null number", column{Type: "BIGINT", Operators: all}, []string{"", "gt", "gte", "lt", "lte"}},
+			[]string{"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie", "gt", "lt"}},
+		{"nullable number", column{Type: "BIGINT", Nullable: true, Operators: all}, []string{"", "n", "gt", "gte", "lt", "lte", "empty", "nempty"}},
+		{"not null number", column{Type: "BIGINT", Operators: all}, []string{"", "n", "gt", "gte", "lt", "lte"}},
 		// >= and <= only where a strict comparison is their exact rewrite.
-		{"decimal", column{Type: "DECIMAL(8,2)", Operators: all}, []string{"", "gt", "gte", "lt", "lte"}},
-		{"floating point", column{Type: "DOUBLE", Operators: all}, []string{"", "gt", "lt"}},
-		{"nullable timestamp", column{Type: "TIMESTAMP WITH TIME ZONE", Nullable: true, Operators: all}, []string{"", "gt", "lt", "empty", "nempty"}},
-		{"equality only", column{Type: "VARCHAR", Nullable: true, Operators: []string{"eq"}}, []string{""}},
+		{"decimal", column{Type: "DECIMAL(8,2)", Operators: all}, []string{"", "n", "gt", "gte", "lt", "lte"}},
+		{"floating point", column{Type: "DOUBLE", Operators: all}, []string{"", "n", "gt", "lt"}},
+		{"nullable timestamp", column{Type: "TIMESTAMP WITH TIME ZONE", Nullable: true, Operators: all}, []string{"", "n", "gt", "lt", "empty", "nempty"}},
+		{"equality only", column{Type: "VARCHAR", Nullable: true, Operators: []string{"eq"}}, []string{"", "n"}},
 		{"nothing", column{Type: "VARCHAR"}, nil},
 	} {
 		if got := seamOperators(tc.col); !slices.Equal(got, tc.want) {

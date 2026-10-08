@@ -372,7 +372,47 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 	if limit > MaxLimit {
 		limit = MaxLimit
 	}
+	w, err := c.walk(ctx, entity, q, scan{want: limit})
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return w.rows, w.total, w.asOf, nil
+}
 
+// scan shapes a walk. With no keep, it is list's: every row counts and pages
+// are sized by the rows still wanted. With keep, rows are tested as they
+// arrive — a filter the replica cannot express — and every page is a full one,
+// since how many of the next page will be kept is unknown: sized by the rows
+// still wanted, a walk one row short would read the rest one row at a time.
+type scan struct {
+	// keep reports whether a row is part of the answer; nil keeps every row.
+	keep func(json.RawMessage) (bool, error)
+	// want is how many kept rows to return.
+	want int
+	// countAll keeps reading after want rows are kept, to count every match.
+	countAll bool
+	// scanCap stops the walk once this many rows have been read; 0 is none.
+	scanCap int
+}
+
+type walked struct {
+	rows []json.RawMessage
+	// total is the service's count for the query sent (see list), which with
+	// keep is the rows read from, not the rows kept.
+	total int
+	asOf  *time.Time
+	// scanned is how many rows were read and matched how many of them keep
+	// accepted, including any past want.
+	scanned, matched int
+	// exhausted says every row the query sent matches was read, so matched is
+	// exact.
+	exhausted bool
+}
+
+// walk is the cursor walk behind list and behind filters the replica cannot
+// express. A restart after a refused cursor starts the whole scan over, so no
+// row is tested or counted twice.
+func (c *Client) walk(ctx context.Context, entity string, q url.Values, s scan) (walked, error) {
 	var (
 		rows []json.RawMessage
 		// total is the first page's count, which is what Result.Total carries.
@@ -387,12 +427,17 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		asOf      *time.Time
 		// seenCursors is every cursor already followed, so a service that
 		// repeats one is caught rather than walked in circles.
-		seenCursors = map[string]bool{}
+		seenCursors      = map[string]bool{}
+		scanned, matched int
+		exhausted        bool
 	)
-	for len(rows) < limit {
-		want := limit - len(rows)
-		if want > pageSize {
-			want = pageSize
+	for (s.countAll || len(rows) < s.want) && (s.scanCap == 0 || scanned < s.scanCap) {
+		want := pageSize
+		if s.keep == nil {
+			want = min(want, s.want-len(rows))
+		}
+		if s.scanCap > 0 {
+			want = min(want, s.scanCap-scanned)
 		}
 		pq := url.Values{}
 		for k, vs := range q {
@@ -414,10 +459,11 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 			if cursor != "" && !restarted && errors.As(err, &apiErr) && apiErr.Status == 400 && strings.HasPrefix(apiErr.Message, "cursor") {
 				restarted = true
 				rows, total, maxTotal, cursor, first, asOf = nil, 0, 0, "", true, nil
+				scanned, matched = 0, 0
 				seenCursors = map[string]bool{}
 				continue
 			}
-			return nil, 0, nil, err
+			return walked{}, err
 		}
 		if first {
 			total = *page.Count
@@ -431,7 +477,20 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		if n := *page.Count; n > maxTotal {
 			maxTotal = n
 		}
-		rows = append(rows, page.rows()...)
+		for _, r := range page.rows() {
+			scanned++
+			if s.keep != nil {
+				ok, err := s.keep(r)
+				if err != nil {
+					return walked{}, err
+				}
+				if !ok {
+					continue
+				}
+			}
+			matched++
+			rows = append(rows, r)
+		}
 
 		// Pages that individually agree with their own count can still
 		// contradict each other: two one-row pages each reporting count 1 hand
@@ -446,8 +505,8 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		// that was correct when it was read. In that case the later pages' own
 		// counts have grown to cover them, so the check passes. A service
 		// contradicting itself has no such growth, and is refused.
-		if len(rows) > maxTotal {
-			return nil, 0, nil, &TransportError{
+		if scanned > maxTotal {
+			return walked{}, &TransportError{
 				Op:      "reading response from " + truncate(c.base+"/v1/"+entity),
 				Err:     errInconsistentCount,
 				Message: "Replica cache returned more rows than any page's total said existed. The service is reachable but answered with something unexpected.",
@@ -458,6 +517,7 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		// result set. Both conditions are needed: the service omits the cursor on
 		// the last page, and a zero-row page with a cursor would otherwise spin.
 		if page.NextCursor == "" || len(page.rows()) == 0 {
+			exhausted = true
 			break
 		}
 		// A cursor that does not advance would re-fetch the same page until the
@@ -467,7 +527,7 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		// that could spin: the loop's other exits are an empty page and an
 		// absent cursor.
 		if seenCursors[page.NextCursor] {
-			return nil, 0, nil, &TransportError{
+			return walked{}, &TransportError{
 				Op:      "reading response from " + truncate(c.base+"/v1/"+entity),
 				Err:     errCursorNotAdvancing,
 				Message: "Replica cache returned the same pagination cursor twice, so the results would repeat rather than continue. The service is reachable but answered with something unexpected.",
@@ -476,8 +536,8 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 		seenCursors[page.NextCursor] = true
 		cursor = page.NextCursor
 	}
-	if len(rows) > limit {
-		rows = rows[:limit]
+	if len(rows) > s.want {
+		rows = rows[:s.want]
 	}
 	// The LARGEST count seen, not the first. Both are the service's own answer,
 	// but a stale one understates: with a first page of 9,999, later pages
@@ -488,7 +548,7 @@ func (c *Client) list(ctx context.Context, entity string, q url.Values, limit in
 	if maxTotal > total {
 		total = maxTotal
 	}
-	return rows, total, asOf, nil
+	return walked{rows: rows, total: total, asOf: asOf, scanned: scanned, matched: matched, exhausted: exhausted}, nil
 }
 
 func truncate(s string) string {

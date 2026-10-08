@@ -163,6 +163,11 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 			}
 			seen[key] = true
 			q.Set(param(f.Field, wire), values[0])
+		case "n", "nic", "nisw", "niew", "nie":
+			// Query answers these itself (negations.go) once it knows the
+			// columns; one that reaches here is on an entity with none yet.
+			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+				Reason: "a negated filter works once this replica has received data for this object type"}
 		case opGTE, opLTE:
 			// rewriteComparisons turns these into gt/lt wherever it can, which
 			// needs the column's type; validateFilters refuses them on any other
@@ -372,12 +377,17 @@ func boolString(b bool) string {
 func seamOperators(col column) []string {
 	var out []string
 	has := func(op string) bool { return slices.Contains(col.Operators, op) }
+	// Each match is followed by its negation (negations.go), except "not
+	// equal" on an IP address column, which NetBox matches by host.
 	if has("eq") || has("in") {
 		out = append(out, opExact)
+		if !has("host") {
+			out = append(out, "n")
+		}
 	}
 	for _, op := range []string{opIContns, opIStarts, opIEnds, opIExact} {
 		if has(wireTextOperator[op]) {
-			out = append(out, op)
+			out = append(out, op, "n"+op)
 		}
 	}
 	_, _, _, stepped := stepOf(col.Type)

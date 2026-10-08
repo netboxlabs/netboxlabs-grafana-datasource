@@ -90,7 +90,7 @@ func applyChoiceLabels(objectType string, rows []map[string]interface{}, withVal
 	return added
 }
 
-// validateChoiceValues refuses an equality filter on a choice column that
+// validateChoiceValues refuses an equality filter (or its negation) on a choice column that
 // names a LABEL rather than a stored value. Rows show labels, so a value
 // picked from a table cell or a variable built on the column is one; NetBox
 // answers it with "Select a valid choice", and sent here it would match no row
@@ -100,7 +100,7 @@ func validateChoiceValues(objectType string, filters []provider.Filter) error {
 	cols := loadChoiceLabels()[objectType]
 	for _, f := range filters {
 		labels, ok := cols[f.Field]
-		if !ok || !equalityOperator(f.Operator) {
+		if !ok || (!equalityOperator(f.Operator) && f.Operator != "n") {
 			continue
 		}
 		for _, v := range splitValues(f.Value) {

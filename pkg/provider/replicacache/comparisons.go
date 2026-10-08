@@ -151,7 +151,9 @@ func rewriteComparisons(filters []provider.Filter, e entity, c *catalog) (out []
 			// Past the low end, >= holds for every value and <= for none; past
 			// the high end, the reverse.
 			if (bound.Cmp(lo) < 0) == (op == opLTE) {
-				return nil, true, nil
+				// No row; the rest is still validated by the caller.
+				none = true
+				continue
 			}
 			if !col.Nullable {
 				continue // every row has a value
@@ -168,10 +170,10 @@ func rewriteComparisons(filters []provider.Filter, e entity, c *catalog) (out []
 	// "Has a value" beside the panel's own "is empty" on that field: no row.
 	for _, f := range out {
 		if f.Operator == opEmpty && notEmpty[f.Field] {
-			return nil, true, nil
+			none = true
 		}
 	}
-	return out, false, nil
+	return out, none, nil
 }
 
 // parseNumber reads a plain decimal exactly.

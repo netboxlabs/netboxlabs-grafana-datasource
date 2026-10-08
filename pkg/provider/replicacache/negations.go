@@ -1,11 +1,13 @@
 package replicacache
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"math/big"
 	"net/url"
 	"slices"
 	"strconv"
@@ -84,7 +86,14 @@ func splitNegations(filters []provider.Filter) ([]provider.Filter, []negation) {
 		}
 		if pos != opExact {
 			for _, v := range values {
-				negs = append(negs, negation{field: f.Field, op: pos, values: []string{v}, source: f})
+				// The same case-insensitive match twice is one predicate, and
+				// counting it twice would spend the inclusion–exclusion budget.
+				dup := slices.ContainsFunc(negs, func(n negation) bool {
+					return n.field == f.Field && n.op == pos && (n.values[0] == v || isASCII(v) && strings.EqualFold(n.values[0], v))
+				})
+				if !dup {
+					negs = append(negs, negation{field: f.Field, op: pos, values: []string{v}, source: f})
+				}
 			}
 			continue
 		}
@@ -229,7 +238,11 @@ func intersect(base []provider.Filter, negs []negation) (out []provider.Filter, 
 			continue
 		}
 		if _, isText := wireTextOperator[op]; isText {
-			text[key{f.Field, op}] = append(text[key{f.Field, op}], f.Value)
+			// As buildFilterValues sends it: trimmed, and nothing at all when
+			// blank. Several values were refused before this.
+			if values := splitValues(f.Value); len(values) > 0 {
+				text[key{f.Field, op}] = append(text[key{f.Field, op}], values[0])
+			}
 			continue
 		}
 		out = append(out, f)
@@ -323,16 +336,32 @@ type negatedRows struct {
 
 // negatedQuery holds what the routes share.
 type negatedQuery struct {
-	spec      provider.QuerySpec
-	e         entity
-	c         *catalog
-	filters   []provider.Filter // the positive filters, already rewritten
-	negs      []negation
-	expand    []string
-	sort      string
-	fields    []string // the projection; nil for every column
-	limit     int
-	isAddress func(string) bool
+	spec    provider.QuerySpec
+	e       entity
+	c       *catalog
+	filters []provider.Filter // the positive filters, already rewritten
+	negs    []negation
+	expand  []string
+	// countExpand is what a count needs expanded: the references the filters
+	// name, and no more.
+	countExpand []string
+	sort        string
+	fields      []string // the projection; nil for every column
+	limit       int
+	isAddress   func(string) bool
+}
+
+// countParams is a count's query: the filters, the joins they need, and the
+// key alone for the one row the envelope comes with.
+func (nq negatedQuery) countParams(filters []provider.Filter) (url.Values, error) {
+	q, err := buildFilterValues(filters, nq.isAddress)
+	if err != nil {
+		return nil, err
+	}
+	if len(nq.countExpand) > 0 {
+		q.Set("expand", strings.Join(nq.countExpand, ","))
+	}
+	return withFields(q, []string{nq.e.pk()}), nil
 }
 
 func (nq negatedQuery) params(filters []provider.Filter, fields []string, sorted bool) (url.Values, error) {
@@ -388,7 +417,7 @@ func countTerms(nq negatedQuery) ([]url.Values, bool) {
 		if empty {
 			continue // a contradiction: no row, no request
 		}
-		q, err := nq.params(filters, nil, false)
+		q, err := nq.countParams(filters)
 		if err != nil {
 			return nil, false
 		}
@@ -474,24 +503,26 @@ const movingCountsWarning = "The total was counted while the replica was applyin
 func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRows, error) {
 	terms, countable := countTerms(nq)
 	var (
-		cnt     counted
-		counted bool
+		cnt   counted
+		taken bool
 	)
 	countOnce := func() error {
-		if counted {
+		if taken {
 			return nil
 		}
 		var err error
 		cnt, err = p.count(ctx, nq, terms)
-		counted = err == nil
+		taken = err == nil
 		return err
 	}
+	// withCount gives rows the counted total, warning when the counts — or
+	// the counts and the rows — are from different moments of the replica.
 	withCount := func(out negatedRows) negatedRows {
 		out.total = max(cnt.total, len(out.raws))
-		out.asOf = older(out.asOf, cnt.asOf)
-		if !cnt.consistent {
+		if !cnt.consistent || !sameInstant(out.asOf, cnt.asOf) {
 			out.warnings = append(out.warnings, movingCountsWarning)
 		}
+		out.asOf = older(out.asOf, cnt.asOf)
 		return out
 	}
 
@@ -502,32 +533,12 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 		return withCount(negatedRows{}), nil
 	}
 
-	// Route 2: the complement, used only once the counts agree with it.
-	if filters, ok := complementOf(nq); ok && countable && !nq.spec.CountOnly {
-		if err := countOnce(); err != nil {
-			return negatedRows{}, err
-		}
-		if cnt.consistent {
-			q, err := nq.params(filters, nq.fields, true)
-			if err != nil {
-				return negatedRows{}, err
-			}
-			raws, total, asOf, err := p.client.list(ctx, nq.spec.ObjectType, q, nq.limit)
-			if err != nil {
-				return negatedRows{}, err
-			}
-			if total == cnt.total && sameInstant(asOf, cnt.asOf) {
-				return negatedRows{raws: raws, total: total, asOf: older(asOf, cnt.asOf)}, nil
-			}
-		}
-	}
-
-	// Route 3: read and test. Without counts, the total has to come from the
-	// walk, which needs every row read: possible only up to MaxLimit, and
-	// required only for a caller that cannot do without a total.
+	// Without counts, the total has to come from reading every row: possible
+	// only up to MaxLimit, and required only for a caller that cannot do
+	// without a total.
 	needAll := !countable && !nq.spec.AllowUncounted
 	if needAll {
-		q, err := nq.params(nq.filters, nil, false)
+		q, err := nq.countParams(nq.filters)
 		if err != nil {
 			return negatedRows{}, err
 		}
@@ -561,9 +572,42 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 	if nq.spec.CountOnly {
 		want = 0
 	}
-	w, err := p.client.walk(ctx, nq.spec.ObjectType, q, scan{keep: rowTester(nq), want: want, countAll: needAll, scanCap: MaxLimit})
+	read := func(scanCap int) (walked, error) {
+		return p.client.walk(ctx, nq.spec.ObjectType, q, scan{keep: rowTester(nq), want: want, countAll: needAll, scanCap: scanCap})
+	}
+
+	// Route 2 is tried only once the first page shows reading would not do:
+	// it did not reach the end, nor find the rows wanted.
+	complement, hasComplement := complementOf(nq)
+	hasComplement = hasComplement && countable && !nq.spec.CountOnly
+	scanCap := MaxLimit
+	if hasComplement {
+		scanCap = pageSize
+	}
+	w, err := read(scanCap)
 	if err != nil {
 		return negatedRows{}, err
+	}
+	if hasComplement && !w.exhausted && len(w.rows) < want {
+		if err := countOnce(); err != nil {
+			return negatedRows{}, err
+		}
+		if cnt.consistent {
+			cq, err := nq.params(complement, nq.fields, true)
+			if err != nil {
+				return negatedRows{}, err
+			}
+			raws, total, asOf, err := p.client.list(ctx, nq.spec.ObjectType, cq, nq.limit)
+			if err != nil {
+				return negatedRows{}, err
+			}
+			if total == cnt.total && sameInstant(asOf, cnt.asOf) {
+				return negatedRows{raws: raws, total: total, asOf: older(asOf, cnt.asOf)}, nil
+			}
+		}
+		if w, err = read(MaxLimit); err != nil {
+			return negatedRows{}, err
+		}
 	}
 
 	out := negatedRows{raws: w.rows, asOf: w.asOf}
@@ -583,7 +627,9 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 		return negatedRows{}, &UnsupportedFilterError{Field: nq.negs[0].field, Operator: nq.negs[0].source.Operator,
 			Reason: fmt.Sprintf("the rows matching the other filters grew past %s while they were being read, so the matches could not all be counted; narrow the other filters", thousands(MaxLimit))}
 	}
-	if !w.exhausted && len(w.rows) < want && w.scanned >= MaxLimit {
+	// Stopped short of the end with fewer rows than wanted, and nothing to
+	// say they were all of them.
+	if !w.exhausted && len(w.rows) < want && w.scanned >= MaxLimit && (!countable || out.total > len(w.rows)) {
 		out.warnings = append(out.warnings, fmt.Sprintf(
 			"Only the first %s rows matching the other filters were checked against the negated ones, and %s of them were kept; rows past those were not read, so more may match. Narrow the other filters.",
 			thousands(w.scanned), thousands(len(w.rows))))
@@ -628,8 +674,12 @@ func rowTester(nq negatedQuery) func(json.RawMessage) (bool, error) {
 		types[n.field] = col.Type
 	}
 	return func(raw json.RawMessage) (bool, error) {
+		// UseNumber keeps a number's own digits: float64 would round a 64-bit
+		// value the replica compares exactly.
 		var row map[string]interface{}
-		if err := json.Unmarshal(raw, &row); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if err := dec.Decode(&row); err != nil {
 			return false, &TransportError{Op: "reading a replica-cache row", Err: err, Message: rowShapeGuidance}
 		}
 		for _, n := range nq.negs {
@@ -648,8 +698,17 @@ func matchesStored(v interface{}, colType, op string, values []string) bool {
 		return false
 	case string:
 		text = t
-	case float64:
-		text = strconv.FormatFloat(t, 'f', -1, 64)
+	case json.Number:
+		// The service's own number text, which may carry an exponent that a
+		// filter value may not (parseNumber).
+		stored, ok := new(big.Rat).SetString(t.String())
+		if !ok || op != opExact {
+			return false
+		}
+		return slices.ContainsFunc(values, func(v string) bool {
+			x, ok := parseNumber(v)
+			return ok && x.Cmp(stored) == 0
+		})
 	case bool:
 		text = strconv.FormatBool(t)
 	default:
@@ -661,6 +720,10 @@ func matchesStored(v interface{}, colType, op string, values []string) bool {
 	if _, isString := v.(string); !isString {
 		return false
 	}
+	// Lowercased with Go's Unicode mapping. The needle is ASCII wherever these
+	// rows meet the replica's counts (countTerms), and the only non-ASCII
+	// letters that lowercase to ASCII are U+0130 and U+212A; how the replica
+	// folds those is its own, so a row holding one may be judged differently.
 	text, want := strings.ToLower(text), strings.ToLower(values[0])
 	switch op {
 	case opIContns:

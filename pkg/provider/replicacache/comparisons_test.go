@@ -206,3 +206,16 @@ func TestQuery_InclusiveComparisonsAtTheTypesLimits(t *testing.T) {
 		})
 	}
 }
+
+// A comparison no row can satisfy answers "no rows", but only once the rest of
+// the query is known to be valid: a typo beside it is still an error, not a
+// healthy-looking zero an alert would act on.
+func TestQuery_UnsatisfiableComparisonStillValidatesTheRest(t *testing.T) {
+	_, p := racksFixture(t)
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/racks", Filters: []provider.Filter{
+		{Field: "u_height", Operator: "gte", Value: "99999"}, {Field: "nosuchcolumn", Value: "x"}}})
+	var unsupported *UnsupportedFilterError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("err = %v, want the unknown column refused", err)
+	}
+}

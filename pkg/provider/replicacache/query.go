@@ -110,8 +110,10 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	case none:
 		// Left empty; the catalogue's instant stands in below.
 	case len(negs) > 0:
+		countPlan := planRequest(e, provider.QuerySpec{ObjectType: spec.ObjectType, Filters: spec.Filters, CountOnly: true})
 		r, err := p.queryNegated(ctx, negatedQuery{spec: spec, e: e, c: c, filters: filters, negs: negs,
-			expand: plan.expand, sort: plan.sort, fields: plan.fields, limit: limit, isAddress: addressField(e, c)})
+			expand: plan.expand, countExpand: countPlan.expand, sort: plan.sort, fields: plan.fields, limit: limit,
+			isAddress: addressField(e, c)})
 		if err != nil {
 			return nil, err
 		}

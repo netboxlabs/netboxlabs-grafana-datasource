@@ -181,16 +181,23 @@ func TestQuery_NegationThatExcludesTheWholeEqualityIsEmpty(t *testing.T) {
 // list, which the replica can filter, sort and page itself. The row counts
 // prove it before the answer is used: values outside the list or NULLs would
 // make them disagree (TestQuery_NegationsMatchNetBoxExclude covers that).
+//
+// A table whose first page answers the query is read instead (see
+// TestQuery_NegationOnASmallTableReadsOnce); this one's first page is all
+// offline, so reading on would cost a page per thousand rows dropped.
 func TestQuery_NegatedChoiceIsSentAsTheRestOfTheList(t *testing.T) {
 	f := newFakeService()
-	f.entities["dcim/devices"] = []map[string]interface{}{
-		device(1, "CORE-1", "active"), device(2, "core-2", "offline"), device(3, "EDGE-1", "planned"), device(4, "edge-2", "active"),
+	var rows []map[string]interface{}
+	for i := 1; i <= pageSize; i++ {
+		rows = append(rows, device(i, fmt.Sprintf("off-%d", i), "offline"))
 	}
+	rows = append(rows, device(pageSize+1, "CORE-1", "active"), device(pageSize+2, "EDGE-1", "planned"), device(pageSize+3, "edge-2", "active"))
+	f.entities["dcim/devices"] = rows
 	p := newTestProvider(t, f)
 
 	res := negationQuery(t, p, provider.QuerySpec{Limit: 2, Filters: []provider.Filter{{Field: "status", Operator: "n", Value: "offline"}}})
-	if got := ids(res); !slices.Equal(got, []int{1, 3}) || res.Total != 3 {
-		t.Errorf("rows = %v (Total %d), want [1 3] of 3", got, res.Total)
+	if got := ids(res); !slices.Equal(got, []int{pageSize + 1, pageSize + 2}) || res.Total != 3 {
+		t.Errorf("rows = %v (Total %d), want the first two of 3", got, res.Total)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -513,5 +520,111 @@ func TestQuery_NonASCIITextNegationIsCountedFromTheRows(t *testing.T) {
 	}
 	if _, ok := f.requestWith("dcim/devices", "filter[name]__ilike"); ok {
 		t.Error("the replica was asked to count a non-ASCII text match")
+	}
+}
+
+// A read cut short at 10,000 rows warns that more may match — unless the
+// counts show every match was already found.
+func TestQuery_NoReadLimitWarningWhenTheCountsShowNothingWasMissed(t *testing.T) {
+	f := newFakeService()
+	rows := bigDevices()
+	for i := 0; i < 5; i++ {
+		rows[i]["name"] = fmt.Sprintf("other-%d", i)
+	}
+	f.entities["dcim/devices"] = append(rows, device(MaxLimit+2, "dev-x", "active"))
+	p := newTestProvider(t, f)
+
+	res := negationQuery(t, p, provider.QuerySpec{Limit: 1000, Filters: []provider.Filter{{Field: "name", Operator: "nic", Value: "dev"}}})
+	if len(res.Rows) != 5 || res.Total != 5 {
+		t.Errorf("rows = %d (Total %d), want 5 of 5", len(res.Rows), res.Total)
+	}
+	if strings.Contains(strings.Join(res.Warnings, " "), "Only the first") {
+		t.Errorf("Warnings = %v, want no read-limit warning: the counts show all 5 were found", res.Warnings)
+	}
+}
+
+// A blank value in another text filter sends nothing (buildFilterValues drops
+// it), so it must not count as a constraint in the totals either: here it made
+// "is foo" and "is ”" look contradictory, and the foo rows were never
+// subtracted.
+func TestQuery_NegationTotalIgnoresABlankTextFilter(t *testing.T) {
+	f := newFakeService()
+	f.schema = withAnchoredText(devicesSchema())
+	f.entities["dcim/devices"] = append(bigDevices(), device(MaxLimit+2, "foo", "active"), device(MaxLimit+3, "FOO", "active"))
+	p := newTestProvider(t, f)
+
+	res := negationQuery(t, p, provider.QuerySpec{Limit: 10, Filters: []provider.Filter{
+		{Field: "name", Operator: "ie", Value: " "}, {Field: "name", Operator: "nie", Value: "foo"}}})
+	if res.Total != MaxLimit+1 {
+		t.Errorf("Total = %d, want %d", res.Total, MaxLimit+1)
+	}
+}
+
+// Count requests read nothing but the count: no joins, one narrow row.
+func TestQuery_NegationCountsReadNoColumns(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = bigDevices()
+	p := newTestProvider(t, f)
+
+	negationQuery(t, p, provider.QuerySpec{Limit: 5, Filters: []provider.Filter{{Field: "name", Operator: "nic", Value: "zz"}}})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	counted := false
+	for _, r := range f.requests {
+		if r.entity != "dcim/devices" || r.query.Get("limit") != "1" {
+			continue
+		}
+		counted = true
+		if r.query.Get("expand") != "" || r.query.Get("fields") != "id" {
+			t.Errorf("a count asked for %v, want fields=id and no expand", r.query)
+		}
+	}
+	if !counted {
+		t.Error("no count was taken")
+	}
+}
+
+// The rows and the total read at different moments warn as counts from
+// different moments do.
+func TestQuery_NegationRowsAndTotalFromDifferentMomentsWarn(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = bigDevices()
+	p := newTestProvider(t, f)
+	f.asOfs = []string{"2026-09-22T14:00:00Z", "2026-09-22T14:01:00Z", "2026-09-22T14:01:00Z"}
+
+	res := negationQuery(t, p, provider.QuerySpec{Limit: 5, Filters: []provider.Filter{{Field: "name", Operator: "nic", Value: "zz"}}})
+	if !strings.Contains(strings.Join(res.Warnings, " "), "changes") {
+		t.Errorf("Warnings = %v, want one saying the data moved", res.Warnings)
+	}
+}
+
+// The rows are decoded with their numbers intact: a 64-bit value float64
+// rounds would be kept by the row test while the replica's count drops it.
+func TestQuery_NegationComparesLargeIntegersExactly(t *testing.T) {
+	f := newFakeService()
+	big := device(1, "A", "active")
+	big["tenant_id"] = int64(9007199254740993)
+	f.entities["dcim/devices"] = []map[string]interface{}{big, device(2, "B", "active")}
+	p := newTestProvider(t, f)
+
+	res := negationQuery(t, p, provider.QuerySpec{Filters: []provider.Filter{{Field: "tenant_id", Operator: "n", Value: "9007199254740993"}}})
+	if got := ids(res); !slices.Equal(got, []int{2}) {
+		t.Errorf("rows = %v, want [2]", got)
+	}
+}
+
+// The same text negation twice is one predicate, not two of the three the
+// counts can take.
+func TestQuery_RepeatedTextNegationsCountOnce(t *testing.T) {
+	f := newFakeService()
+	f.schema = withAnchoredText(devicesSchema())
+	f.entities["dcim/devices"] = bigDevices()
+	p := newTestProvider(t, f)
+
+	res := negationQuery(t, p, provider.QuerySpec{Limit: 5, Filters: []provider.Filter{
+		{Field: "name", Operator: "nic", Value: "zz"}, {Field: "name", Operator: "nic", Value: "ZZ"},
+		{Field: "name", Operator: "nisw", Value: "yy,yy"}}})
+	if res.Total != MaxLimit+1 {
+		t.Errorf("Total = %d, want %d", res.Total, MaxLimit+1)
 	}
 }

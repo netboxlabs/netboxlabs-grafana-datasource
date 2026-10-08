@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -110,10 +111,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	case none:
 		// Left empty; the catalogue's instant stands in below.
 	case len(negs) > 0:
-		countPlan := planRequest(e, provider.QuerySpec{ObjectType: spec.ObjectType, Filters: spec.Filters, CountOnly: true})
 		r, err := p.queryNegated(ctx, negatedQuery{spec: spec, e: e, c: c, filters: filters, negs: negs,
-			expand: plan.expand, countExpand: countPlan.expand, sort: plan.sort, fields: plan.fields, limit: limit,
-			isAddress: addressField(e, c)})
+			expand: plan.expand, countExpand: expandList(e, filterExpansions(e, spec.Filters)), sort: plan.sort,
+			fields: plan.fields, limit: limit, isAddress: addressField(e, c)})
 		if err != nil {
 			return nil, err
 		}
@@ -267,13 +267,7 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 	// for a caller that reads rows, the ones a requested name resolves to.
 	// KeyFields count, by the same rule: a join on "site" needs the name, a
 	// join on "site_id" does not.
-	expandSet := map[string]bool{}
-	for _, f := range spec.Filters {
-		// validateFilters has already refused a filter on an unavailable one.
-		if via, _, ok := e.expandedColumn(f.Field); ok && via.Ref.Available {
-			expandSet[via.Ref.ExpandKey] = true
-		}
-	}
+	expandSet := filterExpansions(e, spec.Filters)
 	warned := map[string]bool{}
 	ask := func(name string) {
 		via, _, ok := e.expandedColumn(name)
@@ -382,6 +376,31 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 	}
 	add(e.pk())
 	return r
+}
+
+// filterExpansions is the references the filters name, by expand key: what
+// a filter on a related name needs joined in, and all a count needs.
+func filterExpansions(e entity, filters []provider.Filter) map[string]bool {
+	set := map[string]bool{}
+	for _, f := range filters {
+		// validateFilters has already refused a filter on an unavailable one.
+		if via, _, ok := e.expandedColumn(f.Field); ok && via.Ref.Available {
+			set[via.Ref.ExpandKey] = true
+		}
+	}
+	return set
+}
+
+// expandList is set as an expand= list, in catalogue order so the parameter
+// is deterministic.
+func expandList(e entity, set map[string]bool) []string {
+	var out []string
+	for _, col := range e.Columns {
+		if col.Ref != nil && set[col.Ref.ExpandKey] && !slices.Contains(out, col.Ref.ExpandKey) {
+			out = append(out, col.Ref.ExpandKey)
+		}
+	}
+	return out
 }
 
 func unavailableReferenceWarning(col column) string {

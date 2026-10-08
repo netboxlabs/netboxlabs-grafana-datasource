@@ -89,7 +89,8 @@ func splitNegations(filters []provider.Filter) ([]provider.Filter, []negation) {
 				// The same case-insensitive match twice is one predicate, and
 				// counting it twice would spend the inclusion–exclusion budget.
 				dup := slices.ContainsFunc(negs, func(n negation) bool {
-					return n.field == f.Field && n.op == pos && (n.values[0] == v || isASCII(v) && strings.EqualFold(n.values[0], v))
+					return n.field == f.Field && n.op == pos &&
+						(n.values[0] == v || isASCII(v) && isASCII(n.values[0]) && strings.EqualFold(n.values[0], v))
 				})
 				if !dup {
 					negs = append(negs, negation{field: f.Field, op: pos, values: []string{v}, source: f})
@@ -162,6 +163,14 @@ func rowComparable(colType string) bool {
 func sameValue(colType, a, b string) bool {
 	switch fieldTypeOf(colType) {
 	case provider.FieldTypeNumber:
+		if bits := floatBits(colType); bits > 0 {
+			x, okA := parseFloat(a, bits)
+			y, okB := parseFloat(b, bits)
+			if okA && okB {
+				return x == y
+			}
+			break
+		}
 		x, okA := parseNumber(a)
 		y, okB := parseNumber(b)
 		if okA && okB {
@@ -175,6 +184,26 @@ func sameValue(colType, a, b string) bool {
 		}
 	}
 	return a == b
+}
+
+// floatBits is a floating-point column's width, 0 for any other type. The
+// replica casts a filter value to the column's type before comparing, so a
+// value is compared as that width holds it.
+func floatBits(colType string) int {
+	switch strings.ToUpper(strings.TrimSpace(colType)) {
+	case "DOUBLE", "FLOAT8":
+		return 64
+	case "FLOAT", "REAL", "FLOAT4":
+		return 32
+	}
+	return 0
+}
+
+// parseFloat reads a plain decimal (parseNumber's syntax; the service's own
+// number text may also carry an exponent) rounded to a float of bits.
+func parseFloat(s string, bits int) (float64, bool) {
+	f, err := strconv.ParseFloat(s, bits)
+	return f, err == nil && !strings.ContainsAny(s, "xXpPnNiI_")
 }
 
 func containsValue(colType string, set []string, v string) bool {
@@ -354,23 +383,16 @@ type negatedQuery struct {
 // countParams is a count's query: the filters, the joins they need, and the
 // key alone for the one row the envelope comes with.
 func (nq negatedQuery) countParams(filters []provider.Filter) (url.Values, error) {
-	q, err := buildFilterValues(filters, nq.isAddress)
-	if err != nil {
-		return nil, err
-	}
-	if len(nq.countExpand) > 0 {
-		q.Set("expand", strings.Join(nq.countExpand, ","))
-	}
-	return withFields(q, []string{nq.e.pk()}), nil
+	return nq.params(filters, nq.countExpand, []string{nq.e.pk()}, false)
 }
 
-func (nq negatedQuery) params(filters []provider.Filter, fields []string, sorted bool) (url.Values, error) {
+func (nq negatedQuery) params(filters []provider.Filter, expand, fields []string, sorted bool) (url.Values, error) {
 	q, err := buildFilterValues(filters, nq.isAddress)
 	if err != nil {
 		return nil, err
 	}
-	if len(nq.expand) > 0 {
-		q.Set("expand", strings.Join(nq.expand, ","))
+	if len(expand) > 0 {
+		q.Set("expand", strings.Join(expand, ","))
 	}
 	if sorted && nq.sort != "" {
 		q.Set("sort", nq.sort)
@@ -515,13 +537,17 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 		taken = err == nil
 		return err
 	}
-	// withCount gives rows the counted total, warning when the counts — or
-	// the counts and the rows — are from different moments of the replica.
+	// withCount gives rows the counted total. It warns when the counts are
+	// from different moments, or say there are fewer matches than the rows
+	// already found. Rows read at one moment and counts taken at the next are
+	// otherwise what any multi-page read gives on a busy replica, and a
+	// warning there would fail every alert rule on one; the answer reports
+	// the older instant instead.
 	withCount := func(out negatedRows) negatedRows {
-		out.total = max(cnt.total, len(out.raws))
-		if !cnt.consistent || !sameInstant(out.asOf, cnt.asOf) {
+		if !cnt.consistent || cnt.total < len(out.raws) {
 			out.warnings = append(out.warnings, movingCountsWarning)
 		}
+		out.total = max(cnt.total, len(out.raws))
 		out.asOf = older(out.asOf, cnt.asOf)
 		return out
 	}
@@ -564,7 +590,7 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 			}
 		}
 	}
-	q, err := nq.params(nq.filters, fields, !nq.spec.CountOnly)
+	q, err := nq.params(nq.filters, nq.expand, fields, !nq.spec.CountOnly)
 	if err != nil {
 		return negatedRows{}, err
 	}
@@ -572,8 +598,9 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 	if nq.spec.CountOnly {
 		want = 0
 	}
+	keep, progress := rowTester(nq), newWalker()
 	read := func(scanCap int) (walked, error) {
-		return p.client.walk(ctx, nq.spec.ObjectType, q, scan{keep: rowTester(nq), want: want, countAll: needAll, scanCap: scanCap})
+		return p.client.walkOn(ctx, nq.spec.ObjectType, q, scan{keep: keep, want: want, countAll: needAll, scanCap: scanCap}, progress)
 	}
 
 	// Route 2 is tried only once the first page shows reading would not do:
@@ -593,7 +620,7 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 			return negatedRows{}, err
 		}
 		if cnt.consistent {
-			cq, err := nq.params(complement, nq.fields, true)
+			cq, err := nq.params(complement, nq.expand, nq.fields, true)
 			if err != nil {
 				return negatedRows{}, err
 			}
@@ -605,6 +632,7 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 				return negatedRows{raws: raws, total: total, asOf: older(asOf, cnt.asOf)}, nil
 			}
 		}
+		// On from the page already read.
 		if w, err = read(MaxLimit); err != nil {
 			return negatedRows{}, err
 		}
@@ -674,21 +702,41 @@ func rowTester(nq negatedQuery) func(json.RawMessage) (bool, error) {
 		types[n.field] = col.Type
 	}
 	return func(raw json.RawMessage) (bool, error) {
-		// UseNumber keeps a number's own digits: float64 would round a 64-bit
-		// value the replica compares exactly.
-		var row map[string]interface{}
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber()
-		if err := dec.Decode(&row); err != nil {
+		var row map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &row); err != nil {
 			return false, &TransportError{Op: "reading a replica-cache row", Err: err, Message: rowShapeGuidance}
 		}
 		for _, n := range nq.negs {
-			if matchesStored(row[n.field], types[n.field], n.op, n.values) {
+			if matchesStored(storedValue(row[n.field]), types[n.field], n.op, n.values) {
 				return false, nil
 			}
 		}
 		return true, nil
 	}
+}
+
+// storedValue reads one JSON value as the row holds it. A number keeps its own
+// digits, as json.Number: float64 would round a 64-bit value the replica
+// compares exactly. An object or array matches nothing.
+func storedValue(raw json.RawMessage) interface{} {
+	raw = bytes.TrimSpace(raw)
+	switch {
+	case len(raw) == 0 || string(raw) == "null":
+		return nil
+	case raw[0] == '"':
+		var text string
+		if json.Unmarshal(raw, &text) != nil {
+			return nil
+		}
+		return text
+	case string(raw) == "true":
+		return true
+	case string(raw) == "false":
+		return false
+	case raw[0] == '-' || raw[0] >= '0' && raw[0] <= '9':
+		return json.Number(raw)
+	}
+	return raw
 }
 
 func matchesStored(v interface{}, colType, op string, values []string) bool {
@@ -699,13 +747,20 @@ func matchesStored(v interface{}, colType, op string, values []string) bool {
 	case string:
 		text = t
 	case json.Number:
+		if op != opExact {
+			return false
+		}
+		if bits := floatBits(colType); bits > 0 {
+			stored, ok := parseFloat(t.String(), bits)
+			return ok && slices.ContainsFunc(values, func(v string) bool {
+				x, ok := parseFloat(v, bits)
+				return ok && plainDecimal.MatchString(v) && x == stored
+			})
+		}
 		// The service's own number text, which may carry an exponent that a
 		// filter value may not (parseNumber).
 		stored, ok := new(big.Rat).SetString(t.String())
-		if !ok || op != opExact {
-			return false
-		}
-		return slices.ContainsFunc(values, func(v string) bool {
+		return ok && slices.ContainsFunc(values, func(v string) bool {
 			x, ok := parseNumber(v)
 			return ok && x.Cmp(stored) == 0
 		})

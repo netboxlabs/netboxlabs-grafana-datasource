@@ -584,17 +584,22 @@ func TestQuery_NegationCountsReadNoColumns(t *testing.T) {
 	}
 }
 
-// The rows and the total read at different moments warn as counts from
-// different moments do.
-func TestQuery_NegationRowsAndTotalFromDifferentMomentsWarn(t *testing.T) {
+// Rows read at one moment and a total counted at the next are what any
+// multi-page read gives on a replica applying changes, and a warning would fail
+// every alert rule on a busy replica. The answer reports the older instant, so
+// a max-data-age rule judges it by its oldest part.
+func TestQuery_NegationRowsAndTotalFromDifferentMomentsReportTheOlder(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = bigDevices()
 	p := newTestProvider(t, f)
 	f.asOfs = []string{"2026-09-22T14:00:00Z", "2026-09-22T14:01:00Z", "2026-09-22T14:01:00Z"}
 
 	res := negationQuery(t, p, provider.QuerySpec{Limit: 5, Filters: []provider.Filter{{Field: "name", Operator: "nic", Value: "zz"}}})
-	if !strings.Contains(strings.Join(res.Warnings, " "), "changes") {
-		t.Errorf("Warnings = %v, want one saying the data moved", res.Warnings)
+	if strings.Contains(strings.Join(res.Warnings, " "), "changes") {
+		t.Errorf("Warnings = %v, want none for rows and counts that agree", res.Warnings)
+	}
+	if res.DataAsOf == nil || res.DataAsOf.Format("15:04") != "14:00" {
+		t.Errorf("DataAsOf = %v, want the older instant, 14:00", res.DataAsOf)
 	}
 }
 
@@ -626,5 +631,72 @@ func TestQuery_RepeatedTextNegationsCountOnce(t *testing.T) {
 		{Field: "name", Operator: "nisw", Value: "yy,yy"}}})
 	if res.Total != MaxLimit+1 {
 		t.Errorf("Total = %d, want %d", res.Total, MaxLimit+1)
+	}
+}
+
+// Only ASCII values are folded together: U+017F folds equal to "s" but does
+// not lowercase to it, so the two are different negations.
+func TestQuery_TextNegationDedupeIsASCIIOnly(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{device(1, "bus", "active"), device(2, "xyz", "active")}
+	p := newTestProvider(t, f)
+
+	res := negationQuery(t, p, provider.QuerySpec{Filters: []provider.Filter{
+		{Field: "name", Operator: "nic", Value: "ſ"}, {Field: "name", Operator: "nic", Value: "s"}}})
+	if got := ids(res); !slices.Equal(got, []int{2}) {
+		t.Errorf("rows = %v, want [2]", got)
+	}
+}
+
+// A floating-point column is compared at its own width, as the replica casts
+// the filter value to the column's type: 0.10000000000000001 is 0.1 to a
+// DOUBLE, and 0.1 is the stored float32 to a REAL.
+func TestQuery_NegationOnFloatColumnsComparesAtTheirWidth(t *testing.T) {
+	f := newFakeService()
+	f.addEntity("dcim/power-feeds", "id:BIGINT:pk", "name:VARCHAR", "amps:DOUBLE", "ratio:REAL")
+	f.entities["dcim/power-feeds"] = []map[string]interface{}{
+		{"id": 1, "name": "A", "amps": 0.1, "ratio": float64(float32(0.1))},
+		{"id": 2, "name": "B", "amps": 0.2, "ratio": float64(float32(0.2))},
+	}
+	p := newTestProvider(t, f)
+
+	for _, filter := range []provider.Filter{
+		{Field: "amps", Operator: "n", Value: "0.10000000000000001"},
+		{Field: "ratio", Operator: "n", Value: "0.1"},
+	} {
+		res := negationQuery(t, p, provider.QuerySpec{ObjectType: "dcim/power-feeds", Filters: []provider.Filter{filter}})
+		if got := ids(res); !slices.Equal(got, []int{2}) {
+			t.Errorf("%s n %s: rows = %v, want [2]", filter.Field, filter.Value, got)
+		}
+	}
+}
+
+// When the rest of NetBox's list does not prove out, the read carries on from
+// the page already read rather than reading it again.
+func TestQuery_ComplementFallbackContinuesTheRead(t *testing.T) {
+	f := newFakeService()
+	var rows []map[string]interface{}
+	for i := 1; i <= pageSize; i++ {
+		rows = append(rows, device(i, fmt.Sprintf("off-%d", i), "offline"))
+	}
+	// NULL is kept by the negation and missed by the rest of the list.
+	rows = append(rows, device(pageSize+1, "CORE-1", "active"), device(pageSize+2, "EDGE-1", nil))
+	f.entities["dcim/devices"] = rows
+	p := newTestProvider(t, f)
+
+	res := negationQuery(t, p, provider.QuerySpec{Limit: 5, Filters: []provider.Filter{{Field: "status", Operator: "n", Value: "offline"}}})
+	if got := ids(res); !slices.Equal(got, []int{pageSize + 1, pageSize + 2}) || res.Total != 2 {
+		t.Errorf("rows = %v (Total %d), want the last two", got, res.Total)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	firstPages := 0
+	for _, r := range f.requests {
+		if r.entity == "dcim/devices" && r.query.Get("limit") == "1000" && r.query.Get("cursor") == "" && r.query.Get("filter[status]__in") == "" {
+			firstPages++
+		}
+	}
+	if firstPages != 1 {
+		t.Errorf("the first page was read %d times, want once", firstPages)
 	}
 }

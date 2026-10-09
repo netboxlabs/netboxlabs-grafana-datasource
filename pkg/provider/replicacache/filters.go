@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,7 +24,9 @@ import (
 // translating: every unsupported lookup here has a plausible-looking near-miss
 // (gte as gt, n as a negated eq the API cannot express), and silently
 // substituting one would answer a different question than the panel asked while
-// looking entirely healthy. FilterFields advertises only the operators below,
+// looking entirely healthy. A translation is made only where it is exact:
+// gte/lte on number columns with a fixed step (comparisons.go), and the
+// negations, which are answered here (negations.go) rather than sent. FilterFields advertises only the operators below,
 // so the query editor never offers a combination that lands here as an error.
 const (
 	opExact   = ""
@@ -162,9 +165,21 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 			}
 			seen[key] = true
 			q.Set(param(f.Field, wire), values[0])
+		case "n", "nic", "nisw", "niew", "nie":
+			// Query answers these itself (negations.go) once it knows the
+			// columns; one that reaches here is on an entity with none yet.
+			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+				Reason: "a negated filter works once this replica has received data for this object type"}
+		case opGTE, opLTE:
+			// rewriteComparisons turns these into gt/lt wherever it can, which
+			// needs the column's type; validateFilters refuses them on any other
+			// column, so one that reaches here is on an entity the replica has no
+			// columns for yet.
+			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+				Reason: "greater/less than or equal works on number columns once this replica has received data for this object type"}
 		default:
 			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-				Reason: "this backend supports only equality, text match, greater/less than and is-empty"}
+				Reason: "this backend supports only equality, text match, greater/less than (or equal, on number columns) and is-empty"}
 		}
 	}
 
@@ -364,19 +379,36 @@ func boolString(b bool) string {
 func seamOperators(col column) []string {
 	var out []string
 	has := func(op string) bool { return slices.Contains(col.Operators, op) }
+	// Each match is followed by its negation (negations.go) where the rows can
+	// be tested as the replica compares (rowComparable), except "not equal" on
+	// an IP address column, which NetBox matches by host.
+	negatable := rowComparable(col.Type)
 	if has("eq") || has("in") {
 		out = append(out, opExact)
+		if negatable && !has("host") {
+			out = append(out, "n")
+		}
 	}
 	for _, op := range []string{opIContns, opIStarts, opIEnds, opIExact} {
 		if has(wireTextOperator[op]) {
 			out = append(out, op)
+			if negatable {
+				out = append(out, "n"+op)
+			}
 		}
 	}
+	_, _, _, stepped := stepOf(col.Type)
 	if has("gt") {
 		out = append(out, opGT)
+		if stepped {
+			out = append(out, opGTE) // see rewriteComparisons
+		}
 	}
 	if has("lt") {
 		out = append(out, opLT)
+		if stepped {
+			out = append(out, opLTE)
+		}
 	}
 	if has("isnull") && col.Nullable && fieldTypeOf(col.Type) != provider.FieldTypeString {
 		out = append(out, opEmpty, opNEmpty)
@@ -445,9 +477,31 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 				Reason: fmt.Sprintf("the backend does not take that operator on a %s column", strings.ToLower(col.Type))}
 		}
+		// The replica refuses "4.0" on a whole-number column rather than
+		// comparing it as 4, and NetBox answers "Enter a whole number". Said
+		// here, the answer does not depend on whether a negation is sent or
+		// tested on the rows read (negations.go).
+		//
+		// A DECIMAL column is held to a plain decimal for the same reason: the
+		// row test reads no other syntax (parseNumber), so "1e1" would be one
+		// value to the replica's count and none to the rows read.
+		if scale, _, _, stepped := stepOf(col.Type); stepped && op == opExact {
+			for _, v := range splitValues(f.Value) {
+				switch {
+				case scale == 0 && !wholeNumber.MatchString(v):
+					return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+						Reason: fmt.Sprintf("a %s column holds whole numbers, and %q is not one", strings.ToLower(col.Type), v)}
+				case scale > 0 && !plainDecimal.MatchString(v):
+					return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+						Reason: fmt.Sprintf("a %s column takes a plain decimal such as 10.5, and %q is not one", strings.ToLower(col.Type), v)}
+				}
+			}
+		}
 	}
 	return nil
 }
+
+var wholeNumber = regexp.MustCompile(`^[+-]?\d+$`)
 
 // targetColumn is the column an expanded name filters and sorts on: the
 // target entity's own column when the catalogue has it (it lists every served

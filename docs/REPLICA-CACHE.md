@@ -100,19 +100,21 @@ in rows and in the value list.
 (multi-value → `in`), a case-insensitive **contains** on text columns, and,
 on a replica-cache build that lists them (`istartswith`, `iendswith`,
 `iexact` in the schema route), _starts with_, _ends with_ and _= (ci)_ on text
-columns as well; greater/less than, and _or equal_ on whole-number and
-decimal columns; _is empty_ / _has any value_ on nullable non-text columns;
+columns as well; greater/less than, and _or equal_ on whole-number
+columns; _is empty_ / _has any value_ on nullable non-text columns;
 and the negation of each match (_not equal_, _not contains_, _not starts
 with_, _not ends with_, _not (ci)_). Related names filter too (`site contains
 ams`, `site starts with dc-`). Every text match is case-insensitive and
 literal: a `%` or `_` in a value is that character, not a wildcard.
 
 The replica compares with greater and less than only, so **_or equal_** is
-sent as the strict comparison that is exactly equivalent on the column's
-type: `u_height >= 42` as `> 41`, `weight <= 10.5` on a `DECIMAL(8,2)` as
-`< 10.51`. At the edge of the type, `<=` its largest value is _has any
-value_. Floating-point columns, which NetBox does not use, have no exact
-equivalent and are not offered it.
+sent as the strict comparison that is exactly equivalent on a whole-number
+column: `u_height >= 42` as `> 41`, `u_height >= 42.5` as `> 42`. At the edge
+of the type, `<=` its largest value is _has any value_. NetBox's decimal fields
+(a rack's `weight`, a device's `position`, a site's `latitude`) reach the
+replica as text, so they are not offered _or equal_, and their greater/less
+than compares text: `weight > 9` does not match `10.00`. Filter those with
+equality, or in NetBox mode.
 
 The replica has no **negation**, so the data source answers one exactly
 itself, with NetBox's meaning: a row is dropped when its value matches, a row

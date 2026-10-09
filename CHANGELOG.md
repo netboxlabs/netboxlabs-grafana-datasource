@@ -25,7 +25,7 @@
   columns, and _starts with_, _ends with_ and _= (ci)_ on a build that lists
   them. Each match has its negation (_not equal_, _not contains_, …), answered
   exactly with NetBox's meaning although the replica has none, and _>=_ / _<=_
-  work on whole-number and decimal columns. Choice columns show NetBox's
+  work on whole-number columns. Choice columns show NetBox's
   labels, with the stored value in `<field>_value`. On a build that lists
   `host`, equality on an IP address matches by host when the value has no
   mask, as NetBox's address filter does, and a single-host address is shown

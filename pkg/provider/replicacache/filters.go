@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -476,9 +477,23 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 				Reason: fmt.Sprintf("the backend does not take that operator on a %s column", strings.ToLower(col.Type))}
 		}
+		// The replica refuses "4.0" on a whole-number column rather than
+		// comparing it as 4, and NetBox answers "Enter a whole number". Said
+		// here, the answer does not depend on whether a negation is sent or
+		// tested on the rows read (negations.go).
+		if _, whole := wholeNumberBits[strings.ToUpper(strings.TrimSpace(col.Type))]; whole && op == opExact {
+			for _, v := range splitValues(f.Value) {
+				if !wholeNumber.MatchString(v) {
+					return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+						Reason: fmt.Sprintf("a %s column holds whole numbers, and %q is not one", strings.ToLower(col.Type), v)}
+				}
+			}
+		}
 	}
 	return nil
 }
+
+var wholeNumber = regexp.MustCompile(`^[+-]?\d+$`)
 
 // targetColumn is the column an expanded name filters and sorts on: the
 // target entity's own column when the catalogue has it (it lists every served

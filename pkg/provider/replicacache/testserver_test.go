@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -314,6 +315,16 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 			if c.Operators != nil && !slices.Contains(c.Operators, op) {
 				writeErr(w, 400, "invalid filter operator: "+op)
 				return
+			}
+			// A whole-number column takes whole numbers: the service refuses
+			// "4.0" rather than comparing it as 4 (measured on v1.40).
+			if _, whole := wholeNumberBits[strings.ToUpper(c.Type)]; whole && (op == "eq" || op == "in" || op == "gt" || op == "lt") {
+				for _, v := range strings.Split(vs[0], ",") {
+					if _, ok := new(big.Int).SetString(v, 10); !ok {
+						writeErr(w, 400, "invalid filter value for "+col)
+						return
+					}
+				}
 			}
 		}
 		// host (DATA-417) takes IP addresses with no mask or zone, and one bad

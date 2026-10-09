@@ -79,7 +79,7 @@ func TestQuery_NegationsMatchNetBoxExclude(t *testing.T) {
 		{"a negation beside a positive filter",
 			[]provider.Filter{{Field: "name", Operator: "ic", Value: "edge"}, {Field: "status", Operator: "n", Value: "offline"}}, []int{3, 4}},
 		{"not equal on a number",
-			[]provider.Filter{{Field: "id", Operator: "n", Value: "2,4.0"}}, []int{1, 3, 5, 6}},
+			[]provider.Filter{{Field: "id", Operator: "n", Value: "2,4"}}, []int{1, 3, 5, 6}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -359,6 +359,11 @@ func TestQuery_NegationRefusals(t *testing.T) {
 		{"a label as the value", "dcim/devices", provider.Filter{Field: "status", Operator: "n", Value: "Active"}, `"active"`},
 		{"a text negation on a number", "dcim/devices", provider.Filter{Field: "id", Operator: "nic", Value: "1"}, "does not take that operator"},
 		{"an entity with no data yet", "dcim/platforms", provider.Filter{Field: "name", Operator: "n", Value: "x"}, "received data"},
+		// The replica refuses "4.0" on a whole-number column (and NetBox says
+		// "Enter a whole number"); answering it from the rows on a small table
+		// and failing on a large one would make the route decide.
+		{"not a whole number on a whole-number column", "dcim/devices", provider.Filter{Field: "id", Operator: "n", Value: "2,4.0"}, "whole number"},
+		{"the same, as an equality", "dcim/devices", provider.Filter{Field: "id", Value: "4.0"}, "whole number"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

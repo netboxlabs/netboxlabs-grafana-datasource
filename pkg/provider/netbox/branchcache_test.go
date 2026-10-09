@@ -229,3 +229,38 @@ func TestPinBranch_ARescopedContextIsResolvedAfresh(t *testing.T) {
 		t.Errorf("pin after re-scoping to two = %q, want bbbb2222", other)
 	}
 }
+
+// A context derived from a pinned one — a timeout or cancel scope, as
+// declaredCustomFieldTypes wraps its own around the walk and by-name lookups —
+// keeps the pin. Every pinBranch beneath it answers with the branch the call
+// was pinned to, even after the branch list has changed and its cache has
+// expired, so one call's cache keys and requests cannot straddle two branches.
+func TestPinBranch_ADerivedContextKeepsThePin(t *testing.T) {
+	var branches atomic.Value
+	branches.Store(`{"count":1,"next":null,"results":[{"name":"one","schema_id":"aaaa1111"}]}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(branches.Load().(string)))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "tok", &http.Client{Timeout: 5 * time.Second})
+
+	pinned, first := c.pinBranch(provider.WithBranch(context.Background(), "one"))
+	if first != "aaaa1111" {
+		t.Fatalf("pin(one) = %q, want aaaa1111", first)
+	}
+	// "one" is recreated under a new schema id, and the branch list expires.
+	branches.Store(`{"count":1,"next":null,"results":[{"name":"one","schema_id":"cccc3333"}]}`)
+	c.branchMu.Lock()
+	c.branchExpiry = time.Time{}
+	c.branchMu.Unlock()
+
+	derived, cancel := context.WithTimeout(pinned, time.Minute)
+	defer cancel()
+	if _, got := c.pinBranch(derived); got != "aaaa1111" {
+		t.Errorf("pin under a derived context = %q, want the call's pin aaaa1111", got)
+	}
+	// Not vacuous: an unpinned context does see the new branch list.
+	if _, fresh := c.pinBranch(provider.WithBranch(context.Background(), "one")); fresh != "cccc3333" {
+		t.Errorf("a fresh pin = %q, want cccc3333 from the new branch list", fresh)
+	}
+}

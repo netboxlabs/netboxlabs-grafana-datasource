@@ -549,6 +549,11 @@ func (p *Provider) declaredCustomFieldTypes(ctx context.Context, nullColumns []s
 	if len(cfCols) == 0 {
 		return nil, true, time.Time{}
 	}
+	// One branch for the walk, the by-name lookups and the refresh below: each
+	// pins the context it is given, and a context derived from a pinned one
+	// keeps the pin. Query and Fields pin before calling, so this is a
+	// no-op for them; it keeps any other caller from straddling two branches.
+	ctx, _ = p.client.pinBranch(ctx)
 	// One wait budget for everything this call may wait on — the walk and
 	// any by-name lookups after it. They are hints, and however many of them
 	// a result needs, a stalled endpoint costs the query at most

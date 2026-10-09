@@ -3,7 +3,12 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import { createTheme } from '@grafana/data';
 import { ORDERING_DISABLED_TOOLTIP, ORDERING_TOOLTIP, QueryEditor } from './QueryEditor';
 import { FAST_PAGING_TOOLTIP } from './ConfigEditor';
-import { IP_CONTEXT_FIELD_GROUPS, IP_CONTEXT_FIELD_OPTIONS, DEFAULT_IP_CONTEXT_FIELDS } from '../types';
+import {
+  IP_CONTEXT_FIELD_GROUPS,
+  IP_CONTEXT_FIELD_OPTIONS,
+  DEFAULT_IP_CONTEXT_FIELDS,
+  orderingFieldsFor,
+} from '../types';
 
 jest.mock('@grafana/runtime', () => ({
   ...jest.requireActual('@grafana/runtime'),
@@ -542,6 +547,28 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
     );
   });
 
+  it('offers related names in replica-cache mode, which sorts on them server-side', async () => {
+    // The backend publishes the sortable set as its filterable set: stored
+    // columns plus the related names it resolves under expand=. Nothing here
+    // decides which; the picker shows what the backend said.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-cache-related',
+      datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+      getFilterFields: jest.fn().mockResolvedValue([
+        { name: 'name', operators: ['', 'ic'] },
+        { name: 'site', operators: ['', 'ic'] },
+        { name: 'site_slug', operators: ['', 'ic'] },
+      ]),
+    } as any;
+    setup({}, ds);
+
+    const menu = await openMenu(await screen.findByLabelText('Sort by'));
+    expect(menu.getByText('name')).toBeInTheDocument();
+    expect(menu.getByText('site')).toBeInTheDocument();
+    expect(menu.getByText('site_slug')).toBeInTheDocument();
+  });
+
   it('hides the sort control for a count query — a single number has no order', async () => {
     setup({ count: true }, { ...datasource, uid: 'ds-sort-count' } as any);
     await screen.findByText('Add filter');
@@ -594,6 +621,65 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
     expect(await screen.findByRole('switch', { name: /Alert table/i })).toBeChecked();
     expect(await screen.findByLabelText('Sort by')).not.toBeDisabled();
     expect(await screen.findByLabelText('ordering-direction')).not.toBeDisabled();
+  });
+
+  it('keeps the sort control live in replica-cache mode even with fast paging set', async () => {
+    // Fast paging is NetBox's cursor walk. The replica-cache backend ignores
+    // FastPagingNoTotals and honours its own sort parameter, so reading the flag
+    // without the mode took a working control away — and the value survives a
+    // mode switch, so a data source that had fast paging on before being pointed
+    // at the cache arrived with sorting dead for a limit that does not apply.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-cache-fastpaging',
+      datasourceInstanceSettings: { jsonData: { mode: 'replica-cache', fastPagingNoTotals: true } },
+    } as any;
+    setup({ ordering: 'name' }, ds);
+
+    expect(await screen.findByLabelText('Sort by')).not.toBeDisabled();
+    expect(await screen.findByLabelText('ordering-direction')).not.toBeDisabled();
+  });
+
+  it('builds replica-cache sort options from the stored columns, not the NetBox allow-list', async () => {
+    // The allow-list is NetBox's, and it was wrong for the cache in both
+    // directions: dcim/racks and every plugin model have no entry and so got no
+    // sort control at all, while dcim/devices offered site and role, which are
+    // derived and which the backend drops with a note. The cache's sortable set
+    // is its STORED columns, which the backend already publishes as the
+    // filterable set.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-cache-options',
+      datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+      getFilterFields: jest.fn().mockResolvedValue([
+        { name: 'asset_tag', operators: [''] },
+        { name: 'name', operators: ['', 'ic'] },
+      ]),
+    } as any;
+    // dcim/racks has no allow-list entry at all, so in NetBox mode this object
+    // type gets no control whatsoever.
+    expect(orderingFieldsFor('dcim/racks')).toEqual([]);
+    setup({ objectType: 'dcim/racks' }, ds);
+
+    const picker = await screen.findByLabelText('Sort by');
+    fireEvent.keyDown(picker, { key: 'ArrowDown' });
+    expect(await screen.findByText('asset_tag')).toBeInTheDocument();
+    expect(screen.getByText('name')).toBeInTheDocument();
+  });
+
+  it('keeps a stored sort in the options when the schema does not list it', async () => {
+    // Otherwise the control vanishes from under a saved panel while the schema
+    // loads, or for good if the column is gone.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-cache-stored',
+      datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+      getFilterFields: jest.fn().mockResolvedValue([{ name: 'name', operators: [''] }]),
+    } as any;
+    setup({ objectType: 'dcim/racks', ordering: '-serial' }, ds);
+
+    expect(await screen.findByLabelText('Sort by')).toBeInTheDocument();
+    expect(await screen.findByText('serial')).toBeInTheDocument();
   });
 
   it('keeps the sort control live when fast paging is off', async () => {
@@ -811,5 +897,34 @@ describe('query type change and filters', () => {
     await pickQueryType('Topology');
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ queryType: 'topology' }));
     expect(onChange.mock.calls.at(-1)![0].filters).toEqual([{ field: 'site', operator: '', value: 'dc1' }]);
+  });
+});
+
+describe('branch field when branching is unavailable', () => {
+  // A saved query keeps its branch when its datasource is switched to a backend
+  // that has none. The backend then refuses every execution and says to clear
+  // it — advice the reader cannot follow if the only control that can is dead.
+  it('stays editable when the query still carries a branch', async () => {
+    const ds = {
+      ...datasource,
+      uid: 'ds-branch-retained',
+      getBranchingInstalled: jest.fn().mockResolvedValue(false),
+    } as any;
+    setup({ branch: 'schema_abc' }, ds);
+
+    const input = await screen.findByDisplayValue('schema_abc');
+    await waitFor(() => expect(input).not.toBeDisabled());
+  });
+
+  it('is disabled when there is no branch to clear', async () => {
+    const ds = {
+      ...datasource,
+      uid: 'ds-branch-empty',
+      getBranchingInstalled: jest.fn().mockResolvedValue(false),
+    } as any;
+    setup({}, ds);
+
+    const input = await screen.findByPlaceholderText('(main)');
+    await waitFor(() => expect(input).toBeDisabled());
   });
 });

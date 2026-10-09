@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+- **IP enrichment's prefix fallback asks about the host.** An input written
+  with a mask (`10.1.2.5/24`) made NetBox match the `/24` network, so a more
+  specific prefix holding the address was missed; an IPv4-mapped input
+  (`::ffff:10.1.2.5`) matched no IPv4 prefix. A masked input now asks about
+  the host's own `/32` (or `/128`), which finds every prefix holding it, and a
+  bare input keeps NetBox's strict rule, so the inputs that worked answer as
+  before. The fallback also reads every page of containing prefixes instead of
+  the first 100, and skips values that are not addresses, including a zoned
+  IPv6 address, which no NetBox record can hold.
+
+- **Replica-cache mode.** A data source can read from a NetBox replica-cache
+  deployment instead of the REST API (**Mode** → _replica-cache_), for
+  instances too large for the API to serve table queries interactively. The
+  data source reads the replica's schema route for object types, columns,
+  types, operators and references, so nothing is sampled or guessed; related
+  names (site, role, tenant…) are resolved by the replica, in an All columns
+  query as in NetBox mode, and can be sorted and filtered on; custom fields
+  expand as in NetBox mode; every result states
+  how fresh the data is, and a replica still loading its initial snapshot is a
+  warning. Text filters follow the replica's schema: _contains_ on text
+  columns, and _starts with_, _ends with_ and _= (ci)_ on a build that lists
+  them. Each match has its negation (_not equal_, _not contains_, …), answered
+  exactly with NetBox's meaning although the replica has none, and _>=_ / _<=_
+  work on whole-number columns. Choice columns show NetBox's
+  labels, with the stored value in `<field>_value`. On a build that lists
+  `host`, equality on an IP address matches by host when the value has no
+  mask, as NetBox's address filter does, and a single-host address is shown
+  with its mask. A new **Max data age** setting makes alert rules and expression-fed
+  queries refuse stale or unknown-age data. Annotations, IP enrichment,
+  topology and tags are not available in this mode and fail with an explicit
+  message. The connection fields are the same in both modes — URL and API
+  token name whichever service the mode reads from — plus the NetBox instance
+  ID; _View in NetBox_ links come from the NetBox URL the replica reports.
+  Requires a replica-cache build with the schema route (v1.35+). Guide:
+  `docs/REPLICA-CACHE.md`.
+
 ## 1.0.3 (2026-10-06)
 
 - **Build dependencies updated for new advisories.** `source-map-js` 1.2.2 fixes

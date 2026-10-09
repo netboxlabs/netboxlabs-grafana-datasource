@@ -12,11 +12,13 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/models"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
@@ -179,7 +181,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			// for in reverse: a strict path that silently ignores a new Result field
 			// is exactly how a deliberate cap ended up evaluating as a column of
 			// zeroes.
-			if msg := resultRefusal(c, res, noun); msg != "" {
+			if msg := d.refuse(c, res, noun); msg != "" {
 				return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 			}
 		}
@@ -262,8 +264,21 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		if err != nil {
 			return queryErrorResponse(err)
 		}
+		// A count is a rule's input as much as the alert table is, and it has
+		// no rows to reveal anything: a loading replica (a degradation warning)
+		// or stale data refuses it for a strict consumer exactly as they refuse
+		// the row shapes. Not the truncation check — a count reads Total and
+		// returns one row by design.
+		if msg := d.refuseCount(c, res); msg != "" {
+			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+		}
 		frame := buildCountFrame(qm.ObjectType, res.Total)
 		frame.RefID = q.RefID
+		// A dashboard was let through: state the gap on the frame as the row
+		// shapes do. Not resultNotices — its truncation notice would read
+		// "Showing 1 of N" on every count, since one row is fetched beside the
+		// total by design. buildCountFrame always sets Meta.
+		frame.Meta.Notices = append(frame.Meta.Notices, reportedNotices(res)...)
 		return backend.DataResponse{Frames: data.Frames{frame}}
 	}
 
@@ -292,8 +307,9 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		// alerting on an arbitrary subset or on values that were never measured.
 		// Unconditional, unlike the other branches: asking for this shape is
 		// asking for a rule's input, whoever is asking. See resultRefusal for the
-		// three checks and why they run in that order.
-		if msg := resultRefusal(c, res, nounObjects); msg != "" {
+		// three checks and why they run in that order; refuse adds the
+		// datasource's staleness rule after them.
+		if msg := d.refuse(c, res, nounObjects); msg != "" {
 			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 		}
 		applyJoinKeys(res, qm.JoinKeys)
@@ -370,7 +386,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		// measured live, limit 2 against 4 matching prefixes evaluated two
 		// instances and dropped an 86%-utilized prefix entirely, so a
 		// "utilization > 90" rule never fired and nothing anywhere said why.
-		if msg := resultRefusal(c, res, nounObjects); msg != "" {
+		if msg := d.refuse(c, res, nounObjects); msg != "" {
 			return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 		}
 	}
@@ -409,6 +425,44 @@ func queryOrdering(ordering string, c consumer) string {
 		return ""
 	}
 	return ordering
+}
+
+// refuse is resultRefusal plus the datasource-level staleness rule, applied
+// after it so the reader gets the most actionable reason first. An unparseable
+// Max data age is itself a refusal naming the setting: silently treating it as
+// "off" would be the one wrong direction. The alert-table branch calls this
+// for every consumer, so its preview refuses on staleness as the rule would.
+func (d *Datasource) refuse(c consumer, res *provider.Result, noun string) string {
+	if msg := resultRefusal(c, res, noun); msg != "" {
+		return msg
+	}
+	return d.stalenessRefusal(c, res)
+}
+
+// refuseCount is refuse for the Count shape: degradation and staleness, never
+// truncation (a count returns one row beside a total by design).
+func (d *Datasource) refuseCount(c consumer, res *provider.Result) string {
+	if !c.strict() {
+		return ""
+	}
+	if msg := degradationError(c, res); msg != "" {
+		return msg
+	}
+	return d.stalenessRefusal(c, res)
+}
+
+// stalenessRefusal applies Max data age, which exists in replica-cache mode
+// alone (the editor shows it there alone): a value left behind by a mode
+// switch must not refuse a NetBox-mode rule on a field it cannot see.
+func (d *Datasource) stalenessRefusal(c consumer, res *provider.Result) string {
+	if d.cfg.Mode != models.ModeReplicaCache {
+		return ""
+	}
+	maxAge, err := d.cfg.MaxDataAgeDuration()
+	if err != nil {
+		return fmt.Sprintf("This datasource's Max data age (%q) is not a duration; fix it or clear it before this query can be evaluated.", d.cfg.MaxDataAge)
+	}
+	return stalenessError(c, res, maxAge, time.Now())
 }
 
 // allFilterValue is Grafana's own token for a variable's "All" option. A filter
@@ -466,6 +520,15 @@ func healthErrorMessage(err error) string {
 	// Status 0 means the provider classified something that was not an HTTP
 	// refusal; there is no code to report, so fall through to the transport
 	// message rather than printing "HTTP 0".
+	// Detail first, and before the status check: a transport failure carries no
+	// HTTP code but is exactly where the provider's own wording matters most —
+	// the generic fallback below names NetBox, which is the wrong service when
+	// a different backend is what could not be reached.
+	if u := provider.Classify(err); u != nil {
+		if d := boundedDetail(u); d != "" {
+			return d
+		}
+	}
 	if u := provider.Classify(err); u != nil && u.Status != 0 {
 		switch u.Kind {
 		case provider.ErrorKindAuth:
@@ -476,6 +539,19 @@ func healthErrorMessage(err error) string {
 		return fmt.Sprintf("NetBox returned HTTP %d", u.Status)
 	}
 	return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
+}
+
+// boundedDetail returns the provider's own sentence about a failure, bounded.
+//
+// Detail is provider-authored and never carries upstream response text (see
+// provider.UpstreamError), but it is bounded here anyway on the same principle
+// as every other echoed string: the caller cannot see who wrote it.
+func boundedDetail(u *provider.UpstreamError) string {
+	d := strings.TrimSpace(u.Detail)
+	if len(d) > maxUpstreamDetail {
+		d = d[:maxUpstreamDetail] + "…"
+	}
+	return d
 }
 
 // maxUpstreamDetail bounds a user-supplied string echoed in a user-facing
@@ -607,6 +683,21 @@ const (
 // the user. The raw error is logged separately (sanitized) for operators.
 func queryErrorMessage(err error) string {
 	if u := provider.Classify(err); u != nil {
+		// A provider-authored sentence wins wherever one exists. The wording
+		// below says "NetBox" and points at the NetBox URL and API token, which
+		// is wrong for a datasource reading from a different backend: it sends
+		// the reader to settings that mode does not even use. Only the provider
+		// knows which credential its failure is about.
+		//
+		// That includes the unknown-object-type case, which used to be excepted:
+		// the sentence below names the annotation format app_label.model, and a
+		// backend addressing types as plural slash paths would send the reader
+		// to a correction that fails again. The exception is gone; the NetBox
+		// provider sets no Detail for this kind, so it still gets the wording
+		// below.
+		if d := boundedDetail(u); d != "" {
+			return d
+		}
 		switch u.Kind {
 		// An object type the upstream does not know is the USER's input, not an
 		// upstream failure, and it is the one error here the reader can act on.
@@ -623,6 +714,15 @@ func queryErrorMessage(err error) string {
 			}
 			return fmt.Sprintf("NetBox has no object type %q — it isn't one of the %d types this instance reports. Annotations filter by app_label.model, singular (e.g. dcim.device, ipam.ipaddress).",
 				name, u.KnownTypes)
+		// A capability the backend does not have. The provider's own sentence is
+		// preferred because only it can name what is missing and what to use
+		// instead; it is provider-authored (never an upstream body) but bounded
+		// here anyway, on the same principle as every other echoed string.
+		case provider.ErrorKindUnsupported:
+			if d := boundedDetail(u); d != "" {
+				return d
+			}
+			return "This query isn't supported by the backend this datasource is configured to use."
 		case provider.ErrorKindNotListable:
 			return "This object type can't be queried — the NetBox endpoint doesn't support listing (HTTP 405). It may be an action endpoint, not a queryable collection."
 		case provider.ErrorKindInvalidBranch:
@@ -656,8 +756,20 @@ func queryErrorResponse(err error) backend.DataResponse {
 // is a bad request, and saying otherwise tells the reader to retry something
 // only they can fix.
 func queryErrorStatus(err error) backend.Status {
-	if u := provider.Classify(err); u != nil && u.Kind == provider.ErrorKindUnknownObjectType {
-		return backend.StatusBadRequest
+	// These three are settled facts about what was asked for, and StatusInternal
+	// says "our side broke, try again" — the opposite of what the reader has to
+	// do. A bad request belongs with them: whether it came from the upstream
+	// answering 400 or from a filter this backend cannot express, the query is
+	// what has to change, and no retry will help.
+	//
+	// Genuine upstream failures are untouched. A 500 or an unreachable host
+	// classifies as ErrorKindUpstream or not at all, and stays internal.
+	if u := provider.Classify(err); u != nil {
+		switch u.Kind {
+		case provider.ErrorKindUnknownObjectType, provider.ErrorKindUnsupported, provider.ErrorKindBadRequest,
+			provider.ErrorKindNotReplicated:
+			return backend.StatusBadRequest
+		}
 	}
 	return backend.StatusInternal
 }

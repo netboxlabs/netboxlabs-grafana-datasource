@@ -85,6 +85,63 @@ describe('metricFindQuery', () => {
     expect(out).toEqual([{ text: 'main', value: 'main' }]);
   });
 
+  it('degrades for replica-cache, whose wording matches no regex', async () => {
+    // The prose fallback was a contract nobody declared: the same condition
+    // reads "not found" from NetBox and "Replica cache has no object type ..."
+    // from the cache, so a dashboard with a branch variable threw on refresh
+    // the moment a second provider existed. The backend sends its
+    // classification now, and that is what this reads.
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockRejectedValue({
+      status: 400,
+      data: {
+        error:
+          'Replica cache has no object type "plugins/branching/branches" — it isn\'t one of the 74 types this deployment reports.',
+        kind: 'unknown-object-type',
+      },
+    });
+    const out = await ds.metricFindQuery({
+      refId: 'v',
+      objectType: 'plugins/branching/branches',
+      valueField: 'schema_id',
+      textField: 'name',
+    });
+    expect(out).toEqual([{ text: 'main', value: 'main' }]);
+  });
+
+  it('degrades when the cache reports the endpoint missing', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockRejectedValue({
+      status: 502,
+      data: { error: 'Replica cache has no such endpoint. Check the replica-cache URL.', kind: 'not-found' },
+    });
+    const out = await ds.metricFindQuery({
+      refId: 'v',
+      objectType: 'plugins/branching/branches',
+      valueField: 'schema_id',
+      textField: 'name',
+    });
+    expect(out).toEqual([{ text: 'main', value: 'main' }]);
+  });
+
+  it('still rethrows a classified failure that is NOT a missing endpoint', async () => {
+    // The kind must not become a blanket "degrade on anything classified":
+    // an auth failure hidden behind "main" is exactly what this guard prevents.
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockRejectedValue({
+      status: 400,
+      data: { error: 'Replica cache rejected the credentials.', kind: 'auth' },
+    });
+    await expect(
+      ds.metricFindQuery({
+        refId: 'v',
+        objectType: 'plugins/branching/branches',
+        valueField: 'schema_id',
+        textField: 'name',
+      })
+    ).rejects.toBeDefined();
+  });
+
   it('rethrows a real branch-list failure (outage/auth) instead of hiding it behind "main"', async () => {
     const ds = makeDS();
     (ds as any).runResourceQuery = jest
@@ -246,5 +303,129 @@ describe('resource helpers', () => {
     const ds = makeDS();
     (ds as any).getResource = jest.fn().mockResolvedValue({});
     expect(await ds.getBranchingInstalled()).toBe(true);
+  });
+});
+
+describe('metricFindQuery degradation', () => {
+  // A degraded result is not a shorter list, it is a DIFFERENT one: a lookup
+  // that could not read some site names produces a variable missing those
+  // options, which silently rescopes every panel that depends on it.
+  it('refuses a degraded variable list instead of offering a partial one', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({
+      columns: ['site'],
+      rows: [{ site: 'DC-Northeast' }],
+      warnings: ['Related names from dcim/sites are missing for 3 of the 5 objects referenced here.'],
+    });
+    await expect(
+      ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'site' })
+    ).rejects.toThrow(/incomplete list/i);
+  });
+
+  it('returns the list when nothing was degraded', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest
+      .fn()
+      .mockResolvedValue({ columns: ['site'], rows: [{ site: 'DC-Northeast' }] });
+    expect(await ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'site' })).toEqual([
+      { text: 'DC-Northeast', value: 'DC-Northeast' },
+    ]);
+  });
+});
+
+describe('metricFindQuery truncation', () => {
+  // Measured on a 6.8M-device instance: a `site` variable over devices reads
+  // the first 1,000 devices and finds ONE distinct site out of 4,030 that
+  // exist. Every panel scoped by it would show a single site while looking
+  // like the whole estate.
+  it('refuses a list that did not cover the match count', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({
+      columns: ['site'],
+      rows: [{ site: 'DC-Northeast' }],
+      total: 6824570,
+    });
+    await expect(
+      ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'site' })
+    ).rejects.toThrow(/may be missing values/i);
+  });
+
+  it('names what to do about it', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest
+      .fn()
+      .mockResolvedValue({ columns: ['site'], rows: [{ site: 'A' }], total: 4030 });
+    await expect(
+      ds.metricFindQuery({ refId: 'v', objectType: 'dcim/devices', valueField: 'site' })
+    ).rejects.toThrow(/Query the object type that owns this field/i);
+  });
+
+  it('accepts a list that covers every matching object', async () => {
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({
+      columns: ['name'],
+      rows: [{ name: 'a' }, { name: 'b' }],
+      total: 2,
+    });
+    expect(await ds.metricFindQuery({ refId: 'v', objectType: 'dcim/sites', valueField: 'name' })).toEqual([
+      { text: 'a', value: 'a' },
+      { text: 'b', value: 'b' },
+    ]);
+  });
+
+  it('accepts a source that reports no total at all', async () => {
+    // Result.Total is documented as 0 when the source cannot report one, so an
+    // absent total must not be read as "zero matches, therefore truncated".
+    const ds = makeDS();
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({ columns: ['name'], rows: [{ name: 'a' }] });
+    expect(await ds.metricFindQuery({ refId: 'v', objectType: 'dcim/sites', valueField: 'name' })).toEqual([
+      { text: 'a', value: 'a' },
+    ]);
+  });
+});
+
+describe('branch variable in replica-cache mode', () => {
+  // The cache mirrors the main dataset only and refuses a branch-scoped query
+  // outright, so if it happens to replicate the branches table every schema it
+  // listed would be an option that breaks every panel selecting it.
+  it('offers only main, without relying on the endpoint being absent', async () => {
+    const ds = makeDS();
+    (ds as any).datasourceInstanceSettings = { jsonData: { mode: 'replica-cache' } };
+    const run = jest.fn().mockResolvedValue({
+      columns: ['schema_id', 'name'],
+      rows: [{ schema_id: 'schema_abc', name: 'feature-x' }],
+      total: 1,
+    });
+    (ds as any).runResourceQuery = run;
+
+    const out = await ds.metricFindQuery({
+      refId: 'v',
+      objectType: 'plugins/branching/branches',
+      valueField: 'schema_id',
+      textField: 'name',
+    });
+    expect(out).toEqual([{ text: 'main', value: 'main' }]);
+    // And it does not even ask: the answer cannot change what is offerable.
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('still lists real branches in NetBox mode', async () => {
+    const ds = makeDS();
+    (ds as any).datasourceInstanceSettings = { jsonData: {} };
+    (ds as any).runResourceQuery = jest.fn().mockResolvedValue({
+      columns: ['schema_id', 'name'],
+      rows: [{ schema_id: 'schema_abc', name: 'feature-x' }],
+      total: 1,
+    });
+    const out = await ds.metricFindQuery({
+      refId: 'v',
+      objectType: 'plugins/branching/branches',
+      valueField: 'schema_id',
+      textField: 'name',
+    });
+    expect(out).toEqual([
+      { text: 'main', value: 'main' },
+      { text: 'feature-x (schema_abc)', value: 'schema_abc' },
+    ]);
   });
 });

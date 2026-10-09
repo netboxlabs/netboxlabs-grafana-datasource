@@ -36,10 +36,10 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
-	q, err := buildFilterValues(spec.Filters, addressField(e, c))
-	if err != nil {
+	if err := validateChoiceValues(spec.ObjectType, spec.Filters); err != nil {
 		return nil, err
 	}
+	filters := spec.Filters
 	// An entity the catalogue has as unfed is NOT refused here: the row route
 	// answers 404 for it, classified as not-replicated by the client, and it
 	// is current where the catalogue can be ten minutes stale. Nor is the
@@ -49,13 +49,36 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// answers for itself: 404 while unfed, its own validation once fed. The
 	// one thing judged without columns is the operator vocabulary, which is
 	// the build's (validateTextOperators).
-	var plan request
+	//
+	// Negations are answered here rather than by the service (negations.go),
+	// which needs the columns: on an unfed entity they stay among the filters
+	// and buildFilterValues refuses them, saying so.
+	var (
+		plan request
+		negs []negation
+		// none is a filter that no row can match: no request is needed.
+		none bool
+	)
 	if e.Ingested {
-		if err := validateFilters(spec.Filters, e, c); err != nil {
+		if filters, none, err = rewriteComparisons(filters, e, c); err != nil {
+			return nil, err
+		}
+		filters, negs = splitNegations(filters)
+		if err := validateFilters(filters, e, c); err != nil {
+			return nil, err
+		}
+		if err := validateNegations(negs, e, c); err != nil {
 			return nil, err
 		}
 		plan = planRequest(e, spec)
-	} else if err := validateTextOperators(spec.Filters, c); err != nil {
+		if !none {
+			filters, negs, none = subtractNegations(filters, negs, e, c)
+		}
+	} else if err := validateTextOperators(filters, c); err != nil {
+		return nil, err
+	}
+	q, err := buildFilterValues(filters, addressField(e, c))
+	if err != nil {
 		return nil, err
 	}
 
@@ -78,9 +101,30 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		q = withFields(q, plan.fields)
 	}
 
-	raws, total, asOf, err := p.client.list(ctx, spec.ObjectType, q, limit)
-	if err != nil {
-		return nil, err
+	var (
+		raws  []json.RawMessage
+		total int
+		asOf  *time.Time
+	)
+	switch {
+	case none:
+		// Left empty; the catalogue's instant stands in below.
+	case len(negs) > 0:
+		r, err := p.queryNegated(ctx, negatedQuery{spec: spec, e: e, c: c, filters: filters, negs: negs,
+			expand: plan.expand, countExpand: expandList(e, filterExpansions(e, spec.Filters)), sort: plan.sort,
+			fields: plan.fields, limit: limit, isAddress: addressField(e, c)})
+		if err != nil {
+			return nil, err
+		}
+		raws, total, asOf = r.raws, r.total, r.asOf
+		plan.warnings = append(plan.warnings, r.warnings...)
+		if r.fields != nil {
+			projected = r.fields
+		}
+	default:
+		if raws, total, asOf, err = p.client.list(ctx, spec.ObjectType, q, limit); err != nil {
+			return nil, err
+		}
 	}
 	cols, rows, err := flattenRows(raws, projected, e.pk())
 	if err != nil {
@@ -105,6 +149,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// empty output column, and since the backstop covers key fields too,
 		// alert evaluation failed on it.
 		cols = append(cols, addChoiceValueAliases(selectedFields(spec), rows)...)
+		cols = append(cols, applyChoiceLabels(spec.ObjectType, rows, len(spec.Fields) == 0)...)
 		cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
 		cols = append(cols, addUnsetCustomFieldColumns(spec, rows)...)
 		if addDeepLinks(p.linkBase(c), spec.ObjectType, rows, e.pk()) {
@@ -221,13 +266,7 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 	// for a caller that reads rows, the ones a requested name resolves to.
 	// KeyFields count, by the same rule: a join on "site" needs the name, a
 	// join on "site_id" does not.
-	expandSet := map[string]bool{}
-	for _, f := range spec.Filters {
-		// validateFilters has already refused a filter on an unavailable one.
-		if via, _, ok := e.expandedColumn(f.Field); ok && via.Ref.Available {
-			expandSet[via.Ref.ExpandKey] = true
-		}
-	}
+	expandSet := filterExpansions(e, spec.Filters)
 	warned := map[string]bool{}
 	ask := func(name string) {
 		via, _, ok := e.expandedColumn(name)
@@ -292,12 +331,9 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 			r.notes = append(r.notes, fmt.Sprintf("Rows are not sorted by %q: this replica has no such column.", field))
 		}
 	}
-	for _, col := range e.Columns { // catalogue order, so the parameter is deterministic
-		if col.Ref != nil && expandSet[col.Ref.ExpandKey] {
-			delete(expandSet, col.Ref.ExpandKey) // once, should two references share a key
-			r.expand = append(r.expand, col.Ref.ExpandKey)
-			r.expanded = append(r.expanded, expansion{key: col.Ref.ExpandKey, via: col.Name, target: strings.TrimPrefix(col.Ref.Path, "/v1/")})
-		}
+	for _, col := range expandColumns(e, expandSet) {
+		r.expand = append(r.expand, col.Ref.ExpandKey)
+		r.expanded = append(r.expanded, expansion{key: col.Ref.ExpandKey, via: col.Name, target: strings.TrimPrefix(col.Ref.Path, "/v1/")})
 	}
 	if wantAll || spec.CountOnly {
 		// An empty Fields means "all columns" — the contract's wording and the
@@ -336,6 +372,43 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 	}
 	add(e.pk())
 	return r
+}
+
+// filterExpansions is the references the filters name, by expand key: what
+// a filter on a related name needs joined in, and all a count needs.
+func filterExpansions(e entity, filters []provider.Filter) map[string]bool {
+	set := map[string]bool{}
+	for _, f := range filters {
+		// validateFilters has already refused a filter on an unavailable one.
+		if via, _, ok := e.expandedColumn(f.Field); ok && via.Ref.Available {
+			set[via.Ref.ExpandKey] = true
+		}
+	}
+	return set
+}
+
+// expandColumns is the reference column behind each key in set, in catalogue
+// order so the parameter is deterministic, and once per key, should two
+// references share one.
+func expandColumns(e entity, set map[string]bool) []column {
+	var out []column
+	seen := map[string]bool{}
+	for _, col := range e.Columns {
+		if col.Ref != nil && set[col.Ref.ExpandKey] && !seen[col.Ref.ExpandKey] {
+			seen[col.Ref.ExpandKey] = true
+			out = append(out, col)
+		}
+	}
+	return out
+}
+
+// expandList is set as an expand= list (see expandColumns).
+func expandList(e entity, set map[string]bool) []string {
+	var out []string
+	for _, col := range expandColumns(e, set) {
+		out = append(out, col.Ref.ExpandKey)
+	}
+	return out
 }
 
 func unavailableReferenceWarning(col column) string {
@@ -381,9 +454,10 @@ func restrictColumns(cols, requested []string) []string {
 //
 // There, flattenObject splits a choice object into <field> carrying the LABEL
 // ("Active") and <field>_value carrying the raw value ("active"). This backend
-// stores choices as the raw value in a plain column and publishes no labels at
-// all, so <field> already holds what <field>_value would, and a saved panel
-// selecting status_value went blank on switching modes.
+// stores choices as the raw value in a plain column, so <field> holds what
+// <field>_value should until applyChoiceLabels, which runs after this, puts the
+// label in its place; without the alias a saved panel selecting status_value
+// went blank on switching modes.
 //
 // Only requested aliases are added. Emitting <field>_value beside every string
 // column would double the width of every result for the sake of a name almost

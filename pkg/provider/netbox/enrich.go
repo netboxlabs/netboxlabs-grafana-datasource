@@ -55,6 +55,8 @@ func buildFilterValues(filters []provider.Filter) url.Values {
 // cable paths (default — patch panels and circuits resolve to the far device)
 // or raw physical cables, plus wireless links in both views.
 func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*provider.Graph, error) {
+	// One branch for every request and cache key this call makes (pinBranch).
+	ctx, _ = p.client.pinBranch(ctx)
 	// Clamped to the ceiling rather than reset to the default, matching Query.
 	// Treating an over-limit request like an unset one sent a caller asking for
 	// 5,000 devices back to 1,000 — and the truncation refusal then advises

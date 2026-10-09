@@ -46,6 +46,12 @@ func customFieldsServerMutable(t *testing.T, extrasStatus int, extrasHits *int32
 	t.Helper()
 	var mode int32
 	mux := http.NewServeMux()
+	// The server answers branch-scoped requests differently, as a NetBox with
+	// netbox-branching does, so it lists the branch the tests use: a branch list
+	// that 404s now means no branching, and every value would be main.
+	mux.HandleFunc("/api/plugins/branching/branches/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"name":"b1","schema_id":"b1"}]}`))
+	})
 	mux.HandleFunc("/api/extras/custom-fields/", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(extrasHits, 1)
 		for _, d := range delay {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -401,25 +402,82 @@ func TestGetListPage_ARefusedRedirectIsNotRetried(t *testing.T) {
 
 // Upgrading to https on the same host is the redirect a NetBox configured with
 // an http:// URL commonly answers with. It moves the token to a safer channel
-// on the same host, and it worked before the redirect policy existed.
+// on the same host, and it worked before the redirect policy existed. The
+// transport answers in process, so the upgrade can land on port 443 itself.
 func TestGetBytes_HTTPSUpgradeOnTheSameHostIsFollowed(t *testing.T) {
 	var auth atomic.Value
-	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Scheme == "http" {
+			to := "https://" + r.URL.Hostname() + r.URL.RequestURI()
+			return &http.Response{StatusCode: http.StatusMovedPermanently, Header: http.Header{"Location": {to}},
+				Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+		}
 		auth.Store(r.Header.Get("Authorization"))
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer secure.Close()
-	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, secure.URL+r.URL.RequestURI(), http.StatusMovedPermanently)
-	}))
-	defer plain.Close()
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{}`)), Request: r}, nil
+	})}
 
-	c := NewClient(plain.URL, "secret-token", secure.Client())
-	if _, err := c.getBytes(context.Background(), plain.URL+"/api/status/"); err != nil {
+	c := NewClient("http://netbox.example.com", "secret-token", hc)
+	if _, err := c.getBytes(context.Background(), "http://netbox.example.com/api/status/"); err != nil {
 		t.Fatalf("an http to https upgrade on the same host was refused: %v", err)
 	}
 	if got, _ := auth.Load().(string); got != "Token secret-token" {
 		t.Errorf("Authorization after the upgrade = %q, want the token", got)
+	}
+}
+
+// The upgrade is followed only to https's own port. Go keeps the Authorization
+// header across a same-host redirect whatever the port, so an upgrade to any
+// other port would hand the token to whatever listens there; a NetBox served
+// on another https port is configured with that https:// URL instead.
+func TestRedirectPolicy_HTTPSUpgradeIsToPort443Only(t *testing.T) {
+	hop := func(raw string) *http.Request {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Request{URL: u}
+	}
+	for _, tc := range []struct {
+		base, to string
+		allowed  bool
+	}{
+		{"http://netbox.example.com", "https://netbox.example.com/api/status/", true},
+		{"http://netbox.example.com", "https://netbox.example.com:443/api/status/", true},
+		{"http://netbox.example.com:80/netbox", "https://netbox.example.com/netbox/api/status/", true},
+		{"http://netbox.example.com", "https://netbox.example.com:8443/api/status/", false},
+		{"http://example.com/netbox", "https://example.com:8443/netbox/api/status/", false},
+		// Only the standard pair is an upgrade: from another http port there
+		// is no telling which https service is NetBox's.
+		{"http://netbox.example.com:8080", "https://netbox.example.com/api/status/", false},
+		{"http://netbox.example.com:8080", "https://netbox.example.com:8443/api/status/", false},
+	} {
+		c := NewClient(tc.base, "secret-token", nil)
+		err := c.http.CheckRedirect(hop(tc.to), []*http.Request{hop(tc.base)})
+		if tc.allowed && err != nil {
+			t.Errorf("%s -> %s refused: %v", tc.base, tc.to, err)
+		}
+		if !tc.allowed && !errors.Is(err, errOffOrigin) {
+			t.Errorf("%s -> %s: err = %v, want errOffOrigin", tc.base, tc.to, err)
+		}
+	}
+
+	// End to end: the redirect to another port is not followed at all.
+	var offPort atomic.Int32
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Scheme == "https" {
+			offPort.Add(1)
+		}
+		return &http.Response{StatusCode: http.StatusMovedPermanently,
+			Header: http.Header{"Location": {"https://netbox.example.com:8443" + r.URL.RequestURI()}},
+			Body:   io.NopCloser(strings.NewReader("")), Request: r}, nil
+	})}
+	c := NewClient("http://netbox.example.com", "secret-token", hc)
+	if _, err := c.getBytes(context.Background(), "http://netbox.example.com/api/status/"); !errors.Is(err, errOffOrigin) {
+		t.Errorf("err = %v, want errOffOrigin", err)
+	}
+	if n := offPort.Load(); n != 0 {
+		t.Errorf("%d request(s) followed the upgrade to port 8443", n)
 	}
 }
 

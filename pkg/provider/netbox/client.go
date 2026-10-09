@@ -173,9 +173,15 @@ func (c *Client) underBasePath(u *url.URL) bool {
 // configured URL is plain http: the redirect an http:// NetBox commonly answers
 // with. It keeps the token on the same host and takes it off the wire in clear,
 // and it worked before redirects were checked at all.
+//
+// Only the standard pair is an upgrade, http's port 80 to https's 443. Go keeps
+// the Authorization header across a same-host redirect whatever the port, so
+// any other port would hand the token to whatever listens there; a NetBox on
+// another https port is configured with that https:// URL instead.
 func (c *Client) httpsUpgrade(u *url.URL) bool {
 	return c.origin != nil && u != nil &&
 		strings.EqualFold(c.origin.Scheme, "http") && strings.EqualFold(u.Scheme, "https") &&
+		effectivePort(c.origin) == "80" && effectivePort(u) == "443" &&
 		strings.EqualFold(u.Hostname(), c.origin.Hostname()) &&
 		c.underBasePath(u)
 }

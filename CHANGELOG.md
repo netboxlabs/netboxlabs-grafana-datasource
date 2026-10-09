@@ -8,7 +8,9 @@
   not pass `X-Forwarded-Proto`/`X-Forwarded-Host`, they name plain http or the
   proxy's upstream host, and the token went with them. Every request is now
   built on the configured URL, and a request or redirect that would leave it is
-  refused; an upgrade from http to https on the same host is still followed.
+  refused. The standard upgrade from `http://` to `https://` on the same host
+  (port 80 to 443) is still followed; a NetBox on another https port is
+  configured with its `https://` URL.
 - **Branch caches stay bounded.** The schema, field and custom-field caches were
   keyed on the branch value as the query sent it, so on a NetBox without
   netbox-branching every new value cached another entry and downloaded the

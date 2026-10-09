@@ -38,7 +38,8 @@ var plainDecimal = regexp.MustCompile(`^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$`)
 var decimalType = regexp.MustCompile(`^DECIMAL\((\d+),\s*(\d+)\)$`)
 
 // wholeNumberBits is the width of each whole-number type the catalogue names.
-// HUGEINT's range is symmetric, ±(2^127 - 1).
+// Each is two's complement, -2^(n-1) to 2^(n-1) - 1, HUGEINT included: the
+// replica's DuckDB (v1.5.5) holds -2^127.
 var wholeNumberBits = map[string]uint{"TINYINT": 8, "SMALLINT": 16, "INTEGER": 32, "BIGINT": 64, "HUGEINT": 128}
 
 // stepOf returns the step a column's values are multiples of, as a decimal
@@ -50,9 +51,6 @@ func stepOf(duckType string) (scale int, lo, hi *big.Rat, ok bool) {
 		limit := new(big.Int).Lsh(big.NewInt(1), bits-1)
 		hiInt := new(big.Int).Sub(limit, big.NewInt(1))
 		loInt := new(big.Int).Neg(limit)
-		if t == "HUGEINT" {
-			loInt.Add(loInt, big.NewInt(1))
-		}
 		return 0, new(big.Rat).SetInt(loInt), new(big.Rat).SetInt(hiInt), true
 	}
 	m := decimalType.FindStringSubmatch(t)

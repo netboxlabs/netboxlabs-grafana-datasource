@@ -2,6 +2,7 @@ package replicacache
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -217,5 +218,35 @@ func TestQuery_UnsatisfiableComparisonStillValidatesTheRest(t *testing.T) {
 	var unsupported *UnsupportedFilterError
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("err = %v, want the unknown column refused", err)
+	}
+}
+
+// HUGEINT holds -2^127 (measured on the replica's DuckDB, v1.5.5), so >= one
+// above it is the strict "> -2^127", which drops that row; it is not "every
+// value", which would keep it.
+func TestQuery_InclusiveComparisonAtTheHugeintMinimum(t *testing.T) {
+	const (
+		minimum    = "-170141183460469231731687303715884105728"
+		oneAbove   = "-170141183460469231731687303715884105727"
+		wantStrict = minimum
+	)
+	f := newFakeService()
+	f.addEntity("dcim/racks", "id:BIGINT:pk", "name:VARCHAR", "big:HUGEINT")
+	f.entities["dcim/racks"] = []map[string]interface{}{
+		{"id": 1, "name": "MIN", "big": json.Number(minimum)},
+		{"id": 2, "name": "ZERO", "big": 0},
+	}
+	p := newTestProvider(t, f)
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/racks",
+		Filters: []provider.Filter{{Field: "big", Operator: "gte", Value: oneAbove}}})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := rackNames(res); !slices.Equal(got, []string{"ZERO"}) {
+		t.Errorf("rows = %v, want [ZERO]", got)
+	}
+	if req, ok := f.requestWith("dcim/racks", "filter[big]__gt"); !ok || req.query.Get("filter[big]__gt") != wantStrict {
+		t.Errorf("sent %v, want filter[big]__gt=%s", req.query, wantStrict)
 	}
 }

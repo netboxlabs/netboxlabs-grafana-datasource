@@ -481,11 +481,19 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 		// comparing it as 4, and NetBox answers "Enter a whole number". Said
 		// here, the answer does not depend on whether a negation is sent or
 		// tested on the rows read (negations.go).
-		if _, whole := wholeNumberBits[strings.ToUpper(strings.TrimSpace(col.Type))]; whole && op == opExact {
+		//
+		// A DECIMAL column is held to a plain decimal for the same reason: the
+		// row test reads no other syntax (parseNumber), so "1e1" would be one
+		// value to the replica's count and none to the rows read.
+		if scale, _, _, stepped := stepOf(col.Type); stepped && op == opExact {
 			for _, v := range splitValues(f.Value) {
-				if !wholeNumber.MatchString(v) {
+				switch {
+				case scale == 0 && !wholeNumber.MatchString(v):
 					return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
 						Reason: fmt.Sprintf("a %s column holds whole numbers, and %q is not one", strings.ToLower(col.Type), v)}
+				case scale > 0 && !plainDecimal.MatchString(v):
+					return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+						Reason: fmt.Sprintf("a %s column takes a plain decimal such as 10.5, and %q is not one", strings.ToLower(col.Type), v)}
 				}
 			}
 		}

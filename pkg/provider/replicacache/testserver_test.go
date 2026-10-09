@@ -515,7 +515,11 @@ func matches(v interface{}, op, want string) bool {
 	case "iendswith":
 		return strings.HasSuffix(strings.ToLower(s), strings.ToLower(want))
 	case "iexact":
-		return strings.EqualFold(s, want)
+		// DuckDB's ILIKE lowercases both sides (simple Unicode mapping); it
+		// does not case-fold, so "s" and "ſ" differ, where strings.EqualFold
+		// would match them.
+		lowered := strings.ToLower(s)
+		return lowered == strings.ToLower(want)
 	case "host":
 		// The stored inet text's address, compared as an address with any
 		// listed one; the mask plays no part.

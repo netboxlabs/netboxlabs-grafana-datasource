@@ -784,10 +784,11 @@ func matchesStored(v interface{}, colType, op string, values []string) bool {
 	if _, isString := v.(string); !isString {
 		return false
 	}
-	// Lowercased with Go's Unicode mapping. The needle is ASCII wherever these
-	// rows meet the replica's counts (countTerms), and the only non-ASCII
-	// letters that lowercase to ASCII are U+0130 and U+212A; how the replica
-	// folds those is its own, so a row holding one may be judged differently.
+	// Lowercased with Go's simple Unicode mapping, which is what the replica's
+	// DuckDB ILIKE does: measured, "s" ILIKE "ſ" is false, the Kelvin sign
+	// ILIKE "k" and "İ" ILIKE "i" are true, "straße" ILIKE "STRASSE" is false,
+	// and strings.ToLower agrees on each. Case folding (strings.EqualFold)
+	// would not.
 	text, want := strings.ToLower(text), strings.ToLower(values[0])
 	switch op {
 	case opIContns:

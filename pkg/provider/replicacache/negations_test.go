@@ -724,3 +724,51 @@ func TestWithCount_ChecksTheCountAgainstEveryMatchSeen(t *testing.T) {
 		t.Errorf("total %d, warnings %v; want 600 and none", out.total, out.warnings)
 	}
 }
+
+// A DECIMAL column compares exact decimals; a value in another syntax ("1e1")
+// is refused before anything is sent, so the row test and the replica's count
+// cannot read it differently.
+func TestQuery_ExponentOnADecimalColumnIsRefused(t *testing.T) {
+	f := newFakeService()
+	f.addEntity("dcim/racks", "id:BIGINT:pk", "name:VARCHAR", "weight:DECIMAL(8,2)")
+	f.entities["dcim/racks"] = []map[string]interface{}{{"id": 1, "name": "R1", "weight": 10.0}}
+	p := newTestProvider(t, f)
+
+	for _, filter := range []provider.Filter{
+		{Field: "weight", Operator: "n", Value: "1e1"},
+		{Field: "weight", Value: "1e1"},
+	} {
+		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/racks", Filters: []provider.Filter{filter}})
+		var unsupported *UnsupportedFilterError
+		if !errors.As(err, &unsupported) || !strings.Contains(unsupported.Reason, "decimal") {
+			t.Errorf("%q %s: err = %v, want a refusal naming the decimal syntax", filter.Operator, filter.Value, err)
+		}
+	}
+}
+
+// The replica's case-insensitive matches are DuckDB's ILIKE, which lowercases
+// with the simple Unicode mapping, as strings.ToLower does. Measured against
+// DuckDB (v1.40's duckdb-go): "s" ILIKE "ſ" is false, the Kelvin sign ILIKE
+// "k" is true, "straße" ILIKE "STRASSE" is false. The row test must agree.
+func TestQuery_TextNegationFoldsCaseAsTheReplica(t *testing.T) {
+	f := newFakeService()
+	f.schema = withAnchoredText(devicesSchema())
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		device(1, "s", "active"), device(2, "ſ", "active"), device(3, "K-rack", "active"), device(4, "straße", "active"),
+	}
+	p := newTestProvider(t, f)
+
+	for _, c := range []struct {
+		op, value string
+		want      []int
+	}{
+		{"nie", "ſ", []int{1, 3, 4}},
+		{"nic", "k", []int{1, 2, 4}},
+		{"nie", "STRASSE", []int{1, 2, 3, 4}},
+	} {
+		res := negationQuery(t, p, provider.QuerySpec{Filters: []provider.Filter{{Field: "name", Operator: c.op, Value: c.value}}})
+		if got := ids(res); !slices.Equal(got, c.want) {
+			t.Errorf("name %s %s: rows = %v, want %v", c.op, c.value, got, c.want)
+		}
+	}
+}

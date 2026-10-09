@@ -1,8 +1,10 @@
 package replicacache
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -48,6 +50,12 @@ type fakeService struct {
 	// catalogue changed underneath a walk. One models the case the client
 	// recovers from; two models a service that keeps refusing.
 	rejectCursors int
+	// asOfs, when non-empty, is the data_as_of of the next row responses, one
+	// each in order — a replica applying changes between requests.
+	asOfs []string
+	// cursorOnLastPage hands out a next_cursor with a full last page, as a
+	// keyset-paged service may; the page after it is empty.
+	cursorOnLastPage bool
 }
 
 type recordedRequest struct {
@@ -118,12 +126,16 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.requests = append(f.requests, recordedRequest{entity: entity, query: q})
 	rows, ok := f.entities[entity]
-	status, errBody, pageCap := f.status, f.errBody, f.pageCap
+	status, errBody, pageCap, cursorOnLastPage := f.status, f.errBody, f.pageCap, f.cursorOnLastPage
 	var se *fakeEntity
 	if f.schema != nil {
 		if e, known := f.schema.Entities["/v1/"+entity]; known {
 			se = &e
 		}
+	}
+	var asOf *string
+	if len(f.asOfs) > 0 {
+		asOf, f.asOfs = &f.asOfs[0], f.asOfs[1:]
 	}
 	rejectCursor := f.rejectCursors > 0 && q.Get("cursor") != ""
 	if rejectCursor {
@@ -304,6 +316,16 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, 400, "invalid filter operator: "+op)
 				return
 			}
+			// A whole-number column takes whole numbers: the service refuses
+			// "4.0" rather than comparing it as 4 (measured on v1.40).
+			if _, whole := wholeNumberBits[strings.ToUpper(c.Type)]; whole && (op == "eq" || op == "in" || op == "gt" || op == "lt") {
+				for _, v := range strings.Split(vs[0], ",") {
+					if _, ok := new(big.Int).SetString(v, 10); !ok {
+						writeErr(w, 400, "invalid filter value for "+col)
+						return
+					}
+				}
+			}
 		}
 		// host (DATA-417) takes IP addresses with no mask or zone, and one bad
 		// element refuses the whole list, as the service does.
@@ -411,11 +433,26 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	if se != nil && se.DataAsOf != nil {
 		resp["data_as_of"] = *se.DataAsOf
 	}
-	if end < len(filtered) {
+	if asOf != nil {
+		resp["data_as_of"] = *asOf
+	}
+	if end < len(filtered) || (cursorOnLastPage && end > start) {
 		resp["next_cursor"] = strconv.Itoa(end)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func toFloat(v interface{}) float64 {
+	switch n := v.(type) {
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case float64:
+		return n
+	}
+	return 0
 }
 
 func matches(v interface{}, op, want string) bool {
@@ -423,18 +460,51 @@ func matches(v interface{}, op, want string) bool {
 	if f, ok := v.(float64); ok {
 		s = strconv.FormatFloat(f, 'f', -1, 64)
 	}
+	// A number column compares by value, as the service's typed columns do:
+	// 4 equals "4.0".
+	same := func(w string) bool {
+		if f, ok := v.(float64); ok {
+			n, err := strconv.ParseFloat(w, 64)
+			return err == nil && n == f
+		}
+		if i, ok := v.(int); ok {
+			n, err := strconv.ParseFloat(w, 64)
+			return err == nil && n == float64(i)
+		}
+		return s == w
+	}
 	switch op {
 	case "eq":
-		return s == want
+		return v != nil && same(want)
 	case "in":
+		if v == nil {
+			return false
+		}
 		for _, w := range strings.Split(want, ",") {
-			if s == w {
+			if same(w) {
 				return true
 			}
 		}
 		return false
 	case "isnull":
 		return (v == nil) == (want == "true")
+	case "gt", "lt":
+		// A number compares as a number and text as text, as the service's
+		// typed columns do; NULL compares as nothing.
+		var order int
+		switch n := v.(type) {
+		case nil:
+			return false
+		case int, int64, float64:
+			w, err := strconv.ParseFloat(want, 64)
+			if err != nil {
+				return false
+			}
+			order = cmp.Compare(toFloat(n), w)
+		default:
+			order = strings.Compare(s, want)
+		}
+		return (op == "gt" && order > 0) || (op == "lt" && order < 0)
 	case "ilike":
 		// The service's ilike is a case-insensitive contains on the literal
 		// value; a % in the value is that character.
@@ -445,7 +515,11 @@ func matches(v interface{}, op, want string) bool {
 	case "iendswith":
 		return strings.HasSuffix(strings.ToLower(s), strings.ToLower(want))
 	case "iexact":
-		return strings.EqualFold(s, want)
+		// DuckDB's ILIKE lowercases both sides (simple Unicode mapping); it
+		// does not case-fold, so "s" and "ſ" differ, where strings.EqualFold
+		// would match them.
+		lowered := strings.ToLower(s)
+		return lowered == strings.ToLower(want)
 	case "host":
 		// The stored inet text's address, compared as an address with any
 		// listed one; the mask plays no part.

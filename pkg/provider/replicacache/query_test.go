@@ -269,7 +269,9 @@ func TestQueryFetchesKeyFieldsWithoutShowingThem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if got := res.Rows[0]["status"]; got != "active" {
+	// The key carries the label, as it does in NetBox mode; status_value is the
+	// key to join on the stored value.
+	if got := res.Rows[0]["status"]; got != "Active" {
 		t.Errorf("key field not fetched: status = %v", got)
 	}
 	for _, c := range res.Columns {
@@ -472,7 +474,7 @@ func TestQueryProjectsKeyFieldsAlongsideExplicitFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if res.Rows[0]["status"] != "active" {
+	if res.Rows[0]["status"] != "Active" {
 		t.Error("the key field's source was not fetched")
 	}
 	if len(res.Columns) != 1 || res.Columns[0] != "name" {

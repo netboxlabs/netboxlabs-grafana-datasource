@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Go 1.26.9 and `golang.org/x/net` 0.60.0.** The backend is built with fixes
+  for advisories published on 2026-10-08 in Go's HTTP/1 and HTTP/2 handling,
+  MIME header parsing, TLS and `html/template` (GO-2026-6599, 6600, 6603,
+  6605, 6607, 6608, 6610, 6611, 6612, 6613, 6617). `golang.org/x/sys` and
+  `golang.org/x/text` move with `x/net`.
+
 - **The API token only goes to the configured NetBox URL.** Paging and
   object-type discovery followed the URLs NetBox writes into its responses,
   which NetBox builds from the request as it arrived: behind a proxy that does

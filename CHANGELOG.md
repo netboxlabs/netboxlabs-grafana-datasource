@@ -26,6 +26,16 @@
   field entries are dropped, and panels opening together on a cold cache share
   one schema download.
 
+- **The recording-rule recipe is corrected.** _Cutting the cost: record the
+  NetBox side once_ in `docs/alerting/rule-time-join.md` now labels the
+  recorded `netbox_device_info` series through join keys, so no `label_replace`
+  is needed, and its joins take each device's newest series. Before, a NetBox
+  edit to a device's site, role or tenant put every alert built on the recipe
+  into error for about four minutes (`found duplicate series`). The recipe now
+  shows the rule as a provisioning file, and states its limits: up to 10,000
+  devices and a full inventory read on every run, past which the metrics should
+  carry NetBox labels from collection instead.
+
 ## 1.0.3 (2026-10-06)
 
 - **Build dependencies updated for new advisories.** `source-map-js` 1.2.2 fixes

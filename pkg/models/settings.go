@@ -3,6 +3,8 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
@@ -11,24 +13,35 @@ import (
 type ProviderMode string
 
 const (
-	// ModeNetBox queries the NetBox REST API directly. This is the default and
-	// the only mode implemented today.
+	// ModeNetBox queries the NetBox REST API directly. This is the default.
 	ModeNetBox ProviderMode = "netbox"
+	// ModeReplicaCache queries the NetBox replica-cache read API: a columnar
+	// mirror built to answer at a scale the REST API cannot serve interactively.
+	//
+	// It is not a drop-in replacement. It cannot serve annotations, IP
+	// enrichment or topology, and it says so explicitly rather than returning
+	// empty results; see pkg/provider/replicacache.
+	ModeReplicaCache ProviderMode = "replica-cache"
 )
 
 // PluginSettings holds the non-secret configuration for a datasource instance.
 type PluginSettings struct {
-	// URL is the base URL of the NetBox instance, e.g.
-	// https://netbox.example.com — without a trailing /api.
+	// URL is the base URL of the service this datasource reads from: the
+	// NetBox instance (https://netbox.example.com, without a trailing /api) in
+	// NetBox mode, the replica-cache deployment in replica-cache mode. One
+	// field for both, because a datasource talks to exactly one of them.
 	URL string `json:"url"`
 	// PublicURL, when set, is where users' browsers reach NetBox if that
-	// differs from URL (compose/k8s service DNS). Deep-link URLs in results
-	// are rewritten from URL's base to PublicURL's. Empty = no rewrite.
+	// differs from the base the links are built from — URL in NetBox mode
+	// (compose/k8s service DNS), the NetBox URL the replica reports in
+	// replica-cache mode. Deep-link URLs in results are rewritten from that
+	// base to PublicURL's. Empty = no rewrite.
 	PublicURL string `json:"publicUrl"`
-	// Mode selects the enrichment backend. Defaults to "netbox" — the only
-	// implemented backend today. The field is kept as the seam for a planned
-	// second, high-volume backend; there is no UI selector until that ships.
+	// Mode selects the enrichment backend. Defaults to "netbox".
 	Mode ProviderMode `json:"mode"`
+	// NetBoxID identifies the NetBox instance the cache is holding, sent as the
+	// NBC-Netbox-ID header. The service rejects requests without it.
+	NetBoxID string `json:"netboxId"`
 	// TLSSkipVerify disables TLS certificate verification (self-signed certs).
 	TLSSkipVerify bool `json:"tlsSkipVerify"`
 	// TimeoutSeconds bounds individual upstream HTTP requests. Defaults to 30.
@@ -50,14 +63,45 @@ type PluginSettings struct {
 	// regardless of this setting — for every rule, not only the ones whose query
 	// uses the Alert table shape.
 	FastPagingNoTotals bool `json:"fastPagingNoTotals"`
+	// MaxDataAge, when set, is how old a replica-cache result may be before an
+	// alert rule or an expression-fed query refuses it rather than evaluating
+	// a stale inventory as current — a Go duration such as "15m". Empty means
+	// never refuse ON AGE: a replica can legitimately report no age for an
+	// entity once its snapshot is complete, and dashboards only show the age.
+	// (A replica still loading its initial snapshot is refused regardless, as
+	// a degraded result.) Read in replica-cache mode alone, where the editor
+	// shows it; NetBox mode ignores it, including a value that does not parse.
+	// See MaxDataAgeDuration.
+	MaxDataAge string `json:"maxDataAge"`
 
 	Secrets *SecretPluginSettings `json:"-"`
+}
+
+// MaxDataAgeDuration parses MaxDataAge. Empty is off (0). An unparseable or
+// negative value is an ERROR, not off: the setting exists to make a rule
+// refuse stale data, and a typo that silently disabled it would be the one
+// wrong direction. Save & Test and the strict query paths both report it.
+func (s *PluginSettings) MaxDataAgeDuration() (time.Duration, error) {
+	raw := strings.TrimSpace(s.MaxDataAge)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("max data age %q is not a duration such as 15m or 2h", raw)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("max data age %q is negative", raw)
+	}
+	return d, nil
 }
 
 // SecretPluginSettings holds values that are encrypted at rest by Grafana and
 // only ever decrypted server-side.
 type SecretPluginSettings struct {
-	// APIToken is the NetBox API token used for `Authorization: Token <token>`.
+	// APIToken is the credential for the service URL names: a NetBox API token
+	// (`Authorization: Token <token>`) in NetBox mode, the replica-cache bearer
+	// token in replica-cache mode. One field, as URL is one field.
 	APIToken string `json:"apiToken"`
 }
 

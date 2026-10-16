@@ -1,7 +1,17 @@
 import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { ConfigEditor, FAST_PAGING_TOOLTIP } from './ConfigEditor';
+import { ConfigEditor, FAST_PAGING_TOOLTIP, MODE_TOOLTIP } from './ConfigEditor';
 import { NetBoxDataSourceOptions } from '../types';
+
+// @grafana/ui's Select menu (via ScrollIndicators) uses IntersectionObserver
+// to decide when to show scroll shadows; jsdom doesn't implement it, so opening
+// a Select's dropdown throws without this stub.
+class IntersectionObserverStub {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+(globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver = IntersectionObserverStub;
 
 function makeOptions(jsonData: Partial<NetBoxDataSourceOptions> = {}, overrides: Record<string, unknown> = {}) {
   return {
@@ -151,5 +161,167 @@ describe('fast paging setting', () => {
   it('reflects an enabled setting', () => {
     setup({ fastPagingNoTotals: true });
     expect(screen.getByRole('switch', { name: /fast paging/i })).toBeChecked();
+  });
+});
+
+// Without these fields the mode is reachable only through provisioning or by
+// editing datasource settings by hand, which is how it shipped in the first
+// draft. They also have to be conditional: the NetBox API token is never sent
+// in replica-cache mode, and showing it implies a credential the backend does
+// not use — the same confusion that made Save & Test fail on a correctly
+// configured cache datasource.
+describe('replica-cache mode', () => {
+  // One set of connection fields for both modes: the URL and API token name
+  // whichever service the mode reads from. The instance ID is the one field
+  // only the replica needs.
+  it('asks for URL and API token in NetBox mode, and no instance ID', () => {
+    setup();
+    expect(screen.getByLabelText('URL')).toBeInTheDocument();
+    expect(screen.getByLabelText(/API token/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/NetBox instance ID/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Replica cache/i)).not.toBeInTheDocument();
+  });
+
+  it('asks for the same URL and API token in replica-cache mode, plus the instance ID', () => {
+    setup({ mode: 'replica-cache' });
+    expect(screen.getByLabelText('URL')).toBeInTheDocument();
+    expect(screen.getByLabelText(/API token/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/NetBox instance ID/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Replica cache/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/NetBox URL/i)).not.toBeInTheDocument();
+  });
+
+  it('hints the service in the placeholders rather than in the labels', () => {
+    setup({ mode: 'replica-cache' });
+    expect(screen.getByPlaceholderText('https://<id>.replica-cache.example.com')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('ff_…')).toBeInTheDocument();
+  });
+
+  it('writes the URL to jsonData.url and the list address in cache mode too', () => {
+    const { onOptionsChange } = setup({ mode: 'replica-cache' });
+    fireEvent.change(screen.getByLabelText('URL'), { target: { value: 'https://cache.example.com' } });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: 'https://cache.example.com',
+        jsonData: expect.objectContaining({ url: 'https://cache.example.com' }),
+      })
+    );
+  });
+
+  it('writes the instance ID into jsonData', () => {
+    const { onOptionsChange } = setup({ mode: 'replica-cache' });
+    fireEvent.change(screen.getByLabelText(/NetBox instance ID/i), { target: { value: 'nb-123' } });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ jsonData: expect.objectContaining({ netboxId: 'nb-123' }) })
+    );
+  });
+
+  // The token lands in secureJsonData under the one key both modes read, or
+  // it is stored in the clear.
+  it('stores the cache token as the API token secret', () => {
+    const { onOptionsChange } = setup({ mode: 'replica-cache' });
+    fireEvent.change(screen.getByLabelText(/API token/i), { target: { value: 'ff_secret' } });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ secureJsonData: expect.objectContaining({ apiToken: 'ff_secret' }) })
+    );
+    const call = onOptionsChange.mock.calls[0][0];
+    expect(call.jsonData.apiToken).toBeUndefined();
+  });
+
+  // Max data age only means something for a backend that reports one, and it
+  // must reach jsonData, where the backend reads it.
+  it('offers Max data age in replica-cache mode and writes it to jsonData', () => {
+    const { onOptionsChange } = setup({ mode: 'replica-cache' });
+    fireEvent.change(screen.getByLabelText(/Max data age/i), { target: { value: '15m' } });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ jsonData: expect.objectContaining({ maxDataAge: '15m' }) })
+    );
+  });
+
+  it('does not offer Max data age in NetBox mode', () => {
+    setup();
+    expect(screen.queryByLabelText(/Max data age/i)).not.toBeInTheDocument();
+  });
+
+  // One URL and one token for both modes means a switch would otherwise keep
+  // the old service's address and credential: a stored NetBox token pointed at
+  // the replica the moment the URL is edited, or a freshly entered replica
+  // token sent to the NetBox host that the URL still names. Switching mode is
+  // switching service, so both are cleared and must be re-entered.
+  it('clears the stored token and the URL when the mode changes', async () => {
+    const onOptionsChange = jest.fn();
+    render(
+      <ConfigEditor
+        options={
+          {
+            ...makeOptions(
+              { mode: 'netbox', url: 'https://netbox.example.com' },
+              { url: 'https://netbox.example.com' }
+            ),
+            secureJsonFields: { apiToken: true },
+            secureJsonData: { apiToken: 'nbt_unsaved' },
+          } as any
+        }
+        onOptionsChange={onOptionsChange}
+      />
+    );
+    const mode = screen.getByLabelText('Mode');
+    fireEvent.keyDown(mode, { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByText('Replica cache'));
+
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: '',
+        jsonData: expect.objectContaining({ mode: 'replica-cache', url: '' }),
+        secureJsonFields: expect.objectContaining({ apiToken: false }),
+        secureJsonData: expect.objectContaining({ apiToken: '' }),
+      })
+    );
+  });
+
+  // The differences between the modes live in docs/REPLICA-CACHE.md and in the
+  // query editor at the point of failure, not in a warning label on the
+  // connection form.
+  it('keeps the mode copy free of capability caveats', () => {
+    expect(MODE_TOOLTIP).not.toMatch(/annotations|topology|IP enrichment|cannot|label/i);
+  });
+});
+
+// The URL and Browser URL fields sit in the same place in both modes, so
+// switching Mode does not shuffle the form under the cursor. They are shared
+// settings, not mode-specific ones: the mode-specific field follows them.
+describe('config field order', () => {
+  const labelsInOrder = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('label'))
+      .map((l) => l.textContent?.trim())
+      .filter((t): t is string => Boolean(t));
+
+  it('keeps the shared connection fields directly after Mode in both modes', () => {
+    const netbox = render(<ConfigEditor options={makeOptions({})} onOptionsChange={jest.fn()} />).container;
+    const netboxOrder = labelsInOrder(netbox).slice(0, 3);
+
+    const cache = render(
+      <ConfigEditor options={makeOptions({ mode: 'replica-cache' })} onOptionsChange={jest.fn()} />
+    ).container;
+    const cacheOrder = labelsInOrder(cache).slice(0, 3);
+
+    expect(netboxOrder).toEqual(cacheOrder);
+    expect(netboxOrder[0]).toMatch(/Mode/i);
+    expect(netboxOrder[1]).toBe('URL');
+    expect(netboxOrder[2]).toMatch(/Browser URL/i);
+  });
+});
+
+// Fast paging is a NetBox-only trade: the replica-cache backend has no cursor
+// walk to opt into, so the switch would be a control that changes nothing.
+describe('ConfigEditor fast paging visibility', () => {
+  it('hides the fast paging switch in replica-cache mode', () => {
+    setup({ mode: 'replica-cache' });
+    expect(screen.queryByText('Fast paging')).not.toBeInTheDocument();
+  });
+
+  it('shows it in NetBox mode', () => {
+    setup({});
+    expect(screen.getByText('Fast paging')).toBeInTheDocument();
   });
 });

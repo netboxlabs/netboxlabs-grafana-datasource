@@ -1,10 +1,13 @@
 import { DataSourceJsonData, SelectableValue } from '@grafana/data';
 import { DataQuery } from '@grafana/schema';
 
-/** Enrichment backend. Only 'netbox' exists today; the type and the `mode`
- * option are kept as the seam for a planned second, high-volume backend
- * (no UI selector until then). */
-export type ProviderMode = 'netbox';
+/** Which backend the datasource reads from.
+ *
+ * 'netbox' queries the NetBox REST API directly and is the default.
+ * 'replica-cache' reads a columnar mirror built for instances the REST API
+ * cannot serve interactively; it cannot do annotations, IP enrichment or
+ * topology, and says so rather than returning empty results. */
+export type ProviderMode = 'netbox' | 'replica-cache';
 
 /** A single field/operator/value constraint applied to a query. */
 export interface FilterRow {
@@ -98,11 +101,16 @@ export interface NetBoxVariableQuery extends DataQuery {
 }
 
 export interface NetBoxDataSourceOptions extends DataSourceJsonData {
+  /** Base URL of the service this datasource reads from: NetBox, or the
+   * replica-cache deployment when mode is 'replica-cache'. */
   url?: string;
   /** Browser-facing NetBox base URL, if different from url (e.g. Grafana
    * reaches NetBox via internal service DNS). Used to rewrite deep links. */
   publicUrl?: string;
   mode?: ProviderMode;
+  /** Identifies the NetBox instance the cache mirrors, sent as NBC-Netbox-ID.
+   * Required when mode is 'replica-cache'. */
+  netboxId?: string;
   tlsSkipVerify?: boolean;
   timeoutSeconds?: number;
   /** Opt-in for very large NetBox instances: table queries page by ID and skip
@@ -112,10 +120,18 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
    * hundred thousand objects it buys nothing and the costs apply at every size.
    * Alerting is unaffected: count and alert-table queries never use it. */
   fastPagingNoTotals?: boolean;
+  /** replica-cache mode only. A Go duration such as 15m or 2h. When set, alert
+   * rules and expression-fed queries refuse a result older than this, or whose
+   * age the replica cannot report, instead of evaluating a stale inventory.
+   * Dashboards only show the age. Empty = never refuse on age (a replica still
+   * loading its initial snapshot is refused regardless). */
+  maxDataAge?: string;
 }
 
 /** Secret values — never returned to the frontend after being set. */
 export interface NetBoxSecureJsonData {
+  /** Credential for the service `url` names: a NetBox API token, or the
+   * replica-cache bearer token when mode is 'replica-cache'. */
   apiToken?: string;
 }
 

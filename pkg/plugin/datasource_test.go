@@ -526,3 +526,133 @@ func TestQueryData_FastPaging_AlertRulesAreUnaffected(t *testing.T) {
 		}
 	})
 }
+
+// Both modes read the same URL and API token fields — they name whichever
+// service the mode talks to — and replica-cache additionally needs the
+// instance id. Save & Test names the missing one in the mode's own words.
+func TestMissingSettingIsModeAware(t *testing.T) {
+	full := func() *models.PluginSettings {
+		return &models.PluginSettings{
+			Mode:     models.ModeReplicaCache,
+			URL:      "https://cache.example.com",
+			NetBoxID: "nb-1",
+			Secrets:  &models.SecretPluginSettings{APIToken: "ff_x"},
+		}
+	}
+
+	t.Run("replica-cache needs no NetBox token", func(t *testing.T) {
+		cfg := full()
+		if msg := missingSetting(cfg); msg != "" {
+			t.Errorf("a fully configured replica-cache datasource was rejected: %q", msg)
+		}
+	})
+
+	t.Run("replica-cache reports its own missing settings", func(t *testing.T) {
+		cases := map[string]func(*models.PluginSettings){
+			"replica-cache URL is missing":  func(c *models.PluginSettings) { c.URL = "" },
+			"NetBox instance ID is missing": func(c *models.PluginSettings) { c.NetBoxID = "" },
+			"API token is missing": func(c *models.PluginSettings) {
+				c.Secrets = &models.SecretPluginSettings{}
+			},
+		}
+		for want, break_ := range cases {
+			cfg := full()
+			break_(cfg)
+			if got := missingSetting(cfg); got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		}
+	})
+
+	t.Run("netbox mode is unchanged", func(t *testing.T) {
+		cfg := &models.PluginSettings{Mode: models.ModeNetBox}
+		if got := missingSetting(cfg); got != "NetBox URL is missing" {
+			t.Errorf("got %q", got)
+		}
+		cfg.URL = "https://netbox.example.com"
+		if got := missingSetting(cfg); got != "API token is missing" {
+			t.Errorf("got %q", got)
+		}
+		cfg.Secrets = &models.SecretPluginSettings{APIToken: "t"}
+		if got := missingSetting(cfg); got != "" {
+			t.Errorf("a configured NetBox datasource was rejected: %q", got)
+		}
+	})
+
+	// An empty Mode defaults to NetBox in LoadPluginSettings, and must behave
+	// the same here rather than falling into a mode-specific branch.
+	t.Run("an unset mode behaves as netbox", func(t *testing.T) {
+		cfg := &models.PluginSettings{URL: "https://netbox.example.com",
+			Secrets: &models.SecretPluginSettings{APIToken: "t"}}
+		if got := missingSetting(cfg); got != "" {
+			t.Errorf("got %q, want no error", got)
+		}
+	})
+}
+
+// Failing construction meant no Datasource existed for CheckHealth to run on,
+// so Save & Test never reached missingSetting — the one place that can name
+// WHICH field is absent. A provisioned datasource missing its URL reported a
+// construction failure instead.
+func TestReplicaCacheHealthNamesTheMissingSetting(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		json string
+		want string
+	}{
+		{"no url", `{"mode":"replica-cache","netboxId":"nb-1"}`, "replica-cache URL is missing"},
+		{"no instance id", `{"mode":"replica-cache","url":"http://c"}`, "NetBox instance ID is missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, err := NewDatasource(context.Background(), backend.DataSourceInstanceSettings{
+				JSONData:                []byte(tc.json),
+				DecryptedSecureJSONData: map[string]string{"apiToken": "t"},
+			})
+			if err != nil {
+				t.Fatalf("construction must succeed so Save & Test can explain: %v", err)
+			}
+			ds, ok := inst.(*Datasource)
+			if !ok {
+				t.Fatalf("want a *Datasource, got %T", inst)
+			}
+			res, err := ds.CheckHealth(context.Background(), &backend.CheckHealthRequest{})
+			if err != nil {
+				t.Fatalf("CheckHealth: %v", err)
+			}
+			if res.Status != backend.HealthStatusError {
+				t.Errorf("status = %v, want an error", res.Status)
+			}
+			if !strings.Contains(res.Message, tc.want) {
+				t.Errorf("message = %q, want it to name %q", res.Message, tc.want)
+			}
+		})
+	}
+}
+
+// The clients trim, so an untrimmed check passed a whitespace-only value
+// through to be reported as an unreachable service or an upstream rejection —
+// an outage message for the configuration problem this check exists to name.
+func TestWhitespaceOnlySettingsAreMissing(t *testing.T) {
+	for _, tc := range []struct{ name, json, want string }{
+		{"blank url", `{"mode":"replica-cache","url":"   ","netboxId":"nb-1"}`, "replica-cache URL is missing"},
+		{"blank instance id", `{"mode":"replica-cache","url":"http://c","netboxId":"\t"}`, "NetBox instance ID is missing"},
+		{"blank netbox url", `{"url":" "}`, "NetBox URL is missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, err := NewDatasource(context.Background(), backend.DataSourceInstanceSettings{
+				JSONData:                []byte(tc.json),
+				DecryptedSecureJSONData: map[string]string{"apiToken": "t"},
+			})
+			if err != nil {
+				t.Fatalf("NewDatasource: %v", err)
+			}
+			res, err := inst.(*Datasource).CheckHealth(context.Background(), &backend.CheckHealthRequest{})
+			if err != nil {
+				t.Fatalf("CheckHealth: %v", err)
+			}
+			if !strings.Contains(res.Message, tc.want) {
+				t.Errorf("message = %q, want it to name %q", res.Message, tc.want)
+			}
+		})
+	}
+}

@@ -3,6 +3,7 @@ package plugin
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
@@ -59,26 +60,7 @@ const (
 //
 // noun names what Total counts for this query type (nounObjects / nounIPs).
 func resultNotices(res *provider.Result, requestedLimit int, noun string) []data.Notice {
-	var notices []data.Notice
-	if res != nil {
-		// The provider writes the whole sentence: only it knows which columns a
-		// given hop fills, and inventing wording here would drift from the
-		// producer. This layer supplies the severity and the frame plumbing —
-		// the reason Warnings is a plain []string in a package that must not
-		// import the Grafana SDK's frame types.
-		for _, w := range res.Warnings {
-			notices = append(notices, data.Notice{
-				Severity: data.NoticeSeverityWarning,
-				Text:     w,
-			})
-		}
-		for _, n := range res.Notes {
-			notices = append(notices, data.Notice{
-				Severity: data.NoticeSeverityInfo,
-				Text:     n,
-			})
-		}
-	}
+	notices := reportedNotices(res)
 	if isTruncated(res) {
 		notices = append(notices, data.Notice{
 			Severity: data.NoticeSeverityInfo,
@@ -110,6 +92,37 @@ func resultNotices(res *provider.Result, requestedLimit int, noun string) []data
 			Text: fmt.Sprintf(
 				"Row limit reduced to %s (the maximum); you requested %s.",
 				thousands(res.MaxRows), thousands(requestedLimit)),
+		})
+	}
+	return notices
+}
+
+// reportedNotices is the provider's own account of a result — its warnings
+// and notes, in that order — as frame notices. It is the part of resultNotices
+// that holds for every shape, the Count shape included: a count has no rows to
+// truncate or cap (it fetches one beside a total by design), but a loading
+// replica or an entity of unknown age is as true of its total as of any row.
+//
+// The provider writes the whole sentence: only it knows which columns a given
+// hop fills, and inventing wording here would drift from the producer. This
+// layer supplies the severity and the frame plumbing — the reason Warnings is
+// a plain []string in a package that must not import the Grafana SDK's frame
+// types.
+func reportedNotices(res *provider.Result) []data.Notice {
+	if res == nil {
+		return nil
+	}
+	var notices []data.Notice
+	for _, w := range res.Warnings {
+		notices = append(notices, data.Notice{
+			Severity: data.NoticeSeverityWarning,
+			Text:     w,
+		})
+	}
+	for _, n := range res.Notes {
+		notices = append(notices, data.Notice{
+			Severity: data.NoticeSeverityInfo,
+			Text:     n,
 		})
 	}
 	return notices
@@ -280,6 +293,51 @@ func resultRefusal(c consumer, res *provider.Result, noun string) string {
 		return msg
 	}
 	return degradationError(c, res)
+}
+
+// stalenessError refuses a strict consumer's result whose data is older than
+// the datasource allows, or of unknown age, when a maximum is set at all.
+// Opt-in, because a replica can legitimately report no age; on by choice,
+// because a rule that evaluates a two-hour-old inventory as current is the
+// failure the replica's freshness reporting exists to make visible.
+//
+// Only a producer that reports freshness at all can be stale. NetBox mode
+// leaves SnapshotComplete nil, and the setting lives in jsonData, which a mode
+// switch or a provisioned datasource can carry either way.
+func stalenessError(c consumer, res *provider.Result, maxAge time.Duration, now time.Time) string {
+	if maxAge <= 0 || res == nil || res.SnapshotComplete == nil {
+		return ""
+	}
+	v := c.voice()
+	if res.DataAsOf == nil {
+		// Reachable only once the snapshot is complete: while it loads, the
+		// provider's warning has already refused the result as degraded. So
+		// there is nothing to wait for — the replica reports no commit time
+		// for this entity, and only the setting can change the outcome.
+		return fmt.Sprintf("%s read data whose age is unknown (the replica reports no commit time for this entity), and this datasource allows at most %s, so %s. Raise or clear Max data age.",
+			v.subject, formatAge(maxAge), v.stale)
+	}
+	if age := now.Sub(*res.DataAsOf); age > maxAge {
+		return fmt.Sprintf("%s read data that is %s old and this datasource allows at most %s, so %s. Check the replica's ingestion, or raise Max data age.",
+			v.subject, formatAge(age), formatAge(maxAge), v.stale)
+	}
+	return ""
+}
+
+// formatAge writes a duration the way the setting is written: "2h 14m",
+// "15m", "under a minute" — not Go's "2h14m0s".
+func formatAge(d time.Duration) string {
+	d = d.Round(time.Minute)
+	h, m := int(d.Hours()), int(d.Minutes())%60
+	switch {
+	case h > 0 && m > 0:
+		return fmt.Sprintf("%dh %dm", h, m)
+	case h > 0:
+		return fmt.Sprintf("%dh", h)
+	case m > 0:
+		return fmt.Sprintf("%dm", m)
+	}
+	return "under a minute"
 }
 
 // thousands formats n with comma separators (104231 -> "104,231") so large

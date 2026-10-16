@@ -16,6 +16,7 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/models"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/replicacache"
 )
 
 // Ensure Datasource implements the required SDK interfaces.
@@ -78,6 +79,46 @@ func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings bac
 }
 
 // newProvider selects the enrichment backend based on the configured mode.
+// missingSetting names the first required setting this datasource has not been
+// given, or "" when it can be reached. It mirrors newProvider's switch: a mode
+// added there needs its prerequisites added here, or Save & Test will check the
+// wrong ones. Both modes read URL and APIToken; the message names the service
+// the mode talks to.
+// Trimmed, because the clients trim: a whitespace-only URL becomes an empty
+// request URL and a whitespace-only instance id an empty tenant header, so an
+// untrimmed check passed the value through to be reported as an unreachable
+// service or an upstream rejection — an outage message for the configuration
+// problem this function exists to name.
+func missingSetting(cfg *models.PluginSettings) string {
+	switch cfg.Mode {
+	case models.ModeReplicaCache:
+		// A Max data age that cannot be read must be fixed before it silently
+		// means "off". Only in this mode: the editor shows the field here
+		// alone, and a value left behind by a mode switch must not fail a
+		// NetBox-mode datasource on a field it cannot see.
+		if _, err := cfg.MaxDataAgeDuration(); err != nil {
+			return "Max data age " + strings.TrimPrefix(err.Error(), "max data age ")
+		}
+		switch {
+		case strings.TrimSpace(cfg.URL) == "":
+			return "replica-cache URL is missing"
+		case strings.TrimSpace(cfg.NetBoxID) == "":
+			return "NetBox instance ID is missing"
+		case cfg.Secrets == nil || strings.TrimSpace(cfg.Secrets.APIToken) == "":
+			return "API token is missing"
+		}
+		return ""
+	default:
+		switch {
+		case strings.TrimSpace(cfg.URL) == "":
+			return "NetBox URL is missing"
+		case cfg.Secrets == nil || strings.TrimSpace(cfg.Secrets.APIToken) == "":
+			return "API token is missing"
+		}
+		return ""
+	}
+}
+
 func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.Provider, error) {
 	switch cfg.Mode {
 	case models.ModeNetBox, "":
@@ -88,6 +129,16 @@ func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.
 			// size the utilization measurement budget: raising the timeout is how a
 			// user says "I will wait", and it is the only such dial they have.
 			netbox.WithRequestTimeout(time.Duration(cfg.TimeoutSeconds)*time.Second)), nil
+	case models.ModeReplicaCache:
+		// Constructed even when the URL or the instance id is missing, exactly as
+		// NetBox mode is with an empty URL. Failing here failed NewDatasource, so
+		// no Datasource existed for CheckHealth to run on and Save & Test never
+		// reached missingSetting above — the one place that can name WHICH field
+		// is absent. A provisioned datasource missing its URL reported a
+		// construction failure instead of "replica-cache URL is missing".
+		// "View in NetBox" links come from the NetBox URL the replica's own
+		// catalogue reports; nothing is configured for them here.
+		return replicacache.New(cfg.URL, cfg.Secrets.APIToken, cfg.NetBoxID, httpClient), nil
 	default:
 		return nil, fmt.Errorf("unknown provider mode %q", cfg.Mode)
 	}
@@ -135,6 +186,7 @@ type refusalVoice struct {
 	degraded   string // …returned a degraded result, so <degraded>
 	links      string // …returned an incomplete set of links, so <links>
 	unmeasured string // …measured X for N of M rows, so the other K <unmeasured>
+	stale      string // …read data that is X old / of unknown age, so <stale>
 }
 
 // voice addresses the refusal to its reader. Someone whose dashboard panel broke
@@ -150,6 +202,7 @@ func (c consumer) voice() refusalVoice {
 			degraded:   "the expression would compute on data that is missing for a reason the numbers cannot show",
 			links:      "the expression would see a device as less connected than it is",
 			unmeasured: "would reach the expression blank instead of with the values they hold",
+			stale:      "the expression would compute on a stale replica",
 		}
 	}
 	return refusalVoice{
@@ -158,6 +211,7 @@ func (c consumer) voice() refusalVoice {
 		degraded:   "it would alert on data that is missing for a reason the numbers cannot show",
 		links:      "it would alert on a device that may have a working path it cannot see",
 		unmeasured: "would evaluate as zero rather than as the values they hold",
+		stale:      "it would alert on a stale replica",
 	}
 }
 
@@ -229,11 +283,12 @@ func isAlertRequest(req *backend.QueryDataRequest) bool {
 
 // CheckHealth verifies the datasource can reach and authenticate to NetBox.
 func (d *Datasource) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
-	if d.cfg.URL == "" {
-		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: "NetBox URL is missing"}, nil
-	}
-	if d.cfg.Secrets == nil || d.cfg.Secrets.APIToken == "" {
-		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: "API token is missing"}, nil
+	// The prerequisites differ per backend, and checking NetBox's against a
+	// replica-cache datasource fails Save & Test on a correctly configured
+	// instance — the two authenticate with different credentials against
+	// different services, and replica-cache never uses the NetBox token.
+	if msg := missingSetting(d.cfg); msg != "" {
+		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: msg}, nil
 	}
 
 	msg, err := d.provider.HealthCheck(ctx)

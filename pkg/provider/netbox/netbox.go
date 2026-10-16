@@ -98,6 +98,9 @@ type Provider struct {
 	// branch may define custom-field filters (cf_*) main lacks, so main and each
 	// branch must cache separately — mirroring the fields cache.
 	schemaByBranch map[string]schemaCacheEntry
+	// schemaFlightByBranch is the in-progress schema fetch per branch, so
+	// panels opening together on a cold cache wait for one download.
+	schemaFlightByBranch map[string]*schemaFlight
 
 	// customFieldsByBranch caches the custom-field type index (see
 	// customFieldTypes) keyed the same way, for the same reason: a branch can
@@ -169,6 +172,26 @@ type schemaCacheEntry struct {
 type fieldsCacheEntry struct {
 	fields []provider.Field
 	expiry time.Time
+}
+
+// schemaFlight is one OpenAPI schema fetch that every caller arriving while it
+// runs waits for; entry and err are set before done closes.
+type schemaFlight struct {
+	done  chan struct{}
+	entry schemaCacheEntry
+	err   error
+}
+
+// dropExpired deletes the entries of m that expired before now. The caches it
+// runs on are only ever overwritten by their own key, so without it a key that
+// is never asked again — a branch since merged and deleted — stayed for the
+// life of the process. Callers hold p.mu, and call it when they write.
+func dropExpired[V any](m map[string]V, now time.Time, expiry func(V) time.Time) {
+	for k, v := range m {
+		if !now.Before(expiry(v)) {
+			delete(m, k)
+		}
+	}
 }
 
 // Option configures a Provider at construction.
@@ -272,6 +295,12 @@ func (p *Provider) ObjectTypes(ctx context.Context) ([]provider.ObjectType, erro
 // collection, so nothing is hard-coded: GET /api/ yields {app: url} (dcim,
 // ipam, …) and each app index yields {model: url}. Plugin endpoints are
 // handled by discoverPlugins.
+//
+// Only the keys are used. Each one is the path segment its URL names, and the
+// next index is built from it on the configured URL: the values are absolute
+// URLs NetBox wrote from the request as it arrived, which behind a proxy that
+// does not pass X-Forwarded-Proto/-Host name plain http or another host (see
+// nextPageURL). Queries already address object types by these keys.
 func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) {
 	root, err := p.urlMap(ctx, p.client.apiURL("", nil))
 	if err != nil {
@@ -279,11 +308,11 @@ func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) 
 	}
 
 	var types []provider.ObjectType
-	for app, appURL := range root {
+	for app := range root {
 		if app == "status" {
 			continue
 		}
-		models, err := p.urlMap(ctx, appURL)
+		models, err := p.urlMap(ctx, p.client.apiURL(app, nil))
 		if err != nil {
 			continue // tolerate individual app discovery failures
 		}
@@ -311,8 +340,8 @@ func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) 
 // either a plugin sub-app (a URL map of its models) or a direct collection.
 func (p *Provider) discoverPlugins(ctx context.Context, plugins map[string]string) []provider.ObjectType {
 	var types []provider.ObjectType
-	for plugin, pURL := range plugins {
-		sub, err := p.urlMap(ctx, pURL)
+	for plugin := range plugins {
+		sub, err := p.urlMap(ctx, p.client.apiURL("plugins/"+plugin, nil))
 		if err != nil {
 			// Direct collection (e.g. installed-plugins).
 			types = append(types, provider.ObjectType{
@@ -363,6 +392,8 @@ func (p *Provider) urlMap(ctx context.Context, rawURL string) (map[string]string
 
 // Query executes an object query and returns flattened, joinable rows.
 func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provider.Result, error) {
+	// One branch for every request and cache key this call makes (pinBranch).
+	ctx, _ = p.client.pinBranch(ctx)
 	if spec.ObjectType == "" {
 		return nil, fmt.Errorf("objectType is required")
 	}
@@ -1013,7 +1044,9 @@ func (p *Provider) fetchList(ctx context.Context, objectType string, q url.Value
 		if page.Next == nil {
 			break
 		}
-		next = *page.Next
+		if next, err = p.client.nextPageURL(next, *page.Next); err != nil {
+			return listResult{}, err
+		}
 	}
 	if len(out.rows) > limit {
 		out.rows = out.rows[:limit]
@@ -1056,6 +1089,11 @@ func retryable(ctx context.Context, err error) bool {
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			return true
 		}
+		return false
+	}
+	// Refused by this client, not failed on the wire: the same request would be
+	// refused the same way.
+	if errors.Is(err, errOffOrigin) || errors.Is(err, errTooManyRedirects) || errors.Is(err, errNotAbsoluteURL) {
 		return false
 	}
 	return transientTransport(err)
@@ -1197,10 +1235,12 @@ func (p *Provider) getListPageRetryN(ctx context.Context, rawURL string) (listPa
 func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Field, error) {
 	// Partition the cache by branch: a branch may define custom fields that main
 	// (or another branch) does not, so main and each branch must cache their
-	// field sets separately. The null byte cannot appear in an object-type path
-	// or a branch schema id, so it is a collision-free key separator.
+	// field sets separately. The key is the branch as resolved (pinBranch), not
+	// the value the query carried. The null byte cannot appear in an object-type
+	// path or a branch schema id, so it is a collision-free key separator.
+	ctx, branch := p.client.pinBranch(ctx)
 	cacheKey := objectType
-	if branch := provider.BranchFromContext(ctx); branch != "" {
+	if branch != "" {
 		cacheKey = objectType + "\x00" + branch
 	}
 
@@ -1260,6 +1300,7 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 
 	if cacheable {
 		p.mu.Lock()
+		dropExpired(p.fields, time.Now(), func(e fieldsCacheEntry) time.Time { return e.expiry })
 		p.fields[cacheKey] = fieldsCacheEntry{fields: fields, expiry: expiry}
 		p.mu.Unlock()
 	}
@@ -1277,25 +1318,68 @@ func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provi
 	return entry.filters[objectType], nil
 }
 
-// schema fetches, parses and caches the OpenAPI schema for the context's
-// branch. One fetch feeds both derivations: the filter params FilterFields
-// serves, and the dimension index FieldValues resolves against.
+// schema returns the parsed OpenAPI schema for the context's branch, from the
+// cache or from one fetch shared by every caller that arrives while it runs.
+// One fetch feeds both derivations: the filter params FilterFields serves, and
+// the dimension index FieldValues resolves against.
 //
 // A failure to parse the dimension index is NOT fatal — FilterFields is the
 // long-standing consumer and must keep working — so the entry is cached with a
 // nil index and FieldValues falls back to sampling.
 func (p *Provider) schema(ctx context.Context) (schemaCacheEntry, error) {
-	branch := provider.BranchFromContext(ctx)
+	ctx, branch := p.client.pinBranch(ctx)
 
 	p.mu.Lock()
 	if e, ok := p.schemaByBranch[branch]; ok && time.Now().Before(e.expiry) {
 		p.mu.Unlock()
 		return e, nil
 	}
+	flight := p.schemaFlightByBranch[branch]
+	if flight == nil {
+		flight = &schemaFlight{done: make(chan struct{})}
+		if p.schemaFlightByBranch == nil {
+			p.schemaFlightByBranch = map[string]*schemaFlight{}
+		}
+		p.schemaFlightByBranch[branch] = flight
+		go p.runSchemaFetch(ctx, branch, flight)
+	}
 	p.mu.Unlock()
 
-	// The fetch carries the branch via ctx (X-NetBox-Branch), so the parsed
-	// result is cached under that branch, never shared with main/other branches.
+	select {
+	case <-flight.done:
+		return flight.entry, flight.err
+	case <-ctx.Done():
+		return schemaCacheEntry{}, ctx.Err()
+	}
+}
+
+// runSchemaFetch downloads and parses the schema for branch, publishes it to
+// the cache on success, and retires the flight under the same lock.
+//
+// The fetch is detached from the starting caller's cancellation, as the
+// custom-field and object-type fetches are: the callers waiting on it are not
+// all that one, and a panel closed mid-download must not fail the others. It
+// gets the same budget they do instead.
+func (p *Provider) runSchemaFetch(ctx context.Context, branch string, flight *schemaFlight) {
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.objectTypeFetchBudget())
+	defer cancel()
+	flight.entry, flight.err = p.fetchSchema(fetchCtx)
+	p.mu.Lock()
+	if flight.err == nil {
+		if p.schemaByBranch == nil {
+			p.schemaByBranch = map[string]schemaCacheEntry{}
+		}
+		dropExpired(p.schemaByBranch, time.Now(), func(e schemaCacheEntry) time.Time { return e.expiry })
+		p.schemaByBranch[branch] = flight.entry
+	}
+	delete(p.schemaFlightByBranch, branch)
+	p.mu.Unlock()
+	close(flight.done)
+}
+
+// fetchSchema downloads and parses the OpenAPI schema. The fetch carries the
+// branch via ctx (X-NetBox-Branch), so the result belongs to that branch alone.
+func (p *Provider) fetchSchema(ctx context.Context) (schemaCacheEntry, error) {
 	raw, err := p.client.getBytes(ctx, p.client.apiURL("schema", url.Values{"format": {"json"}}))
 	if err != nil {
 		return schemaCacheEntry{}, fmt.Errorf("fetch OpenAPI schema: %w", err)
@@ -1310,15 +1394,7 @@ func (p *Provider) schema(ctx context.Context) (schemaCacheEntry, error) {
 			"error", logSafe(err.Error()))
 		dims = nil
 	}
-
-	entry := schemaCacheEntry{filters: parsed, dims: dims, expiry: time.Now().Add(schemaTTL)}
-	p.mu.Lock()
-	if p.schemaByBranch == nil {
-		p.schemaByBranch = map[string]schemaCacheEntry{}
-	}
-	p.schemaByBranch[branch] = entry
-	p.mu.Unlock()
-	return entry, nil
+	return schemaCacheEntry{filters: parsed, dims: dims, expiry: time.Now().Add(schemaTTL)}, nil
 }
 
 // FieldValues returns distinct values of a column for autocomplete.
@@ -1349,6 +1425,8 @@ func (p *Provider) schema(ctx context.Context) (schemaCacheEntry, error) {
 // than an error; the result is re-checked against the response as well, so a
 // rejected projection degrades to a full fetch instead of an empty dropdown.
 func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string, limit int) ([]string, error) {
+	// One branch for every request and cache key this call makes (pinBranch).
+	ctx, _ = p.client.pinBranch(ctx)
 	if field == "" {
 		return nil, fmt.Errorf("field is required")
 	}
@@ -1606,6 +1684,8 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 
 // Changes returns change-log events within a time window for annotations.
 func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]provider.Change, error) {
+	// One branch for every request and cache key this call makes (pinBranch).
+	ctx, _ = p.client.pinBranch(ctx)
 	limit := spec.Limit
 	if limit <= 0 || limit > MaxLimit {
 		limit = defaultLimit

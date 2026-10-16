@@ -407,7 +407,9 @@ func (p *Provider) childIPHosts(ctx context.Context, cost *utilCost, cidr string
 		if page.Next == nil {
 			break
 		}
-		next = *page.Next
+		if next, err = p.client.nextPageURL(next, *page.Next); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -448,7 +450,9 @@ func (p *Provider) utilizedChildRanges(ctx context.Context, cost *utilCost, cidr
 		if page.Next == nil {
 			break
 		}
-		next = *page.Next
+		if next, err = p.client.nextPageURL(next, *page.Next); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -849,7 +853,9 @@ func (p *Provider) childPrefixes(ctx context.Context, cost *utilCost, cidr strin
 		if page.Next == nil {
 			break
 		}
-		next = *page.Next
+		if next, err = p.client.nextPageURL(next, *page.Next); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }

@@ -567,6 +567,12 @@ func transportCause(err error) string {
 		return false
 	}
 	switch {
+	// The NetBox provider's own refusals, matched first: their words are this
+	// plugin's, and say what to fix.
+	case has("outside the configured netbox url"):
+		return causeRedirected
+	case has("not an absolute http(s) url", "unsupported protocol scheme"):
+		return causeNoScheme
 	case has("no such host", "server misbehaving"):
 		return causeUnresolved
 	case has("certificate"):
@@ -600,6 +606,8 @@ const (
 	causeReset       = "the connection was reset"
 	causeClosed      = "the connection closed before the response was complete"
 	causeNotJSON     = "the response could not be read as JSON (is this the NetBox base URL, not a proxy or login page?)"
+	causeRedirected  = "NetBox redirected to an address other than the configured URL, which the API token is not sent to (check the URL's scheme and host)"
+	causeNoScheme    = "the URL has no scheme (start it with https or http)"
 )
 
 // queryErrorMessage maps an upstream error to a concise, user-facing message so

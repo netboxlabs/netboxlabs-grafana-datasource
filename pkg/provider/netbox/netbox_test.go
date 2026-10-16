@@ -291,6 +291,11 @@ func containsStr(s []string, v string) bool {
 func TestFields_BranchCachePartition(t *testing.T) {
 	var branches []string
 	mux := http.NewServeMux()
+	// A branch-aware NetBox: it lists the branch, as netbox-branching does. A
+	// branch list that 404s means no branching, and every value would be main.
+	mux.HandleFunc("/api/plugins/branching/branches/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"name":"feature","schema_id":"td5smq0f"}]}`)
+	})
 	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
 		b := r.Header.Get("X-NetBox-Branch")
 		branches = append(branches, b)
@@ -383,6 +388,11 @@ func TestFilterFields_FromSchema(t *testing.T) {
 func TestFilterFields_BranchCachePartition(t *testing.T) {
 	var branches []string
 	mux := http.NewServeMux()
+	// A branch-aware NetBox: it lists the branch, as netbox-branching does. A
+	// branch list that 404s means no branching, and every value would be main.
+	mux.HandleFunc("/api/plugins/branching/branches/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"name":"feature","schema_id":"td5smq0f"}]}`)
+	})
 	mux.HandleFunc("/api/schema/", func(w http.ResponseWriter, r *http.Request) {
 		b := r.Header.Get("X-NetBox-Branch")
 		branches = append(branches, b)

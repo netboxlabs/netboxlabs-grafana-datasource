@@ -188,6 +188,11 @@ func TestTransportCause(t *testing.T) {
 		{"plain string no such host", errors.New("dial tcp: lookup netbox.internal: no such host"), "resolved"},
 		// EHOSTUNREACH stringifies as "no route to host", not "unreachable".
 		{"plain string no route", errors.New("dial tcp 10.0.0.5:8000: connect: no route to host"), "unreachable"},
+		// The NetBox provider refuses a redirect off the configured origin, and
+		// a configured URL with no scheme; both say what to check.
+		{"redirect off the configured url", &url.Error{Op: "Get", URL: "https://nb/api/status/", Err: errors.New("refusing to send a request outside the configured NetBox URL")}, "redirected"},
+		{"configured url without a scheme", fmt.Errorf("request failed: %w", errors.New("the configured NetBox URL is not an absolute http(s) URL")), "scheme"},
+		{"go's own no-scheme error", &url.Error{Op: "Get", URL: "nb/api/status/", Err: errors.New(`unsupported protocol scheme ""`)}, "scheme"},
 		{"unknown", errors.New("something else entirely"), "request failed"},
 	}
 	for _, tc := range cases {

@@ -31,9 +31,9 @@ const chunkBudgetBytes = 6144
 //
 // TWO of them, and the second is the one that is easy to miss. fetchList adds
 // "&limit=<min(limit, pageSize)>" to the first page, which is ours to measure.
-// Every page after that is fetched from NetBox's own `next` URL, followed
-// verbatim (netbox.go, `next = *page.Next`), and DRF builds that by adding
-// "&offset=<n>" to the query it received. So a batch that fits on page 1 can
+// Every page after that is fetched with the query of NetBox's own `next` URL
+// (nextPageURL keeps our origin and path and takes that query whole), and DRF
+// builds it by adding "&offset=<n>" to the query it received. So a batch that fits on page 1 can
 // still exceed the ceiling on page 2, and nothing in this file constructs that
 // URL to notice.
 //
@@ -1570,6 +1570,8 @@ func project(row map[string]interface{}, fields []string) map[string]interface{}
 // documented Grafana join on "ip" requires unique keys — with match_count
 // reporting how many address records matched.
 func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string, limit int) (*provider.Result, error) {
+	// One branch for every request and cache key this call makes (pinBranch).
+	ctx, _ = p.client.pinBranch(ctx)
 	// The limit matters more here than for a batched object query: when a
 	// prefix_* column is selected the fallback below issues one ?contains=
 	// request per unmatched IP and cannot be batched (contains takes a single
@@ -1631,6 +1633,8 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 // batch blanks its own IPs and the rest of the table stands; here the listing is
 // the row set, and there is nothing to stand.
 func (p *Provider) ResolveScope(ctx context.Context, filters []provider.Filter, fields []string, limit int) (*provider.Result, error) {
+	// One branch for every request and cache key this call makes (pinBranch).
+	ctx, _ = p.client.pinBranch(ctx)
 	fields, limit = normalizeIPEnrichArgs(fields, limit)
 
 	raws, total, err := p.fetchRows(ctx, "ipam/ip-addresses", buildFilterValues(filters), limit)

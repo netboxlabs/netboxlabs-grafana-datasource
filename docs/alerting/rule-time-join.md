@@ -166,12 +166,49 @@ the join-key outputs. That yields one series per device, with nothing to
 netbox_device_info{device="AMS1-leaf-01", netbox_id="7", site="ams1", role="leaf", tenant_slug="grafana-demo"} 1
 ```
 
-The demo ships this rule provisioned in
-`provisioning/alerting/netbox-device-info.yml`; start from that copy. When you
-provision your own, mind one spelling. The target data source is
-`targetDatasourceUid` in a provisioning file and `target_datasource_uid` on the
-HTTP API, the same split as `keepFiringFor` and `keep_firing_for`. The wrong
-spelling is dropped without a warning, and the rule then fails with
+As a provisioning file, with your NetBox and Prometheus data source uids in
+place of `netboxlabs-netbox` and `prometheus`:
+
+```yaml
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: netbox-recording
+    folder: NetBox
+    interval: 1m
+    rules:
+      - uid: netbox-device-info
+        title: NetBox device info (recording)
+        condition: A
+        noDataState: OK
+        execErrState: Error
+        record:
+          metric: netbox_device_info
+          from: A
+          targetDatasourceUid: prometheus
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: netboxlabs-netbox
+            model:
+              refId: A
+              datasource: { type: netboxlabs-netbox-datasource, uid: netboxlabs-netbox }
+              queryType: objects
+              objectType: dcim/devices
+              alertTable: true
+              fields: [tenant_slug]
+              joinKeys:
+                - { source: name, output: device, transform: none }
+                - { source: id, output: netbox_id, transform: none }
+                - { source: site_slug, output: site, transform: none }
+                - { source: role_slug, output: role, transform: none }
+              limit: 1000 # above the fleet size
+```
+
+Mind one spelling. The target data source is `targetDatasourceUid` in a
+provisioning file and `target_datasource_uid` on the HTTP API, the same split as
+`keepFiringFor` and `keep_firing_for`. The wrong spelling is dropped without a
+warning, and the rule then fails with
 `remote write failed: data source uid not specified and no default set`.
 
 **Join against the newest series per device.** When a device's site, role or
@@ -308,6 +345,16 @@ Cost: **one** NetBox query per recording interval, however many alert rules you
 have. The trade is freshness — recorded context is only as current as the last
 recording run, so a device that moves site keeps its old labels until then. For
 inventory data that is almost always fine, but decide it rather than discover it.
+
+**When it fits, and when it does not.** The whole inventory is one query, so
+the recipe works up to the query Limit's ceiling of 10,000 devices; past that,
+the rule fails rather than record a subset. The interval has to stay under five
+minutes, too: Prometheus stops returning a series five minutes after its last
+sample, so a slower rule leaves gaps. Every run therefore reads the full
+inventory from NetBox, however rarely it changes. For a large fleet, put the
+NetBox labels on the metrics when they are collected instead, through service
+discovery and relabelling or an exporter that caches NetBox, so nothing has to
+join at query time.
 
 **Decide what crosses into Prometheus, too.** Every label value is copied into
 the time-series store and lives under the Prometheus data source's permissions

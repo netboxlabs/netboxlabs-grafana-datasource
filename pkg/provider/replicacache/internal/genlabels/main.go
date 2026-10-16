@@ -48,7 +48,11 @@ func main() {
 	}
 	out := labels{}
 	for _, path := range os.Args[1:] {
-		raw, err := os.ReadFile(path)
+		// A developer runs this by hand on schema files they downloaded and name
+		// on the command line; it is never part of the plugin, so reading the
+		// paths it is given is the point, not a traversal.
+		raw, err := os.ReadFile(path) // #nosec G304 G703 -- reads the schema files named on the command line
+
 		if err != nil {
 			fail(err)
 		}

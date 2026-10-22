@@ -80,7 +80,8 @@ export function ConfigEditor(props: Props) {
 
   // secureJsonData carries every secret not saved yet, including ones other
   // controls on this page write (Grafana Cloud's PDC network selector sets
-  // secureSocksProxyPassword), so the token is merged in rather than replacing it.
+  // secureSocksProxyPassword for a network that has one), so the token is merged
+  // in rather than replacing it.
   const onTokenChange = (event: ChangeEvent<HTMLInputElement>) => {
     onOptionsChange({ ...options, secureJsonData: { ...secureJsonData, apiToken: event.target.value } });
   };

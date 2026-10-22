@@ -76,6 +76,7 @@ Add the data source (**Connections → Data sources → NetBox**) and set:
 | **Skip TLS verify** | Accept self-signed certificates.                                                                                                                                                                                |
 | **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                      |
 | **Fast paging**     | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                |
+| **Secure Socks Proxy** | Shown only on self-hosted Grafana with a [secure SOCKS5 data source proxy](https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/proxy/) configured. **Enabled** routes this datasource through it. On Grafana Cloud, see [Grafana Cloud](#grafana-cloud). |
 
 Click **Save & test**. A healthy data source reports the connected NetBox version.
 
@@ -241,34 +242,34 @@ This is a **backend** datasource, so it runs on Grafana Cloud once published to 
 plugin catalog and signed by Grafana (Cloud cannot load private/unsigned plugins).
 
 - **Public NetBox** (internet-reachable URL): the Cloud-hosted backend calls it directly.
-- **Private NetBox** (VPC / on-prem): use **[Private Data Source Connect (PDC)](https://grafana.com/docs/grafana-cloud/connect-externally-hosted/private-data-source-connect/)**.
-  Run Grafana's [PDC agent](https://grafana.com/docs/grafana-cloud/connect-externally-hosted/private-data-source-connect/configure-pdc/)
+- **Private NetBox** (VPC / on-prem): use **[Private Data Source Connect (PDC)](https://grafana.com/docs/grafana-cloud/observe-and-act/connect-externally-hosted/private-data-source-connect/)**.
+  Run Grafana's [PDC agent](https://grafana.com/docs/grafana-cloud/observe-and-act/connect-externally-hosted/private-data-source-connect/configure-pdc/)
   inside that network; it needs outbound access to Grafana Cloud's PDC endpoints on ports 22
-  and 443. Give the datasource NetBox's internal URL, as a host inside the network reaches it,
-  and route it through the PDC network:
-  - **On the settings page:** Grafana Cloud adds a **Private data source connect** section with
-    a network selector, but only for plugins Grafana lists as supporting PDC. Until this plugin
-    is on that list, use the API or a provisioning file.
-  - **Through the API or a provisioning file:** set both fields below. The network is named by
-    its ID, not its name: without the ID, Grafana Cloud does not route the connection.
+  and 443. Set **NetBox URL** to the address the agent's host reaches NetBox at, and
+  **Browser URL** to where browsers reach it if that differs, so deep links work. Then route
+  the datasource through the PDC network:
+  - **On the settings page:** Grafana Cloud adds a **Private data source connection** section,
+    with a network selector, to the data sources Grafana lists as
+    [supporting PDC](https://grafana.com/docs/grafana-cloud/observe-and-act/connect-externally-hosted/private-data-source-connect/#supported-data-sources).
+    If the page has no such section, Grafana has not listed this plugin yet: use the API.
+  - **Through the API:** add two fields to the datasource's `jsonData`. An update replaces
+    `jsonData` whole, so send them together with the fields it already has.
 
-    ```yaml
-    jsonData:
-      url: https://netbox.internal.example.com
-      enableSecureSocksProxy: true
-      secureSocksProxyUsername: <PDC network ID>
+    ```json
+    "jsonData": {
+      "url": "https://netbox.internal.example.com",
+      "enableSecureSocksProxy": true,
+      "secureSocksProxyUsername": "<PDC network ID>"
+    }
     ```
 
-    The network ID is what Grafana's Terraform provider exposes as `pdc_network_id` on
-    `grafana_cloud_private_data_source_connect_network`: the ID of the access policy behind the
-    network.
+    `secureSocksProxyUsername` takes the network's ID: its name, the stack ID and `default` do
+    not route. To find the ID, select the network under **Connections → Private data source
+    connections**; Grafana's Terraform provider exposes it as `pdc_network_id`.
 
-  The backend builds its HTTP client from the Grafana SDK, which applies the proxy, so nothing
-  else in the plugin needs configuring.
-
-On **self-hosted Grafana** with a [secure SOCKS5 data source proxy](https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/proxy/)
-configured, the settings page shows a **Secure Socks Proxy** switch that routes the
-datasource through it.
+  If **Save & test** reports that the hostname could not be resolved, the request did not go
+  through PDC. Nothing else in the plugin needs configuring: the backend builds its HTTP client
+  from the Grafana SDK, which applies the proxy.
 
 The backend ships binaries for `linux/amd64` and `linux/arm64` (Cloud) plus the full
 catalog target matrix (darwin/windows/arm).

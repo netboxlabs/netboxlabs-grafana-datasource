@@ -125,7 +125,8 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
 /** Secret values — never returned to the frontend after being set. */
 export interface NetBoxSecureJsonData {
   apiToken?: string;
-  /** Written by Grafana's PDC network selector, not by this editor. */
+  /** The proxy password. Grafana's PDC network selector writes it for a network
+   * that has one; this editor never does. */
   secureSocksProxyPassword?: string;
 }
 

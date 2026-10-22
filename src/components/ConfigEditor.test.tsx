@@ -4,10 +4,6 @@ import { config } from '@grafana/runtime';
 import { ConfigEditor, FAST_PAGING_TOOLTIP } from './ConfigEditor';
 import { NetBoxDataSourceOptions } from '../types';
 
-jest.mock('@grafana/runtime', () => ({
-  config: { secureSocksDSProxyEnabled: false },
-}));
-
 function makeOptions(jsonData: Partial<NetBoxDataSourceOptions> = {}, overrides: Record<string, unknown> = {}) {
   return {
     id: 1,
@@ -165,9 +161,14 @@ describe('fast paging setting', () => {
 // jsonData.enableSecureSocksProxy is true, so without this switch the only way
 // to turn it on is the API or a provisioning file.
 describe('secure socks proxy', () => {
+  // The real runtime config: the flag defaults to false, and is set per test.
   afterEach(() => {
     config.secureSocksDSProxyEnabled = false;
   });
+
+  function proxySwitch() {
+    return within(screen.getByText('Secure Socks Proxy').parentElement as HTMLElement).getByRole('switch');
+  }
 
   // Grafana's own components read the same flag. It is false when the server
   // has no proxy configured, and on Grafana Cloud, where the PDC app renders
@@ -176,10 +177,6 @@ describe('secure socks proxy', () => {
     setup();
     expect(screen.queryByText('Secure Socks Proxy')).not.toBeInTheDocument();
   });
-
-  function proxySwitch() {
-    return within(screen.getByText('Secure Socks Proxy').parentElement as HTMLElement).getByRole('switch');
-  }
 
   it('is offered, and off, when the server has one', () => {
     config.secureSocksDSProxyEnabled = true;
@@ -206,17 +203,37 @@ describe('secure socks proxy', () => {
 });
 
 // secureJsonData holds every secret not saved yet, not only ours. On Grafana
-// Cloud the PDC network selector writes secureSocksProxyPassword into it on the
-// same page, so typing a token must not discard what another control set.
+// Cloud the PDC network selector can write secureSocksProxyPassword into it on
+// the same page, so typing a token must not discard what another control set.
 describe('API token', () => {
-  it('keeps the other unsaved secrets when the token is edited', () => {
-    const { onOptionsChange } = setup({}, { secureJsonData: { secureSocksProxyPassword: 'from-pdc' } });
+  // The earlier unsaved token is in the fixture so the order of the merge is
+  // pinned: were the old value spread after the new one, every keystroke would
+  // be overwritten by the previous one.
+  it('keeps the other unsaved secrets when the token is edited, and the new token wins', () => {
+    const { onOptionsChange } = setup(
+      {},
+      { secureJsonData: { secureSocksProxyPassword: 'from-pdc', apiToken: 'nbt_old' } }
+    );
     fireEvent.change(screen.getByPlaceholderText('nbt_… or a 40-character token'), {
       target: { value: 'nbt_abc.def' },
     });
     expect(onOptionsChange).toHaveBeenCalledWith(
       expect.objectContaining({
         secureJsonData: { secureSocksProxyPassword: 'from-pdc', apiToken: 'nbt_abc.def' },
+      })
+    );
+  });
+
+  it('keeps the other unsaved secrets when the token is reset', () => {
+    const { onOptionsChange } = setup(
+      {},
+      { secureJsonFields: { apiToken: true }, secureJsonData: { secureSocksProxyPassword: 'from-pdc' } }
+    );
+    fireEvent.click(screen.getByRole('button', { name: /reset/i }));
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        secureJsonFields: expect.objectContaining({ apiToken: false }),
+        secureJsonData: { secureSocksProxyPassword: 'from-pdc', apiToken: '' },
       })
     );
   });

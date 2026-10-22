@@ -2,14 +2,18 @@
 
 ## Unreleased
 
-- **A private NetBox can be reached through Grafana's secure socks proxy from
-  the settings page.** On self-hosted Grafana with the secure SOCKS5 data source
-  proxy configured, the page shows a **Secure Socks Proxy** switch; before, the
-  proxy could only be turned on through the API. On Grafana Cloud, the README
-  now gives the two fields that route a datasource through Private Data Source
-  Connect: `enableSecureSocksProxy`, and `secureSocksProxyUsername` set to the
-  PDC network's ID. Editing the API token no longer discards other unsaved
-  secrets on the page.
+- **The secure SOCKS proxy can be turned on from the settings page.** On
+  self-hosted Grafana with a secure SOCKS5 data source proxy configured, the
+  page has a **Secure Socks Proxy** section whose **Enabled** switch routes the
+  datasource through it; before, only the API or a provisioning file could. On
+  Grafana Cloud, Private Data Source Connect adds its own network selector, and
+  only to the data sources Grafana lists, which do not include this plugin yet.
+  The README gives the two `jsonData` fields that route it through a PDC network
+  over the API: `enableSecureSocksProxy`, and `secureSocksProxyUsername` set to
+  the network's ID.
+- **Editing the API token keeps the page's other unsaved secrets.** The token
+  field replaced every secret not saved yet, including any another control on
+  the page had set. It now changes only the token.
 
 - **Go 1.26.9 and `golang.org/x/net` 0.60.0.** The backend is built with fixes
   for advisories published on 2026-10-08 in Go's HTTP/1 and HTTP/2 handling,

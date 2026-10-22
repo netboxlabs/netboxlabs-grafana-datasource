@@ -69,6 +69,9 @@ func LoadPluginSettings(source backend.DataSourceInstanceSettings) (*PluginSetti
 		if err := json.Unmarshal(source.JSONData, &settings); err != nil {
 			return nil, fmt.Errorf("could not unmarshal PluginSettings json: %w", err)
 		}
+		if err := checkSecureSocksProxyFields(source.JSONData); err != nil {
+			return nil, err
+		}
 	}
 
 	if settings.Mode == "" {
@@ -81,6 +84,39 @@ func LoadPluginSettings(source backend.DataSourceInstanceSettings) (*PluginSetti
 	settings.Secrets = loadSecretPluginSettings(source.DecryptedSecureJSONData)
 
 	return &settings, nil
+}
+
+// checkSecureSocksProxyFields refuses the secure socks proxy settings in a
+// shape the plugin SDK cannot use. The SDK reads them itself when it builds
+// the HTTP client, and trusts their JSON types: with the proxy on, a
+// secureSocksProxyUsername that is not a string panics inside the SDK on every
+// request (an unchecked type assertion), and an enableSecureSocksProxy that is
+// not a boolean is read as "off" while Grafana's switch shows it on, so the
+// requests quietly go direct. Neither shape comes from the settings page; both
+// come from a hand-written API call or provisioning file, where a placeholder
+// left blank is a YAML null.
+func checkSecureSocksProxyFields(jsonData json.RawMessage) error {
+	var fields struct {
+		Enable   json.RawMessage `json:"enableSecureSocksProxy"`
+		Username json.RawMessage `json:"secureSocksProxyUsername"`
+	}
+	if err := json.Unmarshal(jsonData, &fields); err != nil {
+		return fmt.Errorf("could not unmarshal PluginSettings json: %w", err)
+	}
+	var enabled bool
+	if len(fields.Enable) > 0 && string(fields.Enable) != "null" {
+		if err := json.Unmarshal(fields.Enable, &enabled); err != nil {
+			return fmt.Errorf("enableSecureSocksProxy must be true or false, not %s", fields.Enable)
+		}
+	}
+	if !enabled || len(fields.Username) == 0 {
+		return nil
+	}
+	var username string
+	if err := json.Unmarshal(fields.Username, &username); err != nil || string(fields.Username) == "null" {
+		return fmt.Errorf("secureSocksProxyUsername must be the PDC network's ID, a string, not %s", fields.Username)
+	}
+	return nil
 }
 
 func loadSecretPluginSettings(source map[string]string) *SecretPluginSettings {

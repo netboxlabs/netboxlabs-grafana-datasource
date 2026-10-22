@@ -475,7 +475,25 @@ func healthErrorMessage(err error) string {
 		}
 		return fmt.Sprintf("NetBox returned HTTP %d", u.Status)
 	}
+	if throughProxy(err) {
+		return "Cannot reach NetBox through the secure socks proxy: " + transportCause(err) + ". Check that the proxy is running and can reach the NetBox URL (on Grafana Cloud, the PDC agent of the selected network); the Grafana server log has the full error."
+	}
 	return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
+}
+
+// throughProxy reports whether a transport failure happened on the way through
+// Grafana's secure socks proxy (Private Data Source Connect on Grafana Cloud)
+// rather than on a direct connection. The SOCKS dialer the SDK installs wraps
+// every failure, reaching the proxy or the proxy reaching NetBox, in a
+// *net.OpError whose Op is "socks connect".
+//
+// It matters because of who reads the message. Told only that "the connection
+// was refused", a reader checks NetBox and its URL, when the hop that failed is
+// the proxy or the agent behind it, and on Grafana Cloud they cannot open the
+// server log the message points to.
+func throughProxy(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && strings.HasPrefix(opErr.Op, "socks")
 }
 
 // maxUpstreamDetail bounds a user-supplied string echoed in a user-facing
@@ -647,6 +665,9 @@ func queryErrorMessage(err error) string {
 		if u.Status != 0 {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
 		}
+	}
+	if throughProxy(err) {
+		return "Couldn't reach NetBox through the secure socks proxy: " + transportCause(err) + ". Check that the proxy (on Grafana Cloud, the PDC agent) can reach NetBox; the Grafana server log has the full error."
 	}
 	return "Couldn't reach NetBox: " + transportCause(err) + ". The Grafana server log has the full error."
 }

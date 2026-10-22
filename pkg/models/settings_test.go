@@ -28,6 +28,7 @@ func TestLoadPluginSettings_SecureSocksProxyFields(t *testing.T) {
 		{"keys are matched exactly, as the SDK reads them", `{"enableSecureSocksProxy": true, "SecureSocksProxyUsername": 42}`, ""},
 		{"a null username with the proxy on", `{"enableSecureSocksProxy": true, "secureSocksProxyUsername": null}`, "secureSocksProxyUsername"},
 		{"a numeric username with the proxy on", `{"enableSecureSocksProxy": true, "secureSocksProxyUsername": 42}`, "secureSocksProxyUsername"},
+		{"an object username with the proxy on", `{"enableSecureSocksProxy": true, "secureSocksProxyUsername": {"id": "x"}}`, "secureSocksProxyUsername"},
 		{"a flag written as \"true\" would silently be off", `{"enableSecureSocksProxy": "true"}`, "enableSecureSocksProxy"},
 		{"a flag written as 1 would silently be off", `{"enableSecureSocksProxy": 1}`, "enableSecureSocksProxy"},
 	} {
@@ -46,6 +47,11 @@ func TestLoadPluginSettings_SecureSocksProxyFields(t *testing.T) {
 			// "An error occurred within the plugin".
 			if !backend.IsDownstreamError(err) {
 				t.Errorf("error %v is not classified as downstream", err)
+			}
+			// Panels show it to every viewer: it describes the value, it does not
+			// echo whatever was written there.
+			if strings.Contains(err.Error(), `"id"`) {
+				t.Errorf("error %q echoes the raw value", err)
 			}
 		})
 	}

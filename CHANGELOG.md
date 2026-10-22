@@ -12,10 +12,13 @@
   over the API: `enableSecureSocksProxy`, and `secureSocksProxyUsername` set to
   the network's ID.
 - **Failures through the secure SOCKS proxy say so.** For a datasource routed
-  through the proxy, Save & test and query errors read "through the secure
-  socks proxy" and point at the proxy — on Grafana Cloud, the PDC agent —
-  rather than at the NetBox URL. Before, a stopped agent, or one whose traffic
-  to NetBox is dropped, read as "Cannot reach NetBox … Check the NetBox URL".
+  through the proxy, a request that gets no answer from NetBox reads, on
+  Save & test and on panels, "through the secure socks proxy", and points at
+  the proxy — on Grafana Cloud, the PDC agent — rather than at the NetBox URL.
+  Before, a stopped agent, or one whose traffic to NetBox is dropped, read as
+  "Cannot reach NetBox … Check the NetBox URL". The settings page shows the
+  switch as the plugin SDK reads the setting: on only for the JSON boolean
+  `true`.
 - **Proxy settings the plugin SDK cannot use are refused by name.** With the
   proxy on, a `secureSocksProxyUsername` that is not a string (a placeholder
   left blank in a provisioning file is null) made every request fail inside

@@ -114,7 +114,8 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
   fastPagingNoTotals?: boolean;
   /** Route this datasource through Grafana's secure socks proxy: Private Data
    * Source Connect on Grafana Cloud, an admin-run SOCKS proxy when self-hosted.
-   * The plugin SDK reads it when it builds the HTTP client; no plugin code does. */
+   * The plugin SDK reads it when it builds the HTTP client and routes only for
+   * the JSON boolean true; the backend checks its shape (pkg/models). */
   enableSecureSocksProxy?: boolean;
   /** The proxy username. On Grafana Cloud it names the PDC network (its ID, a
    * UUID), written by Grafana's network selector or set through the API. When

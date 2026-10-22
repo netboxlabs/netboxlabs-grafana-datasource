@@ -200,6 +200,15 @@ describe('secure socks proxy', () => {
     setup({ enableSecureSocksProxy: true });
     expect(proxySwitch()).toBeChecked();
   });
+
+  // The plugin SDK routes through the proxy only for the JSON boolean true. A
+  // flag written another way by the API or a provisioning file ("true", 1) is
+  // off for every request, so the switch shows it off rather than on.
+  it('shows a flag the SDK reads as off as off', () => {
+    config.secureSocksDSProxyEnabled = true;
+    setup({ enableSecureSocksProxy: 'true' as unknown as boolean });
+    expect(proxySwitch()).not.toBeChecked();
+  });
 });
 
 // secureJsonData holds every secret not saved yet, not only ours. On Grafana

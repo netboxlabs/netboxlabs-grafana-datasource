@@ -378,6 +378,58 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 		assertNamesTheProxyOnly(t, res.Message, socks.addr, netbox.URL)
 	})
 
+	// An answer NetBox sent back through the proxy is not the proxy's failure:
+	// a login page served in place of the API, or a redirect, means the route
+	// works and the URL is wrong. Naming the proxy would send the reader to the
+	// one hop that did its job.
+	t.Run("does not blame the proxy for an answer NetBox sent through it", func(t *testing.T) {
+		loginPage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html><body>Sign in</body></html>"))
+		}))
+		t.Cleanup(loginPage.Close)
+		socks := startSOCKS5(t)
+		res := saveAndTest(t, socks.addr, map[string]any{"url": loginPage.URL, "enableSecureSocksProxy": true})
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
+		}
+		if len(socks.connects()) == 0 {
+			t.Fatal("the request did not go through the proxy, so this tests nothing")
+		}
+		if namesTheProxy(res.Message) {
+			t.Errorf("message %q blames the proxy for an answer NetBox sent through it", res.Message)
+		}
+	})
+
+	// The switch is on, but Grafana has no proxy configured: the SDK sends the
+	// request direct, so nothing about it is the proxy's.
+	t.Run("does not mention the proxy when Grafana has none", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		deadNetBox := "http://" + ln.Addr().String()
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		inst, err := NewDatasource(context.Background(), backend.DataSourceInstanceSettings{
+			UID:                     pdcTestUID,
+			Type:                    "netboxlabs-netbox-datasource",
+			JSONData:                []byte(`{"url": "` + deadNetBox + `", "enableSecureSocksProxy": true, "timeoutSeconds": 5}`),
+			DecryptedSecureJSONData: map[string]string{"apiToken": "0123456789abcdef0123456789abcdef01234567"},
+		})
+		if err != nil {
+			t.Fatalf("NewDatasource: %v", err)
+		}
+		res, err := inst.(*Datasource).CheckHealth(context.Background(), &backend.CheckHealthRequest{})
+		if err != nil {
+			t.Fatalf("CheckHealth: %v", err)
+		}
+		if res.Status != backend.HealthStatusError || namesTheProxy(res.Message) {
+			t.Errorf("health = %v %q, want an error that does not mention a proxy", res.Status, res.Message)
+		}
+	})
+
 	t.Run("does not mention a proxy the datasource does not use", func(t *testing.T) {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -392,7 +444,7 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 		if res.Status != backend.HealthStatusError {
 			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
 		}
-		if strings.Contains(res.Message, "proxy") || strings.Contains(res.Message, "PDC") {
+		if namesTheProxy(res.Message) {
 			t.Errorf("message %q blames a proxy this datasource does not use", res.Message)
 		}
 	})
@@ -438,19 +490,36 @@ func TestQueryErrorMessage_SecureSocksProxy(t *testing.T) {
 	}
 }
 
-// The panel path, not only Save & test: a proxied datasource's query failure
-// names the proxy.
-func TestQueryData_TransportFailureThroughProxyIsNamed(t *testing.T) {
-	d := newTestDatasource(&fakeProvider{queryErr: fmt.Errorf("request failed: %w", errors.New("i/o timeout"))})
-	d.viaProxy = true
-	resp, err := d.QueryData(context.Background(), &backend.QueryDataRequest{
-		Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices"}`)}},
-	})
-	if err != nil {
-		t.Fatalf("QueryData: %v", err)
+// Panels and resource calls (the editor's pickers) word a failure by the
+// datasource's route, as Save & test does: the proxy named when the datasource
+// goes through it, never when it does not.
+func TestErrorWording_FollowsTheDatasourcesRoute(t *testing.T) {
+	for _, viaProxy := range []bool{true, false} {
+		d := newTestDatasource(&fakeProvider{queryErr: fmt.Errorf("request failed: %w", errors.New("i/o timeout"))})
+		d.viaProxy = viaProxy
+
+		resp, err := d.QueryData(context.Background(), &backend.QueryDataRequest{
+			Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices"}`)}},
+		})
+		if err != nil {
+			t.Fatalf("QueryData: %v", err)
+		}
+		dr := resp.Responses["A"]
+		if dr.Error == nil || strings.Contains(dr.Error.Error(), "secure socks proxy") != viaProxy {
+			t.Errorf("viaProxy=%v: panel error = %v", viaProxy, dr.Error)
+		}
+
+		rec := httptest.NewRecorder()
+		d.newRouter().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/query", strings.NewReader(`{"objectType":"dcim/devices"}`)))
+		if body := rec.Body.String(); rec.Code < 400 || strings.Contains(body, "secure socks proxy") != viaProxy {
+			t.Errorf("viaProxy=%v: resource answer = %d %s", viaProxy, rec.Code, body)
+		}
 	}
-	dr := resp.Responses["A"]
-	if dr.Error == nil || !strings.Contains(dr.Error.Error(), "secure socks proxy") {
-		t.Errorf("response error = %v, want the proxy named", dr.Error)
-	}
+}
+
+// namesTheProxy reports whether a message blames Grafana's secure socks proxy
+// or the PDC agent. The bare word "proxy" is not enough: the not-JSON cause
+// asks whether an HTTP proxy or login page answered, which is about the URL.
+func namesTheProxy(msg string) bool {
+	return strings.Contains(msg, "secure socks proxy") || strings.Contains(msg, "PDC")
 }

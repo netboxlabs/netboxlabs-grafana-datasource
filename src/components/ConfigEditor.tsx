@@ -176,7 +176,7 @@ export function ConfigEditor(props: Props) {
       {/* How a NetBox on a private network is reached. The switch sets
           jsonData.enableSecureSocksProxy, which the plugin SDK honours when it
           builds the HTTP client (newHTTPClient in pkg/plugin/datasource.go), so
-          the backend needs nothing of its own.
+          the routing needs nothing of the backend's own.
 
           Gated the way Grafana's own data sources gate it. Grafana sets
           secureSocksDSProxyEnabled when [secure_socks_datasource_proxy] is
@@ -184,9 +184,20 @@ export function ConfigEditor(props: Props) {
           instead, which Grafana 10 removed, so following it hides the switch
           everywhere. On Grafana Cloud the flag is false: Grafana's PDC app adds a
           network selector to this page itself, for plugins Grafana lists as
-          supporting PDC. */}
+          supporting PDC.
+
+          The switch is handed the SDK's reading of the flag: only the JSON
+          boolean true routes through the proxy, so a "true" or 1 written by the
+          API or a provisioning file shows as off — which it is — instead of the
+          on Grafana's switch would show for any truthy value. */}
       {config.secureSocksDSProxyEnabled && (
-        <SecureSocksProxySettings options={options} onOptionsChange={onOptionsChange} />
+        <SecureSocksProxySettings
+          options={{
+            ...options,
+            jsonData: { ...jsonData, enableSecureSocksProxy: jsonData.enableSecureSocksProxy === true },
+          }}
+          onOptionsChange={onOptionsChange}
+        />
       )}
     </>
   );

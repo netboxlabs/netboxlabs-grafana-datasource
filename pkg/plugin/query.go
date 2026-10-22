@@ -480,10 +480,23 @@ func healthErrorMessage(err error, viaProxy bool) string {
 		}
 		return fmt.Sprintf("NetBox returned HTTP %d", u.Status)
 	}
-	if viaProxy {
-		return "Cannot reach NetBox through the secure socks proxy: " + transportCause(err) + ". Check that the proxy is running and can reach the NetBox URL (on Grafana Cloud, the PDC agent of the selected network); the Grafana server log has the full error."
+	if cause := transportCause(err); viaProxy && proxyMayBeAtFault(cause) {
+		return "Cannot reach NetBox through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach the NetBox URL (on Grafana Cloud, the PDC agent of the selected network); the Grafana server log has the full error."
 	}
 	return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
+}
+
+// proxyMayBeAtFault reports whether a transport failure can be the secure socks
+// proxy's. A body that is not JSON and a redirect came back through it — the
+// route works and the URL is wrong — and a URL with no scheme was never sent;
+// naming the proxy for those would point the reader at the one hop that did
+// its job.
+func proxyMayBeAtFault(cause string) bool {
+	switch cause {
+	case causeNotJSON, causeRedirected, causeNoScheme:
+		return false
+	}
+	return true
 }
 
 // maxUpstreamDetail bounds a user-supplied string echoed in a user-facing
@@ -658,7 +671,7 @@ func queryErrorMessage(err error, viaProxy bool) string {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
 		}
 	}
-	if viaProxy {
+	if viaProxy && proxyMayBeAtFault(transportCause(err)) {
 		return "Couldn't reach NetBox through the secure socks proxy: " + transportCause(err) + ". Check that the proxy is running and can reach NetBox (on Grafana Cloud, the PDC agent); the Grafana server log has the full error."
 	}
 	return "Couldn't reach NetBox: " + transportCause(err) + ". The Grafana server log has the full error."

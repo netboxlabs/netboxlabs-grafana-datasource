@@ -96,14 +96,15 @@ func LoadPluginSettings(source backend.DataSourceInstanceSettings) (*PluginSetti
 //     inside the SDK on every request (an unchecked type assertion) — typically
 //     a placeholder left blank in YAML, which is null;
 //   - an enableSecureSocksProxy that is not a JSON boolean is read as off, so
-//     one written to mean on ("true", 1) sends every request direct while
-//     Grafana's switch shows it on.
+//     one written to mean on ("true", 1) sends every request direct.
 //
 // A flag that reads as off ("false", 0) is accepted as off, which is what the
-// SDK and Grafana make of it: refusing it would break a datasource that works.
-// The error is the datasource's settings, not the plugin, so it is classified
-// downstream: Grafana then shows the message on panels too, not "An error
-// occurred within the plugin".
+// SDK and Grafana's server make of it: refusing it would break a datasource
+// that works. (The settings page shows the SDK's reading too — see the
+// ConfigEditor.) The error is the datasource's settings, not the plugin, so it
+// is classified downstream: Grafana then shows the message on panels too, not
+// "An error occurred within the plugin". It describes the value rather than
+// echoing it, since panels show it to every viewer.
 func checkSecureSocksProxyFields(jsonData json.RawMessage) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(jsonData, &fields); err != nil {
@@ -112,7 +113,7 @@ func checkSecureSocksProxyFields(jsonData json.RawMessage) error {
 	flag, enabled := fields["enableSecureSocksProxy"], false
 	if len(flag) > 0 && string(flag) != "null" && json.Unmarshal(flag, &enabled) != nil && readsAsOn(flag) {
 		return backend.DownstreamError(fmt.Errorf(
-			"enableSecureSocksProxy must be true or false, not %s: any other value is read as off, so this datasource would not use the proxy", flag))
+			"enableSecureSocksProxy must be the JSON boolean true or false, not %s: any other value is read as off, so this datasource would not use the proxy", jsonKind(flag)))
 	}
 	username, present := fields["secureSocksProxyUsername"]
 	if !enabled || !present {
@@ -120,9 +121,31 @@ func checkSecureSocksProxyFields(jsonData json.RawMessage) error {
 	}
 	var s string
 	if string(username) == "null" || json.Unmarshal(username, &s) != nil {
-		return backend.DownstreamError(fmt.Errorf("secureSocksProxyUsername must be the PDC network's ID, a string, not %s", username))
+		return backend.DownstreamError(fmt.Errorf("secureSocksProxyUsername must be the PDC network's ID, a string, not %s", jsonKind(username)))
 	}
 	return nil
+}
+
+// jsonKind names the JSON type of a value, for a message that must not echo
+// the value itself.
+func jsonKind(raw json.RawMessage) string {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return "malformed JSON"
+	}
+	switch v.(type) {
+	case nil:
+		return "null"
+	case bool:
+		return "a boolean"
+	case float64:
+		return "a number"
+	case string:
+		return "a string"
+	case []any:
+		return "an array"
+	}
+	return "an object"
 }
 
 // readsAsOn reports whether a flag that is not a JSON boolean was written to

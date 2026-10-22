@@ -242,9 +242,33 @@ plugin catalog and signed by Grafana (Cloud cannot load private/unsigned plugins
 
 - **Public NetBox** (internet-reachable URL): the Cloud-hosted backend calls it directly.
 - **Private NetBox** (VPC / on-prem): use **[Private Data Source Connect (PDC)](https://grafana.com/docs/grafana-cloud/connect-externally-hosted/private-data-source-connect/)**.
-  PDC supports backend datasource plugins, and this plugin builds its HTTP client from the
-  Grafana SDK (`backend/httpclient`) so PDC's secure tunnel, proxy and TLS settings are
-  honored automatically. No plugin changes are needed by the customer.
+  Run Grafana's [PDC agent](https://grafana.com/docs/grafana-cloud/connect-externally-hosted/private-data-source-connect/configure-pdc/)
+  inside that network; it needs outbound access to Grafana Cloud's PDC endpoints on ports 22
+  and 443. Give the datasource NetBox's internal URL, as a host inside the network reaches it,
+  and route it through the PDC network:
+  - **On the settings page:** Grafana Cloud adds a **Private data source connect** section with
+    a network selector, but only for plugins Grafana lists as supporting PDC. Until this plugin
+    is on that list, use the API or a provisioning file.
+  - **Through the API or a provisioning file:** set both fields below. The network is named by
+    its ID, not its name: without the ID, Grafana Cloud does not route the connection.
+
+    ```yaml
+    jsonData:
+      url: https://netbox.internal.example.com
+      enableSecureSocksProxy: true
+      secureSocksProxyUsername: <PDC network ID>
+    ```
+
+    The network ID is what Grafana's Terraform provider exposes as `pdc_network_id` on
+    `grafana_cloud_private_data_source_connect_network`: the ID of the access policy behind the
+    network.
+
+  The backend builds its HTTP client from the Grafana SDK, which applies the proxy, so nothing
+  else in the plugin needs configuring.
+
+On **self-hosted Grafana** with a [secure SOCKS5 data source proxy](https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/proxy/)
+configured, the settings page shows a **Secure Socks Proxy** switch that routes the
+datasource through it.
 
 The backend ships binaries for `linux/amd64` and `linux/arm64` (Cloud) plus the full
 catalog target matrix (darwin/windows/arm).

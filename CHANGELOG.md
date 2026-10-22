@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A private NetBox can be reached through Grafana's secure socks proxy from
+  the settings page.** On self-hosted Grafana with the secure SOCKS5 data source
+  proxy configured, the page shows a **Secure Socks Proxy** switch; before, the
+  proxy could only be turned on through the API. On Grafana Cloud, the README
+  now gives the two fields that route a datasource through Private Data Source
+  Connect: `enableSecureSocksProxy`, and `secureSocksProxyUsername` set to the
+  PDC network's ID. Editing the API token no longer discards other unsaved
+  secrets on the page.
+
 - **Go 1.26.9 and `golang.org/x/net` 0.60.0.** The backend is built with fixes
   for advisories published on 2026-10-08 in Go's HTTP/1 and HTTP/2 handling,
   MIME header parsing, TLS and `html/template` (GO-2026-6599, 6600, 6603,

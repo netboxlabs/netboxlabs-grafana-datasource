@@ -1,7 +1,12 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
+import { config } from '@grafana/runtime';
 import { ConfigEditor, FAST_PAGING_TOOLTIP } from './ConfigEditor';
 import { NetBoxDataSourceOptions } from '../types';
+
+jest.mock('@grafana/runtime', () => ({
+  config: { secureSocksDSProxyEnabled: false },
+}));
 
 function makeOptions(jsonData: Partial<NetBoxDataSourceOptions> = {}, overrides: Record<string, unknown> = {}) {
   return {
@@ -151,5 +156,68 @@ describe('fast paging setting', () => {
   it('reflects an enabled setting', () => {
     setup({ fastPagingNoTotals: true });
     expect(screen.getByRole('switch', { name: /fast paging/i })).toBeChecked();
+  });
+});
+
+// The secure socks proxy is how a NetBox on a private network is reached:
+// Private Data Source Connect on Grafana Cloud, a SOCKS proxy the admin runs on
+// self-hosted Grafana. The backend already routes through it whenever
+// jsonData.enableSecureSocksProxy is true, so without this switch the only way
+// to turn it on is the API or a provisioning file.
+describe('secure socks proxy', () => {
+  afterEach(() => {
+    config.secureSocksDSProxyEnabled = false;
+  });
+
+  // Grafana's own components read the same flag. It is false when the server
+  // has no proxy configured, and on Grafana Cloud, where the PDC app renders
+  // its own network selector instead (show_ui = false).
+  it('is not offered when the Grafana server has no proxy to offer', () => {
+    setup();
+    expect(screen.queryByText('Secure Socks Proxy')).not.toBeInTheDocument();
+  });
+
+  function proxySwitch() {
+    return within(screen.getByText('Secure Socks Proxy').parentElement as HTMLElement).getByRole('switch');
+  }
+
+  it('is offered, and off, when the server has one', () => {
+    config.secureSocksDSProxyEnabled = true;
+    setup();
+    expect(proxySwitch()).not.toBeChecked();
+  });
+
+  it('routes this datasource through the proxy when switched on', () => {
+    config.secureSocksDSProxyEnabled = true;
+    const { onOptionsChange } = setup({ url: 'https://netbox.internal' });
+    fireEvent.click(proxySwitch());
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jsonData: expect.objectContaining({ enableSecureSocksProxy: true, url: 'https://netbox.internal' }),
+      })
+    );
+  });
+
+  it('reflects a datasource that already routes through it', () => {
+    config.secureSocksDSProxyEnabled = true;
+    setup({ enableSecureSocksProxy: true });
+    expect(proxySwitch()).toBeChecked();
+  });
+});
+
+// secureJsonData holds every secret not saved yet, not only ours. On Grafana
+// Cloud the PDC network selector writes secureSocksProxyPassword into it on the
+// same page, so typing a token must not discard what another control set.
+describe('API token', () => {
+  it('keeps the other unsaved secrets when the token is edited', () => {
+    const { onOptionsChange } = setup({}, { secureJsonData: { secureSocksProxyPassword: 'from-pdc' } });
+    fireEvent.change(screen.getByPlaceholderText('nbt_… or a 40-character token'), {
+      target: { value: 'nbt_abc.def' },
+    });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        secureJsonData: { secureSocksProxyPassword: 'from-pdc', apiToken: 'nbt_abc.def' },
+      })
+    );
   });
 });

@@ -3,6 +3,8 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
@@ -86,37 +88,53 @@ func LoadPluginSettings(source backend.DataSourceInstanceSettings) (*PluginSetti
 	return &settings, nil
 }
 
-// checkSecureSocksProxyFields refuses the secure socks proxy settings in a
-// shape the plugin SDK cannot use. The SDK reads them itself when it builds
-// the HTTP client, and trusts their JSON types: with the proxy on, a
-// secureSocksProxyUsername that is not a string panics inside the SDK on every
-// request (an unchecked type assertion), and an enableSecureSocksProxy that is
-// not a boolean is read as "off" while Grafana's switch shows it on, so the
-// requests quietly go direct. Neither shape comes from the settings page; both
-// come from a hand-written API call or provisioning file, where a placeholder
-// left blank is a YAML null.
+// checkSecureSocksProxyFields refuses the secure socks proxy settings in the
+// two shapes that break something. The SDK reads them itself when it builds
+// the HTTP client, by exact key, and trusts their JSON types:
+//
+//   - with the proxy on, a secureSocksProxyUsername that is not a string panics
+//     inside the SDK on every request (an unchecked type assertion) — typically
+//     a placeholder left blank in YAML, which is null;
+//   - an enableSecureSocksProxy that is not a JSON boolean is read as off, so
+//     one written to mean on ("true", 1) sends every request direct while
+//     Grafana's switch shows it on.
+//
+// A flag that reads as off ("false", 0) is accepted as off, which is what the
+// SDK and Grafana make of it: refusing it would break a datasource that works.
+// The error is the datasource's settings, not the plugin, so it is classified
+// downstream: Grafana then shows the message on panels too, not "An error
+// occurred within the plugin".
 func checkSecureSocksProxyFields(jsonData json.RawMessage) error {
-	var fields struct {
-		Enable   json.RawMessage `json:"enableSecureSocksProxy"`
-		Username json.RawMessage `json:"secureSocksProxyUsername"`
-	}
+	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(jsonData, &fields); err != nil {
 		return fmt.Errorf("could not unmarshal PluginSettings json: %w", err)
 	}
-	var enabled bool
-	if len(fields.Enable) > 0 && string(fields.Enable) != "null" {
-		if err := json.Unmarshal(fields.Enable, &enabled); err != nil {
-			return fmt.Errorf("enableSecureSocksProxy must be true or false, not %s", fields.Enable)
-		}
+	flag, enabled := fields["enableSecureSocksProxy"], false
+	if len(flag) > 0 && string(flag) != "null" && json.Unmarshal(flag, &enabled) != nil && readsAsOn(flag) {
+		return backend.DownstreamError(fmt.Errorf(
+			"enableSecureSocksProxy must be true or false, not %s: any other value is read as off, so this datasource would not use the proxy", flag))
 	}
-	if !enabled || len(fields.Username) == 0 {
+	username, present := fields["secureSocksProxyUsername"]
+	if !enabled || !present {
 		return nil
 	}
-	var username string
-	if err := json.Unmarshal(fields.Username, &username); err != nil || string(fields.Username) == "null" {
-		return fmt.Errorf("secureSocksProxyUsername must be the PDC network's ID, a string, not %s", fields.Username)
+	var s string
+	if string(username) == "null" || json.Unmarshal(username, &s) != nil {
+		return backend.DownstreamError(fmt.Errorf("secureSocksProxyUsername must be the PDC network's ID, a string, not %s", username))
 	}
 	return nil
+}
+
+// readsAsOn reports whether a flag that is not a JSON boolean was written to
+// mean on: a string strconv.ParseBool reads as true, or a non-zero number.
+func readsAsOn(raw json.RawMessage) bool {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		on, err := strconv.ParseBool(strings.TrimSpace(s))
+		return err == nil && on
+	}
+	var n float64
+	return json.Unmarshal(raw, &n) == nil && n != 0
 }
 
 func loadSecretPluginSettings(source map[string]string) *SecretPluginSettings {

@@ -117,8 +117,8 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
    * The plugin SDK reads it when it builds the HTTP client; no plugin code does. */
   enableSecureSocksProxy?: boolean;
   /** The proxy username. On Grafana Cloud it names the PDC network (its ID, a
-   * UUID), written by Grafana's network selector or set when provisioning. When
-   * unset the SDK sends the datasource UID, which Grafana Cloud does not route. */
+   * UUID), written by Grafana's network selector or set through the API. When
+   * unset the SDK sends the datasource UID instead, which is not a network ID. */
   secureSocksProxyUsername?: string;
 }
 

@@ -11,9 +11,21 @@
   The README gives the two `jsonData` fields that route it through a PDC network
   over the API: `enableSecureSocksProxy`, and `secureSocksProxyUsername` set to
   the network's ID.
+- **Failures through the secure SOCKS proxy say so.** For a datasource routed
+  through the proxy, Save & test and query errors read "through the secure
+  socks proxy" and point at the proxy — on Grafana Cloud, the PDC agent —
+  rather than at the NetBox URL. Before, a stopped agent, or one whose traffic
+  to NetBox is dropped, read as "Cannot reach NetBox … Check the NetBox URL".
+- **Proxy settings the plugin SDK cannot use are refused by name.** With the
+  proxy on, a `secureSocksProxyUsername` that is not a string (a placeholder
+  left blank in a provisioning file is null) made every request fail inside
+  the SDK; an `enableSecureSocksProxy` written to mean on but not as a JSON
+  boolean (`"true"`, `1`) silently left the proxy off. Both now fail with a
+  message naming the setting, on Save & test and on panels. A flag that reads
+  as off (`"false"`, `0`) is still accepted as off.
 - **Editing the API token keeps the page's other unsaved secrets.** The token
-  field replaced every secret not saved yet, including any another control on
-  the page had set. It now changes only the token.
+  field replaced every secret not saved yet, including any that another control
+  on the page had set. It now changes only the token.
 
 - **Go 1.26.9 and `golang.org/x/net` 0.60.0.** The backend is built with fixes
   for advisories published on 2026-10-08 in Go's HTTP/1 and HTTP/2 handling,

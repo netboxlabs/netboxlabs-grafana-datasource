@@ -267,9 +267,11 @@ plugin catalog and signed by Grafana (Cloud cannot load private/unsigned plugins
     not route. To find the ID, select the network under **Connections → Private data source
     connections**; Grafana's Terraform provider exposes it as `pdc_network_id`.
 
-  If **Save & test** reports that the hostname could not be resolved, the request did not go
-  through PDC. Nothing else in the plugin needs configuring: the backend builds its HTTP client
-  from the Grafana SDK, which applies the proxy.
+  A datasource routed through the proxy says so when it fails: **Save & test** reports
+  "Cannot reach NetBox through the secure socks proxy", and names the PDC agent as the hop to
+  check. A failure message without that phrase means the request was not routed through PDC.
+  Nothing else in the plugin needs configuring: the backend builds its HTTP client from the
+  Grafana SDK, which applies the proxy.
 
 The backend ships binaries for `linux/amd64` and `linux/arm64` (Cloud) plus the full
 catalog target matrix (darwin/windows/arm).

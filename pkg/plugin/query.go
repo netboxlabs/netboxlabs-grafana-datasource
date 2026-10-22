@@ -114,7 +114,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			Limit:       qm.Limit,
 		})
 		if err != nil {
-			return queryErrorResponse(err)
+			return d.queryErrorResponse(err)
 		}
 		frame := buildAnnotationsFrame(changes)
 		frame.RefID = q.RefID
@@ -159,7 +159,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			res, err = d.provider.ResolveIPs(ctx, ips, fields, qm.Limit)
 		}
 		if err != nil {
-			return queryErrorResponse(err)
+			return d.queryErrorResponse(err)
 		}
 		// Alert evaluation converts this frame to numeric-multi and drops
 		// meta.notices, so the truncation and degradation notices appended below
@@ -205,7 +205,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			IncludeBoundaryPeers: qm.QueryType == queryTypeTopologyEdges,
 		})
 		if err != nil {
-			return queryErrorResponse(err)
+			return d.queryErrorResponse(err)
 		}
 		if qm.QueryType == queryTypeTopologyEdges {
 			// A truncated traversal is not a smaller answer to this question, it is
@@ -260,7 +260,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			CountOnly:  true,
 		})
 		if err != nil {
-			return queryErrorResponse(err)
+			return d.queryErrorResponse(err)
 		}
 		frame := buildCountFrame(qm.ObjectType, res.Total)
 		frame.RefID = q.RefID
@@ -281,7 +281,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			Limit:      qm.Limit,
 		})
 		if err != nil {
-			return queryErrorResponse(err)
+			return d.queryErrorResponse(err)
 		}
 		if qm.ValueField != "" && !slices.Contains(res.Columns, qm.ValueField) {
 			return backend.ErrDataResponse(backend.StatusBadRequest,
@@ -342,7 +342,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		AllowUncounted: !c.strict(),
 	})
 	if err != nil {
-		return queryErrorResponse(err)
+		return d.queryErrorResponse(err)
 	}
 
 	// The same argument that gates the paging above applies to the RESULT: an
@@ -462,7 +462,12 @@ func splitList(s string) []string {
 }
 
 // healthErrorMessage maps an upstream error to a concise, user-facing message.
-func healthErrorMessage(err error) string {
+// viaProxy is whether the datasource goes through Grafana's secure socks proxy
+// (see Datasource.viaProxy): a transport failure then names the proxy as the
+// hop to check, because told only "the connection was refused" a reader checks
+// NetBox and its URL, and on Grafana Cloud they cannot open the server log the
+// message points to.
+func healthErrorMessage(err error, viaProxy bool) string {
 	// Status 0 means the provider classified something that was not an HTTP
 	// refusal; there is no code to report, so fall through to the transport
 	// message rather than printing "HTTP 0".
@@ -475,25 +480,10 @@ func healthErrorMessage(err error) string {
 		}
 		return fmt.Sprintf("NetBox returned HTTP %d", u.Status)
 	}
-	if throughProxy(err) {
+	if viaProxy {
 		return "Cannot reach NetBox through the secure socks proxy: " + transportCause(err) + ". Check that the proxy is running and can reach the NetBox URL (on Grafana Cloud, the PDC agent of the selected network); the Grafana server log has the full error."
 	}
 	return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
-}
-
-// throughProxy reports whether a transport failure happened on the way through
-// Grafana's secure socks proxy (Private Data Source Connect on Grafana Cloud)
-// rather than on a direct connection. The SOCKS dialer the SDK installs wraps
-// every failure, reaching the proxy or the proxy reaching NetBox, in a
-// *net.OpError whose Op is "socks connect".
-//
-// It matters because of who reads the message. Told only that "the connection
-// was refused", a reader checks NetBox and its URL, when the hop that failed is
-// the proxy or the agent behind it, and on Grafana Cloud they cannot open the
-// server log the message points to.
-func throughProxy(err error) bool {
-	var opErr *net.OpError
-	return errors.As(err, &opErr) && strings.HasPrefix(opErr.Op, "socks")
 }
 
 // maxUpstreamDetail bounds a user-supplied string echoed in a user-facing
@@ -631,7 +621,9 @@ const (
 // queryErrorMessage maps an upstream error to a concise, user-facing message so
 // raw NetBox API errors (500/405/etc.) and exception bodies aren't surfaced to
 // the user. The raw error is logged separately (sanitized) for operators.
-func queryErrorMessage(err error) string {
+// viaProxy names the secure socks proxy in a transport failure, as
+// healthErrorMessage does.
+func queryErrorMessage(err error, viaProxy bool) string {
 	if u := provider.Classify(err); u != nil {
 		switch u.Kind {
 		// An object type the upstream does not know is the USER's input, not an
@@ -666,17 +658,17 @@ func queryErrorMessage(err error) string {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
 		}
 	}
-	if throughProxy(err) {
-		return "Couldn't reach NetBox through the secure socks proxy: " + transportCause(err) + ". Check that the proxy (on Grafana Cloud, the PDC agent) can reach NetBox; the Grafana server log has the full error."
+	if viaProxy {
+		return "Couldn't reach NetBox through the secure socks proxy: " + transportCause(err) + ". Check that the proxy is running and can reach NetBox (on Grafana Cloud, the PDC agent); the Grafana server log has the full error."
 	}
 	return "Couldn't reach NetBox: " + transportCause(err) + ". The Grafana server log has the full error."
 }
 
 // queryErrorResponse logs the raw upstream error (sanitized) and returns a data
 // response carrying only the user-facing mapped message.
-func queryErrorResponse(err error) backend.DataResponse {
+func (d *Datasource) queryErrorResponse(err error) backend.DataResponse {
 	log.DefaultLogger.Warn("netbox query error", "detail", sanitizeLog(err.Error()))
-	return backend.ErrDataResponse(queryErrorStatus(err), queryErrorMessage(err))
+	return backend.ErrDataResponse(queryErrorStatus(err), queryErrorMessage(err, d.viaProxy))
 }
 
 // queryErrorStatus says whose fault the failure is. Everything upstream —

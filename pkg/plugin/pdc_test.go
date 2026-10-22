@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -48,6 +49,10 @@ type socksServer struct {
 	// proxy is up but cannot reach NetBox, like a PDC agent outside NetBox's
 	// network.
 	refuse bool
+	// silent never answers a CONNECT: an agent whose traffic to NetBox is
+	// dropped by a firewall, the most common PDC failure. The request then
+	// times out, and net/http's timeout error no longer carries the proxy.
+	silent bool
 	mu     sync.Mutex
 	seen   []socksConnect
 }
@@ -60,6 +65,9 @@ func (s *socksServer) connects() []socksConnect {
 
 // refusing makes startSOCKS5's proxy refuse every CONNECT.
 func refusing(s *socksServer) { s.refuse = true }
+
+// silent makes startSOCKS5's proxy leave every CONNECT unanswered.
+func silent(s *socksServer) { s.silent = true }
 
 // startSOCKS5 runs a SOCKS5 proxy (RFC 1928, with RFC 1929 username/password)
 // that relays every CONNECT and records it. It prefers username/password when
@@ -170,6 +178,10 @@ func (s *socksServer) serve(c net.Conn) {
 	target := net.JoinHostPort(host, strconv.Itoa(int(binary.BigEndian.Uint16(port))))
 	if s.refuse {
 		_, _ = c.Write([]byte{5, 5, 0, 1, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	if s.silent {
+		_, _ = io.Copy(io.Discard, r) // hold the connection until the client gives up
 		return
 	}
 	up, err := net.Dial("tcp", target)
@@ -285,9 +297,9 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 		}
 	})
 
-	// Without a network name the SDK falls back to the datasource UID. Grafana
-	// Cloud does not route that, but a self-hosted proxy may not care, and the
-	// switch on the settings page sets no username.
+	// Without a network name the SDK falls back to the datasource UID, which is
+	// what a self-hosted proxy receives from the settings-page switch (it sets
+	// no username). On Grafana Cloud the username has to be the network's ID.
 	t.Run("sends the datasource UID when no network is named", func(t *testing.T) {
 		netbox := newFakeNetBox(t)
 		socks := startSOCKS5(t)
@@ -333,9 +345,7 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 		if n := netbox.hits.Load(); n != 0 {
 			t.Errorf("%d request(s) reached NetBox directly", n)
 		}
-		if !strings.Contains(res.Message, "secure socks proxy") {
-			t.Errorf("message %q does not name the proxy, the hop that failed", res.Message)
-		}
+		assertNamesTheProxyOnly(t, res.Message, deadProxy, netbox.URL)
 	})
 
 	// The proxy is up but cannot reach NetBox. On Grafana Cloud the reader
@@ -348,20 +358,99 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 		if res.Status != backend.HealthStatusError {
 			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
 		}
-		for _, want := range []string{"secure socks proxy", "PDC agent"} {
-			if !strings.Contains(res.Message, want) {
-				t.Errorf("message %q does not mention %q", res.Message, want)
-			}
+		assertNamesTheProxyOnly(t, res.Message, socks.addr, netbox.URL)
+	})
+
+	// The agent's traffic to NetBox is dropped, so the CONNECT is never
+	// answered and the request times out. net/http's timeout error carries no
+	// trace of the proxy, which is why the wording is decided from the
+	// datasource's settings rather than from the error.
+	t.Run("names the proxy when it never answers", func(t *testing.T) {
+		netbox := newFakeNetBox(t)
+		socks := startSOCKS5(t, silent)
+		res := saveAndTest(t, socks.addr, map[string]any{"url": netbox.URL, "enableSecureSocksProxy": true, "timeoutSeconds": 1})
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
+		}
+		if !strings.Contains(res.Message, "timed out") {
+			t.Errorf("message %q does not say the request timed out", res.Message)
+		}
+		assertNamesTheProxyOnly(t, res.Message, socks.addr, netbox.URL)
+	})
+
+	t.Run("does not mention a proxy the datasource does not use", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		deadNetBox := "http://" + ln.Addr().String()
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		socks := startSOCKS5(t)
+		res := saveAndTest(t, socks.addr, map[string]any{"url": deadNetBox})
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
+		}
+		if strings.Contains(res.Message, "proxy") || strings.Contains(res.Message, "PDC") {
+			t.Errorf("message %q blames a proxy this datasource does not use", res.Message)
 		}
 	})
 }
 
-// A query failing at the proxy says so too, and still prints no address.
-func TestQueryErrorMessage_NamesTheSecureSocksProxy(t *testing.T) {
-	err := fmt.Errorf("request failed: %w", &net.OpError{Op: "socks connect", Net: "tcp",
-		Err: errors.New("unknown error connection refused")})
-	msg := queryErrorMessage(err)
-	if !strings.Contains(msg, "secure socks proxy") || !strings.Contains(msg, "refused") {
-		t.Errorf("message = %q, want the proxy named and the cause", msg)
+// assertNamesTheProxyOnly checks a failure message names the proxy as the hop
+// to look at, and prints neither the proxy's nor NetBox's address: the
+// catalogue review requires that no message carry a host, port or path.
+func assertNamesTheProxyOnly(t *testing.T, msg, proxyAddr, netboxURL string) {
+	t.Helper()
+	for _, want := range []string{"secure socks proxy", "PDC agent"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q does not mention %q", msg, want)
+		}
+	}
+	for _, leak := range []string{proxyAddr, strings.TrimPrefix(netboxURL, "http://")} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("message %q leaks %q", msg, leak)
+		}
+	}
+}
+
+// A query on a proxied datasource names the proxy too, and a direct one does
+// not; neither prints the addresses the transport error carries.
+func TestQueryErrorMessage_SecureSocksProxy(t *testing.T) {
+	err := fmt.Errorf("request failed: %w", &net.OpError{Op: "dial", Net: "tcp",
+		Source: &net.TCPAddr{IP: net.IPv4(10, 1, 2, 3), Port: 40123},
+		Addr:   &net.TCPAddr{IP: net.IPv4(10, 9, 9, 9), Port: 8443},
+		Err:    syscall.ECONNREFUSED})
+	proxied, direct := queryErrorMessage(err, true), queryErrorMessage(err, false)
+	if !strings.Contains(proxied, "secure socks proxy") || !strings.Contains(proxied, "refused") {
+		t.Errorf("proxied message = %q, want the proxy named and the cause", proxied)
+	}
+	if strings.Contains(direct, "proxy") {
+		t.Errorf("direct message = %q mentions a proxy", direct)
+	}
+	for _, msg := range []string{proxied, direct} {
+		for _, leak := range []string{"10.1.2.3", "40123", "10.9.9.9", "8443"} {
+			if strings.Contains(msg, leak) {
+				t.Errorf("message %q leaks %q", msg, leak)
+			}
+		}
+	}
+}
+
+// The panel path, not only Save & test: a proxied datasource's query failure
+// names the proxy.
+func TestQueryData_TransportFailureThroughProxyIsNamed(t *testing.T) {
+	d := newTestDatasource(&fakeProvider{queryErr: fmt.Errorf("request failed: %w", errors.New("i/o timeout"))})
+	d.viaProxy = true
+	resp, err := d.QueryData(context.Background(), &backend.QueryDataRequest{
+		Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(`{"queryType":"objects","objectType":"dcim/devices"}`)}},
+	})
+	if err != nil {
+		t.Fatalf("QueryData: %v", err)
+	}
+	dr := resp.Responses["A"]
+	if dr.Error == nil || !strings.Contains(dr.Error.Error(), "secure socks proxy") {
+		t.Errorf("response error = %v, want the proxy named", dr.Error)
 	}
 }

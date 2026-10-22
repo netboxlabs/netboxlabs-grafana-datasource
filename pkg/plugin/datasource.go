@@ -11,6 +11,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/httpclient"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/proxy"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/resource/httpadapter"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/models"
@@ -32,6 +33,13 @@ type Datasource struct {
 	cfg             *models.PluginSettings
 	provider        provider.Provider
 	resourceHandler backend.CallResourceHandler
+	// viaProxy is whether this datasource's requests go through Grafana's secure
+	// socks proxy (Private Data Source Connect on Grafana Cloud). Failure
+	// messages read it to name the proxy as the hop to check. It is taken from
+	// the settings the SDK applied, not guessed from an error: a request that
+	// times out behind the proxy returns net/http's timeout error, which carries
+	// no trace of the proxy at all.
+	viaProxy bool
 }
 
 // NewDatasource creates a new datasource instance for a given configuration.
@@ -40,7 +48,7 @@ func NewDatasource(ctx context.Context, settings backend.DataSourceInstanceSetti
 	if err != nil {
 		return nil, err
 	}
-	httpClient, err := newHTTPClient(ctx, cfg, settings)
+	httpClient, viaProxy, err := newHTTPClient(ctx, cfg, settings)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +56,7 @@ func NewDatasource(ctx context.Context, settings backend.DataSourceInstanceSetti
 	if err != nil {
 		return nil, err
 	}
-	ds := &Datasource{cfg: cfg, provider: p}
+	ds := &Datasource{cfg: cfg, provider: p, viaProxy: viaProxy}
 	ds.resourceHandler = httpadapter.New(ds.newRouter())
 	return ds, nil
 }
@@ -57,11 +65,15 @@ func NewDatasource(ctx context.Context, settings backend.DataSourceInstanceSetti
 // Grafana's proxy/TLS/timeout config and Private Data Source Connect (PDC) — the
 // path to a customer's private NetBox from Grafana Cloud — are applied
 // automatically. PDC requires a backend datasource using this client.
-func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings backend.DataSourceInstanceSettings) (*http.Client, error) {
+//
+// It also reports whether the client goes through the secure socks proxy, by
+// the SDK's own test of the options it applies.
+func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings backend.DataSourceInstanceSettings) (_ *http.Client, viaProxy bool, _ error) {
 	opts, err := settings.HTTPClientOptions(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("http client options: %w", err)
+		return nil, false, fmt.Errorf("http client options: %w", err)
 	}
+	viaProxy = opts.ProxyOptions != nil && proxy.New(opts.ProxyOptions).SecureSocksProxyEnabled()
 	// Apply our explicit timeout / TLS-skip config on top of Grafana's defaults.
 	timeouts := httpclient.DefaultTimeoutOptions
 	if cfg.TimeoutSeconds > 0 {
@@ -74,7 +86,8 @@ func newHTTPClient(ctx context.Context, cfg *models.PluginSettings, settings bac
 		}
 		opts.TLS.InsecureSkipVerify = true
 	}
-	return httpclient.New(opts)
+	client, err := httpclient.New(opts)
+	return client, viaProxy, err
 }
 
 // newProvider selects the enrichment backend based on the configured mode.
@@ -239,7 +252,7 @@ func (d *Datasource) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequ
 	msg, err := d.provider.HealthCheck(ctx)
 	if err != nil {
 		log.DefaultLogger.Warn("health check failed", "error", err)
-		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: healthErrorMessage(err)}, nil
+		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: healthErrorMessage(err, d.viaProxy)}, nil
 	}
 	return &backend.CheckHealthResult{Status: backend.HealthStatusOk, Message: msg}, nil
 }

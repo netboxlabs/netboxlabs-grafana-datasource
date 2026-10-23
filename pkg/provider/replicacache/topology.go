@@ -1,6 +1,7 @@
 package replicacache
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -11,14 +12,22 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/text/collate"
+	"golang.org/x/text/language"
+
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // Topology is NetBox mode's graph (netbox/enrich.go) built from the replica's
 // tables: the same devices, the same edges with the same ids and ends, the
-// same counts and the same warnings, wherever the replica holds the same data
-// — and in the same order wherever the replica orders device names as NetBox
-// does (it compares bytes; NetBox orders naturally, without regard to case). NetBox mode reads what NetBox computes — a cable's terminations as
+// same counts and the same warnings, wherever the replica holds the same data.
+// The order is NetBox mode's too, with two exceptions: a name NetBox's
+// collation orders differently from sortByNetBoxName's (see there), and more
+// devices than one of NetBox mode's requests carries (a few hundred ids in
+// its 6 KB batches), past which NetBox mode lists cables and boundary peers
+// batch by batch — the same sets, in another order.
+//
+// NetBox mode reads what NetBox computes — a cable's terminations as
 // objects, an interface's connected endpoints. The replica serves the rows
 // those are computed from, which name what they point at only by content-type
 // id, a number each NetBox assigns for itself. So nothing here reads a type
@@ -33,8 +42,11 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 		return nil, err
 	}
 	// The devices through Query, so that the topology's filters are NetBox's
-	// filters answered as an objects query answers them, ordered by name as
-	// NetBox's device list is. The link is read off the rows when there is one
+	// filters answered as an objects query answers them. The replica sorts
+	// names by their bytes, which picks the devices a limit keeps (the first by
+	// bytes, a known divergence); they are then put in NetBox's own order
+	// (sortByNetBoxName), which every read below, and so every edge's
+	// direction, follows. The link is read off the rows when there is one
 	// to build (Query adds it to every row then) and is not asked for by name:
 	// a replica with no NetBox to link to would otherwise report display_url
 	// missing, a warning that fails every rule over a complete graph.
@@ -54,6 +66,7 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 	}
 	st := &readStats{}
 	st.note(res.DataAsOf)
+	sortByNetBoxName(res.Rows)
 
 	nodes := make([]provider.GraphNode, 0, len(res.Rows))
 	inSet := map[string]bool{}
@@ -512,8 +525,8 @@ func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, node
 // so a row naming one carries its name, role and site, and counts those the
 // replica does not hold: the edge to one is a neighbour the caller cannot
 // see, and must be told about rather than handed a quietly shorter answer.
-// Ordered by name, as NetBox mode's read is; the status is the stored value
-// and the link the same one Query builds.
+// In NetBox's device order, as NetBox mode's read is; the status is the stored
+// value and the link the same one Query builds.
 func (p *Provider) boundaryPeerNodes(ctx context.Context, inSet map[string]bool, edges []provider.GraphEdge, linkBase string, st *readStats) (_ []provider.GraphNode, missing int, _ error) {
 	want := map[string]bool{}
 	for _, e := range edges {
@@ -530,7 +543,7 @@ func (p *Provider) boundaryPeerNodes(ctx context.Context, inSet map[string]bool,
 	if err != nil {
 		return nil, 0, err
 	}
-	params := url.Values{"fields": {"id,name,status,site_id,role_id"}, "sort": {"name"}}
+	params := url.Values{"fields": {"id,name,status,site_id,role_id"}}
 	var expand []string
 	for _, col := range e.Columns {
 		if col.Ref != nil && col.Ref.Available && (col.Ref.ExpandKey == "site" || col.Ref.ExpandKey == "role") {
@@ -544,12 +557,17 @@ func (p *Provider) boundaryPeerNodes(ctx context.Context, inSet map[string]bool,
 	if err != nil {
 		return nil, 0, err
 	}
-	var out []provider.GraphNode
+	peers := make([]map[string]interface{}, 0, len(rows))
 	for _, raw := range rows {
 		var row map[string]interface{}
 		if err := json.Unmarshal(raw, &row); err != nil || row == nil {
 			return nil, 0, &TransportError{Op: "reading dcim/devices", Err: errMalformedRow, Message: rowShapeGuidance}
 		}
+		peers = append(peers, row)
+	}
+	sortByNetBoxName(peers)
+	var out []provider.GraphNode
+	for _, row := range peers {
 		id, ok := toInt(row["id"])
 		if !ok {
 			continue
@@ -582,4 +600,50 @@ func intStrings(ids []int) []string {
 		out[i] = strconv.Itoa(id)
 	}
 	return out
+}
+
+// sortByNetBoxName puts device rows in the order NetBox lists devices:
+// ordering ('name', 'pk'), the name under the natural_sort collation NetBox
+// declares on it (Device.name, db_collation="natural_sort"; migration
+// dcim/0197 creates it as ICU und-u-kn, deterministic), so digit runs compare
+// by value and letters without regard to case first ("leaf2" before
+// "leaf10", "parity-…" before "SIN1-…"), names ICU holds equal by their
+// bytes, as PostgreSQL breaks a deterministic collation's ties, then the
+// primary key; a null name last, as PostgreSQL sorts NULL in ascending
+// order. Measured against PostgreSQL 16.15: 64 names of mixed case, digit
+// runs with and without leading zeros, and punctuation, in the same order.
+// Where Go's collation tables and the database's ICU are of different
+// Unicode versions, a name outside ASCII can sort differently, and so can a
+// digit run of value zero followed by text ("0a").
+func sortByNetBoxName(rows []map[string]interface{}) {
+	c := collate.New(language.Und, collate.Numeric)
+	var buf collate.Buffer
+	type keyed struct {
+		row  map[string]interface{}
+		name string
+		null bool
+		key  []byte
+		id   int
+	}
+	ks := make([]keyed, len(rows))
+	for i, row := range rows {
+		name, named := row["name"].(string)
+		id, _ := toInt(row["id"])
+		ks[i] = keyed{row: row, name: name, null: !named, id: id}
+		if named {
+			ks[i].key = c.KeyFromString(&buf, name)
+		}
+	}
+	slices.SortStableFunc(ks, func(a, b keyed) int {
+		if a.null != b.null {
+			if a.null {
+				return 1
+			}
+			return -1
+		}
+		return cmp.Or(bytes.Compare(a.key, b.key), strings.Compare(a.name, b.name), cmp.Compare(a.id, b.id))
+	})
+	for i, k := range ks {
+		rows[i] = k.row
+	}
 }

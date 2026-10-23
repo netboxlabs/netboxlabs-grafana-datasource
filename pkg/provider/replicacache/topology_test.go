@@ -1,6 +1,7 @@
 package replicacache
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -109,9 +110,10 @@ func reversed(s [][]topoNode) [][]topoNode {
 // 1×2 breakout, a console cable, a path through a circuit, an incomplete path
 // ending at a circuit termination, a planned (inactive) cable — plus a path
 // ending at a provider network and a complete one ending at a circuit
-// termination. Two names differ (PAR1-, LON1-): NetBox orders names
-// naturally and case-insensitively, the replica bytewise, and this model
-// keeps the two orders equal so the graphs can be compared edge for edge.
+// termination. Its names put NetBox's order and the replica's apart: the
+// replica sorts bytes, so SIN1-leaf-10 comes before SIN1-leaf-2 and every
+// SIN1- device before parity-dev-b, which links to SIN1-access-01 — the
+// edge's direction, too, depends on which order is used.
 func demoModel() topoModel {
 	m := topoModel{typeIDs: demoTypeIDs()}
 	m.devices = []topoDevice{
@@ -124,15 +126,15 @@ func demoModel() topoModel {
 		{7, "NYC1-leaf-02", "NYC1", "Leaf", "active"},
 		{8, "NYC1-access-01", "NYC1", "Access", "offline"},
 		{9, "SIN1-spine-01", "SIN1", "Spine", "active"},
-		{10, "SIN1-leaf-01", "SIN1", "Leaf", "active"},
-		{11, "SIN1-leaf-02", "SIN1", "Leaf", "active"},
+		{10, "SIN1-leaf-2", "SIN1", "Leaf", "active"},
+		{11, "SIN1-leaf-10", "SIN1", "Leaf", "active"},
 		{12, "SIN1-access-01", "SIN1", "Access", "active"},
 		{13, "AMS1-pp-01", "AMS1", "Patch Panel", "active"},
 		{14, "AMS1-ap-01", "AMS1", "Access Point", "active"},
 		{15, "AMS1-ap-02", "AMS1", "Access Point", "active"},
-		{17, "PAR1-dev-a", "PAR1", "Parity", "active"},
-		{18, "PAR1-dev-b", "PAR1", "Parity", "active"},
-		{19, "LON1-dev-c", "LON1", "Parity", "planned"},
+		{17, "parity-dev-a", "PAR1", "Parity", "active"},
+		{18, "parity-dev-b", "PAR1", "Parity", "active"},
+		{19, "parity-dev-c", "LON1", "Parity", "planned"},
 	}
 	// Nine direct device-to-device cables, each with the pair of paths NetBox
 	// writes for it.
@@ -182,7 +184,8 @@ func demoModel() topoModel {
 		iface(46, 11, "Ethernet3", 19, "A", 39),
 		topoComp{k: kCircuitTerm, id: 5, cable: 19, end: "B"},
 		// A link between sites, so PAR1's peers outside it are two, whose
-		// names (LON1-, SIN1-) are not in their ids' order (19, 12).
+		// NetBox order (parity-dev-c, SIN1-access-01) is neither their ids'
+		// (12, 19) nor their bytes'.
 		iface(47, 18, "eth3", 21, "A", 42),
 		iface(48, 12, "Ethernet2", 21, "B", 43),
 	)
@@ -225,15 +228,6 @@ func (m topoModel) path(id int) (topoPath, bool) {
 		}
 	}
 	return topoPath{}, false
-}
-
-func (m topoModel) device(id int) (topoDevice, bool) {
-	for _, d := range m.devices {
-		if d.id == id {
-			return d, true
-		}
-	}
-	return topoDevice{}, false
 }
 
 // sitesAndRoles numbers the sites and roles in order of first use.
@@ -364,7 +358,11 @@ func (m topoModel) netboxAPI(t *testing.T) *netbox.Provider {
 		return len(vs) == 0 || slices.Contains(vs, strconv.Itoa(id))
 	}
 	ordered := slices.Clone(m.devices)
-	slices.SortFunc(ordered, func(a, b topoDevice) int { return strings.Compare(a.name, b.name) })
+	slices.SortFunc(ordered, func(a, b topoDevice) int { return cmp.Or(netboxNameOrder(a.name, b.name), cmp.Compare(a.id, b.id)) })
+	rank := map[int]int{}
+	for i, d := range ordered {
+		rank[d.id] = i
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
 		var rows []interface{}
@@ -437,12 +435,9 @@ func (m topoModel) netboxAPI(t *testing.T) *netbox.Provider {
 			}
 			ifaces = append(ifaces, c)
 		}
-		name := func(c topoComp) string { d, _ := m.device(c.device); return d.name }
+		// ('device', _name): the device's own order, then the name.
 		slices.SortFunc(ifaces, func(a, b topoComp) int {
-			if n := strings.Compare(name(a), name(b)); n != 0 {
-				return n
-			}
-			return strings.Compare(a.name, b.name)
+			return cmp.Or(cmp.Compare(rank[a.device], rank[b.device]), strings.Compare(a.name, b.name))
 		})
 		var rows []interface{}
 		for _, c := range ifaces {
@@ -477,6 +472,45 @@ func (m topoModel) netboxAPI(t *testing.T) *netbox.Provider {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return netbox.New(srv.URL, "test-token", srv.Client())
+}
+
+// netboxNameOrder is how the mock NetBox orders device names: character by
+// character without regard to case, a run of digits by its value, then by
+// bytes — ICU's numeric collation as far as this file's names need it. It is
+// written apart from sortByNetBoxName so that comparing with NetBox mode does
+// not check that function against itself; TestSortByNetBoxName checks it
+// against PostgreSQL.
+func netboxNameOrder(a, b string) int {
+	digit := func(c byte) bool { return '0' <= c && c <= '9' }
+	lower := func(c byte) byte {
+		if 'A' <= c && c <= 'Z' {
+			return c + 'a' - 'A'
+		}
+		return c
+	}
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if digit(a[i]) && digit(b[j]) {
+			ei, ej := i, j
+			for ei < len(a) && digit(a[ei]) {
+				ei++
+			}
+			for ej < len(b) && digit(b[ej]) {
+				ej++
+			}
+			x, y := strings.TrimLeft(a[i:ei], "0"), strings.TrimLeft(b[j:ej], "0")
+			if c := cmp.Or(cmp.Compare(len(x), len(y)), strings.Compare(x, y)); c != 0 {
+				return c
+			}
+			i, j = ei, ej
+			continue
+		}
+		if c := cmp.Compare(lower(a[i]), lower(b[j])); c != 0 {
+			return c
+		}
+		i, j = i+1, j+1
+	}
+	return cmp.Or(cmp.Compare(len(a)-i, len(b)-j), strings.Compare(a, b))
 }
 
 // graphShape is what both modes must agree on.
@@ -795,11 +829,11 @@ func TestTopology_NoWirelessNoPanelsTablesUnfed(t *testing.T) {
 func TestTopology_BoundaryPeers(t *testing.T) {
 	g := cacheTopology(t, demoModel().fake(), provider.TopologySpec{Connections: "physical", Filters: siteFilter("par1"), IncludeBoundaryPeers: true})
 	want := []provider.GraphNode{
-		{ID: "19", Title: "LON1-dev-c", Site: "LON1", Role: "Parity", Status: "planned", URL: "https://nb/dcim/devices/19/", Boundary: true},
+		{ID: "19", Title: "parity-dev-c", Site: "LON1", Role: "Parity", Status: "planned", URL: "https://nb/dcim/devices/19/", Boundary: true},
 		{ID: "12", Title: "SIN1-access-01", Site: "SIN1", Role: "Access", Status: "active", URL: "https://nb/dcim/devices/12/", Boundary: true},
 	}
 	if len(g.Nodes) != 4 || !slices.Equal(g.Nodes[2:], want) {
-		t.Errorf("nodes %+v, want PAR1's two, then %+v by name", g.Nodes, want)
+		t.Errorf("nodes %+v, want PAR1's two, then %+v in NetBox's order", g.Nodes, want)
 	}
 	if g.Fetched != 2 || g.Total != 2 {
 		t.Errorf("fetched/total %d/%d: a boundary peer is not a fetched device", g.Fetched, g.Total)
@@ -1108,5 +1142,78 @@ func TestTopology_PhysicalSameIDAtBothEnds(t *testing.T) {
 	sameGraph(t, "same id at both ends", nb, rc)
 	if e, ok := findEdge(rc, "30"); !ok || e.Source != "2" || e.Target != "13" {
 		t.Errorf("cable 30: %+v %v, want AMS1-leaf-01 to the panel", e, ok)
+	}
+}
+
+// NetBox lists devices by name under its natural_sort collation (ICU
+// und-u-kn, deterministic), then by id. The order below is PostgreSQL's own,
+// measured on the demo NetBox's database (PostgreSQL 16.15):
+// SELECT … ORDER BY n COLLATE natural_sort.
+func TestSortByNetBoxName(t *testing.T) {
+	want := []string{"001", "1", "02", "2", "10", "a", "A", "a001", "a01", "a1", "aa", "Ab", "abc", "ABC", "abd",
+		"AMS1-access-01", "AMS1-ap-01", "AMS1-leaf-01", "b", "B", "core", "Core", "CORE", "core_1", "core-1", "core1",
+		"dev 2", "dev 10", "dev.2", "dev.10", "eth0/1", "eth0/2", "eth0/10", "leaf-2", "leaf-10", "leaf1", "leaf2",
+		"leaf03", "Leaf3", "leaf10", "node-9", "node-10", "node-100", "PAR1-dev-a", "parity-dev-a", "parity-dev-b",
+		"r1s2", "r1s10", "r10s1", "SIN1-access-01", "sw 1", "sw_1", "sw-1", "sw01", "sw1", "SW1", "sw1a", "sw1b",
+		"sw2", "sw10", "x.2", "x.10", "z", "Z"}
+	// In byte order, which is how the replica returns them, and reversed.
+	reversedNames := slices.Clone(want)
+	slices.Reverse(reversedNames)
+	for _, in := range [][]string{slices.Sorted(slices.Values(want)), reversedNames} {
+		rows := make([]map[string]interface{}, len(in))
+		for i, name := range in {
+			rows[i] = map[string]interface{}{"id": float64(i + 1), "name": name}
+		}
+		sortByNetBoxName(rows)
+		got := make([]string, len(rows))
+		for i, r := range rows {
+			got[i] = r["name"].(string)
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("got  %q\nwant %q", got, want)
+		}
+	}
+
+	// The same name by id; a device with no name last.
+	rows := []map[string]interface{}{
+		{"id": float64(9), "name": nil}, {"id": float64(7), "name": "leaf10"},
+		{"id": float64(5), "name": "leaf2"}, {"id": float64(3), "name": "leaf2"},
+	}
+	sortByNetBoxName(rows)
+	var ids []int
+	for _, r := range rows {
+		id, _ := toInt(r["id"])
+		ids = append(ids, id)
+	}
+	if !slices.Equal(ids, []int{3, 5, 7, 9}) {
+		t.Errorf("ids %v, want 3, 5 (leaf2 by id), 7 (leaf10), 9 (no name)", ids)
+	}
+}
+
+// Devices come in NetBox's order, not the replica's bytes: SIN1-leaf-2 before
+// SIN1-leaf-10, parity-… before SIN1-…. A path between parity-dev-b and
+// SIN1-access-01 is drawn from the device NetBox mode reads first. A set a
+// limit cut short is put in that order too.
+func TestTopology_DevicesInNetBoxNameOrder(t *testing.T) {
+	g := cacheTopology(t, demoModel().fake(), provider.TopologySpec{})
+	var names []string
+	for _, n := range g.Nodes {
+		names = append(names, n.Title)
+	}
+	want := []string{"AMS1-access-01", "AMS1-ap-01", "AMS1-ap-02", "AMS1-leaf-01", "AMS1-leaf-02", "AMS1-pp-01", "AMS1-spine-01",
+		"NYC1-access-01", "NYC1-leaf-01", "NYC1-leaf-02", "NYC1-spine-01", "parity-dev-a", "parity-dev-b", "parity-dev-c",
+		"SIN1-access-01", "SIN1-leaf-2", "SIN1-leaf-10", "SIN1-spine-01"}
+	if !slices.Equal(names, want) {
+		t.Errorf("nodes %q\nwant  %q", names, want)
+	}
+	if e, ok := findEdge(g, "p47-48"); !ok || e.Source != "18" || e.Target != "12" {
+		t.Errorf("edge p47-48 %+v %v, want parity-dev-b to SIN1-access-01", e, ok)
+	}
+
+	m := topoModel{typeIDs: demoTypeIDs(), devices: []topoDevice{
+		{1, "spine", "DC1", "Spine", "active"}, {2, "leaf10", "DC1", "Leaf", "active"}, {3, "leaf2", "DC1", "Leaf", "active"}}}
+	g = cacheTopology(t, m.fake(), provider.TopologySpec{Limit: 2})
+	if len(g.Nodes) != 2 || g.Nodes[0].Title != "leaf2" || g.Nodes[1].Title != "leaf10" || g.Total != 3 || g.Fetched != 2 {
+		t.Errorf("nodes %+v total=%d fetched=%d, want leaf2 then leaf10 of 3", g.Nodes, g.Total, g.Fetched)
 	}
 }

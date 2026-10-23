@@ -303,15 +303,21 @@ func TestQuery_RelatedDisplayWithoutItsPartsWarns(t *testing.T) {
 	noRequestsFor(t, f, "ipam/vrfs")
 }
 
-// The value list offers a related column's values as the rows show them.
+// The value list offers a related column's values as the rows show them. A
+// search goes to the replica on the name it joins in, which every display
+// holds, so a large table is searched whole.
 func TestFieldValues_RelatedDisplay(t *testing.T) {
-	p := newTestProvider(t, displayFake())
+	f := displayFake()
+	p := newTestProvider(t, f)
 	values, err := p.FieldValues(context.Background(), "ipam/prefixes", "vrf", "", 0)
 	if err != nil || !slices.Equal(values, []string{"Blue (65000:1)", "Red"}) {
 		t.Errorf("FieldValues(vrf) = %v, %v; want the displays", values, err)
 	}
-	values, err = p.FieldValues(context.Background(), "ipam/prefixes", "vrf", "65000", 0)
+	values, err = p.FieldValues(context.Background(), "ipam/prefixes", "vrf", "blu", 0)
 	if err != nil || !slices.Equal(values, []string{"Blue (65000:1)"}) {
-		t.Errorf("FieldValues(vrf, 65000) = %v, %v; want the display that contains it", values, err)
+		t.Errorf("FieldValues(vrf, blu) = %v, %v; want the display of the VRF it names", values, err)
+	}
+	if req, ok := f.requestWith("ipam/prefixes", "filter[vrf]__ilike"); !ok || req.query.Get("filter[vrf]__ilike") != "blu" {
+		t.Errorf("search sent %v, want it on the joined name", req.query)
 	}
 }

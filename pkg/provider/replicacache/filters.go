@@ -15,8 +15,9 @@ import (
 // The operator vocabulary in provider.Filter is NetBox's set of DRF lookups.
 // replica-cache implements a much smaller one — eq, in, isnull, ilike, gt, lt;
 // on a build with DATA-408 the anchored text matches istartswith, iendswith
-// and iexact; on a build with DATA-417 host, on IP address columns — and its
-// own documentation is explicit that gte/lte are absent. Which of them a column takes is the catalogue's word, per
+// and iexact; on a build with DATA-417 host, on IP address columns; from v1.39
+// contains, on prefix columns — and its own documentation is explicit that
+// gte/lte are absent. Which of them a column takes is the catalogue's word, per
 // column, and nothing is offered or sent that it does not list.
 //
 // Rather than widen the seam's vocabulary for the smaller backend, this file
@@ -152,6 +153,10 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 				exactLabels[f.Field] = fieldLabel(f)
 			}
 			exactValues[f.Field] = append(exactValues[f.Field], values...)
+		case opContains:
+			// NetBox's contains on a prefix, which rewriteContains has read and
+			// written as the replica reads it: one value, so Set loses none.
+			q.Set(param(f.Field, "contains"), strings.Join(values, ","))
 		case opGT, opLT:
 			if len(values) > 1 {
 				return refuse("a comparison accepts a single value, but several were given")
@@ -489,8 +494,9 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 		// it is not the empty lookup, whose "" is the problem on text — so only
 		// the column and its operator are asked about. The translation writes
 		// it on the column NetBox reads, never an expanded name; the refusal
-		// names the filter as written (operatorLabel).
-		if nullTest {
+		// names the filter as written (operatorLabel). A prefix's contains
+		// (rewriteContains) is asked the same, of the operator the build lists.
+		if nullTest || op == opContains {
 			col, stored := e.column(f.Field)
 			switch {
 			case !stored:
@@ -499,8 +505,10 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 					reason += ", the column NetBox reads for " + label
 				}
 				return refuse(reason + ", so it cannot answer the filter; remove it, or choose a filter the editor offers")
-			case !slices.Contains(col.Operators, "isnull"):
+			case nullTest && !slices.Contains(col.Operators, "isnull"):
 				return refuse(fmt.Sprintf("this replica cannot test %s for a value (its schema lists no isnull there), so it cannot answer the filter; %s", f.Field, netboxModeAdvice))
+			case op == opContains && (!c.offersContains() || !slices.Contains(col.Operators, "contains")):
+				return refuse(containsUnsupportedReason)
 			}
 			continue
 		}

@@ -279,6 +279,14 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		col := k[len("filter["):strings.Index(k, "]")]
 		op := k[strings.Index(k, "]")+3:]
+		// An operator the handler has no implementation of is a 400 whatever the
+		// catalogue lists on the column (a schema-less fake lists none), never a
+		// filter that matches every row: matches would answer true for it, and a
+		// test sending one the service refuses would pass for the wrong reason.
+		if !slices.Contains(implementedOperators, op) {
+			writeErr(w, 400, "invalid filter operator: "+op)
+			return
+		}
 		if !nameOK(col) {
 			writeErr(w, 400, "unknown column: "+col)
 			return
@@ -333,6 +341,21 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 			for _, h := range strings.Split(vs[0], ",") {
 				if a, err := netip.ParseAddr(h); err != nil || a.Zone() != "" {
 					writeErr(w, 400, "invalid filter value for "+col+": host takes IP addresses with no mask or zone")
+					return
+				}
+			}
+		}
+		// contains (v1.39) takes at most filter_limits.contains.max_values
+		// values, and one that is no address or prefix refuses the whole filter.
+		if op == "contains" {
+			parts := strings.Split(vs[0], ",")
+			if len(parts) > fakeContainsMaxValues {
+				writeErr(w, 400, fmt.Sprintf("invalid filter value for %s: contains takes at most %d values, got %d", col, fakeContainsMaxValues, len(parts)))
+				return
+			}
+			for _, part := range parts {
+				if _, ok := containsOperand(strings.TrimSpace(part)); !ok {
+					writeErr(w, 400, "invalid filter value for "+col+": contains takes IP addresses or prefixes with no zone")
 					return
 				}
 			}
@@ -536,8 +559,72 @@ func matches(v interface{}, op, want string) bool {
 			}
 		}
 		return false
+	case "contains":
+		// The prefixes that contain any listed value: the union of the list. s is
+		// the stored cidr text.
+		stored, err := netip.ParsePrefix(s)
+		if v == nil || err != nil {
+			return false
+		}
+		for _, w := range strings.Split(want, ",") {
+			if operand, ok := containsOperand(strings.TrimSpace(w)); ok && operand.within(stored) {
+				return true
+			}
+		}
+		return false
 	}
 	return true
+}
+
+// fakeContainsMaxValues is filter_limits.contains.max_values on v1.40.1.
+const fakeContainsMaxValues = 1000
+
+// implementedOperators are the filter operators the fake answers, as the
+// catalogue of v1.40.1 lists them across its columns.
+var implementedOperators = []string{"eq", "gt", "lt", "in", "isnull", "ilike", "istartswith", "iendswith", "iexact", "host", "contains"}
+
+// containsTerm is one element of a contains list, as the replica reads it
+// (internal/api/filter.go containsCandidates): a bare address is contained
+// strictly, a value with a mask is a prefix, contained or equal with its host
+// bits ignored. The families never contain each other, and an IPv4-mapped
+// value is IPv6.
+type containsTerm struct {
+	addr   netip.Addr
+	bits   int
+	strict bool
+}
+
+// containsOperand reads a value as the replica does: Go's address and prefix
+// parsers, which take no netmask notation, no zone, and no length written other
+// than in plain digits. False is the 400 the replica answers for the whole list.
+func containsOperand(s string) (containsTerm, bool) {
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		return containsTerm{addr: p.Masked().Addr(), bits: p.Bits()}, err == nil
+	}
+	a, err := netip.ParseAddr(s)
+	return containsTerm{addr: a, bits: a.BitLen(), strict: true}, err == nil && a.Zone() == ""
+}
+
+// within reports whether the stored prefix contains the value.
+func (c containsTerm) within(stored netip.Prefix) bool {
+	if c.strict && stored.Bits() >= c.bits {
+		return false
+	}
+	return stored.Bits() <= c.bits && stored.Contains(c.addr)
+}
+
+// addPrefixes serves ipam/prefixes as replica-cache v1.40.1 does: the prefix
+// is cidr text with its mask always written, the column lists contains, and the
+// schema route states the 1,000-value limit. A test that wants a build without
+// the operator clears schema.FilterLimits, or the column's operator.
+func (f *fakeService) addPrefixes(rows ...map[string]interface{}) {
+	f.addEntity("ipam/prefixes", "id:BIGINT:pk", "prefix:VARCHAR", "status:VARCHAR", "vrf_id:BIGINT")
+	f.addOperators("ipam/prefixes", "prefix", "contains")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.schema.FilterLimits = map[string]fakeFilterLimit{"contains": {MaxValues: fakeContainsMaxValues}}
+	f.entities["ipam/prefixes"] = rows
 }
 
 // addAddressEntity adds ipam/ip-addresses as a replica with the host operator
@@ -629,6 +716,13 @@ type fakeSchema struct {
 	SnapshotComplete bool                  `json:"snapshot_complete"`
 	NetBoxURL        string                `json:"netbox_url,omitempty"`
 	Entities         map[string]fakeEntity `json:"entities"`
+	// FilterLimits is the per-request limit of each operator that has one
+	// (v1.39 and later). Nil omits the block, as a build before containment does.
+	FilterLimits map[string]fakeFilterLimit `json:"filter_limits,omitempty"`
+}
+
+type fakeFilterLimit struct {
+	MaxValues int `json:"max_values"`
 }
 
 type fakeEntity struct {

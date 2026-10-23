@@ -34,11 +34,11 @@ const (
 )
 
 // internalOperators are the operators this datasource writes for itself, which
-// a query never names. Query refuses a filter that names one before anything
-// reads it, on any object type: a plugin's, which nothing translates, would
-// otherwise have a hand-written "is null" taken for what the translation means
-// by it.
-var internalOperators = map[string]bool{opIsNull: true, opNotNull: true}
+// a query never names: the two above, and the replica's containment (opContains,
+// containment.go). Query refuses a filter that names one before anything reads
+// it, on any object type: a plugin's, which nothing translates, would otherwise
+// have a hand-written "is null" taken for what the translation means by it.
+var internalOperators = map[string]bool{opIsNull: true, opNotNull: true, opContains: true}
 
 // refuseInternalOperators is that refusal. A row with no field sends nothing,
 // whatever its operator, and is left alone as everywhere else.
@@ -646,8 +646,8 @@ func valueColumn(e entity, field string) string {
 // where NetBox's __empty is a boolean meaning IS NULL — and only there: a
 // number's or a date's __empty keeps that class and is a NetBox 400
 // (speed__empty). A decimal or date NetBox compares as such, which the replica
-// cannot, is offered with those two alone. A prefix's contains is not offered:
-// nothing answers it yet, and the filter it is passed on as is refused.
+// cannot, is offered with those two alone. A prefix's contains is offered with =
+// alone, where the replica has the operator for it (containment.go).
 func vocabFilterFields(vocab map[string][]vocabEntry, e entity, c *catalog) []provider.FilterField {
 	var out []provider.FilterField
 	for _, name := range slices.Sorted(maps.Keys(vocab)) {
@@ -675,6 +675,12 @@ func vocabOperators(vocab map[string][]vocabEntry, name string, e entity, c *cat
 		}
 	case kindIsNull, kindLocalContext:
 		if stored && slices.Contains(col.Operators, "isnull") {
+			ops = append(ops, opExact)
+		}
+	case kindContains:
+		// No lookups: NetBox has no contains__n. The prefix column lists the
+		// operator on a build that has it, and the schema route its limit.
+		if stored && c.offersContains() && slices.Contains(col.Operators, "contains") {
 			ops = append(ops, opExact)
 		}
 	case kindValue, kindMAC, kindBool, kindAddress, kindPrefix:

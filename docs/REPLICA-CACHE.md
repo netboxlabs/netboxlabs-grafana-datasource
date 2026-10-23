@@ -165,6 +165,18 @@ NetBox's meaning is kept:
   another spelling, or beside a value NetBox cannot read — and is an error
   beside a different network, as in NetBox. An aggregate's zeroes the host
   bits;
+- a prefix's `contains` finds the prefixes that contain an address or a
+  prefix, and reads its one value as NetBox does. An address without a mask is
+  contained strictly: a stored `10.0.0.1/32` does not contain `10.0.0.1`. A
+  value with a mask — `10.0.0.5/24`, or `10.0.0.5/255.255.255.0` in netmask
+  notation — also finds the prefix that equals it, its host bits ignored. The
+  VRF plays no part, IPv4 and IPv6 never contain each other, and an IPv4-mapped
+  address (`::ffff:10.0.0.1`) is IPv6. A value that is not an address or prefix
+  finds nothing, as in NetBox, without a request. Several values are refused:
+  NetBox uses only the last, so a multi-value variable would show one
+  selection without saying so. It needs replica-cache v1.39 or later, whose
+  schema route states it, and is offered on prefixes alone: NetBox has no
+  `contains` on an aggregate;
 - a MAC address in any spelling NetBox reads (`58-56-9F-D1-E3-00`,
   `5856.9fd1.e300`, …) matches the stored address, and a value NetBox cannot
   read makes the whole filter match nothing, as there. _contains_ and the other
@@ -176,7 +188,7 @@ NetBox's meaning is kept:
   or many-to-many one: `tenant_group`, a device's `region`, `site_group` and
   `manufacturer`, an interface's `mac_address`;
 - filters NetBox computes with a query of its own: an IP address's `device` and
-  `virtual_machine`, a prefix's `within`;
+  `virtual_machine`, a prefix's `within`, an IP range's `contains`;
 - content-type filters: the replica has no content-type names;
 - decimal and date/time filters — a rack's `weight`, a device's `position` and
   `latitude`, a device type's `u_height`, `created` — which the replica does not

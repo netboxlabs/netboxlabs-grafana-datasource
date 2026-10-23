@@ -1074,6 +1074,10 @@ func assertAdvertisedOperatorsAccepted(t *testing.T, p *Provider, objectType str
 				value = "true"
 			case kindPrefix:
 				value = "10.0.0.0/8"
+			case kindContains:
+				// An address: a value that is none matches nothing without a
+				// request, which would leave the check with nothing to refuse.
+				value = "10.0.0.1"
 			case kindMAC:
 				value = "58:56:9f:d1:e3:00"
 			case kindRelated, kindTree, kindModelChoice:

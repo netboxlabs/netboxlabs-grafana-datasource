@@ -329,6 +329,37 @@ values it carries and naming the filter (or, for the ids, the column they are
 sent on). A filter on a related object whose values name more than 10,000
 objects, or a tree node with more than 10,000 below it, is refused too.
 
+## Topology
+
+**Topology** and **Topology edges** return what NetBox mode returns for the same
+data — the same devices, edges (ids, ends, kinds), counts and warnings — built
+from the replica's cable tables:
+
+- the devices are the ones the topology's filters select, NetBox's device
+  filters answered as an objects query answers them; each node has its site,
+  role, stored status (`active`, as NetBox mode colours it) and link;
+- **physical**: one edge per cable between devices' interfaces, front ports or
+  rear ports, every device on one end to every device on the other. A console
+  cable or one to a circuit termination is no edge, as in NetBox mode;
+- **logical**: the paths NetBox computed, read from the cable paths it stored.
+  An interface whose path is complete and active and ends at interfaces —
+  through patch panels and circuits alike — has an edge to each far device; a
+  path ending at a circuit termination or a provider network has none;
+- **wireless** links in both views; boundary peers, _connected only_ and the
+  incomplete-links warnings as in NetBox mode.
+
+A tenant with no wireless links or no patch panels gets a complete topology
+with no warning: an empty NetBox table is never fed to the replica, and is read
+as empty.
+
+_Known divergence:_ devices come in the replica's name order, which compares
+bytes (`SIN1-…` before `parity-…`), where NetBox orders names naturally and
+without regard to case. Where the two differ, nodes and edges are the same but
+listed in another order, and a path between two such devices may be drawn the
+other way round (the edges table lists both directions either way). With a row
+limit below the number of matching devices, the devices kept can differ; such a
+result is refused in alert rules as truncated in both modes.
+
 ## Freshness
 
 Every result states how current it is, from the replica's own per-type commit
@@ -343,13 +374,16 @@ instant:
 - _The age of this data is unknown_ — a note, when the snapshot is complete but
   the replica reports no commit time for the type.
 
-**Max data age** is opt-in. When set, an alert rule, an expression-fed query
-or a **Count** query refuses a result older than the threshold, or of unknown
-age, with a message naming the age and the setting; dashboards only show the
-notice. A value that is not a duration fails **Save & test** and refuses those
-queries rather than silently meaning "off". The setting is read in
-replica-cache mode only; a data source in NetBox mode ignores it, its data
-being live.
+A topology is as old as the oldest table it was read from, and states that
+instant; it is of unknown age when any of them is.
+
+**Max data age** is opt-in. When set, an alert rule or an expression-fed
+query — objects, **Count** or **Topology edges** — refuses a result older than
+the threshold, or of unknown age, with a message naming the age and the
+setting; dashboards only show the notice. A value that is not a duration fails
+**Save & test** and refuses those queries rather than silently meaning "off".
+The setting is read in replica-cache mode only; a data source in NetBox mode
+ignores it, its data being live.
 
 ## Not available in this mode
 
@@ -359,7 +393,6 @@ result:
 - **Annotations** — the replica does not carry NetBox's change log.
 - **IP enrichment** (IP list and NetBox scope) — the replica does not carry the
   content-type table that says what an address is assigned to.
-- **Topology** — same reason: cable and interface endpoints are content-typed.
 - **Tags** — not replicated; a `tag` filter is refused as a column the replica
   does not have.
 - **Branches** — the replica mirrors the main dataset only.

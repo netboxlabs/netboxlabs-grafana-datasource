@@ -1,6 +1,9 @@
 package provider
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+)
 
 // The topology contract both backends build a Graph to. They live here, not in
 // either backend, because the identity of a link and the rule for which links
@@ -33,4 +36,22 @@ func EdgeInScope(inSet map[string]bool, a, b string, keepBoundary bool) bool {
 		return inSet[a] || inSet[b]
 	}
 	return inSet[a] && inSet[b]
+}
+
+// The sentences a graph's Warnings carry when its edge set is incomplete,
+// worded once for both backends: an alert rule's refusal quotes them, and the
+// same gap must read the same whichever mode found it.
+const (
+	// WirelessIncompleteWarning: the wireless links could not all be read.
+	WirelessIncompleteWarning = "Wireless links could not be read in full, so some devices may show fewer connections than they have."
+	// CablesCappedWarning: a device has more cables than one read returns.
+	CablesCappedWarning = "Some cables could not be read: a device has more links than one request can return, so its remaining connections are missing."
+	// PathsCappedWarning: a device has more connected interfaces than one read
+	// returns.
+	PathsCappedWarning = "Some links could not be read: a device has more connections than one request can return, so its remaining connections are missing."
+)
+
+// MissingPeersWarning: n devices that links reach could not be read.
+func MissingPeersWarning(n int) string {
+	return fmt.Sprintf("%d connected device(s) could not be read, so links to them are missing; a device may have a working path that is not shown.", n)
 }

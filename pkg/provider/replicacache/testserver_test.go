@@ -125,6 +125,15 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f.mu.Lock()
 	f.requests = append(f.requests, recordedRequest{entity: entity, query: q})
+	// The datasource's own budget, not the replica's (which answered a 36 KB
+	// query): a request whose query, less the cursor a page adds, passes
+	// 16 KB is one this datasource must never send, so the fake refuses it
+	// rather than letting a test pass on a request production would not get.
+	if base := withoutCursor(q); len(base.Encode()) > queryBudget {
+		f.mu.Unlock()
+		writeErr(w, 400, fmt.Sprintf("query of %d bytes exceeds this test's 16 KB budget", len(base.Encode())))
+		return
+	}
 	rows, ok := f.entities[entity]
 	status, errBody, pageCap, cursorOnLastPage := f.status, f.errBody, f.pageCap, f.cursorOnLastPage
 	var se *fakeEntity
@@ -393,8 +402,12 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		keep := []map[string]interface{}{} // the service answers [], never null, when nothing matches
+		match := func(v interface{}) bool { return matches(v, op, vs[0]) }
+		if op == "in" {
+			match = inMatcher(vs[0])
+		}
 		for _, row := range filtered {
-			if matches(row[col], op, vs[0]) {
+			if match(row[col]) {
 				keep = append(keep, row)
 			}
 		}
@@ -609,6 +622,44 @@ func matches(v interface{}, op, want string) bool {
 		return false
 	}
 	return true
+}
+
+// inMatcher is matches(v, "in", want) with the list split once per request
+// rather than once per row: a batched read sends a thousand values against
+// thousands of rows, and splitting the list for every row made such a test
+// quadratic. Same semantics: a number compares by value, text as written, and
+// NULL is in no list.
+func inMatcher(want string) func(interface{}) bool {
+	texts, numbers := map[string]bool{}, map[float64]bool{}
+	for _, w := range strings.Split(want, ",") {
+		texts[w] = true
+		if n, err := strconv.ParseFloat(w, 64); err == nil {
+			numbers[n] = true
+		}
+	}
+	return func(v interface{}) bool {
+		switch n := v.(type) {
+		case nil:
+			return false
+		case float64:
+			return numbers[n]
+		case int:
+			return numbers[float64(n)]
+		}
+		return texts[fmt.Sprintf("%v", v)]
+	}
+}
+
+// withoutCursor is a request's query less its cursor, which is what the
+// budget is measured on in the fake.
+func withoutCursor(q url.Values) url.Values {
+	out := url.Values{}
+	for k, vs := range q {
+		if k != "cursor" {
+			out[k] = vs
+		}
+	}
+	return out
 }
 
 // fakeContainsMaxValues is filter_limits.contains.max_values on v1.40.1.
@@ -1127,4 +1178,25 @@ func (f *fakeService) setIngested(objectType string, ingested bool) {
 		e.Columns, e.DataAsOf = nil, nil
 	}
 	f.schema.Entities["/v1/"+objectType] = e
+}
+
+// addTopologyTables serves the tables a topology is read from, with the
+// columns and types replica-cache v1.40.1 serves them with (GET
+// /v1/_meta/schema on a replica of NetBox 4.4.10), cut down to what the
+// topology reads: a cable termination caches its device (_device_id, null on
+// a circuit termination) and names its object only by content type and id;
+// interfaces and panel ports cache their cable and its end; an interface
+// names its cable path; the path is jsonb text; a wireless link caches both
+// ends' devices.
+func (f *fakeService) addTopologyTables() {
+	f.addEntity("dcim/cable-terminations", "id:BIGINT:pk", "cable_end:VARCHAR", "termination_id:BIGINT",
+		"cable_id:BIGINT", "termination_type_id:INTEGER", "_device_id:BIGINT")
+	f.addEntity("dcim/interfaces", "id:BIGINT:pk", "name:VARCHAR", "_name:VARCHAR", "_path_id:BIGINT",
+		"cable_id:BIGINT", "device_id:BIGINT", "cable_end:VARCHAR")
+	for _, ports := range []string{"dcim/front-ports", "dcim/rear-ports"} {
+		f.addEntity(ports, "id:BIGINT:pk", "name:VARCHAR", "cable_id:BIGINT", "device_id:BIGINT", "cable_end:VARCHAR")
+	}
+	f.addEntity("dcim/cable-paths", "id:BIGINT:pk", "is_active:BOOLEAN", "path:VARCHAR", "is_complete:BOOLEAN")
+	f.addEntity("wireless/wireless-links", "id:BIGINT:pk", "_interface_a_device_id:BIGINT", "_interface_b_device_id:BIGINT",
+		"interface_a_id:BIGINT", "interface_b_id:BIGINT")
 }

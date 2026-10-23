@@ -3,7 +3,6 @@ package netbox
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
@@ -110,7 +109,7 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 	var warnings []string
 	edges, wirelessIncomplete := p.wirelessEdges(ctx, inSet, seen, spec.IncludeBoundaryPeers)
 	if wirelessIncomplete {
-		warnings = append(warnings, "Wireless links could not be read in full, so some devices may show fewer connections than they have.")
+		warnings = append(warnings, provider.WirelessIncompleteWarning)
 	}
 	if spec.Connections == "physical" {
 		physical, capped, err := p.physicalEdges(ctx, inSet, nodeIDs, spec.IncludeBoundaryPeers)
@@ -118,7 +117,7 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 			return nil, err
 		}
 		if capped {
-			warnings = append(warnings, "Some cables could not be read: a device has more links than one request can return, so its remaining connections are missing.")
+			warnings = append(warnings, provider.CablesCappedWarning)
 		}
 		edges = append(edges, physical...)
 	} else {
@@ -127,7 +126,7 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 			return nil, err
 		}
 		if capped {
-			warnings = append(warnings, "Some links could not be read: a device has more connections than one request can return, so its remaining connections are missing.")
+			warnings = append(warnings, provider.PathsCappedWarning)
 		}
 		edges = append(edges, logical...)
 	}
@@ -140,9 +139,7 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 			return nil, err
 		}
 		if missingPeers > 0 {
-			warnings = append(warnings, fmt.Sprintf(
-				"%d connected device(s) could not be read, so links to them are missing; a device may have a working path that is not shown.",
-				missingPeers))
+			warnings = append(warnings, provider.MissingPeersWarning(missingPeers))
 		}
 		nodes = append(nodes, peerNodes...)
 	}

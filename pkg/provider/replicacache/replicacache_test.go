@@ -71,10 +71,6 @@ func TestUnsupportedCapabilitiesRefuseRatherThanReturnNothing(t *testing.T) {
 			_, err := p.ResolveScope(ctx, []provider.Filter{{Field: "parent", Value: "10.0.0.0/24"}}, nil, 10)
 			return err
 		}},
-		{"Topology", func() error {
-			_, err := p.Topology(ctx, provider.TopologySpec{})
-			return err
-		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

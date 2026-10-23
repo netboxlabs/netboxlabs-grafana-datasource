@@ -119,7 +119,15 @@ func reportedNotices(res *provider.Result) []data.Notice {
 			Text:     w,
 		})
 	}
-	for _, n := range res.Notes {
+	return append(notices, noteNotices(res.Notes)...)
+}
+
+// noteNotices is a producer's notes as INFO notices: true of the answer and
+// worth stating, but not a degradation (see provider.Result.Notes). A graph
+// carries them too, which is why they are not read off a Result here.
+func noteNotices(notes []string) []data.Notice {
+	var notices []data.Notice
+	for _, n := range notes {
 		notices = append(notices, data.Notice{
 			Severity: data.NoticeSeverityInfo,
 			Text:     n,

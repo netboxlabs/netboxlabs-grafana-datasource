@@ -233,15 +233,36 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 func freshnessNotes(c *catalog, e entity, asOf *time.Time) (notes, warnings []string) {
 	switch {
 	case asOf != nil:
-		notes = append(notes, fmt.Sprintf("Data as of %s (replica-cache).", asOf.UTC().Format("2006-01-02 15:04:05 UTC")))
+		notes = append(notes, fmt.Sprintf(dataAsOfPrefix+"%s (replica-cache).", asOf.UTC().Format("2006-01-02 15:04:05 UTC")))
 	case e.DataAsOfRaw != "":
-		notes = append(notes, fmt.Sprintf("The age of this data could not be read: the replica reports %q as the commit time.", truncate(e.DataAsOfRaw)))
+		notes = append(notes, fmt.Sprintf(agePrefix+"could not be read: the replica reports %q as the commit time.", truncate(e.DataAsOfRaw)))
 	case !c.SnapshotComplete:
-		warnings = append(warnings, "This replica is still loading its initial snapshot; results may be incomplete and their age is unknown.")
+		warnings = append(warnings, loadingWarning)
 	default:
-		notes = append(notes, "The age of this data is unknown: the replica reports no commit time for this entity.")
+		notes = append(notes, agePrefix+"is unknown: the replica reports no commit time for this entity.")
 	}
 	return notes, warnings
+}
+
+// The sentences freshnessNotes writes begin with these, or are the loading
+// warning, so a caller stating the age of a larger whole (a topology) can take
+// one query's out and put its own in.
+const (
+	dataAsOfPrefix = "Data as of "
+	agePrefix      = "The age of this data "
+	loadingWarning = "This replica is still loading its initial snapshot; results may be incomplete and their age is unknown."
+)
+
+// withoutFreshness is a result's notes or warnings less the ones
+// freshnessNotes wrote.
+func withoutFreshness(lines []string) []string {
+	var out []string
+	for _, l := range lines {
+		if l != loadingWarning && !strings.HasPrefix(l, dataAsOfPrefix) && !strings.HasPrefix(l, agePrefix) {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // danglingReferenceWarnings reports, per expanded reference, the rows whose

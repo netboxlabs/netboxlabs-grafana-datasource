@@ -60,6 +60,10 @@ type fakeService struct {
 	// cursorOnLastPage hands out a next_cursor with a full last page, as a
 	// keyset-paged service may; the page after it is empty.
 	cursorOnLastPage bool
+	// afterRequest, when set, runs once each row request has been answered
+	// (and before the next can be sent) — how a test has the replica change
+	// between two reads of one learn.
+	afterRequest func(entity string, q url.Values)
 }
 
 type recordedRequest struct {
@@ -127,6 +131,14 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 
 	entity := strings.TrimPrefix(r.URL.Path, "/v1/")
 	q := r.URL.Query()
+	defer func() {
+		f.mu.Lock()
+		hook := f.afterRequest
+		f.mu.Unlock()
+		if hook != nil {
+			hook(entity, q)
+		}
+	}()
 	f.mu.Lock()
 	f.requests = append(f.requests, recordedRequest{entity: entity, query: q})
 	// The datasource's own budget, not the replica's (which answered a 36 KB

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/url"
 	"reflect"
 	"slices"
 	"strings"
@@ -33,8 +34,8 @@ func ifaceRow(id, device, path int) map[string]interface{} {
 	return map[string]interface{}{"id": float64(id), "device_id": num(device), "_path_id": num(path), "cable_id": nil, "cable_end": nil}
 }
 
-// cabledRow is an interface or a panel port with a cable on one end.
-func cabledRow(id, cable int, end string) map[string]interface{} {
+// cabledAt is an interface or a panel port with a cable on one end.
+func cabledAt(id, cable int, end string) map[string]interface{} {
 	return map[string]interface{}{"id": float64(id), "device_id": float64(1), "_path_id": nil, "cable_id": float64(cable), "cable_end": end}
 }
 
@@ -256,8 +257,8 @@ func TestAssignmentTypes_DisputedIDIsNotTheGroups(t *testing.T) {
 	logs := captureLogs(t)
 	f := assignFake()
 	f.pathOrigin(12, 5)
-	f.addRows("dcim/front-ports", cabledRow(8, 9, "B"))
-	f.addRows("dcim/rear-ports", cabledRow(8, 10, "A"))
+	f.addRows("dcim/front-ports", cabledAt(8, 9, "B"))
+	f.addRows("dcim/rear-ports", cabledAt(8, 10, "A"))
 	f.addRows("dcim/cable-terminations", termRow(1, 9, "B", idFHRPGroup, 8), termRow(2, 10, "A", idFHRPGroup, 8))
 	f.fhrpAddress(idFHRPGroup, 300, 2)
 	p := newTestProvider(t, f)
@@ -313,6 +314,296 @@ func TestAssignmentTypes_NothingIsRuledOutWhileTheSnapshotLoads(t *testing.T) {
 			f.schema.SnapshotComplete = c.complete
 			f.mu.Unlock()
 			wantTypes(t, learn(t, newTestProvider(t, f), idInterface, idFHRPGroup), c.want)
+		})
+	}
+}
+
+// staleUnfed makes the cached catalogue say what it said before the tables
+// were fed: no data.
+func staleUnfed(p *Provider, tables ...string) {
+	p.catMu.Lock()
+	defer p.catMu.Unlock()
+	for _, k := range tables {
+		e := p.cat.Entities[k]
+		e.Ingested = false
+		p.cat.Entities[k] = e
+	}
+}
+
+// notNamed fails a test that learned a wrong model for id: no name is a fair
+// answer, the right one too.
+func notNamed(t *testing.T, got contentTypes, id int, right string) {
+	t.Helper()
+	if name, ok := got[id]; ok && name != right {
+		t.Errorf("id %d learned as %s, want %s or nothing", id, name, right)
+	}
+}
+
+var vmTables = []string{"virtualization/interfaces", "virtualization/virtual-machines"}
+
+// The catalogue is cached for ten minutes, and what it says of a table is only
+// as fresh: a tenant's first VM is fed, and its address assigned to the VM
+// interface, inside that time. Ids are small sequences in every table (the
+// demo's VM interfaces 1 and 2, its FHRP groups 1 and 2), so an address on a
+// group that exists proves nothing: that a table has no rows is the row
+// route's to say, not the catalogue's.
+func TestAssignmentTypes_StaleCatalogueRulesNothingOut(t *testing.T) {
+	world := func() *fakeService {
+		f := assignFake()
+		f.pathOrigin(idInterface, 5)
+		f.fhrpAddress(idFHRPGroup, 13, 1)
+		f.addRows("ipam/fhrp-groups", idRow(2))
+		return f
+	}
+	t.Run("read before the first VM", func(t *testing.T) {
+		f := world()
+		p := newTestProvider(t, f)
+		if _, err := p.catalogue(context.Background(), false); err != nil {
+			t.Fatal(err)
+		}
+		staleUnfed(p, vmTables...)
+		f.vmPrimary(idVMInterface, 1, 11)
+		got := learn(t, p, idInterface, idVMInterface)
+		wantTypes(t, contentTypes{idInterface: got[idInterface]}, contentTypes{idInterface: "dcim.interface"})
+		notNamed(t, got, idVMInterface, "virtualization.vminterface")
+	})
+	t.Run("VM interfaces that are not the addresses' objects", func(t *testing.T) {
+		f := world()
+		p := newTestProvider(t, f)
+		if _, err := p.catalogue(context.Background(), false); err != nil {
+			t.Fatal(err)
+		}
+		staleUnfed(p, vmTables...)
+		f.addRows("virtualization/interfaces", vmIfaceRow(7, 1))
+		f.addRows("ipam/ip-addresses", addrRow(11, idVMInterface, 2, 0))
+		notNamed(t, learn(t, p, idInterface, idVMInterface), idVMInterface, "virtualization.vminterface")
+	})
+	t.Run("asked alone, once the interface type is known", func(t *testing.T) {
+		f := world()
+		p := newTestProvider(t, f)
+		if _, err := p.catalogue(context.Background(), false); err != nil {
+			t.Fatal(err)
+		}
+		staleUnfed(p, vmTables...)
+		f.vmPrimary(idVMInterface, 1, 11)
+		learn(t, p, idInterface)
+		notNamed(t, learn(t, p, idVMInterface), idVMInterface, "virtualization.vminterface")
+	})
+}
+
+// That a table has no rows is the row route's to say, not the catalogue's, even
+// a catalogue read a moment ago: the VM interfaces are fed after it was read.
+func TestAssignmentTypes_TheRowRouteSaysWhetherATableHasRows(t *testing.T) {
+	f := assignFake()
+	f.pathOrigin(idInterface, 5)
+	f.fhrpAddress(idVMInterface, 300, 2)
+	f.setIngested("virtualization/interfaces", false)
+	var once sync.Once
+	f.afterRequest = func(entity string, q url.Values) {
+		if entity != "ipam/ip-addresses" || !q.Has("filter[assigned_object_type_id]__eq") {
+			return
+		}
+		once.Do(func() {
+			f.addEntity("virtualization/interfaces", "id:BIGINT:pk", "virtual_machine_id:BIGINT")
+			f.addRows("virtualization/interfaces", vmIfaceRow(5, 1))
+		})
+	}
+	p := newTestProvider(t, f)
+
+	notNamed(t, learn(t, p, idInterface, idVMInterface), idVMInterface, "virtualization.vminterface")
+}
+
+// The replica starts reloading inside the catalogue's time to live: the cached
+// catalogue still says complete, and the tables that are not back yet answer
+// 404. A table with no rows is not out of the running then.
+func TestAssignmentTypes_ReloadInsideTheCatalogueTTLRulesNothingOut(t *testing.T) {
+	f := assignFake()
+	f.pathOrigin(idInterface, 5)
+	f.fhrpAddress(idFHRPGroup, 13, 1)
+	f.vmPrimary(idVMInterface, 1, 11)
+	p := newTestProvider(t, f)
+	if _, err := p.catalogue(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range vmTables {
+		f.setIngested(table, false)
+	}
+	f.mu.Lock()
+	f.schema.SnapshotComplete = false
+	f.mu.Unlock()
+
+	notNamed(t, learn(t, p, idInterface, idVMInterface), idVMInterface, "virtualization.vminterface")
+}
+
+// A reload that begins while the tables are being read leaves them as
+// untrustworthy as one that began before: the catalogue is looked at again
+// when the reads are done.
+func TestAssignmentTypes_ReloadDuringTheReadsRulesNothingOut(t *testing.T) {
+	f := assignFake()
+	f.pathOrigin(idInterface, 5)
+	f.fhrpAddress(idFHRPGroup, 300, 2)
+	f.setIngested("virtualization/interfaces", false)
+	f.afterRequest = func(entity string, q url.Values) {
+		if entity == "ipam/fhrp-groups" {
+			f.mu.Lock()
+			f.schema.SnapshotComplete = false
+			f.mu.Unlock()
+		}
+	}
+	p := newTestProvider(t, f)
+
+	wantTypes(t, learn(t, p, idInterface, idFHRPGroup), contentTypes{idInterface: "dcim.interface"})
+}
+
+// What was undecided only because the replica was loading is asked again
+// when it has loaded, not left unknown for the catalogue's whole time to live
+// — and not on every query meanwhile.
+func TestAssignmentTypes_LoadingIsNotCachedAsUnknown(t *testing.T) {
+	f := assignFake()
+	f.pathOrigin(idInterface, 5)
+	f.fhrpAddress(idFHRPGroup, 300, 2)
+	f.setIngested("virtualization/interfaces", false)
+	p := newTestProvider(t, f)
+	if _, err := p.catalogue(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.schema.SnapshotComplete = false
+	f.mu.Unlock()
+
+	wantTypes(t, learn(t, p, idInterface, idFHRPGroup), contentTypes{idInterface: "dcim.interface"})
+	f.forget()
+	wantTypes(t, learn(t, p, idInterface, idFHRPGroup), contentTypes{idInterface: "dcim.interface"})
+	if n := f.requestCount(); n != 0 {
+		t.Errorf("a query during the load read %d times again", n)
+	}
+
+	// The load finishes, and the time to ask again comes.
+	f.mu.Lock()
+	f.schema.SnapshotComplete = true
+	f.mu.Unlock()
+	p.typeMu.Lock()
+	for id := range p.types.deferred {
+		p.types.deferred[id] = time.Now().Add(-time.Second)
+	}
+	p.typeMu.Unlock()
+	wantTypes(t, learn(t, p, idInterface, idFHRPGroup), contentTypes{idInterface: "dcim.interface", idFHRPGroup: "ipam.fhrpgroup"})
+}
+
+// The tables are read after the addresses that carry the id, never before: a
+// VM interface and the address assigned to it appear together, and an absence
+// read first and an address read second would see the address and not the
+// interface.
+func TestAssignmentTypes_AbsenceIsReadAfterTheAddresses(t *testing.T) {
+	f := assignFake()
+	f.pathOrigin(idInterface, 5)
+	f.addRows("ipam/fhrp-groups", idRow(1))
+	var once sync.Once
+	f.afterRequest = func(entity string, q url.Values) {
+		if entity != "virtualization/interfaces" {
+			return
+		}
+		once.Do(func() {
+			f.addRows("virtualization/interfaces", vmIfaceRow(1, 1))
+			f.addRows("ipam/ip-addresses", addrRow(11, idVMInterface, 1, 0))
+		})
+	}
+	p := newTestProvider(t, f)
+
+	notNamed(t, learn(t, p, idInterface, idVMInterface), idVMInterface, "virtualization.vminterface")
+}
+
+// Objects the addresses are assigned to that are rows of a type not yet ruled
+// out leave the id unknown: it may be that type's. A second look, by the
+// objects' ids, after the table was found empty.
+func TestAssignmentTypes_ObjectsOfTheAddressesAreNotThoseModels(t *testing.T) {
+	f := assignFake()
+	f.pathOrigin(idInterface, 5)
+	f.fhrpAddress(idVMInterface, 300, 2)
+	var once sync.Once
+	f.afterRequest = func(entity string, q url.Values) {
+		if entity != "virtualization/interfaces" || q.Has("filter[id]__in") {
+			return
+		}
+		once.Do(func() { f.addRows("virtualization/interfaces", vmIfaceRow(2, 1)) })
+	}
+	p := newTestProvider(t, f)
+
+	notNamed(t, learn(t, p, idInterface, idVMInterface), idVMInterface, "virtualization.vminterface")
+	if _, ok := f.requestWith("virtualization/interfaces", "filter[id]__in"); !ok {
+		t.Error("the objects the addresses are assigned to were not looked for among the VM interfaces")
+	}
+}
+
+// A table the catalogue does not list has no evidence in it and cannot be
+// ruled out: neither is a failure.
+func TestAssignmentTypes_AbsentEntityIsNoEvidenceAndNoElimination(t *testing.T) {
+	drop := func(f *fakeService, tables ...string) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, table := range tables {
+			delete(f.schema.Entities, "/v1/"+table)
+		}
+	}
+	for _, table := range []string{"virtualization/virtual-machines", "virtualization/interfaces", "dcim/devices", "dcim/front-ports",
+		"dcim/rear-ports", "dcim/cable-terminations", "dcim/cable-paths", "ipam/ip-addresses"} {
+		t.Run(table+" evidence", func(t *testing.T) {
+			f := assignFake()
+			f.pathOrigin(idInterface, 5)
+			f.devicePrimary(idInterface, 6, 100)
+			f.vmPrimary(idVMInterface, 7, 200)
+			f.addRows("dcim/interfaces", cabledAt(8, 9, "A"))
+			f.addRows("dcim/front-ports", cabledAt(8, 10, "B"))
+			f.addRows("dcim/rear-ports", cabledAt(8, 11, "B"))
+			f.addRows("dcim/cable-terminations", termRow(1, 9, "A", idInterface, 8), termRow(2, 10, "B", idFrontPort, 8), termRow(3, 11, "B", idRearPort, 8))
+			drop(f, table)
+			got := learn(t, newTestProvider(t, f), idInterface, idVMInterface)
+			wantTypes(t, contentTypes{idInterface: got[idInterface]}, contentTypes{idInterface: "dcim.interface"})
+		})
+	}
+	for _, table := range []string{"virtualization/interfaces", "ipam/fhrp-groups", "ipam/ip-addresses"} {
+		t.Run(table+" elimination", func(t *testing.T) {
+			f := assignFake()
+			f.pathOrigin(idInterface, 5)
+			f.fhrpAddress(idFHRPGroup, 300, 2)
+			drop(f, table)
+			wantTypes(t, learn(t, newTestProvider(t, f), idInterface, idFHRPGroup), contentTypes{idInterface: "dcim.interface"})
+		})
+	}
+}
+
+// A contradiction is logged once however many learns follow it.
+func TestAssignmentTypes_FHRPContradictionIsLoggedOnce(t *testing.T) {
+	logs := captureLogs(t)
+	f := assignFake()
+	f.pathOrigin(idInterface, 5)
+	f.addRows("ipam/fhrp-groups", idRow(1))
+	f.addRows("ipam/ip-addresses", addrRow(300, idFHRPGroup, 99, 0))
+	p := newTestProvider(t, f)
+
+	wantTypes(t, learn(t, p, idInterface, idFHRPGroup), contentTypes{idInterface: "dcim.interface"})
+	// A VM turns up, and the learn that finds its type leaves the same id left.
+	f.vmPrimary(idVMInterface, 7, 200)
+	wantTypes(t, learn(t, p, idInterface, idVMInterface, idFHRPGroup),
+		contentTypes{idInterface: "dcim.interface", idVMInterface: "virtualization.vminterface"})
+	if got := logs.warnings(); len(got) != 1 {
+		t.Errorf("logged %d lines: %q", len(got), got)
+	}
+}
+
+// What the elimination reads fails it, as every read does.
+func TestAssignmentTypes_FailedEliminationReadIsAnError(t *testing.T) {
+	for _, table := range []string{"ipam/ip-addresses", "virtualization/interfaces", "ipam/fhrp-groups"} {
+		t.Run(table, func(t *testing.T) {
+			f := assignFake()
+			f.pathOrigin(idInterface, 5)
+			f.fhrpAddress(idFHRPGroup, 300, 2)
+			f.failing = map[string]int{table: 503}
+			var st readStats
+			_, err := newTestProvider(t, f).assignmentTypes(context.Background(), []int{idInterface, idFHRPGroup}, &st)
+			if u := provider.Classify(err); u == nil || u.Status != 503 {
+				t.Errorf("err = %v, want the replica's 503", err)
+			}
 		})
 	}
 }
@@ -444,9 +735,9 @@ func TestAssignmentTypes_EvidenceMustNameTheOwner(t *testing.T) {
 // type. The end is what keeps two components of one id apart.
 func TestAssignmentTypes_TerminationsClassifyPorts(t *testing.T) {
 	f := assignFake()
-	f.addRows("dcim/interfaces", cabledRow(60, 7, "A"), cabledRow(61, 8, "A"))
-	f.addRows("dcim/front-ports", cabledRow(60, 7, "B"))
-	f.addRows("dcim/rear-ports", cabledRow(9, 10, "A"))
+	f.addRows("dcim/interfaces", cabledAt(60, 7, "A"), cabledAt(61, 8, "A"))
+	f.addRows("dcim/front-ports", cabledAt(60, 7, "B"))
+	f.addRows("dcim/rear-ports", cabledAt(9, 10, "A"))
 	f.addRows("dcim/cable-terminations",
 		termRow(1, 7, "A", idInterface, 60), termRow(2, 7, "B", idFrontPort, 60),
 		termRow(3, 8, "A", idInterface, 61), termRow(4, 10, "A", idRearPort, 9),
@@ -455,8 +746,14 @@ func TestAssignmentTypes_TerminationsClassifyPorts(t *testing.T) {
 		termRow(5, 12, "A", 43, 60))
 	p := newTestProvider(t, f)
 
+	// What a caller is given are the models an address can be assigned to; the
+	// ports are kept to check the one-id-per-model rule and what is left over.
 	got := learn(t, p, idInterface, idFrontPort, idRearPort, 43)
-	wantTypes(t, got, contentTypes{idInterface: "dcim.interface", idFrontPort: "dcim.frontport", idRearPort: "dcim.rearport"})
+	wantTypes(t, got, contentTypes{idInterface: "dcim.interface"})
+	p.typeMu.Lock()
+	kept := maps.Clone(p.types.learned)
+	p.typeMu.Unlock()
+	wantTypes(t, kept, contentTypes{idInterface: "dcim.interface", idFrontPort: "dcim.frontport", idRearPort: "dcim.rearport"})
 }
 
 // Every piece of evidence for an id must agree, and a model has one id: a
@@ -467,7 +764,7 @@ func TestAssignmentTypes_ConflictingEvidenceLeavesTheIDUnknownAndLogsOnce(t *tes
 		f := assignFake()
 		f.pathOrigin(idInterface, 5)
 		// A front port whose termination says it is of the interface's type.
-		f.addRows("dcim/front-ports", cabledRow(8, 9, "B"))
+		f.addRows("dcim/front-ports", cabledAt(8, 9, "B"))
 		f.addRows("dcim/cable-terminations", termRow(1, 9, "B", idInterface, 8))
 		f.vmPrimary(idVMInterface, 7, 200)
 		p := newTestProvider(t, f)
@@ -498,7 +795,7 @@ func TestAssignmentTypes_ConflictingEvidenceLeavesTheIDUnknownAndLogsOnce(t *tes
 		f := assignFake()
 		f.pathOrigin(idInterface, 5)
 		f.devicePrimary(idInterface, 6, 100)
-		f.addRows("dcim/interfaces", cabledRow(8, 9, "A"))
+		f.addRows("dcim/interfaces", cabledAt(8, 9, "A"))
 		f.addRows("dcim/cable-terminations", termRow(1, 9, "A", idInterface, 8))
 		wantTypes(t, learn(t, newTestProvider(t, f), idInterface), contentTypes{idInterface: "dcim.interface"})
 		if got := logs.warnings(); len(got) != 0 {
@@ -596,7 +893,7 @@ func TestAssignmentTypes_FailedReadIsAnErrorAndNotCached(t *testing.T) {
 			f := assignFake()
 			f.pathOrigin(idInterface, 5)
 			f.devicePrimary(idInterface, 6, 100)
-			f.addRows("dcim/front-ports", cabledRow(8, 9, "B"))
+			f.addRows("dcim/front-ports", cabledAt(8, 9, "B"))
 			f.addRows("dcim/cable-terminations", termRow(1, 9, "B", idFrontPort, 8))
 			f.failing = map[string]int{table: 503}
 			p := newTestProvider(t, f)

@@ -271,6 +271,27 @@ type cabledComponent struct {
 	end       string
 }
 
+// cabledTables are the component tables a termination is classified by, and
+// the model each holds: an interface, a front port or a rear port are the
+// terminations that count for a link between devices, and what the types of
+// those terminations are is read the same way (see contentTypes).
+var cabledTables = []struct{ table, name string }{
+	{"dcim/interfaces", typeInterface},
+	{"dcim/front-ports", typeFrontPort},
+	{"dcim/rear-ports", typeRearPort},
+}
+
+// cabledRow is the columns of a component row that tie it to a termination
+// (and to its device, where the read asks for it).
+type cabledRow struct {
+	ID     int    `json:"id"`
+	Cable  int    `json:"cable_id"`
+	End    string `json:"cable_end"`
+	Device int    `json:"device_id"`
+}
+
+func (r cabledRow) component() cabledComponent { return cabledComponent{r.ID, r.Cable, r.End} }
+
 // physicalEdges is one edge per cable between devices, as NetBox mode draws
 // them: every device on one end to every device on the other, with an
 // interface, front port or rear port the only terminations that count — a
@@ -331,24 +352,19 @@ func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool, nod
 	// The device of each termination that is an interface or a panel port. A
 	// table with no data on this tenant (no patch panels) classifies nothing.
 	device := map[cabledComponent]int{}
-	for _, table := range []string{"dcim/interfaces", "dcim/front-ports", "dcim/rear-ports"} {
-		rows, more, err := p.listByIDs(ctx, table, "cable_id", cables, url.Values{"fields": {"id,cable_id,cable_end,device_id"}}, st)
+	for _, t := range cabledTables {
+		rows, more, err := p.listByIDs(ctx, t.table, "cable_id", cables, url.Values{"fields": {"id,cable_id,cable_end,device_id"}}, st)
 		if err != nil {
 			return nil, false, err
 		}
 		capped = capped || more
-		for _, raw := range rows {
-			var comp struct {
-				ID     int    `json:"id"`
-				Cable  int    `json:"cable_id"`
-				End    string `json:"cable_end"`
-				Device int    `json:"device_id"`
-			}
-			if err := json.Unmarshal(raw, &comp); err != nil {
-				return nil, false, &TransportError{Op: "reading " + table, Err: err, Message: rowShapeGuidance}
-			}
+		comps, err := decodeRows[cabledRow](t.table, rows)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, comp := range comps {
 			if comp.Device > 0 {
-				device[cabledComponent{comp.ID, comp.Cable, comp.End}] = comp.Device
+				device[comp.component()] = comp.Device
 			}
 		}
 	}

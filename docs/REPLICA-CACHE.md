@@ -172,11 +172,12 @@ NetBox's meaning is kept:
   notation — also finds the prefix that equals it, its host bits ignored. The
   VRF plays no part, IPv4 and IPv6 never contain each other, and an IPv4-mapped
   address (`::ffff:10.0.0.1`) is IPv6. A value that is not an address or prefix
-  finds nothing, as in NetBox, without a request. Several values are refused:
-  NetBox uses only the last, so a multi-value variable would show one
-  selection without saying so. It needs replica-cache v1.39 or later, whose
-  schema route states it, and is offered on prefixes alone: NetBox has no
-  `contains` on an aggregate;
+  finds nothing, as in NetBox, without a request; one with a null character is
+  refused with NetBox's own message. Several values are refused: NetBox uses
+  only the last, so a multi-value variable would show one selection without
+  saying so. It needs replica-cache v1.39 or later, whose schema route states
+  it (on an older build the filter is refused, saying so), and is offered on
+  prefixes alone: NetBox has no `contains` on an aggregate;
 - a MAC address in any spelling NetBox reads (`58-56-9F-D1-E3-00`,
   `5856.9fd1.e300`, …) matches the stored address, and a value NetBox cannot
   read makes the whole filter match nothing, as there. _contains_ and the other

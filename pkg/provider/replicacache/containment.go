@@ -28,9 +28,10 @@ import (
 // the separators Python's strip removes — and sends the network it names. A
 // value that is no address or prefix finds no row in NetBox (queryset.none(),
 // not an error), where the replica refuses the whole request, so it is answered
-// as NetBox does, with no request. And NetBox's filter takes one value, the last
-// of several, which would narrow a multi-value variable to one selection
-// without a word, so several are refused.
+// as NetBox does, with no request; a null character in it is NetBox's own 400,
+// and is refused so. And NetBox's filter takes one value, the last of several,
+// which would narrow a multi-value variable to one selection without a word, so
+// several are refused.
 
 // containsName is the NetBox filter this file answers.
 const containsName = "contains"
@@ -47,6 +48,10 @@ const opContains = "contains net"
 func (c *catalog) offersContains() bool {
 	return c != nil && c.ContainsMaxValues > 0
 }
+
+// nullCharacterReason is Django's refusal of a null character in a text value,
+// which NetBox's contains answers with, and what to do.
+const nullCharacterReason = "Null characters are not allowed. NetBox mode answers the same; remove the null character from the value"
 
 // containsUnsupportedReason is the refusal of NetBox's contains filter on a
 // build that cannot answer it.
@@ -100,6 +105,14 @@ func rewriteContains(filters []provider.Filter, objectType string, e entity) (ou
 	if value == "" {
 		return slices.Delete(slices.Clone(filters), at, at+1), false, nil
 	}
+	// NetBox's form refuses a null character in a text value with its own 400,
+	// after the strip, whatever else the value says: it is no address, which
+	// would match nothing, but NetBox does not say that (NetBox 4.4.10:
+	// ?contains=10.10.10.5%00 is HTTP 400 {"contains": ["Null characters are not
+	// allowed."]}, and so is a null between spaces).
+	if strings.ContainsRune(value, 0) {
+		return nil, false, &UnsupportedFilterError{Field: fieldLabel(row), Operator: operatorLabel(row), Reason: nullCharacterReason}
+	}
 	network, ok := netaddrNetwork(value)
 	if !ok {
 		return slices.Delete(slices.Clone(filters), at, at+1), true, nil
@@ -113,6 +126,27 @@ func rewriteContains(filters []provider.Filter, objectType string, e entity) (ou
 	return slices.Replace(slices.Clone(filters), at, at+1, provider.Filter{
 		Field: entry.Column, Operator: opContains, Value: text, Label: fieldLabel(row), LabelOperator: row.Operator,
 	}), false, nil
+}
+
+// validateContainsBuild is the part of validateFilters that needs no column,
+// for an entity the replica has received nothing for, which has none to ask: a
+// build without the containment operator is refused as it is for an entity with
+// data (validateFilters), not sent the operator. A build answers an operator it
+// does not know with a 400 before it looks at the table, where every other
+// filter on an unfed table gets the table's own 404 (measured on v1.40.1 against
+// a table that never received data: filter[id]__eq is the 404, filter[id]__bogus
+// the 400 "invalid filter operator: bogus"), and that bare 400 says nothing of
+// what to do.
+func validateContainsBuild(filters []provider.Filter, c *catalog) error {
+	if c.offersContains() {
+		return nil
+	}
+	for _, f := range filters {
+		if f.Field != "" && f.Operator == opContains {
+			return &UnsupportedFilterError{Field: fieldLabel(f), Operator: operatorLabel(f), Reason: containsUnsupportedReason}
+		}
+	}
+	return nil
 }
 
 // containsFilter is NetBox's containment filter on the entity's table: the

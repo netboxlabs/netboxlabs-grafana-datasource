@@ -80,7 +80,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// column", the wrong subject. The bare request goes, and the service
 	// answers for itself: 404 while unfed, its own validation once fed. The
 	// one thing judged without columns is the operator vocabulary, which is
-	// the build's (validateTextOperators).
+	// the build's (validateTextOperators, validateContainsBuild).
 	//
 	// Negations are answered here rather than by the service (negations.go),
 	// which needs the columns: on an unfed entity they stay among the filters
@@ -106,8 +106,13 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		if !none {
 			filters, negs, none = subtractNegations(filters, negs, e, c)
 		}
-	} else if err := validateTextOperators(filters, c); err != nil {
-		return nil, err
+	} else {
+		if err := validateTextOperators(filters, c); err != nil {
+			return nil, err
+		}
+		if err := validateContainsBuild(filters, c); err != nil {
+			return nil, err
+		}
 	}
 	q, err := buildFilterValues(filters, addressField(e, c))
 	if err != nil {

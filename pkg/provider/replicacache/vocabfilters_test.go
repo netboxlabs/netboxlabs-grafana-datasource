@@ -889,6 +889,37 @@ func TestTranslate_RefusesSearchTagsAndCustomFieldsSayingWhy(t *testing.T) {
 	noRequestsFor(t, f, "dcim/devices")
 }
 
+// A null character can be in no stored text (PostgreSQL text cannot hold one),
+// so a value carrying one matched no row, which an alert rule reads as nothing
+// wrong, where NetBox answers every filter read through a Django CharField with
+// 400 "Null characters are not allowed." (NetBox 4.4.10: name=, description__ic=,
+// prefix=, q=). It is refused with that message before anything else reads the
+// filter, whatever it is, on a plugin's table as on NetBox's, and nothing is
+// sent.
+func TestTranslate_NullCharacterIsRefusedAsNetBoxRefusesIt(t *testing.T) {
+	f := newFakeService()
+	f.addEntity(pluginWidgets, "id:BIGINT:pk", "code:VARCHAR")
+	p := newTestProvider(t, f)
+	for _, c := range []struct {
+		objectType string
+		filter     provider.Filter
+	}{
+		{"dcim/devices", provider.Filter{Field: "serial", Operator: "ic", Value: "x\x00"}},
+		{"dcim/devices", provider.Filter{Field: "name", Value: "core-1,\x00"}},
+		{"dcim/devices", provider.Filter{Field: "site", Value: "ams1\x00"}},
+		{"dcim/devices", provider.Filter{Field: "q", Value: "core\x00"}},
+		{"dcim/devices", provider.Filter{Field: "status", Operator: "n", Value: "\x00active"}},
+		{pluginWidgets, provider.Filter{Field: "code", Value: "W-1\x00"}},
+	} {
+		f.forget()
+		u := relatedRefusal(t, p, c.objectType, c.filter)
+		if u.Reason != nullCharacterReason || u.Field != c.filter.Field || u.Operator != c.filter.Operator {
+			t.Errorf("%s %+v: refused %q on %s %q, want NetBox's null-character refusal", c.objectType, c.filter, u.Reason, u.Field, u.Operator)
+		}
+		noRequestsFor(t, f, c.objectType)
+	}
+}
+
 // An entity the vocabulary does not describe — a plugin's model — keeps the
 // catalogue's rules: its filters go as written.
 func TestTranslate_PluginTypeKeepsCatalogueBehaviour(t *testing.T) {

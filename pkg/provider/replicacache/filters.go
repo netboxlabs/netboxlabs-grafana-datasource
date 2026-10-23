@@ -113,6 +113,9 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 	// one field are fine and compose (gt with lt is a range).
 	seen := map[string]bool{}
 
+	// Has any value on text asks for gt "", written once the rest are, below.
+	blank := map[string]bool{}
+
 	for _, f := range filters {
 		if f.Field == "" {
 			continue
@@ -139,6 +142,17 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 		if op == opIsNull || op == opNotNull {
 			q.Set(param(f.Field, "isnull"), boolString(op == opIsNull))
 			continue
+		}
+		// Has any value on a text column (rewriteEmptiness): the replica's
+		// comparison with the empty string, which has no value to read either.
+		if op == opWireGTBlank {
+			blank[f.Field] = true
+			continue
+		}
+		// Is empty on text is a negation, answered once the replica has columns
+		// (negations.go): one that reaches here is on an entity with none yet.
+		if op == opNotGTBlank {
+			return refuse(emptyNeedsDataReason)
 		}
 
 		values := splitValues(f.Value)
@@ -202,6 +216,14 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 			continue
 		}
 		setEquality(q, field, values)
+	}
+	// The same name on the wire as a greater-than the panel wrote on the column,
+	// which implies it — a value greater than any other is a value — so that one
+	// stands, whichever came first.
+	for field := range blank {
+		if !q.Has(param(field, "gt")) {
+			q.Set(param(field, "gt"), "")
+		}
 	}
 	return q, nil
 }
@@ -411,10 +433,12 @@ func boolString(b bool) string {
 // tokens. eq and in collapse to "" (the editor sends a CSV for several
 // values); each text match is offered exactly when the catalogue lists its
 // wire name (ilike is the contains match and nothing else; the anchored
-// matches arrive with DATA-408); isnull becomes empty/nempty only where
-// "empty" and NULL coincide — a nullable non-text column. On text the two
-// diverge (see emptyOnTextReason), and on a NOT NULL column nothing is ever
-// empty.
+// matches arrive with DATA-408); empty/nempty are offered on a text column
+// that lists gt, where NetBox's empty lookup is asked as a comparison with the
+// empty string (emptiness.go; it is NULL or "" there, and a NOT NULL column
+// holds "" too, so nullability does not enter), and otherwise where isnull and
+// NULL coincide — a nullable column that is not text; on a NOT NULL one
+// nothing is ever empty.
 func seamOperators(col column) []string {
 	var out []string
 	has := func(op string) bool { return slices.Contains(col.Operators, op) }
@@ -449,7 +473,10 @@ func seamOperators(col column) []string {
 			out = append(out, opLTE)
 		}
 	}
-	if has("isnull") && col.Nullable && fieldTypeOf(col.Type) != provider.FieldTypeString {
+	switch {
+	case answersTextEmptiness(col):
+		out = append(out, opEmpty, opNEmpty)
+	case has("isnull") && col.Nullable && fieldTypeOf(col.Type) != provider.FieldTypeString:
 		out = append(out, opEmpty, opNEmpty)
 	}
 	return out
@@ -484,19 +511,22 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 		}
 		// A row with an operator and no value emits no parameter (as in
 		// NetBox mode; see buildFilterValues), so it is not judged either: a
-		// saved query carrying one used to run.
+		// saved query carrying one used to run. The emptiness operators have no
+		// value to send, and are judged.
 		nullTest := op == opIsNull || op == opNotNull
-		if op != opEmpty && op != opNEmpty && !nullTest && len(splitValues(f.Value)) == 0 {
+		anyValue := op == opWireGTBlank
+		if op != opEmpty && op != opNEmpty && !nullTest && !anyValue && len(splitValues(f.Value)) == 0 {
 			continue
 		}
 		// NetBox's own IS NULL (the literal null, mtu__empty, cabled; see
 		// translateFilters) means what it says on any column, text included —
-		// it is not the empty lookup, whose "" is the problem on text — so only
-		// the column and its operator are asked about. The translation writes
-		// it on the column NetBox reads, never an expanded name; the refusal
-		// names the filter as written (operatorLabel). A prefix's contains
-		// (rewriteContains) is asked the same, of the operator the build lists.
-		if nullTest || op == opContains {
+		// it is not the empty lookup, whose "" is what isnull cannot test on
+		// text — so only the column and its operator are asked about. The
+		// translation writes it on the column NetBox reads, never an expanded
+		// name; the refusal names the filter as written (operatorLabel). A
+		// prefix's contains (rewriteContains) and has any value on text
+		// (rewriteEmptiness) are asked the same, of the operator they are sent as.
+		if nullTest || anyValue || op == opContains {
 			col, stored := e.column(f.Field)
 			switch {
 			case !stored:
@@ -506,13 +536,18 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 				}
 				return refuse(reason + ", so it cannot answer the filter; remove it, or choose a filter the editor offers")
 			case nullTest && !slices.Contains(col.Operators, "isnull"):
-				return refuse(fmt.Sprintf("this replica cannot test %s for a value (its schema lists no isnull there), so it cannot answer the filter; %s", f.Field, netboxModeAdvice))
+				return refuse(fmt.Sprintf("this replica cannot test %s for a value (its schema lists no isnull there), so it cannot answer the filter; %s", namedColumn(f.Field, label), netboxModeAdvice))
+			case anyValue && !slices.Contains(col.Operators, "gt"):
+				return refuse(noGTReason(namedColumn(f.Field, label)))
 			case op == opContains && (!c.offersContains() || !slices.Contains(col.Operators, "contains")):
 				return refuse(containsUnsupportedReason)
 			}
 			continue
 		}
-		var col column
+		var (
+			col    column
+			joined *column // the column that holds the id, when the filter is on a name joined in from another table
+		)
 		if own, ok := e.column(f.Field); ok {
 			col = own
 		} else if via, target, ok := e.expandedColumn(f.Field); ok {
@@ -521,6 +556,7 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 					label, strings.TrimPrefix(via.Ref.Path, "/v1/"), via.Name))
 			}
 			col = targetColumn(c, via.Ref, target)
+			joined = &via
 		} else {
 			return refuse("this replica has no such column to filter on")
 		}
@@ -532,10 +568,12 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 			return refuse(textMatchReason)
 		}
 		if op == opEmpty || op == opNEmpty {
-			if fieldTypeOf(col.Type) == provider.FieldTypeString {
-				return refuse(emptyOnTextReason(label))
-			}
-			if !col.Nullable {
+			switch {
+			case joined != nil:
+				return refuse(joinedEmptinessReason(label, *joined))
+			case isTextType(col.Type):
+				return refuse(rawEmptinessReason)
+			case !col.Nullable:
 				return refuse("that column is NOT NULL on this replica, so nothing in it is ever empty")
 			}
 		}
@@ -629,21 +667,4 @@ func validateTextOperators(filters []provider.Filter, c *catalog) error {
 		}
 	}
 	return nil
-}
-
-// emptyOnTextReason is the DATA-206 refusal, stated from the catalogue: the
-// column is nullable text, NetBox stores a blank as "" rather than NULL, and
-// the backend's only test is IS NULL — so "is empty" answers the inverse of
-// the population it names. Measured on 6.8M devices:
-//
-//	filter[serial]__isnull=true   -> 0          (what "is empty" would send)
-//	filter[serial]__eq=           -> 6,824,570  (what NetBox means by empty)
-//	filter[serial]__isnull=false  -> 6,824,570  (our "has any value")
-//
-// Neither can be expressed here: "is empty" needs `isnull OR eq ""` and the
-// backend ANDs its filters with no OR; "has any value" needs a negation it
-// does not have. Equality with an empty value is NOT the advice: buildFilterValues
-// drops it, as NetBox mode does, so following it returns every row.
-func emptyOnTextReason(field string) string {
-	return fmt.Sprintf("this backend answers \"is empty\" on a text column with IS NULL, but NetBox stores a blank %s as \"\", not NULL, so the filter would keep the blanks and drop only the nulls — the opposite of what was asked. There is no equivalent here; use a datasource in NetBox mode for this filter", field)
 }

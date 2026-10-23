@@ -39,14 +39,18 @@ import (
 //     every row, up to MaxLimit.
 //
 // Where none is possible the query is refused, saying how to narrow it.
+//
+// NetBox's "is empty" on text is a negation too (emptiness.go): the rows that do
+// not hold a value, which Django's exclude() keeps NULL among.
 
 // negatedOperator is the match each negation excludes.
 var negatedOperator = map[string]string{
-	"n":    opExact,
-	"nic":  opIContns,
-	"nie":  opIExact,
-	"nisw": opIStarts,
-	"niew": opIEnds,
+	"n":          opExact,
+	"nic":        opIContns,
+	"nie":        opIExact,
+	"nisw":       opIStarts,
+	"niew":       opIEnds,
+	opNotGTBlank: opWireGTBlank,
 }
 
 // maxNegations bounds inclusion–exclusion at 2^3 = 8 row counts.
@@ -54,7 +58,8 @@ const maxNegations = 3
 
 // negation is one predicate a kept row must not match: for "n", the value is
 // not in values; for a text negation, one value per negation, since several
-// values each drop what they match.
+// values each drop what they match; for "is empty" on text, op is the comparison
+// with the empty string, whose one value is "".
 type negation struct {
 	field  string
 	op     string // the positive match
@@ -69,10 +74,14 @@ func (n negation) positive() provider.Filter {
 // label is the negated field as the user wrote it, for a refusal.
 func (n negation) label() string { return fieldLabel(n.source) }
 
+// operator is the negation as the user wrote it, for a refusal: "n", "nic", or
+// "empty", which is not the operator it is answered as.
+func (n negation) operator() string { return operatorLabel(n.source) }
+
 // splitNegations separates the negations from the filters the replica takes.
 // Every "n" on one field becomes one negation over all its values; a text
 // negation becomes one per value. A negation with no value is dropped, as
-// NetBox mode sends no parameter for it.
+// NetBox mode sends no parameter for it; "is empty" has none to give, and stays.
 func splitNegations(filters []provider.Filter) ([]provider.Filter, []negation) {
 	var positives []provider.Filter
 	var negs []negation
@@ -83,6 +92,16 @@ func splitNegations(filters []provider.Filter) ([]provider.Filter, []negation) {
 		// skips it among the positives.
 		if !negated || f.Field == "" {
 			positives = append(positives, f)
+			continue
+		}
+		// "Is empty" is a predicate on the column and has no value to split. It
+		// carries the one value the others are read through, the empty string
+		// (countTerms and intersect read values[0]), and twice on one column is one
+		// predicate, as the same text match twice is.
+		if f.Operator == opNotGTBlank {
+			if !slices.ContainsFunc(negs, func(n negation) bool { return n.field == f.Field && n.op == pos }) {
+				negs = append(negs, negation{field: f.Field, op: pos, values: []string{""}, source: f})
+			}
 			continue
 		}
 		values := splitValues(f.Value)
@@ -128,16 +147,16 @@ func validateNegations(negs []negation, e entity, c *catalog) error {
 		if err := validateFilters([]provider.Filter{n.positive()}, e, c); err != nil {
 			var unsupported *UnsupportedFilterError
 			if errors.As(err, &unsupported) {
-				unsupported.Operator = n.source.Operator
+				unsupported.Operator = n.operator()
 			}
 			return err
 		}
 		if n.op == opExact && isAddress(n.field) {
-			return &UnsupportedFilterError{Field: n.label(), Operator: n.source.Operator,
+			return &UnsupportedFilterError{Field: n.label(), Operator: n.operator(),
 				Reason: "NetBox matches an IP address by its host whatever the mask, which this backend can test only as a filter it sends, never as one it excludes; filter on what to keep instead"}
 		}
 		if col, _ := filterColumn(e, c, n.field); !rowComparable(col.Type) {
-			return &UnsupportedFilterError{Field: n.label(), Operator: n.source.Operator,
+			return &UnsupportedFilterError{Field: n.label(), Operator: n.operator(),
 				Reason: fmt.Sprintf("the replica converts a %s value before comparing it, which the rows read here cannot be tested against; filter on what to keep instead", strings.ToLower(col.Type))}
 		}
 	}
@@ -153,6 +172,12 @@ func rowComparable(colType string) bool {
 	case provider.FieldTypeNumber, provider.FieldTypeBoolean:
 		return true
 	}
+	return isTextType(colType)
+}
+
+// isTextType reports whether a column's type is one of the text types: what the
+// replica compares as text, and the rows read here are tested as text.
+func isTextType(colType string) bool {
 	t := strings.ToUpper(strings.TrimSpace(colType))
 	for _, text := range []string{"VARCHAR", "TEXT", "STRING", "CHAR", "BPCHAR"} {
 		if t == text || strings.HasPrefix(t, text+"(") {
@@ -587,7 +612,7 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 			return negatedRows{}, err
 		}
 		if base > MaxLimit {
-			return negatedRows{}, &UnsupportedFilterError{Field: nq.negs[0].label(), Operator: nq.negs[0].source.Operator,
+			return negatedRows{}, &UnsupportedFilterError{Field: nq.negs[0].label(), Operator: nq.negs[0].operator(),
 				Reason: fmt.Sprintf("the replica cannot count rows for these negated filters together, so the rows are read and tested here, which works up to %s rows; the other filters match %s. Narrow them, or negate fewer values",
 					thousands(MaxLimit), thousands(base))}
 		}
@@ -666,7 +691,7 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 		out = withCount(cnt, out, w.matched)
 	case needAll:
 		// The base outgrew MaxLimit between the count and the walk.
-		return negatedRows{}, &UnsupportedFilterError{Field: nq.negs[0].label(), Operator: nq.negs[0].source.Operator,
+		return negatedRows{}, &UnsupportedFilterError{Field: nq.negs[0].label(), Operator: nq.negs[0].operator(),
 			Reason: fmt.Sprintf("the rows matching the other filters grew past %s while they were being read, so the matches could not all be counted; narrow the other filters", thousands(MaxLimit))}
 	}
 	// Stopped short of the end with fewer rows than wanted, and nothing to
@@ -754,6 +779,12 @@ func storedValue(raw json.RawMessage) interface{} {
 }
 
 func matchesStored(v interface{}, colType, op string, values []string) bool {
+	// Has any value on text: greater than the empty string, which every non-empty
+	// string is and NULL is not.
+	if op == opWireGTBlank {
+		text, isString := v.(string)
+		return isString && text != ""
+	}
 	var text string
 	switch t := v.(type) {
 	case nil:

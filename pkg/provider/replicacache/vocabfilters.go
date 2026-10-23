@@ -34,11 +34,15 @@ const (
 )
 
 // internalOperators are the operators this datasource writes for itself, which
-// a query never names: the two above, and the replica's containment (opContains,
-// containment.go). Query refuses a filter that names one before anything reads
-// it, on any object type: a plugin's, which nothing translates, would otherwise
-// have a hand-written "is null" taken for what the translation means by it.
-var internalOperators = map[string]bool{opIsNull: true, opNotNull: true, opContains: true}
+// a query never names: the two above, the replica's containment (opContains,
+// containment.go), and the two that ask the replica NetBox's empty lookup on
+// text (opWireGTBlank and opNotGTBlank, emptiness.go). Query refuses a filter
+// that names one before anything reads it, on any object type: a plugin's,
+// which nothing translates, would otherwise have a hand-written "is null" taken
+// for what the translation means by it.
+var internalOperators = map[string]bool{
+	opIsNull: true, opNotNull: true, opContains: true, opWireGTBlank: true, opNotGTBlank: true,
+}
 
 // refuseInternalOperators is that refusal. A row with no field sends nothing,
 // whatever its operator, and is left alone as everywhere else.
@@ -477,8 +481,9 @@ func booleanFilter(entry vocabEntry, b bool, first provider.Filter) provider.Fil
 		f.Operator, f.LabelOperator = nullOperator(!b), first.Operator
 	case kindEmpty:
 		// NetBox's empty lookup on text, NULL or "", left as the emptiness
-		// operators on the column: one filter cannot test both there, and
-		// validateFilters refuses it on text, saying so (emptyOnTextReason).
+		// operators on the column: the replica's isnull cannot say both there, so
+		// rewriteEmptiness puts them on the comparison it can be asked
+		// (emptiness.go). true is "is empty" and false "has any value".
 		f.Operator = opNEmpty
 		if b {
 			f.Operator = opEmpty
@@ -643,11 +648,13 @@ func valueColumn(e entity, field string) string {
 // object offers = and not where its target is a table with data: its values
 // are checked against that table, so on any other they are refused, and the
 // editor does not offer what a query refuses. is-empty and has-any-value go
-// where NetBox's __empty is a boolean meaning IS NULL — and only there: a
-// number's or a date's __empty keeps that class and is a NetBox 400
-// (speed__empty). A decimal or date NetBox compares as such, which the replica
-// cannot, is offered with those two alone. A prefix's contains is offered with =
-// alone, where the replica has the operator for it (containment.go).
+// where NetBox's __empty is a boolean the replica can answer — IS NULL on a
+// column that takes it, or NetBox's empty lookup on a text column that takes gt
+// (emptiness.go) — and only there: a number's or a date's __empty keeps that
+// class and is a NetBox 400 (speed__empty). A decimal or date NetBox compares as
+// such, which the replica cannot, is offered with those two alone. A prefix's
+// contains is offered with = alone, where the replica has the operator for it
+// (containment.go).
 func vocabFilterFields(vocab map[string][]vocabEntry, e entity, c *catalog) []provider.FilterField {
 	var out []provider.FilterField
 	for _, name := range slices.Sorted(maps.Keys(vocab)) {
@@ -711,10 +718,13 @@ func vocabOperators(vocab map[string][]vocabEntry, name string, e entity, c *cat
 	}
 	if (len(ops) > 0 && base.Kind == kindValue) || base.Kind == kindRefuse {
 		if v, ok := vocab[name+"__empty"]; ok {
-			if empty := pickVocab(v, e); empty.Kind == kindIsNull {
-				if c, ok := e.column(empty.Column); ok && slices.Contains(c.Operators, "isnull") {
-					ops = append(ops, opEmpty, opNEmpty)
-				}
+			empty := pickVocab(v, e)
+			col, stored := e.column(empty.Column)
+			switch {
+			case empty.Kind == kindIsNull && stored && slices.Contains(col.Operators, "isnull"):
+				ops = append(ops, opEmpty, opNEmpty)
+			case empty.Kind == kindEmpty && stored && answersTextEmptiness(col):
+				ops = append(ops, opEmpty, opNEmpty)
 			}
 		}
 	}

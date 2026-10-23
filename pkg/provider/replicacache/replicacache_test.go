@@ -1011,10 +1011,10 @@ func withPluginDevices(s *fakeSchema) *fakeSchema {
 }
 
 // The operators come from the catalogue, translated to the editor's tokens,
-// on a table the vocabulary does not cover. The two withholdings that remain
-// are deliberate: is-empty on TEXT (NetBox stores a blank as "", the backend
-// tests IS NULL — DATA-206) and on a NOT NULL column (nothing is ever empty
-// there).
+// on a table the vocabulary does not cover. Is-empty is offered on text (asked
+// as a comparison with the empty string, whatever the column's nullability), on
+// a number that can be NULL, and not on a NOT NULL one (nothing is ever empty
+// there) nor on a name joined in from another table.
 func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 	f := newFakeService()
 	f.schema = withPluginDevices(f.schema)
@@ -1029,12 +1029,12 @@ func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 		ops[x.Name] = x.Operators
 	}
 	for name, want := range map[string][]string{
-		"name":          {"", "n", "ic", "nic", "gt", "lt"},       // nullable VARCHAR: contains, no is-empty
-		"serial":        {"", "n", "ic", "nic", "gt", "lt"},       // NOT NULL VARCHAR: the same
-		"position":      {"", "n", "gt", "lt", "empty", "nempty"}, // nullable DOUBLE: is-empty is exact
-		"id":            {"", "n", "gt", "gte", "lt", "lte"},      // NOT NULL BIGINT: never empty; whole numbers take >= and <=
-		"is_full_depth": {"", "n", "gt", "lt"},                    // NOT NULL BOOLEAN
-		"site":          {"", "n", "ic", "nic", "gt", "lt"},       // expanded name: the target's name column
+		"name":          {"", "n", "ic", "nic", "gt", "lt", "empty", "nempty"}, // nullable VARCHAR: contains, and is-empty as a comparison with ""
+		"serial":        {"", "n", "ic", "nic", "gt", "lt", "empty", "nempty"}, // NOT NULL VARCHAR: the same, a blank is "" there
+		"position":      {"", "n", "gt", "lt", "empty", "nempty"},              // nullable DOUBLE: is-empty is exact
+		"id":            {"", "n", "gt", "gte", "lt", "lte"},                   // NOT NULL BIGINT: never empty; whole numbers take >= and <=
+		"is_full_depth": {"", "n", "gt", "lt"},                                 // NOT NULL BOOLEAN
+		"site":          {"", "n", "ic", "nic", "gt", "lt"},                    // expanded name: the target's name column, whose emptiness is site_id's
 		"site_slug":     {"", "n", "ic", "nic", "gt", "lt"},
 		"rack":          {"", "n", "ic", "nic", "gt", "lt"},
 	} {
@@ -1135,7 +1135,7 @@ func TestFilterFields_OffersAnchoredMatchesWhenTheCatalogueListsThem(t *testing.
 		ops[x.Name] = x.Operators
 	}
 	for name, want := range map[string][]string{
-		"name":      {"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie", "gt", "lt"},
+		"name":      {"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie", "gt", "lt", "empty", "nempty"},
 		"site":      {"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie", "gt", "lt"},
 		"site_slug": {"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie", "gt", "lt"},
 		"id":        {"", "n", "gt", "gte", "lt", "lte"},
@@ -1178,7 +1178,8 @@ func TestFilterFields_OffersNetBoxVocabularyOnly(t *testing.T) {
 	}
 	p := newTestProvider(t, f)
 
-	text := []string{"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie"}
+	// NetBox's __empty on text is offered with them: is empty and has any value.
+	text := []string{"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie", "empty", "nempty"}
 	devices := filterOps(t, p, "dcim/devices")
 	for name, want := range map[string][]string{
 		"site": {"", "n"}, "site_id": {"", "n"}, "rack_id": {"", "n"}, "tenant": {"", "n"}, "role": {"", "n"},

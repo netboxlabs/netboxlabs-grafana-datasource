@@ -458,7 +458,9 @@ func valueType(v interface{}) provider.FieldType {
 // catalogue's list: every stored column and every available expanded name
 // with the operators the catalogue says the backend takes on it (see
 // seamOperators); an expanded name filters on the TARGET column, so its
-// operators are the target's.
+// operators are the target's, but for is empty and has any value, which a
+// name looked up in another table has no text of its own to answer
+// (joinedNameOperators).
 func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provider.FilterField, error) {
 	if err := rejectBranch(ctx); err != nil {
 		return nil, err
@@ -481,9 +483,9 @@ func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provi
 		if col.Ref == nil || !col.Ref.Available {
 			continue
 		}
-		out = append(out, provider.FilterField{Name: col.Ref.ExpandKey, Operators: seamOperators(targetColumn(c, col.Ref, col.Ref.Columns[0]))})
+		out = append(out, provider.FilterField{Name: col.Ref.ExpandKey, Operators: joinedNameOperators(targetColumn(c, col.Ref, col.Ref.Columns[0]))})
 		for _, tc := range col.Ref.Columns[1:] {
-			out = append(out, provider.FilterField{Name: col.Ref.ExpandKey + "_" + tc, Operators: seamOperators(targetColumn(c, col.Ref, tc))})
+			out = append(out, provider.FilterField{Name: col.Ref.ExpandKey + "_" + tc, Operators: joinedNameOperators(targetColumn(c, col.Ref, tc))})
 		}
 	}
 	return out, nil

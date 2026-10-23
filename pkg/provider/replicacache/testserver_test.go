@@ -325,6 +325,17 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, 400, fmt.Sprintf("operator %s requires a text column: %s is %s", op, col, c.Type))
 				return
 			}
+			// The four text operators refuse an empty value, where eq, in, gt and
+			// lt take one on text (measured on v1.40.1, ipam/ip-addresses dns_name:
+			// __ilike=, __istartswith=, __iendswith= and __iexact= are each 400
+			// "invalid filter value for dns_name: a text filter takes a non-empty
+			// value"; __eq= is the 23 blank rows of 25, __in= the same, __gt= the 2
+			// with a value, __lt= none). matches answers the comparisons: "" is the
+			// least string, and NULL compares as nothing.
+			if isTextOperator(op) && vs[0] == "" {
+				writeErr(w, 400, "invalid filter value for "+col+": a text filter takes a non-empty value")
+				return
+			}
 			// The catalogue is derived from the handler's own operator specs,
 			// so an operator it does not list is one the handler refuses — a
 			// build before DATA-408 answers istartswith this way.
@@ -521,7 +532,10 @@ func matches(v interface{}, op, want string) bool {
 		return (v == nil) == (want == "true")
 	case "gt", "lt":
 		// A number compares as a number and text as text, as the service's
-		// typed columns do; NULL compares as nothing.
+		// typed columns do; NULL compares as nothing. On text the empty string is
+		// the least value, so gt "" is every non-empty string (and no NULL) and
+		// lt "" none — which is how the replica is asked what NetBox's empty
+		// lookup means (emptiness.go).
 		var order int
 		switch n := v.(type) {
 		case nil:

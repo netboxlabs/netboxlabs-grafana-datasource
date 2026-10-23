@@ -399,8 +399,42 @@ func TestValidateFilters_NetBoxNullOnAnyColumnThatTakesIt(t *testing.T) {
 	}
 	err := validateFilters([]provider.Filter{{Field: "_children", Operator: opIsNull, Label: "children", LabelOperator: "n"}}, e, c)
 	var u *UnsupportedFilterError
-	if !errors.As(err, &u) || u.Field != "children" || u.Operator != "n" || !strings.HasPrefix(u.Reason, "this replica cannot test _children for a value") {
+	if !errors.As(err, &u) || u.Field != "children" || u.Operator != "n" || !strings.HasPrefix(u.Reason, "this replica cannot test _children, the column NetBox reads for children, for a value") {
 		t.Errorf("IS NULL on a column without isnull = %v, want a refusal naming children n", err)
+	}
+}
+
+// A refusal about the column NetBox reads for a filter says so when it is not
+// the name the user wrote: a user who wrote children is not shown _children
+// unexplained, whether the replica lacks the column or lists no isnull on it.
+// Where the two are one name there is nothing to explain.
+func TestValidateFilters_RefusalsExplainTheColumnNetBoxReads(t *testing.T) {
+	e := entity{Table: "ipam_prefix", Ingested: true, Columns: []column{
+		{Name: "_children", Type: "BIGINT", Nullable: true, Operators: []string{"eq", "in"}},
+		{Name: "status", Type: "VARCHAR", Nullable: true, Operators: []string{"eq", "in"}},
+	}}
+	c := &catalog{Entities: map[string]entity{"ipam/prefixes": e}}
+	for _, tc := range []struct {
+		name   string
+		filter provider.Filter
+		want   string
+	}{
+		{"no isnull on a column NetBox reads for the filter", provider.Filter{Field: "_children", Operator: opIsNull, Label: "children", LabelOperator: "n"},
+			"this replica cannot test _children, the column NetBox reads for children, for a value (its schema lists no isnull there), so it cannot answer the filter; use a datasource in NetBox mode for this filter"},
+		{"no isnull on the column of that name", provider.Filter{Field: "status", Operator: opIsNull, Label: "status", LabelOperator: "n"},
+			"this replica cannot test status for a value (its schema lists no isnull there), so it cannot answer the filter; use a datasource in NetBox mode for this filter"},
+		{"no isnull, no label", provider.Filter{Field: "status", Operator: opNotNull},
+			"this replica cannot test status for a value (its schema lists no isnull there), so it cannot answer the filter; use a datasource in NetBox mode for this filter"},
+		{"no gt on a column NetBox reads for the filter", provider.Filter{Field: "status", Operator: opWireGTBlank, Label: "state__empty", LabelOperator: "nempty"},
+			"this replica cannot tell whether status, the column NetBox reads for state__empty, has a value (its schema lists no gt there, which is how the replica is asked what NetBox's empty lookup means), so it cannot answer the filter; use a datasource in NetBox mode for this filter"},
+		{"a column the replica does not store", provider.Filter{Field: "_depth", Operator: opIsNull, Label: "depth", LabelOperator: "n"},
+			"this replica does not store _depth, the column NetBox reads for depth, so it cannot answer the filter; remove it, or choose a filter the editor offers"},
+	} {
+		err := validateFilters([]provider.Filter{tc.filter}, e, c)
+		var u *UnsupportedFilterError
+		if !errors.As(err, &u) || u.Reason != tc.want {
+			t.Errorf("%s: err = %v,\nwant the reason %q", tc.name, err, tc.want)
+		}
 	}
 }
 

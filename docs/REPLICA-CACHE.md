@@ -352,13 +352,20 @@ A tenant with no wireless links or no patch panels gets a complete topology
 with no warning: an empty NetBox table is never fed to the replica, and is read
 as empty.
 
-_Known divergence:_ devices come in the replica's name order, which compares
-bytes (`SIN1-…` before `parity-…`), where NetBox orders names naturally and
-without regard to case. Where the two differ, nodes and edges are the same but
-listed in another order, and a path between two such devices may be drawn the
-other way round (the edges table lists both directions either way). With a row
-limit below the number of matching devices, the devices kept can differ; such a
-result is refused in alert rules as truncated in both modes.
+Devices are listed in NetBox's order — by name as NetBox's natural sort
+compares names (`leaf2` before `leaf10`, `parity-…` before `SIN1-…`), then by
+id — and each edge is drawn from the device NetBox mode reads first. Known
+divergences:
+
+- with a row limit below the number of matching devices, the replica keeps the
+  first by their bytes (`SIN1-…` before `parity-…`), so the devices kept can
+  differ; such a result is refused in alert rules as truncated in both modes;
+- a name with a run of digits of value zero followed by text (`0a`, `sw-0a`),
+  or a name outside ASCII where NetBox's database and this data source use
+  different Unicode versions, can sort differently;
+- past a few hundred devices (more ids than one of NetBox mode's 6 KB requests
+  carries) NetBox mode lists cables and boundary peers batch by batch; the
+  sets are the same.
 
 ## Freshness
 

@@ -25,7 +25,9 @@ import (
 // a column, sent as filter[c]__isnull. NetBox spells them several ways (the
 // literal null, mtu__empty, cabled, local_context_data), none of them an
 // operator a query names, and a NetBox lookup is a Python identifier, so a
-// name with a space is never one a saved query carries.
+// name with a space is never one a saved query carries. A row written with
+// one keeps the operator the user wrote in LabelOperator, beside Label, for a
+// refusal to name (operatorLabel).
 const (
 	opIsNull  = "is null"
 	opNotNull = "is not null"
@@ -194,7 +196,7 @@ func (tr translation) filter(name string, rows []provider.Filter) ([]provider.Fi
 		if !ok {
 			return refused(first, fmt.Sprintf("NetBox ignores %q for %s and returns every row; use true or false", last, name))
 		}
-		return []provider.Filter{booleanFilter(entry, b, first.Field)}, false, nil
+		return []provider.Filter{booleanFilter(entry, b, first)}, false, nil
 	case kindAddress:
 		// NetBox's filter_address is the net_in match setAddressMatch makes.
 		return []provider.Filter{{Field: entry.Column, Value: strings.Join(values, ","), Label: first.Field}}, false, nil
@@ -277,12 +279,8 @@ var lookupSuffixes = map[string]bool{
 // objectType is the object type the catalogue serves the table as — what the
 // user picked — for a refusal to name; the table when the catalogue has none.
 func (tr translation) objectType() string {
-	if tr.c != nil {
-		for _, objectType := range slices.Sorted(maps.Keys(tr.c.Entities)) {
-			if tr.c.Entities[objectType].Table == tr.table {
-				return objectType
-			}
-		}
+	if objectType, _, ok := tr.c.servedTable(tr.table); ok {
+		return objectType
 	}
 	return tr.table
 }
@@ -375,12 +373,12 @@ func (tr translation) values(name string, entry vocabEntry, rows []provider.Filt
 			// devices with none), excluded on a negation.
 			rest := slices.DeleteFunc(slices.Clone(values), func(v string) bool { return v == nullValue })
 			if len(rest) == 0 {
-				return []provider.Filter{{Field: entry.Column, Operator: nullOperator(!entry.Exclude), Label: first.Field}}, false, nil
+				return []provider.Filter{{Field: entry.Column, Operator: nullOperator(!entry.Exclude), Label: first.Field, LabelOperator: first.Operator}}, false, nil
 			}
 			if !entry.Exclude {
 				return refused(first, "NetBox returns rows matching either null or the values, and this replica cannot combine the two; filter on null and on the values in separate queries, or "+netboxModeAdvice)
 			}
-			return []provider.Filter{{Field: entry.Column, Operator: opNotNull, Label: first.Field}, on(op, rest, first.Field)}, false, nil
+			return []provider.Filter{{Field: entry.Column, Operator: opNotNull, Label: first.Field, LabelOperator: first.Operator}, on(op, rest, first.Field)}, false, nil
 		case tr.isChoice(entry.Column):
 			// A choice whose form has no null choice (status): NetBox's 400,
 			// in its words.
@@ -458,9 +456,10 @@ func netboxBool(v string) (bool, bool) {
 	return false, false
 }
 
-// booleanFilter is a boolean NetBox filter's answer in the replica's terms.
-func booleanFilter(entry vocabEntry, b bool, label string) provider.Filter {
-	f := provider.Filter{Field: entry.Column, Label: label}
+// booleanFilter is a boolean NetBox filter's answer in the replica's terms,
+// for the filter as written, first.
+func booleanFilter(entry vocabEntry, b bool, first provider.Filter) provider.Filter {
+	f := provider.Filter{Field: entry.Column, Label: first.Field}
 	switch entry.Kind {
 	case kindBool:
 		// Equality on the column; an excluding one keeps the rows NetBox's
@@ -472,10 +471,10 @@ func booleanFilter(entry vocabEntry, b bool, label string) provider.Filter {
 	case kindIsNull:
 		// cabled=true is the cable column IS NOT NULL (an isnull that
 		// excludes); mtu__empty=true is mtu IS NULL.
-		f.Operator = nullOperator(b != entry.Exclude)
+		f.Operator, f.LabelOperator = nullOperator(b != entry.Exclude), first.Operator
 	case kindLocalContext:
 		// NetBox's _local_context_data: true is "has one".
-		f.Operator = nullOperator(!b)
+		f.Operator, f.LabelOperator = nullOperator(!b), first.Operator
 	case kindEmpty:
 		// NetBox's empty lookup on text, NULL or "", left as the emptiness
 		// operators on the column: one filter cannot test both there, and

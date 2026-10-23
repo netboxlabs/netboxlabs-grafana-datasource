@@ -121,7 +121,7 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 			op = opExact
 		}
 		refuse := func(reason string) (url.Values, error) {
-			return nil, &UnsupportedFilterError{Field: fieldLabel(f), Operator: f.Operator, Reason: reason}
+			return nil, &UnsupportedFilterError{Field: fieldLabel(f), Operator: operatorLabel(f), Reason: reason}
 		}
 
 		// The empty family is a predicate on the column, not a comparison, so it
@@ -209,6 +209,17 @@ func fieldLabel(f provider.Filter) string {
 		return f.Label
 	}
 	return f.Field
+}
+
+// operatorLabel is the operator a refusal gives a filter: the one the user
+// wrote where the translation sent it as IS NULL or IS NOT NULL, operators no
+// query names (owner=null, owner__n=null, mtu is empty, cabled=true), else the
+// filter's own.
+func operatorLabel(f provider.Filter) string {
+	if internalOperators[f.Operator] {
+		return f.LabelOperator
+	}
+	return f.Operator
 }
 
 // setEquality writes an exact filter: eq for one value, and `in` for the
@@ -464,13 +475,33 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 		}
 		label := fieldLabel(f)
 		refuse := func(reason string) error {
-			return &UnsupportedFilterError{Field: label, Operator: f.Operator, Reason: reason}
+			return &UnsupportedFilterError{Field: label, Operator: operatorLabel(f), Reason: reason}
 		}
 		// A row with an operator and no value emits no parameter (as in
 		// NetBox mode; see buildFilterValues), so it is not judged either: a
 		// saved query carrying one used to run.
 		nullTest := op == opIsNull || op == opNotNull
 		if op != opEmpty && op != opNEmpty && !nullTest && len(splitValues(f.Value)) == 0 {
+			continue
+		}
+		// NetBox's own IS NULL (the literal null, mtu__empty, cabled; see
+		// translateFilters) means what it says on any column, text included —
+		// it is not the empty lookup, whose "" is the problem on text — so only
+		// the column and its operator are asked about. The translation writes
+		// it on the column NetBox reads, never an expanded name; the refusal
+		// names the filter as written (operatorLabel).
+		if nullTest {
+			col, stored := e.column(f.Field)
+			switch {
+			case !stored:
+				reason := "this replica does not store " + f.Field
+				if f.Field != label {
+					reason += ", the column NetBox reads for " + label
+				}
+				return refuse(reason + ", so it cannot answer the filter; remove it, or choose a filter the editor offers")
+			case !slices.Contains(col.Operators, "isnull"):
+				return refuse(fmt.Sprintf("this replica cannot test %s for a value (its schema lists no isnull there), so it cannot answer the filter; %s", f.Field, netboxModeAdvice))
+			}
 			continue
 		}
 		var col column
@@ -484,16 +515,6 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 			col = targetColumn(c, via.Ref, target)
 		} else {
 			return refuse("this replica has no such column to filter on")
-		}
-		// NetBox's own IS NULL (the literal null, mtu__empty, cabled; see
-		// translateFilters) means what it says on any column, text included —
-		// it is not the empty lookup, whose "" is the problem on text — so only
-		// the operator is asked of the column.
-		if nullTest {
-			if !slices.Contains(col.Operators, "isnull") {
-				return refuse(fmt.Sprintf("the backend does not take that operator on a %s column", strings.ToLower(col.Type)))
-			}
-			continue
 		}
 		// An anchored match on a text column of a replica that lists only
 		// ilike gets the reason that names what does work, not the generic

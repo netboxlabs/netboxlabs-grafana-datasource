@@ -29,8 +29,7 @@ const catalogTTL = 10 * time.Minute
 type catalog struct {
 	SnapshotComplete bool
 	// NetBoxURL is the instance the replica mirrors, "" when the route omits
-	// it: DATA-320 added it to the route, but production's replicas report none
-	// until DATA-383. linkBase then falls back to the datasource's Browser URL.
+	// it. linkBase says what the links are built on then.
 	NetBoxURL string
 	// ContainsMaxValues is the most values one contains filter takes, which the
 	// schema route states under filter_limits (v1.39, the build that added the

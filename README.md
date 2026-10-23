@@ -71,15 +71,15 @@ Re-verify any NetBox version locally with [`demo/compat-check.sh`](https://githu
 
 Add the data source (**Connections → Data sources → NetBox**) and set:
 
-| Field               | Description                                                                                                                                                                                                                                                                                   |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Mode**            | _NetBox_ (default) reads the NetBox REST API. _replica-cache_ reads a NetBox replica-cache deployment instead, for instances too large for the API to serve interactively — see [Replica-cache mode](#replica-cache-mode).                                                                    |
-| **URL**             | Base URL of the service the mode reads from: your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`), or the replica-cache deployment.                                                                                                                                   |
-| **Browser URL**     | Optional. Where users' browsers reach NetBox when that differs from the address the links are built from (the URL above in NetBox mode, the address the replica reports in replica-cache mode); deep links are rewritten to it. If the replica reports none, links are built from it: set it. |
-| **API token**       | The credential for that service: a NetBox API token (classic 40-character v1 or `nbt_…` v2, auto-detected) or the replica-cache bearer token. Stored encrypted.                                                                                                                               |
-| **Skip TLS verify** | Accept self-signed certificates.                                                                                                                                                                                                                                                              |
-| **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                                                                                                    |
-| **Fast paging**     | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                                                                                                        |
+| Field               | Description                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Mode**            | _NetBox_ (default) reads the NetBox REST API. _replica-cache_ reads a NetBox replica-cache deployment instead, for instances too large for the API to serve interactively — see [Replica-cache mode](#replica-cache-mode).                                                                                                                                                                  |
+| **URL**             | Base URL of the service the mode reads from: your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`), or the replica-cache deployment.                                                                                                                                                                                                                                 |
+| **Browser URL**     | Where users' browsers reach NetBox when that differs from the address the links are built from (the URL above in NetBox mode, the address the replica reports in replica-cache mode); deep links are rewritten to it. Optional in NetBox mode. In replica-cache mode a replica that reports no NetBox URL builds its links from it, so set it there, as an `http://` or `https://` address. |
+| **API token**       | The credential for that service: a NetBox API token (classic 40-character v1 or `nbt_…` v2, auto-detected) or the replica-cache bearer token. Stored encrypted.                                                                                                                                                                                                                             |
+| **Skip TLS verify** | Accept self-signed certificates.                                                                                                                                                                                                                                                                                                                                                            |
+| **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                                                                                                                                                                                                  |
+| **Fast paging**     | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                                                                                                                                                                                                      |
 
 Click **Save & test**. A healthy data source reports the connected NetBox version.
 
@@ -90,9 +90,10 @@ interactively, the data source can read from **NetBox replica-cache**, a
 read-only columnar mirror of the instance. Set **Mode** to _replica-cache_, point
 the URL and API token at the replica and add the NetBox instance ID; the
 same panels, variables and alert rules then run against the replica, with
-related names (site, role, tenant…) resolved and sortable, custom fields
-expanded, and every result stating how fresh it is. Annotations, IP enrichment
-and topology are not available in this mode and say so. Details, the
+NetBox's own filters, related names (site, role, tenant…) resolved and sortable,
+custom fields expanded, and every result stating how fresh it is. Objects,
+topology and IP enrichment answer as in NetBox mode; annotations, tags, contacts
+and branches are not available in this mode and say so. Details, the
 provisioning shape and the **Max data age** setting for alert rules:
 [docs/REPLICA-CACHE.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/REPLICA-CACHE.md).
 

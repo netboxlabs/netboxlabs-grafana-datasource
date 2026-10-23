@@ -36,41 +36,50 @@
   devices and a full inventory read on every run, past which the metrics should
   carry NetBox labels from collection instead.
 
-- **IP enrichment's prefix fallback asks about the host.** An input written
-  with a mask (`10.1.2.5/24`) made NetBox match the `/24` network, so a more
-  specific prefix holding the address was missed; an IPv4-mapped input
-  (`::ffff:10.1.2.5`) matched no IPv4 prefix. A masked input now asks about
-  the host's own `/32` (or `/128`), which finds every prefix holding it, and a
-  bare input keeps NetBox's strict rule, so the inputs that worked answer as
-  before. The fallback also reads every page of containing prefixes instead of
-  the first 100, and skips values that are not addresses, including a zoned
-  IPv6 address, which no NetBox record can hold.
+- **IP enrichment's prefix fallback asks about the host.** A masked input
+  (`10.1.2.5/24`) missed the more specific prefixes holding the address, and an
+  IPv4-mapped one matched no IPv4 prefix; both now ask about the host's own `/32`
+  (`/128`), over every page of containing prefixes.
 
-- **Replica-cache mode.** A data source can read from a NetBox replica-cache
-  deployment instead of the REST API (**Mode** → _replica-cache_), for
-  instances too large for the API to serve table queries interactively. The
-  data source reads the replica's schema route for object types, columns,
-  types, operators and references, so nothing is sampled or guessed; related
-  names (site, role, tenant…) are resolved by the replica, in an All columns
-  query as in NetBox mode, and can be sorted and filtered on; custom fields
-  expand as in NetBox mode; every result states
-  how fresh the data is, and a replica still loading its initial snapshot is a
-  warning. Text filters follow the replica's schema: _contains_ on text
-  columns, and _starts with_, _ends with_ and _= (ci)_ on a build that lists
-  them. Each match has its negation (_not equal_, _not contains_, …), answered
-  exactly with NetBox's meaning although the replica has none, and _>=_ / _<=_
-  work on whole-number columns. Choice columns show NetBox's
-  labels, with the stored value in `<field>_value`. On a build that lists
-  `host`, equality on an IP address matches by host when the value has no
-  mask, as NetBox's address filter does, and a single-host address is shown
-  with its mask. A new **Max data age** setting makes alert rules and expression-fed
-  queries refuse stale or unknown-age data. Annotations, IP enrichment,
-  topology and tags are not available in this mode and fail with an explicit
-  message. The connection fields are the same in both modes — URL and API
-  token name whichever service the mode reads from — plus the NetBox instance
-  ID; _View in NetBox_ links come from the NetBox URL the replica reports.
-  Requires a replica-cache build with the schema route (v1.35+). Guide:
-  `docs/REPLICA-CACHE.md`.
+- **An alert table that matches nothing evaluates empty, in both modes.** A rule
+  with a value field and no rows failed with `value field … not found`, so
+  "prefixes over 80%" errored whenever there were none.
+
+- **Replica-cache mode.** A data source can read a NetBox replica-cache
+  deployment instead of the REST API, for instances too large for the API to
+  serve tables interactively. Objects, topology and IP enrichment answer from
+  it; annotations, tags, contacts and branches say they are not available.
+  Guide: `docs/REPLICA-CACHE.md`.
+- **Replica-cache filters are NetBox's.** Names, lookups and meaning follow
+  NetBox's own, and a value or filter NetBox would refuse is refused with its
+  message (a device's `rack` names `rack_id`), so a dashboard reads the same in
+  both modes; text matches on related names are not offered. Documented
+  differences: several values on a case-insensitive name match exactly, a filter
+  only a newer NetBox has is honoured, and a text search on a choice is a text
+  match.
+- **Replica-cache rows read as NetBox's do.** Choices show NetBox's labels with
+  the stored value in `<field>_value` (Return fields lists the aliases),
+  single-host addresses show their mask, related names are resolved and
+  sortable, and custom fields expand.
+- **Replica-cache text matches have negations**, answered exactly as NetBox does
+  although the replica has none, and _is empty_ on text finds null or blank
+  values, as NetBox's `empty` lookup does.
+- **Replica-cache answers prefix `contains`**, NetBox's filter for the prefixes
+  holding an address or prefix (replica-cache v1.39+).
+- **Replica-cache results state how fresh they are**, and the new **Max data
+  age** setting makes alert rules and expression-fed queries refuse stale or
+  unknown-age data.
+- **Replica-cache links come from the replica's NetBox URL, or the Browser URL
+  when it reports none.** Set the Browser URL to an `http://` or `https://`
+  address then.
+- **A column only NetBox computes is named as such.** In replica-cache mode
+  `utilization`, `family`, `tags` and the like warn that NetBox computes them
+  instead of coming back blank, an alert table on one fails saying so, and a
+  missing `display_url` says to set the Browser URL.
+- **Topology, Topology edges and IP enrichment work in replica-cache mode,** with
+  the same graph, rows and columns as NetBox mode. An address assigned to a type
+  the data source cannot learn blanks its columns with a warning, which fails
+  alert rules.
 
 ## 1.0.3 (2026-10-06)
 

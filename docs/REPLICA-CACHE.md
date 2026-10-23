@@ -395,6 +395,18 @@ which is how NetBox orders most related objects (a site, a VRF, a device by
 name first). Sorting on a related name whose target has no data is dropped and
 stated in a panel note.
 
+A name NetBox sorts naturally — one it declares with its `natural_sort`
+collation: a device's, a site's, an interface's, a VM's, a VRF's `name`, and a
+related name such as `site` or `device` on a model NetBox orders by it — is
+sorted as NetBox sorts it: digit runs by value and letters without regard to
+case first (`leaf2` before `leaf10`, `parity-…` before `SIN1-…`), then by id;
+descending, a row with no name comes first, as in NetBox. The replica compares
+the bytes (`SIN1-…` before `parity-…`), so the rows are put in NetBox's order
+once read. With a row limit below the number of matching rows the replica
+chooses which rows are kept, by their bytes, and those can differ from the rows
+NetBox mode keeps: the result says so in a note. Other columns sort as the
+replica sorts them.
+
 **Limits.** Pages of 1,000 rows, walked by cursor up to the data source's
 10,000-row ceiling. The truncation and alert-table rules are the same as in
 NetBox mode. A request is kept within 16 KB: a filter whose values would take
@@ -434,7 +446,8 @@ Known divergences:
 
 - with a row limit below the number of matching devices, the replica keeps the
   first by their bytes (`SIN1-…` before `parity-…`), so the devices kept can
-  differ; such a result is refused in alert rules as truncated in both modes;
+  differ, which a note says, as for any natural sort (see Sorting); such a
+  result is refused in alert rules as truncated in both modes;
 - a name with a run of digits of value zero followed by text (`0a`, `sw-0a`),
   or a name outside ASCII where NetBox's database and this data source use
   different Unicode versions, can sort differently;
@@ -527,6 +540,12 @@ mode on the same data:
   ones kept can differ, and a name with a zero-valued digit run followed by text,
   or a non-ASCII name, can sort differently ([Topology](#topology)). The result
   is refused in alert rules as truncated, as in NetBox mode.
+- **Sorting by a name NetBox sorts naturally** (a device's `name`, a related
+  `site`): the same two cases as Topology. With a row limit below the number of
+  matching rows, the rows kept are the replica's first by their bytes and can
+  differ from NetBox mode's, which a note says; and a name with a zero-valued
+  digit run followed by text, or a non-ASCII name, can sort differently. The
+  rows themselves are in NetBox's order ([Sorting](#what-a-query-returns)).
 - **A NetBox scope cut off by its limit** keeps different first rows than NetBox
   mode; the total agrees, and alert rules refuse it as truncated.
 - **An FHRP group** in a related column (an FHRP group assignment's `group`)

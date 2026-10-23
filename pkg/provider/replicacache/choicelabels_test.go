@@ -107,6 +107,38 @@ func TestChoiceLabels_EmbeddedMapCoversCommonChoices(t *testing.T) {
 	}
 }
 
+// The columns that can offer a <field>_value are the ones the map labels AND
+// the replica stores, in an order that does not depend on the table's or on Go's
+// map iteration, so the editor's list does not reshuffle between loads.
+func TestLabelledColumns_AreTheLabelledColumnsTheReplicaStores(t *testing.T) {
+	storing := func(names ...string) entity {
+		e := entity{Ingested: true}
+		for _, name := range names {
+			e.Columns = append(e.Columns, column{Name: name, Type: "VARCHAR"})
+		}
+		return e
+	}
+	for name, c := range map[string]struct {
+		objectType string
+		e          entity
+		want       []string
+	}{
+		// The table lists status first; the answer does not, and name is no choice.
+		"sorted, choices only": {"dcim/devices", storing("status", "name", "face", "airflow", "id"), []string{"airflow", "face", "status"}},
+		// The map labels airflow and face too; this replica has no such columns.
+		"labelled but not stored": {"dcim/devices", storing("id", "name", "status"), []string{"status"}},
+		"no labelled column":      {"dcim/devices", storing("id", "name"), nil},
+		"a type with no labels":   {"plugins/acme/widgets", storing("id", "status"), nil},
+		"no columns":              {"dcim/devices", entity{}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := labelledColumns(c.objectType, c.e); !slices.Equal(got, c.want) {
+				t.Errorf("labelledColumns(%s) = %v, want %v", c.objectType, got, c.want)
+			}
+		})
+	}
+}
+
 // "All columns" in NetBox mode returns both halves of a choice: status (the
 // label) and status_value (the stored value). Labelling the column here must
 // not lose the stored value from such a query.

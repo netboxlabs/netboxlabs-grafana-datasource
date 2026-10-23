@@ -761,10 +761,10 @@ func TestEntityFor_AnswersFromTheCatalogue(t *testing.T) {
 }
 
 // Fields is read off the catalogue: the physical columns in table order,
-// typed by the catalogue; then the columns every AVAILABLE reference adds
-// under expand=; then the custom fields; then the link. The one row read is
-// for custom-field names — the catalogue cannot carry them — projected to the
-// blob and bounded.
+// typed by the catalogue, each choice column followed by its <field>_value;
+// then the columns every AVAILABLE reference adds under expand=; then the
+// custom fields; then the link. The one row read is for custom-field names —
+// the catalogue cannot carry them — projected to the blob and bounded.
 func TestFields_AreTheCatalogueColumnsPlusExpansions(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{
@@ -784,7 +784,7 @@ func TestFields_AreTheCatalogueColumnsPlusExpansions(t *testing.T) {
 		order = append(order, fl.Name)
 	}
 	wantOrder := []string{
-		"id", "name", "serial", "position", "is_full_depth", "created", "status", "role_id", "tenant_id", "site_id", "rack_id", "platform_id",
+		"id", "name", "serial", "position", "is_full_depth", "created", "status", "status_value", "role_id", "tenant_id", "site_id", "rack_id", "platform_id",
 		"role", "role_slug", "tenant", "tenant_slug", "site", "site_slug", "rack",
 		"cf_lifecycle_phase", "cf_tags_count",
 		"display_url",
@@ -798,6 +798,7 @@ func TestFields_AreTheCatalogueColumnsPlusExpansions(t *testing.T) {
 		// VARCHAR on every tenant today (DATA-250); time the day the catalogue says so.
 		"created": provider.FieldTypeString,
 		"site":    provider.FieldTypeString, "site_slug": provider.FieldTypeString,
+		"status_value":       provider.FieldTypeString,
 		"cf_lifecycle_phase": provider.FieldTypeString, "cf_tags_count": provider.FieldTypeNumber,
 	} {
 		if byName[name] != want {
@@ -816,6 +817,123 @@ func TestFields_AreTheCatalogueColumnsPlusExpansions(t *testing.T) {
 	}
 	if n := f.countRequestsFor("dcim/devices"); n != 1 {
 		t.Errorf("Fields made %d row requests, want exactly the custom-field read", n)
+	}
+}
+
+// Rows show a choice by its label ("Active") and <field>_value is how a panel
+// reads the stored value ("active"). A query accepts the alias, so Return fields
+// has to offer it: with only the physical columns there is nothing to pick.
+// NetBox mode lists the two side by side, so each alias follows its column here,
+// typed as the stored value is: text for a status, a number for a rack's width.
+//
+// An alias is only worth offering when a query can fill it, so the aliases
+// listed are selected as well, and must come back carrying the stored value.
+func TestFields_ListsChoiceValueAliases(t *testing.T) {
+	f := newFakeService()
+	f.addEntity("dcim/racks", "id:BIGINT:pk", "name:VARCHAR", "status:VARCHAR", "width:SMALLINT")
+	f.entities["dcim/racks"] = []map[string]interface{}{
+		{"id": float64(1), "name": "R1", "status": "active", "width": float64(19)},
+	}
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	got, err := p.Fields(ctx, "dcim/racks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []provider.Field{
+		{Name: "id", Type: provider.FieldTypeNumber},
+		{Name: "name", Type: provider.FieldTypeString},
+		{Name: "status", Type: provider.FieldTypeString},
+		{Name: "status_value", Type: provider.FieldTypeString},
+		{Name: "width", Type: provider.FieldTypeNumber},
+		{Name: "width_value", Type: provider.FieldTypeNumber},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("fields = %v\nwant     %v", got, want)
+	}
+
+	res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/racks", Fields: []string{"status_value", "width_value"}})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if !slices.Equal(res.Columns, []string{"status_value", "width_value"}) {
+		t.Errorf("columns = %v, want both aliases a query is asked for", res.Columns)
+	}
+	if v := res.Rows[0]["status_value"]; v != "active" {
+		t.Errorf("status_value = %#v, want the stored value", v)
+	}
+	if v := res.Rows[0]["width_value"]; v != float64(19) {
+		t.Errorf("width_value = %#v, want the stored number", v)
+	}
+}
+
+// The label map is NetBox's, taken from its API schemas; the catalogue is the
+// replica's tables; and the two differ. NetBox labels a prefix's family, which
+// it works out from the prefix, so no table has a column for it. An alias
+// offered for a column the replica lacks would be one no query can fill, so
+// only a column the catalogue stores gets one.
+func TestFields_NoAliasForUnstoredLabelledColumn(t *testing.T) {
+	// The fixture is the case it names only while the map labels family.
+	if _, ok := choiceLabel("ipam/prefixes", "family", "4"); !ok {
+		t.Fatal("the label map no longer labels a prefix's family; this test needs another labelled column the replica does not store")
+	}
+	f := newFakeService()
+	f.addEntity("ipam/prefixes", "id:BIGINT:pk", "prefix:VARCHAR", "status:VARCHAR")
+	f.entities["ipam/prefixes"] = []map[string]interface{}{{"id": float64(1), "prefix": "10.0.0.0/8", "status": "active"}}
+	p := newTestProvider(t, f)
+
+	fields, err := p.Fields(context.Background(), "ipam/prefixes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, fl := range fields {
+		names = append(names, fl.Name)
+	}
+	// status is stored and labelled, so this is not an empty alias list passing
+	// for the right reason.
+	if want := []string{"id", "prefix", "status", "status_value"}; !slices.Equal(names, want) {
+		t.Errorf("fields = %v, want %v: family is labelled but not stored, so neither it nor family_value is offered", names, want)
+	}
+}
+
+// An object custom field flattens in NetBox mode to cf_<name> plus
+// cf_<name>_id. The replica reads the blob as raw JSON, where an object field
+// is a bare number like an integer one, so cf_<name>_id beside every number
+// would offer a column most of them cannot fill. A query that selects it still
+// gets the id where the value is one (TestObjectCustomFieldExposesItsID); it is
+// only not listed.
+func TestFields_NoCustomFieldIDAliases(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{{
+		"id": float64(1), "name": "a", "status": "active",
+		// owning_tenant holds the id an object field would; rack_units is a
+		// plain integer field. The replica cannot tell them apart.
+		"custom_field_data": `{"owning_tenant":22,"rack_units":4,"tier":"gold"}`,
+	}}
+	p := newTestProvider(t, f)
+
+	fields, err := p.Fields(context.Background(), "dcim/devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for _, fl := range fields {
+		listed[fl.Name] = true
+	}
+	// A guard is worth something only while there are custom fields to attach
+	// an id to.
+	custom := []string{"cf_owning_tenant", "cf_rack_units", "cf_tier"}
+	for _, name := range custom {
+		if !listed[name] {
+			t.Fatalf("%s is not offered, so the fixture has nothing to attach an id to: %v", name, fields)
+		}
+	}
+	for _, name := range custom {
+		if listed[name+"_id"] {
+			t.Errorf("%s_id is listed: the replica cannot tell an object custom field from an integer one", name)
+		}
 	}
 }
 

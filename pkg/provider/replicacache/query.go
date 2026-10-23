@@ -460,9 +460,10 @@ func restrictColumns(cols, requested []string) []string {
 // went blank on switching modes.
 //
 // Only requested aliases are added. Emitting <field>_value beside every string
-// column would double the width of every result for the sake of a name almost
-// nobody asks for, and nothing outside a NetBox-mode panel asks for one: the
-// editor here offers the physical columns.
+// column would double the width of every result for the sake of a name that few
+// panels select: those written against NetBox mode, and those that picked it
+// from Return fields, which offers it beside each choice column the replica
+// stores (see Fields).
 func addChoiceValueAliases(fields []string, rows []map[string]interface{}) []string {
 	var added []string
 	for _, f := range fields {

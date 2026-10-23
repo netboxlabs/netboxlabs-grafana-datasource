@@ -295,10 +295,20 @@ type cfEntry struct {
 }
 
 // Fields lists what a query against the object type can return, in this order:
-// the stored columns as the catalogue orders them, typed by the catalogue; the
-// columns each AVAILABLE reference adds under expand= (site, site_slug); the
-// custom fields; the link. An expansion whose target has no data is not
-// offered — a column that can never fill is not a column.
+// the stored columns as the catalogue orders them, typed by the catalogue, each
+// choice column followed by its <field>_value; the columns each AVAILABLE
+// reference adds under expand= (site, site_slug); the custom fields; the link.
+// An expansion whose target has no data is not offered — a column that can
+// never fill is not a column — and neither is a <field>_value the replica
+// cannot fill (see labelledColumns).
+//
+// Rows show a choice by its label, so <field>_value is the only way to read the
+// stored value, and is offered beside the column as NetBox mode lists the pair.
+// It carries the stored value, so it has the stored column's type. The custom
+// field ids NetBox mode adds (cf_<name>_id) are not offered: the blob is raw
+// JSON, in which an object custom field is a number like any integer one, so
+// there is no telling which fields have an id. A query that selects one still
+// gets it where the value is an id (see addCustomFieldIDAliases).
 func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Field, error) {
 	if err := rejectBranch(ctx); err != nil {
 		return nil, err
@@ -313,12 +323,17 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 	if !e.Ingested {
 		return nil, nil
 	}
+	choices := labelledColumns(objectType, e)
 	var out []provider.Field
 	for _, col := range e.Columns {
 		if col.Name == customFieldDataColumn {
 			continue
 		}
-		out = append(out, provider.Field{Name: col.Name, Type: fieldTypeOf(col.Type)})
+		t := fieldTypeOf(col.Type)
+		out = append(out, provider.Field{Name: col.Name, Type: t})
+		if slices.Contains(choices, col.Name) {
+			out = append(out, provider.Field{Name: col.Name + "_value", Type: t})
+		}
 	}
 	for _, name := range e.expandedColumns() {
 		out = append(out, provider.Field{Name: name, Type: provider.FieldTypeString})

@@ -484,7 +484,7 @@ func project(row map[string]interface{}, fields []string) map[string]interface{}
 // anything else, and a record on an object of an unknown type could be either.
 func pickUndecidedWarning(rows, total int) string {
 	return fmt.Sprintf(
-		"%s of %s rows matched several address records, some of them assigned to objects this replica cannot identify, so the record they show is the one with the lowest id, which may not be the one NetBox mode picks.",
+		"%s of %s rows matched several address records, some of them assigned to objects this replica cannot identify, so the record they show is the one with the lowest id among those NetBox mode could pick, which may not be the one it picks.",
 		provider.HumanInt(rows), provider.HumanInt(total))
 }
 
@@ -549,47 +549,64 @@ func (en *enrichment) learnTypes(ctx context.Context, cands map[string][]address
 // id) over a host's records, and whether it is the one NetBox mode makes.
 //
 // A record on an object of a type the rows did not teach could rank as an
-// interface's or as another assignment's, so it is ranked as both. A record
-// that wins under every way the unknown types could fall is NetBox mode's pick
-// whatever they are; when none does, the lowest id is kept and the pick is
-// undecided, which the caller states.
+// interface's or as another assignment's — and every record carrying that type
+// id ranks the same way, since one id is one model. So the pick is made under
+// each reading of each distinct unknown id (a host's records carry at most the
+// three types NetBox assigns addresses to, so at most eight readings): when
+// every reading picks the same record it is NetBox mode's pick whatever the
+// types are; when they differ, the pick is undecided, which the caller states,
+// and the record kept is the lowest id of those some reading picks — one NetBox
+// mode could show, never one that loses under every reading.
 //
 // "Another assignment" is a record with an object id, where NetBox mode tests
 // that the object exists: an address the API assigned to an object that does
 // not exist ranks above an unassigned one here and level with it there, the
 // only place the two can differ.
 func pickRecord(cands []addressRecord, types contentTypes) (addressRecord, bool) {
-	type ranked struct {
-		r      addressRecord
-		lo, hi int
-	}
-	rs := make([]ranked, len(cands))
-	for i, r := range cands {
-		deprecated := r.Status != nil && *r.Status == "deprecated"
-		assigned := r.TypeID > 0 && r.ObjectID > 0
-		name, known := types[r.TypeID]
-		switch {
-		case r.TypeID > 0 && !known:
-			rs[i] = ranked{r, provider.PickAddressRank(false, assigned, deprecated), provider.PickAddressRank(true, assigned, deprecated)}
-		default:
-			rank := provider.PickAddressRank(name == typeInterface || name == typeVMInterface, assigned, deprecated)
-			rs[i] = ranked{r, rank, rank}
+	var unknown []int
+	for _, r := range cands {
+		if _, known := types[r.TypeID]; r.TypeID > 0 && !known && !slices.Contains(unknown, r.TypeID) {
+			unknown = append(unknown, r.TypeID)
 		}
 	}
-	for _, x := range rs {
-		wins := true
-		for _, y := range rs {
-			if y.r.ID != x.r.ID && x.lo <= y.hi && (x.lo < y.hi || x.r.ID > y.r.ID) {
-				wins = false
-				break
+	lowest := func(rs []addressRecord) addressRecord {
+		return slices.MinFunc(rs, func(a, b addressRecord) int { return cmp.Compare(a.ID, b.ID) })
+	}
+	// More unknown ids than NetBox has assignment models is data NetBox's API
+	// does not write; there is no reading to trust, so no record is preferred.
+	if len(unknown) > maxUnknownAssignmentTypes {
+		return lowest(cands), false
+	}
+	var picks []addressRecord
+	for reading := range 1 << len(unknown) {
+		onInterface := func(r addressRecord) bool {
+			if name, known := types[r.TypeID]; known {
+				return name == typeInterface || name == typeVMInterface
+			}
+			i := slices.Index(unknown, r.TypeID)
+			return i >= 0 && reading&(1<<i) != 0
+		}
+		var best addressRecord
+		bestRank := -1
+		for _, r := range cands {
+			deprecated := r.Status != nil && *r.Status == "deprecated"
+			assigned := r.TypeID > 0 && r.ObjectID > 0
+			rank := provider.PickAddressRank(onInterface(r), assigned, deprecated)
+			if rank > bestRank || (rank == bestRank && r.ID < best.ID) {
+				best, bestRank = r, rank
 			}
 		}
-		if wins {
-			return x.r, true
+		if !slices.ContainsFunc(picks, func(p addressRecord) bool { return p.ID == best.ID }) {
+			picks = append(picks, best)
 		}
 	}
-	return slices.MinFunc(cands, func(a, b addressRecord) int { return cmp.Compare(a.ID, b.ID) }), false
+	return lowest(picks), len(picks) == 1
 }
+
+// maxUnknownAssignmentTypes bounds the readings pickRecord tries: NetBox's
+// serializer assigns an address to an interface, a VM interface or an FHRP
+// group, so no host's records carry more type ids than that.
+const maxUnknownAssignmentTypes = 3
 
 // The owners' rows: what an interface, a VM interface, a device and a virtual
 // machine contribute to a row. A name is null only where NetBox allows it.

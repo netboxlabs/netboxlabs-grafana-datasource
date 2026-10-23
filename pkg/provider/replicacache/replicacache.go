@@ -584,8 +584,9 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 		return nil, err
 	}
 	// An IP address is offered as the rows show it, with a single-host mask,
-	// so that the value picked matches that record and no other.
-	isAddress := addressField(e, c)
+	// so that the value picked matches that record and no other; a MAC address
+	// as the rows show it too, in NetBox's capitals.
+	isAddress, isMAC := addressField(e, c), macField(e, c)
 	needle := strings.ToLower(q)
 	seen := map[string]bool{}
 	seenIDs := map[int]bool{}
@@ -639,6 +640,9 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 		s := valueString(v)
 		if isAddress(column) {
 			s = withSingleHostMask(s)
+		}
+		if isMAC(column) {
+			s = netboxMAC(s)
 		}
 		if s == "" || seen[s] {
 			continue

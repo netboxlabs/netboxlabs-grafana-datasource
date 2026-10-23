@@ -139,7 +139,9 @@ the stored value, as NetBox's own filters do, so a filter on a choice takes
 the value to use, where NetBox answers "Select a valid choice". IP addresses
 also read as in NetBox: the replica stores a single-host address without its
 mask (`10.0.0.1`), and it is shown with it (`10.0.0.1/32`, `/128` for IPv6),
-in rows and in the value list.
+in rows and in the value list. So do MAC addresses — a MAC address's
+`mac_address`, an interface's `primary_mac_address` — in NetBox's capitals with
+colons (`02:AB:CD:00:00:01`), whatever spelling the replica stores.
 
 **Filters follow NetBox's own.** A filter is offered and accepted exactly when
 NetBox has it on that object type — under NetBox's name, with NetBox's lookups

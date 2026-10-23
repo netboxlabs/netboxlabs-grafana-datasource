@@ -180,6 +180,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		return nil, err
 	}
 	showSingleHostMasks(rows, cols, addressField(e, c))
+	showMACs(rows, cols, macField(e, c))
 	if asOf == nil {
 		asOf = e.DataAsOf
 	}

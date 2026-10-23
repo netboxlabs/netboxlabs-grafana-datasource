@@ -1,7 +1,6 @@
 package replicacache
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -11,9 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/text/collate"
-	"golang.org/x/text/language"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -628,50 +624,4 @@ func intStrings(ids []int) []string {
 		out[i] = strconv.Itoa(id)
 	}
 	return out
-}
-
-// sortByNetBoxName puts device rows in the order NetBox lists devices:
-// ordering ('name', 'pk'), the name under the natural_sort collation NetBox
-// declares on it (Device.name, db_collation="natural_sort"; migration
-// dcim/0197 creates it as ICU und-u-kn, deterministic), so digit runs compare
-// by value and letters without regard to case first ("leaf2" before
-// "leaf10", "parity-…" before "SIN1-…"), names ICU holds equal by their
-// bytes, as PostgreSQL breaks a deterministic collation's ties, then the
-// primary key; a null name last, as PostgreSQL sorts NULL in ascending
-// order. Measured against PostgreSQL 16.15: 64 names of mixed case, digit
-// runs with and without leading zeros, and punctuation, in the same order.
-// Where Go's collation tables and the database's ICU are of different
-// Unicode versions, a name outside ASCII can sort differently, and so can a
-// digit run of value zero followed by text ("0a").
-func sortByNetBoxName(rows []map[string]interface{}) {
-	c := collate.New(language.Und, collate.Numeric)
-	var buf collate.Buffer
-	type keyed struct {
-		row  map[string]interface{}
-		name string
-		null bool
-		key  []byte
-		id   int
-	}
-	ks := make([]keyed, len(rows))
-	for i, row := range rows {
-		name, named := row["name"].(string)
-		id, _ := toInt(row["id"])
-		ks[i] = keyed{row: row, name: name, null: !named, id: id}
-		if named {
-			ks[i].key = c.KeyFromString(&buf, name)
-		}
-	}
-	slices.SortStableFunc(ks, func(a, b keyed) int {
-		if a.null != b.null {
-			if a.null {
-				return 1
-			}
-			return -1
-		}
-		return cmp.Or(bytes.Compare(a.key, b.key), strings.Compare(a.name, b.name), cmp.Compare(a.id, b.id))
-	})
-	for i, k := range ks {
-		rows[i] = k.row
-	}
 }

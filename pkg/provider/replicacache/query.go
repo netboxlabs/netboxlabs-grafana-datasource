@@ -181,6 +181,18 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	}
 	showSingleHostMasks(rows, cols, addressField(e, c))
 	showMACs(rows, cols, macField(e, c))
+	if !spec.CountOnly && plan.sort != "" {
+		// A sort on a name NetBox declares natural_sort is NetBox's order, not
+		// the replica's bytes (naturalsort.go); a result a limit cut short keeps
+		// the replica's first rows, which the note says.
+		field, descending := strings.CutPrefix(plan.sort, "-")
+		if via, natural := naturalSort(e, c, field); natural {
+			sortNaturally(rows, field, via, descending)
+			if total > len(rows) {
+				plan.notes = append(plan.notes, naturalSortCutShortNote(field, len(rows), total))
+			}
+		}
+	}
 	if !spec.CountOnly {
 		// A related column shows NetBox's display of its object, as NetBox mode
 		// does (displays.go), once the rows are in their order: the sort reads the

@@ -463,10 +463,10 @@ func splitList(s string) []string {
 
 // healthErrorMessage maps an upstream error to a concise, user-facing message.
 // viaProxy is whether the datasource goes through Grafana's secure socks proxy
-// (see Datasource.viaProxy): a transport failure then names the proxy as the
-// hop to check, because told only "the connection was refused" a reader checks
-// NetBox and its URL, and on Grafana Cloud they cannot open the server log the
-// message points to.
+// (see Datasource.viaProxy): a failure the proxy can cause then names it as the
+// hop to check (see proxiedCause), because told only "the connection was
+// refused" a reader checks NetBox and its URL, and on Grafana Cloud they cannot
+// open the server log the message points to.
 func healthErrorMessage(err error, viaProxy bool) string {
 	// Status 0 means the provider classified something that was not an HTTP
 	// refusal; there is no code to report, so fall through to the transport
@@ -480,23 +480,62 @@ func healthErrorMessage(err error, viaProxy bool) string {
 		}
 		return fmt.Sprintf("NetBox returned HTTP %d", u.Status)
 	}
-	if cause := transportCause(err); viaProxy && proxyMayBeAtFault(cause) {
+	if !viaProxy {
+		return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
+	}
+	cause, proxyAtFault := proxiedCause(err)
+	if proxyAtFault {
 		return "Cannot reach NetBox through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach the NetBox URL (on Grafana Cloud, the PDC agent of the selected network); the Grafana server log has the full error."
 	}
-	return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
+	// Grafana never connects to NetBox on this route: the proxy resolves and
+	// dials the URL, so whether Grafana could reach it is beside the point.
+	return "Cannot reach NetBox: " + cause + ". Check the NetBox URL, which the proxy (on Grafana Cloud, the PDC agent) connects to; the Grafana server log has the full error."
 }
 
-// proxyMayBeAtFault reports whether a transport failure can be the secure socks
-// proxy's. A body that is not JSON and a redirect came back through it — the
-// route works and the URL is wrong — and a URL with no scheme was never sent;
-// naming the proxy for those would point the reader at the one hop that did
-// its job.
-func proxyMayBeAtFault(cause string) bool {
+// proxiedCause names why a request through the secure socks proxy failed, and
+// whether the proxy is the hop to check. The SOCKS dialer wraps whatever fails
+// before the tunnel to NetBox is up — reaching the proxy, its TLS, its
+// replies, its credentials exchange — in a *net.OpError whose Op is
+// "socks connect" (see proxyHop); past that, the proxy only relays bytes.
+//
+//   - A body that is not JSON, a redirect, NetBox's certificate and a plain
+//     HTTP answer to https came back through a route that works, and a URL
+//     with no scheme or a cancelled request never depended on it: naming the
+//     proxy would send the reader to the one hop that did its job.
+//   - TLS that fails on the proxy's own hop is the proxy's, and Skip TLS
+//     verify does not govern it, so it gets a sentence of its own.
+//   - A request that failed for no named reason is the proxy's only on its hop.
+//   - The rest name the proxy: a refusal or an unreachable host is the proxy's
+//     reply, and net/http's timeout error no longer carries the dialer's, so
+//     for a timeout, a reset or a closed connection the datasource's route
+//     decides.
+func proxiedCause(err error) (cause string, proxyAtFault bool) {
+	cause = transportCause(err)
 	switch cause {
-	case causeNotJSON, causeRedirected, causeNoScheme:
-		return false
+	case causeNotJSON, causeRedirected, causeNoScheme, causeCancelled:
+		return cause, false
+	case causeCertificate, causeNoTLS:
+		if proxyHop(err) {
+			return causeProxyTLS, true
+		}
+		return cause, false
+	case causeFailed:
+		return cause, proxyHop(err)
 	}
-	return true
+	return cause, true
+}
+
+// proxyHop reports whether err failed on the hop to the secure socks proxy,
+// wherever its *net.OpError sits in the chain: an HTTP proxy from Grafana's
+// environment wraps the dial in an OpError of its own, outside it.
+func proxyHop(err error) bool {
+	var op *net.OpError
+	for e := err; errors.As(e, &op); e = op.Err {
+		if strings.HasPrefix(op.Op, "socks ") {
+			return true
+		}
+	}
+	return false
 }
 
 // maxUpstreamDetail bounds a user-supplied string echoed in a user-facing
@@ -550,7 +589,7 @@ func transportCause(err error) string {
 	case errors.As(err, &hdrErr):
 		return causeNoTLS
 	case errors.Is(err, context.Canceled):
-		return "the request was cancelled"
+		return causeCancelled
 	case errors.Is(err, syscall.ECONNREFUSED):
 		return causeRefused
 	case errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH):
@@ -594,6 +633,11 @@ func transportCause(err error) string {
 		return causeRedirected
 	case has("not an absolute http(s) url", "unsupported protocol scheme"):
 		return causeNoScheme
+	// The SOCKS client's words for a credentials exchange that failed
+	// (golang.org/x/net/internal/socks), including an empty username, which it
+	// refuses to send.
+	case has("username/password", "authentication method"):
+		return causeProxyAuth
 	case has("no such host", "server misbehaving"):
 		return causeUnresolved
 	case has("certificate"):
@@ -613,7 +657,7 @@ func transportCause(err error) string {
 	case has("json"):
 		return causeNotJSON
 	}
-	return "the request failed"
+	return causeFailed
 }
 
 // The sentences transportCause emits, each saying what the reader can act on.
@@ -629,6 +673,13 @@ const (
 	causeNotJSON     = "the response could not be read as JSON (is this the NetBox base URL, not a proxy or login page?)"
 	causeRedirected  = "NetBox redirected to an address other than the configured URL, which the API token is not sent to (check the URL's scheme and host)"
 	causeNoScheme    = "the URL has no scheme (start it with https or http)"
+	causeCancelled   = "the request was cancelled"
+	causeFailed      = "the request failed"
+	// The two causes only the hop to the secure socks proxy has. Grafana's
+	// configuration sets that hop's TLS, not the datasource's; the
+	// datasource's settings carry its credentials.
+	causeProxyTLS  = "the TLS connection to the proxy failed (its certificates are set in Grafana's secure_socks_datasource_proxy configuration, not in the datasource)"
+	causeProxyAuth = "the proxy did not accept the datasource's credentials (check secureSocksProxyUsername and secureSocksProxyPassword; on Grafana Cloud, the username is the PDC network's ID)"
 )
 
 // queryErrorMessage maps an upstream error to a concise, user-facing message so
@@ -671,8 +722,10 @@ func queryErrorMessage(err error, viaProxy bool) string {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
 		}
 	}
-	if viaProxy && proxyMayBeAtFault(transportCause(err)) {
-		return "Couldn't reach NetBox through the secure socks proxy: " + transportCause(err) + ". Check that the proxy is running and can reach NetBox (on Grafana Cloud, the PDC agent); the Grafana server log has the full error."
+	if viaProxy {
+		if cause, proxyAtFault := proxiedCause(err); proxyAtFault {
+			return "Couldn't reach NetBox through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach NetBox (on Grafana Cloud, the PDC agent); the Grafana server log has the full error."
+		}
 	}
 	return "Couldn't reach NetBox: " + transportCause(err) + ". The Grafana server log has the full error."
 }

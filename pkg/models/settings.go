@@ -3,7 +3,6 @@ package models
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -149,12 +148,17 @@ func jsonKind(raw json.RawMessage) string {
 }
 
 // readsAsOn reports whether a flag that is not a JSON boolean was written to
-// mean on: a string strconv.ParseBool reads as true, or a non-zero number.
+// mean on: a non-zero number, or a string that strconv.ParseBool or YAML 1.1
+// reads as true, in any case. Grafana reads provisioning files with yaml/v3,
+// which keeps YAML 1.1's yes, on and y as strings in jsonData.
 func readsAsOn(raw json.RawMessage) bool {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		on, err := strconv.ParseBool(strings.TrimSpace(s))
-		return err == nil && on
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "true", "t", "1", "yes", "y", "on":
+			return true
+		}
+		return false
 	}
 	var n float64
 	return json.Unmarshal(raw, &n) == nil && n != 0

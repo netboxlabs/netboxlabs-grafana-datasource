@@ -29,8 +29,17 @@ func TestLoadPluginSettings_SecureSocksProxyFields(t *testing.T) {
 		{"a null username with the proxy on", `{"enableSecureSocksProxy": true, "secureSocksProxyUsername": null}`, "secureSocksProxyUsername"},
 		{"a numeric username with the proxy on", `{"enableSecureSocksProxy": true, "secureSocksProxyUsername": 42}`, "secureSocksProxyUsername"},
 		{"an object username with the proxy on", `{"enableSecureSocksProxy": true, "secureSocksProxyUsername": {"id": "x"}}`, "secureSocksProxyUsername"},
+		{"a flag written as \"no\" is off", `{"enableSecureSocksProxy": "no"}`, ""},
+		// A proxy that asks for no credentials never reads the username, so an
+		// empty one works there; elsewhere Save & test names the setting.
+		{"an empty username is accepted", `{"enableSecureSocksProxy": true, "secureSocksProxyUsername": ""}`, ""},
 		{"a flag written as \"true\" would silently be off", `{"enableSecureSocksProxy": "true"}`, "enableSecureSocksProxy"},
 		{"a flag written as 1 would silently be off", `{"enableSecureSocksProxy": 1}`, "enableSecureSocksProxy"},
+		// YAML 1.1's spellings of true. Grafana reads provisioning files with
+		// yaml/v3, which keeps them as strings in jsonData.
+		{"a flag written as \"yes\" would silently be off", `{"enableSecureSocksProxy": "yes"}`, "enableSecureSocksProxy"},
+		{"a flag written as \"On\" would silently be off", `{"enableSecureSocksProxy": "On"}`, "enableSecureSocksProxy"},
+		{"a flag written as \"Y\" would silently be off", `{"enableSecureSocksProxy": "Y"}`, "enableSecureSocksProxy"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := LoadPluginSettings(backend.DataSourceInstanceSettings{JSONData: []byte(tc.jsonData)})

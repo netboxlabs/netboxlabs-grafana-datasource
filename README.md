@@ -267,13 +267,17 @@ plugin catalog and signed by Grafana (Cloud cannot load private/unsigned plugins
     not route. To find the ID, select the network under **Connections → Private data source
     connections**; Grafana's Terraform provider exposes it as `pdc_network_id`.
 
-  A datasource routed through the proxy names it when NetBox cannot be reached: **Save & test**
-  reports "Cannot reach NetBox through the secure socks proxy" and names the PDC agent as the
-  hop to check. If a refused or timed-out connection is reported without that phrase, the
-  request was not routed through PDC: check that `enableSecureSocksProxy` is the JSON boolean
-  `true`. An answer from NetBox itself, such as "Authentication failed" or an HTTP status, means
-  the route through PDC works. Nothing else in the plugin needs configuring: the backend builds
-  its HTTP client from the Grafana SDK, which applies the proxy.
+  A datasource routed through the proxy names it when the proxy is the hop to check: **Save &
+  test** and panels report the failure "through the secure socks proxy" and name the PDC agent.
+  Credentials the proxy refuses, or an empty `secureSocksProxyUsername`, read "the proxy did not
+  accept the datasource's credentials". A failure on NetBox's side of the agent, such as its
+  TLS certificate or a page that is not the API, does not name the proxy: check the NetBox URL
+  as the agent reaches it. If a refused or timed-out connection is reported without "through
+  the secure socks proxy", the request was not routed through PDC: check that
+  `enableSecureSocksProxy` is the JSON boolean `true`. An answer from NetBox itself, such as
+  "Authentication failed" or an HTTP status, means the route through PDC works. Nothing else in
+  the plugin needs configuring: the backend builds its HTTP client from the Grafana SDK, which
+  applies the proxy.
 
 The backend ships binaries for `linux/amd64` and `linux/arm64` (Cloud) plus the full
 catalog target matrix (darwin/windows/arm).

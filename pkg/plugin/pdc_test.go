@@ -3,12 +3,21 @@ package plugin
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +28,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/proxy"
@@ -53,6 +63,12 @@ type socksServer struct {
 	// dropped by a firewall, the most common PDC failure. The request then
 	// times out, and net/http's timeout error no longer carries the proxy.
 	silent bool
+	// rejectCredentials fails every username/password exchange (RFC 1929
+	// status 1): a PDC network ID the gateway does not know.
+	rejectCredentials bool
+	// noAuth selects "no authentication" even when the client offers
+	// username/password: a self-hosted proxy that asks for no credentials.
+	noAuth bool
 	mu     sync.Mutex
 	seen   []socksConnect
 }
@@ -68,6 +84,13 @@ func refusing(s *socksServer) { s.refuse = true }
 
 // silent makes startSOCKS5's proxy leave every CONNECT unanswered.
 func silent(s *socksServer) { s.silent = true }
+
+// rejectingCredentials makes startSOCKS5's proxy refuse every username and
+// password.
+func rejectingCredentials(s *socksServer) { s.rejectCredentials = true }
+
+// withoutAuth makes startSOCKS5's proxy ask for no credentials.
+func withoutAuth(s *socksServer) { s.noAuth = true }
 
 // startSOCKS5 runs a SOCKS5 proxy (RFC 1928, with RFC 1929 username/password)
 // that relays every CONNECT and records it. It prefers username/password when
@@ -113,7 +136,7 @@ func (s *socksServer) serve(c net.Conn) {
 		return
 	}
 	var user, pass string
-	if slices.Contains(methods, 2) {
+	if slices.Contains(methods, 2) && !s.noAuth {
 		if _, err := c.Write([]byte{5, 2}); err != nil {
 			return
 		}
@@ -134,6 +157,10 @@ func (s *socksServer) serve(c net.Conn) {
 			return
 		}
 		user, pass = string(name), string(secret)
+		if s.rejectCredentials {
+			_, _ = c.Write([]byte{1, 1})
+			return
+		}
 		if _, err := c.Write([]byte{1, 0}); err != nil {
 			return
 		}
@@ -224,17 +251,29 @@ func newFakeNetBox(t *testing.T) *fakeNetBox {
 	return nb
 }
 
-// saveAndTest builds the datasource the way Grafana does, inside a context that
-// carries Grafana's proxy configuration, and runs its health check. The
-// datasource carries a proxy password, as one the PDC network selector set,
-// and a short timeout so a proxy that never answers fails the test quickly.
+// grafanaProxyCfg is Grafana's configuration for a secure socks proxy at addr,
+// reached without TLS.
+func grafanaProxyCfg(addr string) map[string]string {
+	return map[string]string{
+		proxy.PluginSecureSocksProxyEnabled:       "true",
+		proxy.PluginSecureSocksProxyProxyAddress:  addr,
+		proxy.PluginSecureSocksProxyAllowInsecure: "true",
+	}
+}
+
+// saveAndTest runs Save & test with Grafana's proxy at proxyAddr.
 func saveAndTest(t *testing.T, proxyAddr string, jsonData map[string]any) *backend.CheckHealthResult {
 	t.Helper()
-	ctx := config.WithGrafanaConfig(context.Background(), config.NewGrafanaCfg(map[string]string{
-		proxy.PluginSecureSocksProxyEnabled:       "true",
-		proxy.PluginSecureSocksProxyProxyAddress:  proxyAddr,
-		proxy.PluginSecureSocksProxyAllowInsecure: "true",
-	}))
+	return saveAndTestIn(t, grafanaProxyCfg(proxyAddr), jsonData)
+}
+
+// saveAndTestIn builds the datasource the way Grafana does, inside a context
+// that carries Grafana's configuration, and runs its health check. The
+// datasource carries a proxy password, as one the PDC network selector set,
+// and a short timeout so a proxy that never answers fails the test quickly.
+func saveAndTestIn(t *testing.T, grafanaCfg map[string]string, jsonData map[string]any) *backend.CheckHealthResult {
+	t.Helper()
+	ctx := config.WithGrafanaConfig(context.Background(), config.NewGrafanaCfg(grafanaCfg))
 	settings := map[string]any{"timeoutSeconds": 5}
 	maps.Copy(settings, jsonData)
 	raw, err := json.Marshal(settings)
@@ -396,8 +435,101 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 		if len(socks.connects()) == 0 {
 			t.Fatal("the request did not go through the proxy, so this tests nothing")
 		}
-		if namesTheProxy(res.Message) {
-			t.Errorf("message %q blames the proxy for an answer NetBox sent through it", res.Message)
+		assertPointsAtTheURLTheProxyReaches(t, res.Message)
+	})
+
+	// NetBox's certificate is checked end to end, through the tunnel the proxy
+	// opened: a certificate Grafana cannot verify is NetBox's, and the proxy
+	// relayed the handshake as it should.
+	t.Run("does not blame the proxy for NetBox's certificate", func(t *testing.T) {
+		netbox := newQuietTLSServer(t)
+		socks := startSOCKS5(t)
+		res := saveAndTest(t, socks.addr, map[string]any{"url": netbox.URL, "enableSecureSocksProxy": true})
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
+		}
+		if len(socks.connects()) == 0 {
+			t.Fatal("the request did not go through the proxy, so this tests nothing")
+		}
+		if !strings.Contains(res.Message, "Skip TLS verify") {
+			t.Errorf("message %q does not point at the datasource's TLS setting", res.Message)
+		}
+		assertPointsAtTheURLTheProxyReaches(t, res.Message)
+	})
+
+	t.Run("does not blame the proxy when NetBox does not answer with TLS", func(t *testing.T) {
+		netbox := newFakeNetBox(t)
+		socks := startSOCKS5(t)
+		res := saveAndTest(t, socks.addr, map[string]any{"url": strings.Replace(netbox.URL, "http://", "https://", 1), "enableSecureSocksProxy": true})
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
+		}
+		if len(socks.connects()) == 0 {
+			t.Fatal("the request did not go through the proxy, so this tests nothing")
+		}
+		if !strings.Contains(res.Message, "did not answer with TLS") {
+			t.Errorf("message %q does not say NetBox did not answer with TLS", res.Message)
+		}
+		assertPointsAtTheURLTheProxyReaches(t, res.Message)
+	})
+
+	// The PDC gateway reads the proxy username as the network to route to, so
+	// a network it does not know fails the credentials exchange. Told only "the
+	// request failed", the reader has nothing to check.
+	t.Run("names the proxy credentials when the proxy refuses them", func(t *testing.T) {
+		netbox := newFakeNetBox(t)
+		socks := startSOCKS5(t, rejectingCredentials)
+		res := saveAndTest(t, socks.addr, map[string]any{"url": netbox.URL, "enableSecureSocksProxy": true, "secureSocksProxyUsername": "deleted-network"})
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
+		}
+		assertNamesTheProxyOnly(t, res.Message, socks.addr, netbox.URL)
+		assertNamesTheProxyCredentials(t, res.Message)
+	})
+
+	// An empty username — a provisioning file whose environment variable is
+	// unset — is never sent: the SOCKS client refuses it before the exchange.
+	t.Run("names the proxy credentials when the username is empty", func(t *testing.T) {
+		netbox := newFakeNetBox(t)
+		socks := startSOCKS5(t)
+		res := saveAndTest(t, socks.addr, map[string]any{"url": netbox.URL, "enableSecureSocksProxy": true, "secureSocksProxyUsername": ""})
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
+		}
+		assertNamesTheProxyOnly(t, res.Message, socks.addr, netbox.URL)
+		assertNamesTheProxyCredentials(t, res.Message)
+	})
+
+	// Why the settings accept an empty username: a proxy that asks for no
+	// credentials never reads it, and that datasource works.
+	t.Run("an empty username works with a proxy that asks for no credentials", func(t *testing.T) {
+		netbox := newFakeNetBox(t)
+		socks := startSOCKS5(t, withoutAuth)
+		res := saveAndTest(t, socks.addr, map[string]any{"url": netbox.URL, "enableSecureSocksProxy": true, "secureSocksProxyUsername": ""})
+		if res.Status != backend.HealthStatusOk {
+			t.Fatalf("health = %v %q, want ok", res.Status, res.Message)
+		}
+		if len(socks.connects()) == 0 {
+			t.Error("the request did not go through the proxy")
+		}
+	})
+
+	// Grafana's own configuration sets the TLS to the proxy, not the
+	// datasource: told to try Skip TLS verify, the reader would change a
+	// setting that does not apply to that hop.
+	t.Run("names the proxy's TLS when the proxy's certificate fails", func(t *testing.T) {
+		netbox := newFakeNetBox(t)
+		proxyTLS := newQuietTLSServer(t) // a certificate the configured root CA did not sign
+		addr := strings.TrimPrefix(proxyTLS.URL, "https://")
+		cfg := grafanaProxyCfg(addr)
+		maps.Copy(cfg, grafanaTLSToProxy(t))
+		res := saveAndTestIn(t, cfg, map[string]any{"url": netbox.URL, "enableSecureSocksProxy": true})
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
+		}
+		assertNamesTheProxyOnly(t, res.Message, addr, netbox.URL)
+		if !strings.Contains(res.Message, "TLS connection to the proxy") || strings.Contains(res.Message, "Skip TLS verify") {
+			t.Errorf("message %q does not put the TLS failure on the proxy's hop", res.Message)
 		}
 	})
 
@@ -425,7 +557,7 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CheckHealth: %v", err)
 		}
-		if res.Status != backend.HealthStatusError || namesTheProxy(res.Message) {
+		if res.Status != backend.HealthStatusError || mentionsTheProxy(res.Message) {
 			t.Errorf("health = %v %q, want an error that does not mention a proxy", res.Status, res.Message)
 		}
 	})
@@ -444,10 +576,82 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 		if res.Status != backend.HealthStatusError {
 			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
 		}
-		if namesTheProxy(res.Message) {
+		if mentionsTheProxy(res.Message) {
 			t.Errorf("message %q blames a proxy this datasource does not use", res.Message)
 		}
 	})
+}
+
+// assertPointsAtTheURLTheProxyReaches checks the message for a failure NetBox
+// itself caused on a proxied datasource: it does not blame the proxy, and it
+// sends the reader to the NetBox URL as the proxy reaches it, not as Grafana
+// would, since Grafana never connects to NetBox directly.
+func assertPointsAtTheURLTheProxyReaches(t *testing.T, msg string) {
+	t.Helper()
+	if blamesTheProxy(msg) {
+		t.Errorf("message %q blames the proxy for a failure that is NetBox's", msg)
+	}
+	if !strings.Contains(msg, "which the proxy (on Grafana Cloud, the PDC agent) connects to") || strings.Contains(msg, "reachable from Grafana") {
+		t.Errorf("message %q does not point at the NetBox URL as the proxy reaches it", msg)
+	}
+}
+
+// assertNamesTheProxyCredentials checks a credentials failure names the
+// setting that carries the PDC network.
+func assertNamesTheProxyCredentials(t *testing.T, msg string) {
+	t.Helper()
+	for _, want := range []string{"credentials", "secureSocksProxyUsername", "PDC network's ID"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q does not mention %q", msg, want)
+		}
+	}
+}
+
+// newQuietTLSServer runs an HTTPS server whose certificate no test trusts. It
+// does not log the handshakes that fail against it, which is all it is for.
+func newQuietTLSServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(http.NotFoundHandler())
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// grafanaTLSToProxy is Grafana's configuration for TLS to the proxy: one
+// self-signed certificate as both the root CA and the client certificate. A
+// proxy whose certificate that CA did not sign fails the handshake.
+func grafanaTLSToProxy(t *testing.T) map[string]string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "grafana"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	cert := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	return map[string]string{
+		proxy.PluginSecureSocksProxyAllowInsecure:      "false",
+		proxy.PluginSecureSocksProxyRootCAsContents:    cert,
+		proxy.PluginSecureSocksProxyClientCertContents: cert,
+		proxy.PluginSecureSocksProxyClientKeyContents:  string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})),
+	}
 }
 
 // assertNamesTheProxyOnly checks a failure message names the proxy as the hop
@@ -517,9 +721,52 @@ func TestErrorWording_FollowsTheDatasourcesRoute(t *testing.T) {
 	}
 }
 
-// namesTheProxy reports whether a message blames Grafana's secure socks proxy
-// or the PDC agent. The bare word "proxy" is not enough: the not-JSON cause
-// asks whether an HTTP proxy or login page answered, which is about the URL.
-func namesTheProxy(msg string) bool {
+// mentionsTheProxy reports whether a message mentions Grafana's secure socks
+// proxy or the PDC agent at all, which a direct datasource's must not. The bare
+// word "proxy" is not enough: the not-JSON cause asks whether an HTTP proxy or
+// login page answered, which is about the URL.
+func mentionsTheProxy(msg string) bool {
 	return strings.Contains(msg, "secure socks proxy") || strings.Contains(msg, "PDC")
+}
+
+// blamesTheProxy reports whether a message puts the failure on the proxy's
+// route. A proxied datasource's message for a failure that is NetBox's still
+// mentions the PDC agent, as the one that connects to the URL.
+func blamesTheProxy(msg string) bool {
+	return strings.Contains(msg, "through the secure socks proxy")
+}
+
+// The decision behind the wording, on the error shapes Go produces: the SOCKS
+// dialer wraps a failure on the proxy's own hop in a *net.OpError whose Op is
+// "socks connect", and only those, or a cause only the proxy route can have,
+// name the proxy.
+func TestProxiedCause(t *testing.T) {
+	socksHop := func(err error) error {
+		return &net.OpError{Op: "socks connect", Net: "tcp", Err: err}
+	}
+	certErr := &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}
+	for _, tc := range []struct {
+		name      string
+		err       error
+		wantCause string
+		wantBlame bool
+	}{
+		{"NetBox's certificate", certErr, causeCertificate, false},
+		{"the proxy's certificate", socksHop(certErr), causeProxyTLS, true},
+		{"the proxy is not TLS", socksHop(tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}), causeProxyTLS, true},
+		{"a SOCKS refusal with no category", socksHop(errors.New("unknown error general SOCKS server failure")), causeFailed, true},
+		// An HTTP proxy from Grafana's environment wraps the dial in its own
+		// *net.OpError, outside the SOCKS one.
+		{"the SOCKS hop under an HTTP proxy", &net.OpError{Op: "proxyconnect", Net: "tcp", Err: socksHop(errors.New("unknown error TTL expired"))}, causeFailed, true},
+		{"credentials refused", socksHop(errors.New("username/password authentication failed")), causeProxyAuth, true},
+		{"an answer NetBox sent that the client could not use", errors.New("malformed HTTP response"), causeFailed, false},
+		{"a cancelled request", fmt.Errorf("request failed: %w", context.Canceled), causeCancelled, false},
+		{"refused, on either hop", fmt.Errorf("request failed: %w", syscall.ECONNREFUSED), causeRefused, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if cause, blame := proxiedCause(tc.err); cause != tc.wantCause || blame != tc.wantBlame {
+				t.Errorf("proxiedCause = %q, %v; want %q, %v", cause, blame, tc.wantCause, tc.wantBlame)
+			}
+		})
+	}
 }

@@ -12,20 +12,23 @@
   over the API: `enableSecureSocksProxy`, and `secureSocksProxyUsername` set to
   the network's ID.
 - **Failures through the secure SOCKS proxy say so.** For a datasource routed
-  through the proxy, a request that gets no answer from NetBox reads, on
-  Save & test and on panels, "through the secure socks proxy", and points at
-  the proxy — on Grafana Cloud, the PDC agent — rather than at the NetBox URL.
-  Before, a stopped agent, or one whose traffic to NetBox is dropped, read as
-  "Cannot reach NetBox … Check the NetBox URL". The settings page shows the
-  switch as the plugin SDK reads the setting: on only for the JSON boolean
-  `true`.
+  through the proxy, a failure the proxy can cause (a refused, unreachable or
+  timed-out connection, or the proxy's own TLS) reads, on Save & test and on
+  panels, "through the secure socks proxy", and points at the proxy — on
+  Grafana Cloud, the PDC agent — rather than at the NetBox URL. Before, a
+  stopped agent, or one whose traffic to NetBox is dropped, read as "Cannot
+  reach NetBox … Check the NetBox URL". Credentials the proxy refuses, or an
+  empty `secureSocksProxyUsername`, name that setting. A failure on NetBox's
+  side of the proxy, such as its certificate, still points at the NetBox URL,
+  as the proxy reaches it. The settings page shows the switch as the plugin
+  SDK reads the setting: on only for the JSON boolean `true`.
 - **Proxy settings the plugin SDK cannot use are refused by name.** With the
   proxy on, a `secureSocksProxyUsername` that is not a string (a placeholder
   left blank in a provisioning file is null) made every request fail inside
   the SDK; an `enableSecureSocksProxy` written to mean on but not as a JSON
-  boolean (`"true"`, `1`) silently left the proxy off. Both now fail with a
-  message naming the setting, on Save & test and on panels. A flag that reads
-  as off (`"false"`, `0`) is still accepted as off.
+  boolean (`"true"`, `"yes"`, `1`) silently left the proxy off. Both now fail
+  with a message naming the setting, on Save & test and on panels. A flag that
+  reads as off (`"false"`, `0`) is still accepted as off.
 - **Editing the API token keeps the page's other unsaved secrets.** The token
   field replaced every secret not saved yet, including any that another control
   on the page had set. It now changes only the token.

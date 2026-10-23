@@ -807,6 +807,52 @@ func TestFields_AreTheCatalogueColumnsPlusExpansions(t *testing.T) {
 	}
 }
 
+// Sortable is the editor's Sort by list in replica-cache mode, so it has to be
+// exactly what a query can sort by: every entry Fields returns, ordered by in a
+// query, either sorts (no "Rows are not sorted" note) or is marked not to. The
+// two lists came apart once, when the picker was built from the filters instead.
+func TestFields_SortableIsWhatAQueryCanSortBy(t *testing.T) {
+	f := newFakeService()
+	f.entities["dcim/devices"] = []map[string]interface{}{
+		{"id": float64(1), "name": "a", "status": "active", "site_id": float64(1), "custom_field_data": `{"lifecycle_phase":"production","tags_count":2}`},
+	}
+	f.schema.NetBoxURL = "https://netbox.example.com"
+	p := newTestProvider(t, f)
+	ctx := context.Background()
+
+	fields, err := p.Fields(ctx, "dcim/devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sortable := map[string]bool{}
+	for _, fl := range fields {
+		sortable[fl.Name] = fl.Sortable
+		res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices", Ordering: "-" + fl.Name})
+		if err != nil {
+			t.Fatalf("ordering by %s: %v", fl.Name, err)
+		}
+		noted := false
+		for _, n := range res.Notes {
+			noted = noted || strings.Contains(n, "not sorted")
+		}
+		if fl.Sortable == noted {
+			t.Errorf("%s: Sortable = %v, but ordering by it gave notes %v", fl.Name, fl.Sortable, res.Notes)
+		}
+	}
+	// Not vacuous: stored columns and related names sort, what is built from
+	// them or from the blob does not.
+	for _, name := range []string{"id", "name", "status", "site_id", "site", "site_slug", "role", "tenant_slug"} {
+		if !sortable[name] {
+			t.Errorf("%s should be sortable: %v", name, sortable)
+		}
+	}
+	for _, name := range []string{"status_value", "cf_lifecycle_phase", "cf_tags_count", "display_url"} {
+		if v, ok := sortable[name]; !ok || v {
+			t.Errorf("%s should be listed and not sortable (listed=%v, sortable=%v)", name, ok, v)
+		}
+	}
+}
+
 // Rows show a choice by its label ("Active") and <field>_value is how a panel
 // reads the stored value ("active"). A query accepts the alias, so Return fields
 // has to offer it: with only the physical columns there is nothing to pick.
@@ -829,11 +875,11 @@ func TestFields_ListsChoiceValueAliases(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []provider.Field{
-		{Name: "id", Type: provider.FieldTypeNumber},
-		{Name: "name", Type: provider.FieldTypeString},
-		{Name: "status", Type: provider.FieldTypeString},
+		{Name: "id", Type: provider.FieldTypeNumber, Sortable: true},
+		{Name: "name", Type: provider.FieldTypeString, Sortable: true},
+		{Name: "status", Type: provider.FieldTypeString, Sortable: true},
 		{Name: "status_value", Type: provider.FieldTypeString},
-		{Name: "width", Type: provider.FieldTypeNumber},
+		{Name: "width", Type: provider.FieldTypeNumber, Sortable: true},
 		{Name: "width_value", Type: provider.FieldTypeNumber},
 	}
 	if !slices.Equal(got, want) {

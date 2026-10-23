@@ -25,10 +25,10 @@ func deviceFixture(id int, name string, siteID int) map[string]interface{} {
 	}
 }
 
-func newTestProvider(t *testing.T, f *fakeService) *Provider {
+func newTestProvider(t *testing.T, f *fakeService, opts ...Option) *Provider {
 	t.Helper()
 	srv := f.start(t)
-	return New(srv.URL, "test-token", "nb-test", srv.Client())
+	return New(srv.URL, "test-token", "nb-test", srv.Client(), opts...)
 }
 
 // A panel written against the NetBox provider selects "site", not "site_id".
@@ -391,8 +391,9 @@ func TestQuerySynthesizesNetBoxDeepLinks(t *testing.T) {
 	}
 }
 
-// When the replica reports no NetBox there is nothing to link to, and inventing one would
-// produce links that 404.
+// When the replica reports no NetBox and the datasource has no Browser URL
+// either, there is nothing to link to, and inventing one would produce links
+// that 404.
 func TestQueryOmitsDeepLinksWithoutANetBoxURL(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(7, "CORE-7", 4001)}
@@ -403,7 +404,7 @@ func TestQueryOmitsDeepLinksWithoutANetBoxURL(t *testing.T) {
 		t.Fatalf("Query: %v", err)
 	}
 	if _, ok := res.Rows[0]["display_url"]; ok {
-		t.Error("the replica reports no NetBox, so no link should be produced")
+		t.Error("neither the replica nor a Browser URL names a NetBox, so no link should be produced")
 	}
 }
 

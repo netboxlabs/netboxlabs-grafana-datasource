@@ -36,6 +36,19 @@ export const FAST_PAGING_TOOLTIP = [
 export const MODE_TOOLTIP =
   'Where this datasource reads from: the NetBox API, or a replica-cache mirror of the instance, for deployments too large for the API to serve interactively. The URL and API token below name that service.';
 
+/** Copy for the Browser URL field in replica-cache mode.
+ *
+ *  Kept as a constant for the same reason as FAST_PAGING_TOOLTIP: Grafana only
+ *  mounts tooltip text on hover, which jsdom does not reproduce, so asserting
+ *  on the constant is how the wording stays under test. It says both jobs the
+ *  field has here because the second is not guessable: a replica that reports
+ *  no NetBox URL has no other source of the address its links point at, so
+ *  someone who leaves this empty against one gets no links, and nothing else
+ *  on the form says why.
+ */
+export const BROWSER_URL_CACHE_TOOLTIP =
+  "Where users' browsers reach the NetBox the replica mirrors. 'View in NetBox' links are built from it when the replica reports no NetBox URL, and rewritten to it otherwise. Leave empty only if the replica reports a NetBox URL that browsers can reach.";
+
 const MODE_OPTIONS: Array<{ label: string; value: ProviderMode; description: string }> = [
   { label: 'NetBox API', value: 'netbox', description: 'Query the NetBox instance directly.' },
   { label: 'Replica cache', value: 'replica-cache', description: 'Query a replica-cache mirror of the instance.' },
@@ -166,7 +179,7 @@ export function ConfigEditor(props: Props) {
           labelWidth={20}
           tooltip={
             isCache
-              ? "Where users' browsers reach the NetBox the replica mirrors, if different from the address the replica reports. 'View in NetBox' links are rewritten to it. Leave empty if both match."
+              ? BROWSER_URL_CACHE_TOOLTIP
               : "Where users' browsers reach NetBox, if different from the address Grafana uses (e.g. Grafana connects via an internal service name). 'View in NetBox' links are rewritten to it. Leave empty if both match."
           }
         >

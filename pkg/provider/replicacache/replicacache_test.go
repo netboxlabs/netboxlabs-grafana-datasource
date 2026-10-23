@@ -220,8 +220,9 @@ func TestBaseURLIsTheLinkBase(t *testing.T) {
 		t.Errorf("BaseURL = %q, want the NetBox base the links were built from", got)
 	}
 
-	// Nothing is linkable when the replica reports no NetBox, so there is
-	// nothing to rewrite and the cache root is a harmless fallback.
+	// Nothing is linkable when the replica reports no NetBox and the datasource
+	// has no Browser URL, so there is nothing to rewrite and the cache root is
+	// a harmless fallback.
 	f2 := newFakeService()
 	srv := f2.start(t)
 	without := New(srv.URL, "t", "nb", srv.Client())
@@ -960,12 +961,11 @@ func TestFilterFields_OffersAnchoredMatchesWhenTheCatalogueListsThem(t *testing.
 	assertAdvertisedOperatorsAccepted(t, p, ops)
 }
 
-// Deep links point at the NetBox the replica reports it mirrors — the one
-// source, since a cache-mode datasource is not configured with a NetBox URL
-// any more (DATA-320 makes every tenant report one). A replica that reports
-// none yields rows without a link column, not links to nowhere; BaseURL agrees
-// with whichever base the links were built from, or the plugin's public-URL
-// rewrite matches nothing.
+// Deep links point at the NetBox the replica reports it mirrors. A replica that
+// reports none, with no Browser URL to fall back on (TestDeepLinks_* below),
+// yields rows without a link column, not links to nowhere; BaseURL agrees with
+// whichever base the links were built from, or the plugin's public-URL rewrite
+// matches nothing.
 func TestLinks_ComeFromTheCatalogueNetBoxURL(t *testing.T) {
 	f := newFakeService()
 	f.schema.NetBoxURL = "https://nb.example.com"
@@ -995,6 +995,122 @@ func TestLinks_ComeFromTheCatalogueNetBoxURL(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(res.Warnings, " "), "display_url") {
 		t.Errorf("the requested link column is reported missing: %v", res.Warnings)
+	}
+}
+
+// A replica that reports no netbox_url (production's, until DATA-383) can still
+// link: the datasource's Browser URL is where its users' browsers reach NetBox,
+// which makes it the one NetBox address this datasource has been given. Links
+// are built on it as on a reported URL, the editor offers the column they live
+// in, and BaseURL is that base, so the plugin's rewrite of links to the Browser
+// URL finds nothing to change.
+func TestDeepLinks_FallBackToBrowserURL(t *testing.T) {
+	f := newFakeService() // reports no netbox_url
+	f.entities["dcim/devices"] = []map[string]interface{}{{"id": 7, "name": "a", "custom_field_data": `{}`}}
+	p := newTestProvider(t, f, WithFallbackNetBoxURL("https://nb.example.com/"))
+	ctx := context.Background()
+
+	// Selected by name, and left at "All columns": the default panel links too.
+	for name, fields := range map[string][]string{"selected": {"name", "display_url"}, "all columns": nil} {
+		res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices", Fields: fields})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := res.Rows[0]["display_url"]; got != "https://nb.example.com/dcim/devices/7/" {
+			t.Errorf("%s: display_url = %v", name, got)
+		}
+		if !slices.Contains(res.Columns, "display_url") {
+			t.Errorf("%s: display_url is not announced as a column, so the data link is never attached: %v", name, res.Columns)
+		}
+	}
+
+	offered, err := p.Fields(ctx, "dcim/devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(offered, func(fl provider.Field) bool { return fl.Name == "display_url" }) {
+		t.Errorf("Fields does not offer display_url: %v", offered)
+	}
+	if got := p.BaseURL(); got != "https://nb.example.com" {
+		t.Errorf("BaseURL = %q must match the base the links were built from", got)
+	}
+}
+
+// The reported URL stays first: it is the NetBox the replica says it mirrors,
+// which the Browser URL — where browsers reach that NetBox — need not be
+// spelled the same as. The plugin's rewrite is what carries a link from one to
+// the other.
+func TestDeepLinks_ReportedURLWins(t *testing.T) {
+	f := newFakeService()
+	f.schema.NetBoxURL = "https://nb.internal"
+	f.entities["dcim/devices"] = []map[string]interface{}{{"id": 7, "name": "a", "custom_field_data": `{}`}}
+	p := newTestProvider(t, f, WithFallbackNetBoxURL("https://nb.example.com"))
+
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "display_url"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Rows[0]["display_url"]; got != "https://nb.internal/dcim/devices/7/" {
+		t.Errorf("display_url = %v, want the reported NetBox's", got)
+	}
+	if got := p.BaseURL(); got != "https://nb.internal" {
+		t.Errorf("BaseURL = %q must match the base the links were built from", got)
+	}
+}
+
+// The Browser URL becomes the target of every link, so it is held to what a
+// reported one is (TestCatalog_NetBoxURLIsValidated): an http(s) URL with a
+// host. Anything else is no fallback at all — rows without a link column, not
+// links a browser would open on another scheme or resolve against a host that
+// was never named.
+func TestDeepLinks_FallbackMustBeHTTP(t *testing.T) {
+	for _, raw := range []string{"", "   ", "nb.example.com", "//nb.example.com", "ftp://nb.example.com", "javascript:alert(1)", "https://"} {
+		f := newFakeService()
+		f.entities["dcim/devices"] = []map[string]interface{}{{"id": 7, "name": "a", "custom_field_data": `{}`}}
+		srv := f.start(t)
+		p := New(srv.URL, "t", "nb", srv.Client(), WithFallbackNetBoxURL(raw))
+		ctx := context.Background()
+
+		res, err := p.Query(ctx, provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "display_url"}})
+		if err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		if _, ok := res.Rows[0]["display_url"]; ok || slices.Contains(res.Columns, "display_url") {
+			t.Errorf("%q: built a link: %v", raw, res.Rows[0])
+		}
+		offered, err := p.Fields(ctx, "dcim/devices")
+		if err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		if slices.ContainsFunc(offered, func(fl provider.Field) bool { return fl.Name == "display_url" }) {
+			t.Errorf("%q: Fields offers a link column with nothing to link to", raw)
+		}
+		if got := p.BaseURL(); got != srv.URL {
+			t.Errorf("%q: BaseURL = %q, want the cache root", raw, got)
+		}
+	}
+}
+
+// The fallback is normalised as a reported URL is
+// (TestNetBoxURLIsNormalizedForDeepLinks), so the two sources build the same
+// paths: a trailing slash or the REST suffix would otherwise sit in every link.
+func TestDeepLinks_FallbackIsNormalizedLikeAReportedURL(t *testing.T) {
+	for _, raw := range []string{
+		"https://netbox.example.com/api",
+		"https://netbox.example.com/api/",
+		"https://netbox.example.com/",
+		"  https://netbox.example.com  ",
+	} {
+		f := newFakeService()
+		f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+		p := newTestProvider(t, f, WithFallbackNetBoxURL(raw))
+		res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices"})
+		if err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		if got := res.Rows[0]["display_url"]; got != "https://netbox.example.com/dcim/devices/1/" {
+			t.Errorf("%q produced %v", raw, got)
+		}
 	}
 }
 

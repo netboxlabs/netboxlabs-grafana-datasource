@@ -1,6 +1,6 @@
 import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { ConfigEditor, FAST_PAGING_TOOLTIP, MODE_TOOLTIP } from './ConfigEditor';
+import { BROWSER_URL_CACHE_TOOLTIP, ConfigEditor, FAST_PAGING_TOOLTIP, MODE_TOOLTIP } from './ConfigEditor';
 import { NetBoxDataSourceOptions } from '../types';
 
 // @grafana/ui's Select menu (via ScrollIndicators) uses IntersectionObserver
@@ -284,6 +284,17 @@ describe('replica-cache mode', () => {
   // connection form.
   it('keeps the mode copy free of capability caveats', () => {
     expect(MODE_TOOLTIP).not.toMatch(/annotations|topology|IP enrichment|cannot|label/i);
+  });
+
+  // The Browser URL has two jobs in this mode, and this copy is the one place
+  // the form says so. A replica that reports no NetBox URL has no other source
+  // of the address "View in NetBox" links point at, so a field left empty
+  // against one means no links at all, with nothing else on the form to explain
+  // it. Asserted on the constant, as FAST_PAGING_TOOLTIP is, because the
+  // tooltip text only mounts on hover.
+  it('cache-mode Browser URL tooltip says links are built from it when the replica reports no NetBox URL', () => {
+    expect(BROWSER_URL_CACHE_TOOLTIP).toMatch(/built from it when the replica reports no NetBox URL/i);
+    expect(BROWSER_URL_CACHE_TOOLTIP).toMatch(/rewritten to it otherwise/i);
   });
 });
 

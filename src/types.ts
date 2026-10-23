@@ -105,7 +105,9 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
    * replica-cache deployment when mode is 'replica-cache'. */
   url?: string;
   /** Browser-facing NetBox base URL, if different from url (e.g. Grafana
-   * reaches NetBox via internal service DNS). Used to rewrite deep links. */
+   * reaches NetBox via internal service DNS). Used to rewrite deep links; in
+   * replica-cache mode also the base they are built on when the replica
+   * reports no NetBox URL. */
   publicUrl?: string;
   mode?: ProviderMode;
   /** Identifies the NetBox instance the cache mirrors, sent as NBC-Netbox-ID.

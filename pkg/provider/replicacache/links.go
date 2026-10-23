@@ -10,10 +10,11 @@ import (
 // per request; replica-cache serves database rows, where it does not exist and
 // cannot — see the display/display_url finding in the FK design review.
 //
-// So it is synthesized here from the NetBox base URL the datasource is already
-// configured with. Without this, pointing a datasource at replica-cache
-// silently removes every "View in NetBox" link from panels that had them, which
-// is a feature regression the user never asked for and cannot diagnose.
+// So it is synthesized here from the NetBox base the provider links to (see
+// linkBase): the one the replica reports, else the datasource's Browser URL.
+// Without this, pointing a datasource at replica-cache silently removes every
+// "View in NetBox" link from panels that had them, which is a feature
+// regression the user never asked for and cannot diagnose.
 const deepLinkColumn = "display_url"
 
 // addDeepLinks adds a display_url column pointing at the object in the NetBox

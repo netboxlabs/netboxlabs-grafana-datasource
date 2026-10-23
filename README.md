@@ -75,7 +75,7 @@ Add the data source (**Connections → Data sources → NetBox**) and set:
 | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Mode**            | _NetBox_ (default) reads the NetBox REST API. _replica-cache_ reads a NetBox replica-cache deployment instead, for instances too large for the API to serve interactively — see [Replica-cache mode](#replica-cache-mode).                                                                    |
 | **URL**             | Base URL of the service the mode reads from: your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`), or the replica-cache deployment.                                                                                                                                   |
-| **Browser URL**     | Optional. Where users' browsers reach NetBox when it differs from the address the links are built from — the URL above in NetBox mode, the NetBox address the replica reports in replica-cache mode. Deep links are rewritten to this base; leave empty if that address is browser-reachable. |
+| **Browser URL**     | Optional. Where users' browsers reach NetBox when that differs from the address the links are built from (the URL above in NetBox mode, the address the replica reports in replica-cache mode); deep links are rewritten to it. If the replica reports none, links are built from it: set it. |
 | **API token**       | The credential for that service: a NetBox API token (classic 40-character v1 or `nbt_…` v2, auto-detected) or the replica-cache bearer token. Stored encrypted.                                                                                                                               |
 | **Skip TLS verify** | Accept self-signed certificates.                                                                                                                                                                                                                                                              |
 | **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                                                                                                    |
@@ -176,7 +176,8 @@ datasources:
 ```
 
 A data source in replica-cache mode is provisioned with `mode: replica-cache`,
-`url` and `apiToken` pointing at the replica, and `netboxId` — see
+`url` and `apiToken` pointing at the replica, `netboxId`, and `publicUrl` for the
+_View in NetBox_ links of a replica that reports no NetBox URL — see
 [docs/REPLICA-CACHE.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/REPLICA-CACHE.md#configuration).
 
 ## Query types

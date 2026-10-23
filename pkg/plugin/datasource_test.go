@@ -656,3 +656,93 @@ func TestWhitespaceOnlySettingsAreMissing(t *testing.T) {
 		})
 	}
 }
+
+// replicaStub is as much of replica-cache as one query needs: the catalogue,
+// which names netboxURL when it is not empty (as a build before the route
+// carried it does not), and one list route holding one device.
+func replicaStub(t *testing.T, netboxURL string) *httptest.Server {
+	t.Helper()
+	ints := []string{"eq", "gt", "lt", "in", "isnull"}
+	text := []string{"eq", "gt", "lt", "in", "isnull", "ilike"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/_meta/schema":
+			doc := map[string]interface{}{
+				"snapshot_complete": true,
+				"entities": map[string]interface{}{
+					"/v1/dcim/devices": map[string]interface{}{
+						"table": "dcim_device", "primary_key": "id", "ingested": true,
+						"data_as_of": "2026-09-22T14:03:11Z",
+						"columns": []map[string]interface{}{
+							{"name": "id", "type": "BIGINT", "operators": ints},
+							{"name": "name", "type": "VARCHAR", "nullable": true, "operators": text},
+						},
+					},
+				},
+			}
+			if netboxURL != "" {
+				doc["netbox_url"] = netboxURL
+			}
+			_ = json.NewEncoder(w).Encode(doc)
+		case "/v1/dcim/devices":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"count":      1,
+				"results":    []map[string]interface{}{{"id": 7, "name": "leaf1"}},
+				"data_as_of": "2026-09-22T14:03:11Z",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// In replica-cache mode the Browser URL reaches the provider as the link base
+// of a replica that reports no NetBox URL (production's, until DATA-383):
+// without it every such datasource's rows come back with no "View in NetBox"
+// link. The plugin then rewrites links from the provider's base to the Browser
+// URL, which for links built on it changes nothing; a reported URL still wins,
+// and is what that rewrite moves.
+func TestNewProvider_ReplicaCachePassesBrowserURL(t *testing.T) {
+	for _, tc := range []struct {
+		name, reported, browserURL string
+		want                       string // "" is no link at all
+	}{
+		{"none reported: built on the Browser URL", "", "https://netbox.example.com", "https://netbox.example.com/dcim/devices/7/"},
+		{"none reported: a trailing slash adds no second one", "", "https://netbox.example.com/", "https://netbox.example.com/dcim/devices/7/"},
+		{"reported: rewritten to the Browser URL", "https://nb.internal", "https://netbox.example.com", "https://netbox.example.com/dcim/devices/7/"},
+		{"reported, no Browser URL: left as reported", "https://nb.internal", "", "https://nb.internal/dcim/devices/7/"},
+		{"neither: no link", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := replicaStub(t, tc.reported)
+			cfg := &models.PluginSettings{
+				Mode: models.ModeReplicaCache, URL: srv.URL, NetBoxID: "nb-1", PublicURL: tc.browserURL,
+				Secrets: &models.SecretPluginSettings{APIToken: "t"},
+			}
+			p, err := newProvider(cfg, srv.Client())
+			if err != nil {
+				t.Fatalf("newProvider: %v", err)
+			}
+			res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "display_url"}})
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			// What every query path does to a result before it is framed.
+			rewriteLinks(res, p.BaseURL(), cfg.PublicURL)
+
+			got, linked := res.Rows[0]["display_url"]
+			if tc.want == "" {
+				if linked || slices.Contains(res.Columns, "display_url") {
+					t.Errorf("a link was built with no NetBox to name: %v", res.Rows[0])
+				}
+				return
+			}
+			if got != tc.want {
+				t.Errorf("display_url = %v, want %s", got, tc.want)
+			}
+		})
+	}
+}

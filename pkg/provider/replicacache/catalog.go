@@ -25,7 +25,8 @@ const catalogTTL = 10 * time.Minute
 type catalog struct {
 	SnapshotComplete bool
 	// NetBoxURL is the instance the replica mirrors, "" when the route omits
-	// it (no tenant states one yet, DATA-320).
+	// it: DATA-320 added it to the route, but production's replicas report none
+	// until DATA-383. linkBase then falls back to the datasource's Browser URL.
 	NetBoxURL string
 	// Entities is keyed by object type ("dcim/devices"), the route path minus
 	// its "/v1/" prefix — the same value a saved query names in NetBox mode.
@@ -206,11 +207,12 @@ func (doc schemaDoc) toCatalog() (*catalog, error) {
 	return out, nil
 }
 
-// linkBaseOf accepts the route's netbox_url as a link base only when it is an
-// http(s) URL with a host: it is upstream-controlled and becomes the target of
-// every "View in NetBox" link. Normalised as the NetBox provider normalises
-// its own URL — no trailing slash, no /api — so both build the same paths.
-// Anything else is ignored, and the replica has no link base.
+// linkBaseOf accepts a NetBox URL as a link base only when it is an http(s) URL
+// with a host: the route's netbox_url is upstream-controlled and the Browser
+// URL is typed into a form, and either becomes the target of every "View in
+// NetBox" link. Normalised as the NetBox provider normalises its own URL — no
+// trailing slash, no /api — so both build the same paths. Anything else is
+// ignored, and that source gives no link base.
 func linkBaseOf(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {

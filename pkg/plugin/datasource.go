@@ -137,8 +137,12 @@ func newProvider(cfg *models.PluginSettings, httpClient *http.Client) (provider.
 		// is absent. A provisioned datasource missing its URL reported a
 		// construction failure instead of "replica-cache URL is missing".
 		// "View in NetBox" links come from the NetBox URL the replica's own
-		// catalogue reports; nothing is configured for them here.
-		return replicacache.New(cfg.URL, cfg.Secrets.APIToken, cfg.NetBoxID, httpClient), nil
+		// catalogue reports. A replica that reports none (production's, until
+		// DATA-383) gets them from the Browser URL instead, the one NetBox
+		// address a datasource of this mode is given; the links are rewritten
+		// to that URL anyway, so for those the rewrite has nothing to change.
+		return replicacache.New(cfg.URL, cfg.Secrets.APIToken, cfg.NetBoxID, httpClient,
+			replicacache.WithFallbackNetBoxURL(cfg.PublicURL)), nil
 	default:
 		return nil, fmt.Errorf("unknown provider mode %q", cfg.Mode)
 	}

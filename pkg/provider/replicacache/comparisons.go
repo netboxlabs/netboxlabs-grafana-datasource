@@ -114,7 +114,7 @@ func rewriteComparisons(filters []provider.Filter, e entity, c *catalog) (out []
 			continue
 		}
 		refuse := func(reason string) error {
-			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: reason}
+			return &UnsupportedFilterError{Field: fieldLabel(f), Operator: f.Operator, Reason: reason}
 		}
 		// buildFilterValues makes both checks too, but after this rewrite it
 		// would name gt where the panel said gte.
@@ -160,14 +160,15 @@ func rewriteComparisons(filters []provider.Filter, e entity, c *catalog) (out []
 				return nil, false, refuse(fmt.Sprintf("every value a %s column holds satisfies this, so it means \"has any value\", which this column cannot be filtered on", strings.ToLower(col.Type)))
 			}
 			notEmpty[f.Field] = true
-			out = append(out, provider.Filter{Field: f.Field, Operator: opNEmpty})
+			out = append(out, provider.Filter{Field: f.Field, Operator: opNEmpty, Label: f.Label})
 			continue
 		}
-		out = append(out, provider.Filter{Field: f.Field, Operator: strict, Value: bound.FloatString(scale)})
+		out = append(out, provider.Filter{Field: f.Field, Operator: strict, Value: bound.FloatString(scale), Label: f.Label})
 	}
-	// "Has a value" beside the panel's own "is empty" on that field: no row.
+	// "Has a value" beside the panel's own "is empty" on that field — on a
+	// NetBox number, its IS NULL (translateFilters) — is no row.
 	for _, f := range out {
-		if f.Operator == opEmpty && notEmpty[f.Field] {
+		if (f.Operator == opEmpty || f.Operator == opIsNull) && notEmpty[f.Field] {
 			none = true
 		}
 	}

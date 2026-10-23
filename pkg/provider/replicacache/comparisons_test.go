@@ -11,13 +11,20 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
+// pluginRacks is a plugin's model: the vocabulary covers no plugin, so its
+// filters keep the catalogue's rules, which are what these tests are about.
+// NetBox's own racks filter as NetBox does (vocabfilters.go): NetBox has no
+// filter on ratio or name__lte, and its weight is a decimal the replica holds
+// as text.
+const pluginRacks = "plugins/acme/racks"
+
 // racksFixture is a replica table with a whole-number column, a DECIMAL one, a
 // floating-point one and text, so each comparison rule has a column to act on.
 func racksFixture(t *testing.T) (*fakeService, *Provider) {
 	t.Helper()
 	f := newFakeService()
-	f.addEntity("dcim/racks", "id:BIGINT:pk", "name:VARCHAR", "u_height:SMALLINT", "weight:DECIMAL(8,2)", "ratio:DOUBLE")
-	f.entities["dcim/racks"] = []map[string]interface{}{
+	f.addEntity(pluginRacks, "id:BIGINT:pk", "name:VARCHAR", "u_height:SMALLINT", "weight:DECIMAL(8,2)", "ratio:DOUBLE")
+	f.entities[pluginRacks] = []map[string]interface{}{
 		{"id": 1, "name": "R1", "u_height": 40, "weight": 10.00, "ratio": 0.5},
 		{"id": 2, "name": "R2", "u_height": 42, "weight": 10.01, "ratio": 0.5},
 		{"id": 3, "name": "R3", "u_height": 44, "weight": 10.5, "ratio": 0.5},
@@ -73,7 +80,7 @@ func TestQuery_InclusiveComparisonsBecomeExactStrictOnes(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f, p := racksFixture(t)
-			res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/racks", Filters: c.filters})
+			res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: pluginRacks, Filters: c.filters})
 			if err != nil {
 				t.Fatalf("Query: %v", err)
 			}
@@ -84,7 +91,7 @@ func TestQuery_InclusiveComparisonsBecomeExactStrictOnes(t *testing.T) {
 				t.Errorf("Total = %d, want %d", res.Total, len(c.want))
 			}
 			for key, value := range c.sent {
-				req, ok := f.requestWith("dcim/racks", key)
+				req, ok := f.requestWith(pluginRacks, key)
 				if !ok || req.query.Get(key) != value {
 					t.Errorf("sent %v, want %s=%s", req.query, key, value)
 				}
@@ -110,7 +117,7 @@ func TestQuery_InclusiveComparisonsRefuseWhatHasNoExactRewrite(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f, p := racksFixture(t)
-			_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/racks", Filters: c.filters})
+			_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: pluginRacks, Filters: c.filters})
 			var unsupported *UnsupportedFilterError
 			if !errors.As(err, &unsupported) {
 				t.Fatalf("err = %v, want an UnsupportedFilterError", err)
@@ -121,7 +128,7 @@ func TestQuery_InclusiveComparisonsRefuseWhatHasNoExactRewrite(t *testing.T) {
 			if unsupported.Operator != c.filters[len(c.filters)-1].Operator {
 				t.Errorf("the error names operator %q, want the one the panel used", unsupported.Operator)
 			}
-			if n := f.countRequestsFor("dcim/racks"); n != 0 {
+			if n := f.countRequestsFor(pluginRacks); n != 0 {
 				t.Errorf("%d requests sent for a refused filter", n)
 			}
 		})
@@ -131,7 +138,7 @@ func TestQuery_InclusiveComparisonsRefuseWhatHasNoExactRewrite(t *testing.T) {
 // The editor offers >= and <= exactly where the rewrite applies.
 func TestFilterFields_OfferInclusiveComparisonsOnWholeAndDecimalColumns(t *testing.T) {
 	_, p := racksFixture(t)
-	fields, err := p.FilterFields(context.Background(), "dcim/racks")
+	fields, err := p.FilterFields(context.Background(), pluginRacks)
 	if err != nil {
 		t.Fatalf("FilterFields: %v", err)
 	}
@@ -189,7 +196,7 @@ func TestQuery_InclusiveComparisonsAtTheTypesLimits(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f, p := racksFixture(t)
-			res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/racks", Filters: c.filters})
+			res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: pluginRacks, Filters: c.filters})
 			if err != nil {
 				t.Fatalf("Query: %v", err)
 			}
@@ -197,11 +204,11 @@ func TestQuery_InclusiveComparisonsAtTheTypesLimits(t *testing.T) {
 				t.Errorf("rows = %v (Total %d), want %v", got, res.Total, c.want)
 			}
 			for key, value := range c.sent {
-				if req, ok := f.requestWith("dcim/racks", key); !ok || req.query.Get(key) != value {
+				if req, ok := f.requestWith(pluginRacks, key); !ok || req.query.Get(key) != value {
 					t.Errorf("sent %v, want %s=%s", req.query, key, value)
 				}
 			}
-			if c.want == nil && f.countRequestsFor("dcim/racks") != 0 {
+			if c.want == nil && f.countRequestsFor(pluginRacks) != 0 {
 				t.Error("a filter no row can match still sent a request")
 			}
 		})
@@ -213,7 +220,7 @@ func TestQuery_InclusiveComparisonsAtTheTypesLimits(t *testing.T) {
 // healthy-looking zero an alert would act on.
 func TestQuery_UnsatisfiableComparisonStillValidatesTheRest(t *testing.T) {
 	_, p := racksFixture(t)
-	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/racks", Filters: []provider.Filter{
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: pluginRacks, Filters: []provider.Filter{
 		{Field: "u_height", Operator: "gte", Value: "99999"}, {Field: "nosuchcolumn", Value: "x"}}})
 	var unsupported *UnsupportedFilterError
 	if !errors.As(err, &unsupported) {
@@ -231,14 +238,14 @@ func TestQuery_InclusiveComparisonAtTheHugeintMinimum(t *testing.T) {
 		wantStrict = minimum
 	)
 	f := newFakeService()
-	f.addEntity("dcim/racks", "id:BIGINT:pk", "name:VARCHAR", "big:HUGEINT")
-	f.entities["dcim/racks"] = []map[string]interface{}{
+	f.addEntity(pluginRacks, "id:BIGINT:pk", "name:VARCHAR", "big:HUGEINT")
+	f.entities[pluginRacks] = []map[string]interface{}{
 		{"id": 1, "name": "MIN", "big": json.Number(minimum)},
 		{"id": 2, "name": "ZERO", "big": 0},
 	}
 	p := newTestProvider(t, f)
 
-	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/racks",
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: pluginRacks,
 		Filters: []provider.Filter{{Field: "big", Operator: "gte", Value: oneAbove}}})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
@@ -246,7 +253,7 @@ func TestQuery_InclusiveComparisonAtTheHugeintMinimum(t *testing.T) {
 	if got := rackNames(res); !slices.Equal(got, []string{"ZERO"}) {
 		t.Errorf("rows = %v, want [ZERO]", got)
 	}
-	if req, ok := f.requestWith("dcim/racks", "filter[big]__gt"); !ok || req.query.Get("filter[big]__gt") != wantStrict {
+	if req, ok := f.requestWith(pluginRacks, "filter[big]__gt"); !ok || req.query.Get("filter[big]__gt") != wantStrict {
 		t.Errorf("sent %v, want filter[big]__gt=%s", req.query, wantStrict)
 	}
 }

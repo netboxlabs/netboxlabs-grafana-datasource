@@ -450,9 +450,14 @@ func valueType(v interface{}) provider.FieldType {
 	return provider.FieldTypeString
 }
 
-// FilterFields advertises every stored column and every available expanded
-// name with the operators the catalogue says the backend takes on it (see
-// seamOperators). An expanded name filters on the TARGET column, so its
+// FilterFields advertises what a query can filter on. On an entity NetBox's
+// filter vocabulary covers, that is NetBox's own filters, under NetBox's
+// names, with NetBox's lookups — as far as the replica can answer them (see
+// vocabFilterFields) — so a dashboard built here filters the same way in
+// NetBox mode. An entity it does not cover (a plugin's model) keeps the
+// catalogue's list: every stored column and every available expanded name
+// with the operators the catalogue says the backend takes on it (see
+// seamOperators); an expanded name filters on the TARGET column, so its
 // operators are the target's.
 func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provider.FilterField, error) {
 	if err := rejectBranch(ctx); err != nil {
@@ -461,6 +466,9 @@ func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provi
 	e, c, err := p.entityFor(ctx, objectType)
 	if err != nil {
 		return nil, err
+	}
+	if vocab, covered := vocabFor(e.Table); covered {
+		return vocabFilterFields(vocab, e), nil
 	}
 	var out []provider.FilterField
 	for _, col := range e.Columns {

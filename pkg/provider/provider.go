@@ -57,6 +57,12 @@ type Filter struct {
 	Field    string `json:"field"`
 	Operator string `json:"operator"` // NetBox lookup, e.g. "" (exact), "ic", "n", "gte"
 	Value    string `json:"value"`
+	// Label is the field as the user wrote it, set by a provider that rewrites
+	// a filter onto another column before sending it (replica-cache sends
+	// NetBox's children filter as _children), so that a refusal names the field
+	// the user knows. Empty means Field is as written. It never travels in a
+	// query: callers set Field, and only the provider fills this in.
+	Label string `json:"-"`
 }
 
 // QuerySpec describes an object query.

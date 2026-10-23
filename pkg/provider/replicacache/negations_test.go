@@ -354,10 +354,13 @@ func TestQuery_NegationRefusals(t *testing.T) {
 	}{
 		// NetBox matches an address by host, whatever the mask; the rows here
 		// hold PostgreSQL's text, so "not this host" cannot be tested on them
-		// the way NetBox tests it.
-		{"not equal on an IP address", "ipam/ip-addresses", provider.Filter{Field: "address", Operator: "n", Value: "10.0.0.1"}, "IP address"},
+		// the way NetBox tests it. A plugin's address column keeps that rule;
+		// NetBox's own ip-addresses have no address__n at all.
+		{"not equal on an IP address", "plugins/acme/addresses", provider.Filter{Field: "address", Operator: "n", Value: "10.0.0.1"}, "IP address"},
+		{"NetBox has no not equal on its address", "ipam/ip-addresses", provider.Filter{Field: "address", Operator: "n", Value: "10.0.0.1"}, "NetBox has no address__n filter"},
 		{"a label as the value", "dcim/devices", provider.Filter{Field: "status", Operator: "n", Value: "Active"}, `"active"`},
-		{"a text negation on a number", "dcim/devices", provider.Filter{Field: "id", Operator: "nic", Value: "1"}, "does not take that operator"},
+		{"a text negation on a number", "plugins/acme/addresses", provider.Filter{Field: "id", Operator: "nic", Value: "1"}, "does not take that operator"},
+		{"NetBox has no text negation on an id", "dcim/devices", provider.Filter{Field: "id", Operator: "nic", Value: "1"}, "NetBox has no id__nic filter"},
 		{"an entity with no data yet", "dcim/platforms", provider.Filter{Field: "name", Operator: "n", Value: "x"}, "received data"},
 		// The replica refuses "4.0" on a whole-number column (and NetBox says
 		// "Enter a whole number"); answering it from the rows on a small table
@@ -369,6 +372,8 @@ func TestQuery_NegationRefusals(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFakeService()
 			f.addAddressEntity(true)
+			f.addEntity("plugins/acme/addresses", "id:BIGINT:pk", "address:VARCHAR")
+			f.addOperators("plugins/acme/addresses", "address", "host")
 			f.entities["dcim/devices"] = mixedDevices()
 			p := newTestProvider(t, f)
 			_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: c.objectType, Filters: []provider.Filter{c.filter}})
@@ -441,17 +446,21 @@ func TestQuery_NegatedRelatedName(t *testing.T) {
 
 // The rows are tested here and the counts by the replica, so a negation is
 // offered only where the two compare alike: text, numbers and booleans. A
-// timestamp the replica casts before comparing is not one.
+// timestamp the replica casts before comparing is not one. The table is a
+// plugin's, whose filters keep the catalogue's rules: NetBox's cables have no
+// filter on a timestamp column, so they would be refused before this rule.
 func TestQuery_NegationOnlyWhereTheRowTestComparesLikeTheReplica(t *testing.T) {
+	const cables = "plugins/acme/cables"
 	f := newFakeService()
-	f.addEntity("dcim/cables", "id:BIGINT:pk", "label:VARCHAR", "seen:TIMESTAMP WITH TIME ZONE")
-	f.entities["dcim/cables"] = []map[string]interface{}{{"id": 1, "label": "a", "seen": "2026-05-01T10:00:00+00:00"}}
+	f.addEntity(cables, "id:BIGINT:pk", "label:VARCHAR", "seen:TIMESTAMP WITH TIME ZONE")
+	f.entities[cables] = []map[string]interface{}{{"id": 1, "label": "a", "seen": "2026-05-01T10:00:00+00:00"}}
 	p := newTestProvider(t, f)
 
-	ff, err := p.FilterFields(context.Background(), "dcim/cables")
+	ff, err := p.FilterFields(context.Background(), cables)
 	if err != nil {
 		t.Fatalf("FilterFields: %v", err)
 	}
+	listed := 0
 	for _, x := range ff {
 		if x.Name == "seen" && slices.Contains(x.Operators, "n") {
 			t.Errorf("seen operators = %v, want no n on a timestamp", x.Operators)
@@ -459,12 +468,18 @@ func TestQuery_NegationOnlyWhereTheRowTestComparesLikeTheReplica(t *testing.T) {
 		if x.Name == "label" && !slices.Contains(x.Operators, "n") {
 			t.Errorf("label operators = %v, want n", x.Operators)
 		}
+		if x.Name == "seen" || x.Name == "label" {
+			listed++
+		}
 	}
-	_, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/cables",
+	if listed != 2 {
+		t.Errorf("FilterFields = %+v, want seen and label offered", ff)
+	}
+	_, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: cables,
 		Filters: []provider.Filter{{Field: "seen", Operator: "n", Value: "2026-05-01T10:00:00Z"}}})
 	var unsupported *UnsupportedFilterError
-	if !errors.As(err, &unsupported) {
-		t.Errorf("err = %v, want a refusal", err)
+	if !errors.As(err, &unsupported) || !strings.Contains(unsupported.Reason, "converts") {
+		t.Errorf("err = %v, want the refusal saying the replica converts the value", err)
 	}
 }
 
@@ -656,11 +671,13 @@ func TestQuery_TextNegationDedupeIsASCIIOnly(t *testing.T) {
 
 // A floating-point column is compared at its own width, as the replica casts
 // the filter value to the column's type: 0.10000000000000001 is 0.1 to a
-// DOUBLE, and 0.1 is the stored float32 to a REAL.
+// DOUBLE, and 0.1 is the stored float32 to a REAL. NetBox stores no float, so
+// only a plugin's table has such columns.
 func TestQuery_NegationOnFloatColumnsComparesAtTheirWidth(t *testing.T) {
+	const feeds = "plugins/acme/power-feeds"
 	f := newFakeService()
-	f.addEntity("dcim/power-feeds", "id:BIGINT:pk", "name:VARCHAR", "amps:DOUBLE", "ratio:REAL")
-	f.entities["dcim/power-feeds"] = []map[string]interface{}{
+	f.addEntity(feeds, "id:BIGINT:pk", "name:VARCHAR", "amps:DOUBLE", "ratio:REAL")
+	f.entities[feeds] = []map[string]interface{}{
 		{"id": 1, "name": "A", "amps": 0.1, "ratio": float64(float32(0.1))},
 		{"id": 2, "name": "B", "amps": 0.2, "ratio": float64(float32(0.2))},
 	}
@@ -672,7 +689,7 @@ func TestQuery_NegationOnFloatColumnsComparesAtTheirWidth(t *testing.T) {
 		// The replica's float cast takes an exponent, and so does this.
 		{Field: "amps", Operator: "n", Value: "1e-1"},
 	} {
-		res := negationQuery(t, p, provider.QuerySpec{ObjectType: "dcim/power-feeds", Filters: []provider.Filter{filter}})
+		res := negationQuery(t, p, provider.QuerySpec{ObjectType: feeds, Filters: []provider.Filter{filter}})
 		if got := ids(res); !slices.Equal(got, []int{2}) {
 			t.Errorf("%s n %s: rows = %v, want [2]", filter.Field, filter.Value, got)
 		}
@@ -727,18 +744,19 @@ func TestWithCount_ChecksTheCountAgainstEveryMatchSeen(t *testing.T) {
 
 // A DECIMAL column compares exact decimals; a value in another syntax ("1e1")
 // is refused before anything is sent, so the row test and the replica's count
-// cannot read it differently.
+// cannot read it differently. (A plugin's DECIMAL column: NetBox's own decimals
+// reach the replica as text and are refused by the vocabulary.)
 func TestQuery_ExponentOnADecimalColumnIsRefused(t *testing.T) {
 	f := newFakeService()
-	f.addEntity("dcim/racks", "id:BIGINT:pk", "name:VARCHAR", "weight:DECIMAL(8,2)")
-	f.entities["dcim/racks"] = []map[string]interface{}{{"id": 1, "name": "R1", "weight": 10.0}}
+	f.addEntity(pluginRacks, "id:BIGINT:pk", "name:VARCHAR", "weight:DECIMAL(8,2)")
+	f.entities[pluginRacks] = []map[string]interface{}{{"id": 1, "name": "R1", "weight": 10.0}}
 	p := newTestProvider(t, f)
 
 	for _, filter := range []provider.Filter{
 		{Field: "weight", Operator: "n", Value: "1e1"},
 		{Field: "weight", Value: "1e1"},
 	} {
-		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/racks", Filters: []provider.Filter{filter}})
+		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: pluginRacks, Filters: []provider.Filter{filter}})
 		var unsupported *UnsupportedFilterError
 		if !errors.As(err, &unsupported) || !strings.Contains(unsupported.Reason, "decimal") {
 			t.Errorf("%q %s: err = %v, want a refusal naming the decimal syntax", filter.Operator, filter.Value, err)

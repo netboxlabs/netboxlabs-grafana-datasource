@@ -137,7 +137,7 @@ func validateChoiceValues(objectType string, filters []provider.Filter) error {
 			}
 			if len(values) > 0 {
 				slices.Sort(values)
-				return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+				return &UnsupportedFilterError{Field: fieldLabel(f), Operator: f.Operator,
 					Reason: fmt.Sprintf("%q is how the rows show %s, but filters take the stored value (%s); %s_value shows the stored values",
 						v, strings.Join(values, " or "), strings.Join(values, ", "), f.Field)}
 			}

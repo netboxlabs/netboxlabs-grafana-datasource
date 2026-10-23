@@ -1605,24 +1605,100 @@ func TestQuery_ExpandsServerSideAndSortsOnTheName(t *testing.T) {
 
 // expand= goes with every query, count-only included: a filter on an expanded
 // name is only valid under it, and the alert Count path sends the rule's
-// filters with CountOnly. Only the sort and the projection are dropped.
+// filters with CountOnly. Only the sort and the projection are dropped. Only a
+// plugin's table filters on its expanded names, by the catalogue's rules; on
+// NetBox's devices the same filter is site__ic, which NetBox lacks, and it is
+// refused on the count path too, before anything is sent.
 func TestQuery_CountOnlyStillExpandsForFilters(t *testing.T) {
+	const widgets = "plugins/acme/widgets"
 	f := newFakeService()
+	f.addEntity(widgets, "id:BIGINT:pk", "name:VARCHAR", "site_id:BIGINT")
+	f.addReference(widgets, "site_id", "dcim/sites", "site", "name", "slug")
 	f.entities["dcim/sites"] = []map[string]interface{}{{"id": 1, "name": "AMS1", "slug": "ams1"}}
-	f.entities["dcim/devices"] = []map[string]interface{}{{"id": 1, "name": "a", "site_id": 1, "custom_field_data": `{}`}}
+	f.entities[widgets] = []map[string]interface{}{{"id": 1, "name": "a", "site_id": 1}}
 	p := newTestProvider(t, f)
 
-	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", CountOnly: true, Limit: 1,
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: widgets, CountOnly: true, Limit: 1,
 		Filters: []provider.Filter{{Field: "site", Operator: "ic", Value: "ams"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, _ := f.requestWith("dcim/devices", "expand")
+	req, _ := f.requestWith(widgets, "expand")
 	if req.query.Get("expand") != "site" || req.query.Get("sort") != "" || req.query.Get("fields") != "" {
 		t.Errorf("count-only request = %v: expand must travel, sort and fields must not", req.query)
 	}
 	if res.Total != 1 {
 		t.Errorf("total = %d", res.Total)
+	}
+
+	_, err = p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", CountOnly: true, Limit: 1,
+		Filters: []provider.Filter{{Field: "site", Operator: "ic", Value: "ams"}}})
+	var refused *UnsupportedFilterError
+	if !errors.As(err, &refused) || !strings.HasPrefix(refused.Reason, "NetBox has no site__ic filter on dcim/devices") {
+		t.Errorf("devices: err = %v, want NetBox's refusal", err)
+	}
+	if n := f.countRequestsFor("dcim/devices"); n != 0 {
+		t.Errorf("devices: %d requests sent for a refused filter", n)
+	}
+}
+
+// The request is planned from the filters as translated, never as written: a
+// filter NetBox reads from another column must not expand a reference that
+// happens to share its name — not on the rows read, not on a count, not on a
+// negated query's counts. No catalogue measured names a reference like a
+// filter the translation moves (cabled is sent on cable_id), so this one is
+// made up to make the difference visible.
+func TestQuery_ExpansionsFollowTheTranslatedFilters(t *testing.T) {
+	f := newFakeService()
+	f.addEntity("dcim/cables", "id:BIGINT:pk", "label:VARCHAR")
+	f.addEntity("dcim/interfaces", "id:BIGINT:pk", "name:VARCHAR", "cable_id:BIGINT")
+	f.addReference("dcim/interfaces", "cable_id", "dcim/cables", "cabled", "label")
+	f.entities["dcim/cables"] = []map[string]interface{}{{"id": float64(9), "label": "C9"}}
+	f.entities["dcim/interfaces"] = []map[string]interface{}{
+		{"id": float64(1), "name": "eth0", "cable_id": float64(9)},
+		{"id": float64(2), "name": "eth1", "cable_id": nil},
+		{"id": float64(3), "name": "eth2", "cable_id": float64(9)},
+	}
+	p := newTestProvider(t, f)
+
+	cabled := provider.Filter{Field: "cabled", Value: "true"}
+	notEth2 := provider.Filter{Field: "name", Operator: "n", Value: "eth2"}
+	for _, c := range []struct {
+		name  string
+		spec  provider.QuerySpec
+		total int
+	}{
+		{"rows", provider.QuerySpec{Fields: []string{"name"}, Filters: []provider.Filter{cabled}}, 2},
+		{"a count", provider.QuerySpec{CountOnly: true, Filters: []provider.Filter{cabled}}, 2},
+		{"a negated query's counts", provider.QuerySpec{CountOnly: true, Filters: []provider.Filter{cabled, notEth2}}, 1},
+		{"a negated query's rows", provider.QuerySpec{Fields: []string{"name"}, Filters: []provider.Filter{cabled, notEth2}}, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f.mu.Lock()
+			f.requests = nil
+			f.mu.Unlock()
+			c.spec.ObjectType = "dcim/interfaces"
+			res, err := p.Query(context.Background(), c.spec)
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if res.Total != c.total {
+				t.Errorf("Total = %d, want %d", res.Total, c.total)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			for _, r := range f.requests {
+				if r.entity != "dcim/interfaces" {
+					continue
+				}
+				if r.query.Get("expand") != "" {
+					t.Errorf("request %v expands %q; the filter was sent on cable_id", r.query, r.query.Get("expand"))
+				}
+				if r.query.Get("filter[cable_id]__isnull") != "false" {
+					t.Errorf("request %v, want cabled sent as filter[cable_id]__isnull=false", r.query)
+				}
+			}
+		})
 	}
 }
 

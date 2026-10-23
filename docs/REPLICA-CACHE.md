@@ -367,6 +367,36 @@ divergences:
   carries) NetBox mode lists cables and boundary peers batch by batch; the
   sets are the same.
 
+## IP enrichment
+
+**IP enrichment**, from an IP list or a NetBox scope, returns what NetBox mode
+returns for the same data: the same rows and columns, the same pick and
+`match_count` for a host with several records, NetBox's renderings (a VRF as
+`name (rd)`, a rack as `name (facility id)`, a VLAN as `name (vid)`, a device
+interface as `name (label)`), and the longest containing prefix for a host
+with no record, ties broken in NetBox's order.
+
+- **What an address is assigned to.** The replica names an assignment by a
+  content-type id and serves no names for the ids, so the data source learns
+  them from the replica's own rows: an interface's cable path, the cable
+  terminations, a device's or a VM's primary address, and the FHRP groups'
+  addresses. An address on an object of a type it cannot learn shows no
+  interface, device or VM, and the result carries a warning counting those
+  addresses — alert rules refuse it. A host whose pick such a type could change
+  keeps its lowest-id record, with a warning too.
+- **NetBox scope.** The filters are NetBox's filters on `ipam/ip-addresses`,
+  answered as an objects query answers them. `parent`, `mask_length` and
+  `family` are refused: the replica has no address-within-prefix filter. Scope
+  by VRF or tenant instead. A scope cut off by the row limit keeps the
+  replica's first records, which can differ from NetBox mode's; alert rules
+  refuse it as truncated in both modes.
+- **Prefix columns** need a replica-cache build with containment (v1.39).
+- A tenant with no VRFs, racks, VLANs, VMs or FHRP groups gets a complete
+  answer with no warning; a reference to an object the replica does not hold
+  yet (while it applies changes) leaves that column blank, with a warning.
+- A read that fails fails the query, where NetBox mode blanks that lookup's
+  columns with a warning; alert rules refuse either.
+
 ## Freshness
 
 Every result states how current it is, from the replica's own per-type commit
@@ -381,14 +411,15 @@ instant:
 - _The age of this data is unknown_ — a note, when the snapshot is complete but
   the replica reports no commit time for the type.
 
-A topology is as old as the oldest table it was read from, and states that
-instant; it is of unknown age when any of them is.
+A topology or an IP enrichment is as old as the oldest table it was read from,
+and states that instant; it is of unknown age when any of them is.
 
 **Max data age** is opt-in. When set, an alert rule or an expression-fed
-query — objects, **Count** or **Topology edges** — refuses a result older than
-the threshold, or of unknown age, with a message naming the age and the
-setting; dashboards only show the notice. A value that is not a duration fails
-**Save & test** and refuses those queries rather than silently meaning "off".
+query — objects, **Count**, **Topology edges** or **IP enrichment** — refuses
+a result older than the threshold, or of unknown age, with a message naming the
+age and the setting; dashboards only show the notice. A value that is not a
+duration fails **Save & test** and refuses those queries rather than silently
+meaning "off".
 The setting is read in replica-cache mode only; a data source in NetBox mode
 ignores it, its data being live.
 
@@ -398,8 +429,6 @@ These query types fail with an explicit message rather than returning an empty
 result:
 
 - **Annotations** — the replica does not carry NetBox's change log.
-- **IP enrichment** (IP list and NetBox scope) — the replica does not carry the
-  content-type table that says what an address is assigned to.
 - **Tags** — not replicated; a `tag` filter is refused as a column the replica
   does not have.
 - **Branches** — the replica mirrors the main dataset only.

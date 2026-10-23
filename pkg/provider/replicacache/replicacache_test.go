@@ -49,8 +49,7 @@ func TestHealthCheckSurfacesAuthFailure(t *testing.T) {
 
 // Each unsupported capability must fail LOUDLY. An empty result is the failure
 // mode that matters here: an annotation query that silently returns nothing
-// looks identical to "nothing changed", and an alert rule on an empty
-// enrichment evaluates as healthy.
+// looks identical to "nothing changed".
 func TestUnsupportedCapabilitiesRefuseRatherThanReturnNothing(t *testing.T) {
 	p := newTestProvider(t, newFakeService())
 	ctx := context.Background()
@@ -61,14 +60,6 @@ func TestUnsupportedCapabilitiesRefuseRatherThanReturnNothing(t *testing.T) {
 	}{
 		{"Changes", func() error {
 			_, err := p.Changes(ctx, provider.ChangeSpec{})
-			return err
-		}},
-		{"ResolveIPs", func() error {
-			_, err := p.ResolveIPs(ctx, []string{"10.0.0.1"}, nil, 10)
-			return err
-		}},
-		{"ResolveScope", func() error {
-			_, err := p.ResolveScope(ctx, []provider.Filter{{Field: "parent", Value: "10.0.0.0/24"}}, nil, 10)
 			return err
 		}},
 	}

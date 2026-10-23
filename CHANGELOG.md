@@ -34,11 +34,13 @@
   field replaced every secret not saved yet, including any that another control
   on the page had set. It now changes only the token.
 
-- **Go 1.26.9 and `golang.org/x/net` 0.60.0.** The backend is built with fixes
+- **Go 1.26.10 and `golang.org/x/net` 0.60.0.** The backend is built with fixes
   for advisories published on 2026-10-08 in Go's HTTP/1 and HTTP/2 handling,
   MIME header parsing, TLS and `html/template` (GO-2026-6599, 6600, 6603,
-  6605, 6607, 6608, 6610, 6611, 6612, 6613, 6617). `golang.org/x/sys` and
-  `golang.org/x/text` move with `x/net`.
+  6605, 6607, 6608, 6610, 6611, 6612, 6613, 6617), and on 2026-10-21 in
+  `crypto/x509`, which now refuses intermediate certificates that are no longer
+  trusted (GO-2026-6809). `golang.org/x/sys` and `golang.org/x/text` move with
+  `x/net`.
 
 - **The API token only goes to the configured NetBox URL.** Paging and
   object-type discovery followed the URLs NetBox writes into its responses,

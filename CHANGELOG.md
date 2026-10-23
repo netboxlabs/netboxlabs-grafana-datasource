@@ -46,8 +46,8 @@
   REST API, for large instances. No annotations, tags, contacts or branches.
 - **Replica-cache filters are NetBox's**: names, lookups and meaning. A filter
   NetBox lacks (a device's `rack`) is refused naming `rack_id`, not ignored.
-- **Replica-cache rows read as NetBox's do**: choice labels (the stored value in
-  `<field>_value`), single-host addresses with their mask, related names.
+- **Replica-cache rows read and sort as NetBox's do**: choice labels (stored
+  value in `<field>_value`), related objects' display text, NetBox's name order.
 - **Replica-cache text matches have negations**, and _is empty_ finds null or
   blank values, both answered as NetBox does.
 - **Replica-cache answers prefix `contains`**, NetBox's filter for the prefixes

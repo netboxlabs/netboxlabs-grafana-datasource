@@ -11,10 +11,11 @@
 // The trade is fidelity. It serves raw table rows, so a relationship is a bare
 // integer id unless the service joins the name in (expand=, from the
 // references its catalogue declares), and a handful of NetBox concepts have no
-// representation at all — the change log, contacts, and the content-type table
-// that would say what an IP is attached to. What the catalogue states is used;
-// what it cannot state is refused explicitly rather than returned as an empty
-// result that looks like an answer.
+// representation at all — the change log, contacts, and the names of content
+// types, so what an IP is attached to is named only through ids learned from
+// the rows (contenttypes.go). What the catalogue states is used; what it
+// cannot state is refused explicitly rather than returned as an empty result
+// that looks like an answer.
 package replicacache
 
 import (
@@ -686,30 +687,5 @@ func (p *Provider) Changes(_ context.Context, _ provider.ChangeSpec) ([]provider
 	return nil, &UnsupportedError{
 		Feature: "the change log",
 		Detail:  "This datasource is configured to read from replica-cache, which does not replicate NetBox's change log, so annotations cannot be built from it. Point the annotation at a datasource in NetBox mode.",
-	}
-}
-
-// ResolveIPs is not supported.
-//
-// The service holds ipam.ipaddress rows, but each one names its parent through
-// assigned_object_type_id — a content-type id — and exposes no table to
-// translate that id into a model. The id is also assigned per NetBox instance,
-// so it cannot be hardcoded. Returning an unattached IP would be worse than
-// refusing: the enrichment's whole purpose is naming the device behind the
-// address.
-func (p *Provider) ResolveIPs(_ context.Context, _ []string, _ []string, _ int) (*provider.Result, error) {
-	return nil, &UnsupportedError{
-		Feature: "IP enrichment",
-		Detail:  "This datasource is configured to read from replica-cache, which cannot say what an IP address is assigned to because it does not expose NetBox's content-type table. Use a datasource in NetBox mode for IP enrichment.",
-	}
-}
-
-// ResolveScope is the scope source of the same query, and is unsupported for
-// the same reason: every address in a scope still has to be resolved to what
-// it is assigned to, which goes through the content-type table.
-func (p *Provider) ResolveScope(_ context.Context, _ []provider.Filter, _ []string, _ int) (*provider.Result, error) {
-	return nil, &UnsupportedError{
-		Feature: "IP enrichment",
-		Detail:  "This datasource is configured to read from replica-cache, which cannot say what an IP address is assigned to because it does not expose NetBox's content-type table. Use a datasource in NetBox mode for IP enrichment.",
 	}
 }

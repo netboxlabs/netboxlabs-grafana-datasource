@@ -1255,3 +1255,75 @@ func (f *fakeService) addRows(objectType string, rows ...map[string]interface{})
 	defer f.mu.Unlock()
 	f.entities[objectType] = append(f.entities[objectType], rows...)
 }
+
+// addIPEnrichmentTables serves the tables an IP's context is read from, with
+// the columns replica-cache v1.40.1 serves them with (GET /v1/_meta/schema on a
+// replica of NetBox 4.4.10), cut down to what is read: an address's own
+// columns, its tenant by name and its NAT inside by address, as the catalogue
+// declares them; an interface's label and description, and a VM interface's
+// name and description (that table has no label); a device's type, location
+// and primary addresses beside the references the devices fixture declares; a
+// rack's facility id; a VRF's RD and a VLAN's VID; and a prefix with the
+// scope NetBox caches on it (_location_id, _site_id, _site_group_id,
+// _region_id) and the containment operator. The assignment tables come with
+// it, being where an address's owner type is learned. Every table is fed and
+// empty.
+func (f *fakeService) addIPEnrichmentTables() {
+	f.addAssignmentTables()
+	f.addColumns("ipam/ip-addresses", "status:VARCHAR", "role:VARCHAR", "dns_name:VARCHAR", "description:VARCHAR",
+		"tenant_id:BIGINT", "vrf_id:BIGINT")
+	f.addOperators("ipam/ip-addresses", "address", "host")
+	f.addColumns("dcim/interfaces", "label:VARCHAR", "description:VARCHAR")
+	f.addColumns("virtualization/interfaces", "name:VARCHAR", "description:VARCHAR")
+	f.addColumns("virtualization/virtual-machines", "name:VARCHAR")
+	f.addColumns("dcim/devices", "device_type_id:BIGINT", "location_id:BIGINT")
+	f.addColumns("dcim/racks", "facility_id:VARCHAR")
+	f.addEntity("dcim/device-types", "id:BIGINT:pk", "model:VARCHAR", "slug:VARCHAR")
+	for _, named := range []string{"dcim/locations", "dcim/regions", "dcim/site-groups", "ipam/roles"} {
+		f.addEntity(named, "id:BIGINT:pk", "name:VARCHAR", "slug:VARCHAR")
+	}
+	f.addEntity("ipam/vrfs", "id:BIGINT:pk", "name:VARCHAR", "rd:VARCHAR")
+	f.addEntity("ipam/vlans", "id:BIGINT:pk", "vid:INTEGER", "name:VARCHAR")
+	f.addPrefixes()
+	f.addColumns("ipam/prefixes", "description:VARCHAR", "tenant_id:BIGINT", "role_id:BIGINT", "vlan_id:BIGINT",
+		"scope_id:BIGINT", "scope_type_id:INTEGER", "_location_id:BIGINT", "_region_id:BIGINT", "_site_id:BIGINT", "_site_group_id:BIGINT")
+	for _, table := range []string{"tenancy/tenants", "dcim/sites", "dcim/device-roles", "dcim/racks", "dcim/device-types",
+		"dcim/locations", "dcim/regions", "dcim/site-groups", "ipam/roles", "ipam/vrfs", "ipam/vlans", "ipam/prefixes"} {
+		f.entities[table] = []map[string]interface{}{}
+	}
+	f.addReference("ipam/ip-addresses", "tenant_id", "tenancy/tenants", "tenant", "name", "slug")
+	f.addReference("ipam/ip-addresses", "vrf_id", "ipam/vrfs", "vrf", "name")
+	f.addReference("ipam/ip-addresses", "nat_inside_id", "ipam/ip-addresses", "nat_inside", "address")
+	f.addReference("dcim/devices", "device_type_id", "dcim/device-types", "device_type", "model", "slug")
+	f.addReference("dcim/devices", "location_id", "dcim/locations", "location", "name", "slug")
+	f.addReference("dcim/interfaces", "device_id", "dcim/devices", "device", "name")
+	f.addReference("virtualization/interfaces", "virtual_machine_id", "virtualization/virtual-machines", "virtual_machine", "name")
+	f.addReference("ipam/prefixes", "tenant_id", "tenancy/tenants", "tenant", "name", "slug")
+	f.addReference("ipam/prefixes", "role_id", "ipam/roles", "role", "name", "slug")
+	f.addReference("ipam/prefixes", "vrf_id", "ipam/vrfs", "vrf", "name")
+	f.addReference("ipam/prefixes", "vlan_id", "ipam/vlans", "vlan", "name")
+}
+
+// unfeed marks entities as having received no data, as a tenant whose NetBox
+// tables are empty has them: each lists no columns and answers 404, and every
+// reference to it is unavailable, as the catalogue says per tenant.
+func (f *fakeService) unfeed(objectTypes ...string) {
+	for _, objectType := range objectTypes {
+		f.setIngested(objectType, false)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for path, e := range f.schema.Entities {
+		for i, c := range e.Columns {
+			if c.References == nil {
+				continue
+			}
+			if t, ok := f.schema.Entities[c.References.Path]; ok && !t.Ingested {
+				ref := *c.References
+				ref.Available = false
+				e.Columns[i].References = &ref
+			}
+		}
+		f.schema.Entities[path] = e
+	}
+}

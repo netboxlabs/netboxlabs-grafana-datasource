@@ -284,3 +284,47 @@ func TestTopologyEdges_LoadingWarningRefusesRules(t *testing.T) {
 		t.Errorf("notices %+v, want the loading warning", n)
 	}
 }
+
+// IP enrichment, from a list or a scope, is a rule's input as an objects query
+// is (the scope source exists for rules): Max data age applies to it the same
+// way, through the freshness the provider reports.
+func TestIPEnrichment_MaxDataAge(t *testing.T) {
+	old := time.Now().Add(-2 * time.Hour)
+	fresh := time.Now().Add(-1 * time.Minute)
+	yes := true
+	queries := map[string]backend.DataQuery{
+		"list":  {RefID: "A", JSON: []byte(`{"queryType":"ip-enrichment","ips":"10.0.0.1"}`)},
+		"scope": {RefID: "A", JSON: []byte(`{"queryType":"ip-enrichment","ipSource":"scope","filters":[{"field":"tenant","value":"acme"}]}`)},
+	}
+	for _, tc := range []struct {
+		name    string
+		asOf    *time.Time
+		refused bool
+		msgHas  string
+	}{
+		{"fresh", &fresh, false, ""},
+		{"old", &old, true, "2h old"},
+		{"unknown age", nil, true, "reports no commit time"},
+	} {
+		for source, q := range queries {
+			t.Run(tc.name+"/"+source, func(t *testing.T) {
+				res := &provider.Result{Columns: []string{"ip"}, Rows: []map[string]interface{}{{"ip": "10.0.0.1"}}, Total: 1,
+					DataAsOf: tc.asOf, SnapshotComplete: &yes}
+				d := newTestDatasource(&fakeProvider{ipResult: res, scopeResult: res})
+				d.cfg.Mode, d.cfg.MaxDataAge = models.ModeReplicaCache, "15m"
+				for _, c := range []consumer{consumerAlert, consumerExpression} {
+					resp := d.query(context.Background(), q, c)
+					if (resp.Error != nil) != tc.refused {
+						t.Errorf("consumer %v: err=%v, want refused=%v", c, resp.Error, tc.refused)
+					}
+					if tc.refused && resp.Error != nil && !strings.Contains(resp.Error.Error(), tc.msgHas) {
+						t.Errorf("consumer %v: %v lacks %q", c, resp.Error, tc.msgHas)
+					}
+				}
+				if resp := d.query(context.Background(), q, consumerDashboard); resp.Error != nil {
+					t.Errorf("dashboard refused: %v", resp.Error)
+				}
+			})
+		}
+	}
+}

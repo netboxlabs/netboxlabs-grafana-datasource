@@ -316,17 +316,6 @@ func devicesFromTerminations(ts []termination) []string {
 	return out
 }
 
-// linkKey is a link's identity: the sorted pair of its end-interface IDs.
-// Both directions of the same path (and a wireless link vs. its own computed
-// path) collapse onto one key, while parallel links between the same devices
-// keep distinct keys.
-func linkKey(a, b int) string {
-	if a > b {
-		a, b = b, a
-	}
-	return strconv.Itoa(a) + "-" + strconv.Itoa(b)
-}
-
 // logicalEdges derives device-to-device edges from NetBox's computed cable
 // paths (interface connected_endpoints): patch panels and circuits resolve to
 // the far device. Each path is seen from both end interfaces — dedup by link
@@ -368,10 +357,10 @@ func (p *Provider) logicalEdges(ctx context.Context, inSet map[string]bool, devi
 				continue
 			}
 			b := strconv.Itoa(ep.Device.ID)
-			if a == b || !edgeInScope(inSet, a, b, keepBoundary) {
+			if a == b || !provider.EdgeInScope(inSet, a, b, keepBoundary) {
 				continue
 			}
-			k := linkKey(i.ID, ep.ID)
+			k := provider.LinkKey(i.ID, ep.ID)
 			if seen[k] {
 				continue
 			}
@@ -419,7 +408,7 @@ func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool, dev
 		// dropping any of them hides a real neighbour.
 		for _, a := range devicesFromTerminations(c.A) {
 			for _, b := range devicesFromTerminations(c.B) {
-				if a == b || !edgeInScope(inSet, a, b, keepBoundary) {
+				if a == b || !provider.EdgeInScope(inSet, a, b, keepBoundary) {
 					continue
 				}
 				id := strconv.Itoa(c.ID)
@@ -484,10 +473,10 @@ func (p *Provider) wirelessEdges(ctx context.Context, inSet map[string]bool, see
 			continue
 		}
 		a, b := strconv.Itoa(wl.A.Device.ID), strconv.Itoa(wl.B.Device.ID)
-		if a == b || !edgeInScope(inSet, a, b, keepBoundary) {
+		if a == b || !provider.EdgeInScope(inSet, a, b, keepBoundary) {
 			continue
 		}
-		k := linkKey(wl.A.ID, wl.B.ID)
+		k := provider.LinkKey(wl.A.ID, wl.B.ID)
 		if seen[k] {
 			continue
 		}
@@ -495,22 +484,6 @@ func (p *Provider) wirelessEdges(ctx context.Context, inSet map[string]bool, see
 		edges = append(edges, provider.GraphEdge{ID: "w" + strconv.Itoa(wl.ID), Source: a, Target: b, Kind: "wireless"})
 	}
 	return edges, incomplete
-}
-
-// edgeInScope decides whether an edge belongs in the result.
-//
-// The node-graph view keeps only edges with BOTH ends inside the filtered set,
-// so nothing dangles off the picture. A caller asking about a device's
-// neighbours needs the opposite: an edge with one end in scope names a real
-// neighbour, and dropping it hides exactly the peer that might be healthy —
-// which for the suppression recipe reads as "no working path" and silences a
-// page. Per-site filtering, which that recipe recommends, is precisely when a
-// link leaves the set.
-func edgeInScope(inSet map[string]bool, a, b string, keepBoundary bool) bool {
-	if keepBoundary {
-		return inSet[a] || inSet[b]
-	}
-	return inSet[a] && inSet[b]
 }
 
 // boundaryPeerNodes fetches the devices that edges reference but the filter did

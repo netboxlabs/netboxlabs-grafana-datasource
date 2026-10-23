@@ -306,8 +306,21 @@ func (p *Provider) resolve(ctx context.Context, n *relatedName, t relatedTarget,
 	}
 	// A tree filter on a model the replica's NetBox stores flat (device roles
 	// before 4.3, platforms before 4.4) has no tree to read: the nodes named
-	// are the answer.
+	// are the answer. A flat model has no parent_id either; every model a tree
+	// filter targets that has one is nested by django-mptt, so a target with
+	// parent_id and without the tree columns is a replica that leaves them out,
+	// and the nodes named alone would drop their descendants without a word.
 	tree := n.entry.Kind == kindTree && t.e.has("tree_id") && t.e.has("lft") && t.e.has("rght")
+	if n.entry.Kind == kindTree && !tree && t.e.has("parent_id") {
+		var missing []string
+		for _, col := range []string{"tree_id", "lft", "rght"} {
+			if !t.e.has(col) {
+				missing = append(missing, col)
+			}
+		}
+		return n.refuse(fmt.Sprintf("%s includes in NetBox the objects below each one named, and %s on this replica has parent_id without %s, the columns those are found by; %s",
+			n.first.Field, t.objectType, joinNames(missing), netboxModeAdvice))
+	}
 	if tree {
 		fields = append(fields, "tree_id", "lft", "rght")
 	}

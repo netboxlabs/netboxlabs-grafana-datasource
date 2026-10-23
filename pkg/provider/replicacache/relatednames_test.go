@@ -257,6 +257,36 @@ func TestRelated_FlatTargetResolvesWithoutDescendants(t *testing.T) {
 	}
 }
 
+// Every model a tree filter targets that has a parent_id is one django-mptt
+// nests, so a target served with parent_id and without the tree columns is a
+// replica that leaves them out, not a NetBox that stores the model flat: the
+// nodes named alone would drop their descendants with nothing to say so
+// (core > core-leaf, one device on each: role=core is 2 devices in NetBox). It
+// is refused, naming the columns missing, before the target is read; the parent
+// filter, which is no tree filter, still works.
+func TestRelated_TreeTargetWithoutTreeColumnsIsRefused(t *testing.T) {
+	f := relatedFake()
+	f.schema.Entities["/v1/dcim/device-roles"] = devicesSchema().Entities["/v1/dcim/device-roles"]
+	f.addColumns("dcim/device-roles", "parent_id:BIGINT", "lft:INTEGER")
+	f.entities["dcim/device-roles"] = []map[string]interface{}{
+		{"id": 5, "name": "Core", "slug": "core", "parent_id": nil, "lft": 1},
+		{"id": 8, "name": "Core Leaf", "slug": "core-leaf", "parent_id": 5, "lft": 2},
+	}
+	p := newTestProvider(t, f)
+	for _, filter := range []provider.Filter{{Field: "role", Value: "core"}, {Field: "role_id", Value: "5"}, {Field: "role", Operator: "n", Value: "core"}} {
+		f.forget()
+		u := relatedRefusal(t, p, "dcim/devices", filter)
+		want := filter.Field + " includes in NetBox the objects below each one named, and dcim/device-roles on this replica has parent_id without tree_id and rght, the columns those are found by; " + netboxModeAdvice
+		if u.Reason != want {
+			t.Errorf("%+v: reason %q,\nwant %q", filter, u.Reason, want)
+		}
+		noRequestsFor(t, f, "dcim/devices", "dcim/device-roles")
+	}
+	if got := relatedRows(t, p, "dcim/device-roles", provider.Filter{Field: "parent", Value: "core"}); !slices.Equal(got, []int{8}) {
+		t.Errorf("parent=core: rows %v, want [8]", got)
+	}
+}
+
 // Each node a tree filter matches can be one more read, so a filter matching
 // more than 100 is refused, naming how many, before any is read.
 func TestRelated_TreeNodeCap(t *testing.T) {

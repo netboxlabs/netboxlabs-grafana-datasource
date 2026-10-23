@@ -280,7 +280,10 @@ nodes below it and is not itself below another node named):
   `site_group`, a site's `region` and `group`, and their `_id` forms —
   includes every node below each one named, as NetBox's does, up to 100 nodes
   per filter; on a replica of a NetBox that stores the model flat, it is the
-  nodes named. A `parent` filter is the direct children alone;
+  nodes named. A replica that serves the model's `parent_id` without its tree
+  columns (`tree_id`, `lft`, `rght`) cannot find the nodes below, and the filter
+  is refused, naming the columns missing. A `parent` filter is the direct
+  children alone;
 - the values, and the rows, of one filter match any of them; different filters
   (`site` and `site_id`) must all match, and what a _not_ excludes is taken off
   what the others select, as in NetBox;

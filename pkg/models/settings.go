@@ -120,7 +120,7 @@ func checkSecureSocksProxyFields(jsonData json.RawMessage) error {
 	}
 	var s string
 	if string(username) == "null" || json.Unmarshal(username, &s) != nil {
-		return backend.DownstreamError(fmt.Errorf("secureSocksProxyUsername must be the PDC network's ID, a string, not %s", jsonKind(username)))
+		return backend.DownstreamError(fmt.Errorf("secureSocksProxyUsername must be a string (on Grafana Cloud, the PDC network's ID), not %s", jsonKind(username)))
 	}
 	return nil
 }

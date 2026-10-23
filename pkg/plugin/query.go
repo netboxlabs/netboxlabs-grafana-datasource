@@ -484,12 +484,23 @@ func healthErrorMessage(err error, viaProxy bool) string {
 		return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
 	}
 	cause, proxyAtFault := proxiedCause(err)
-	if proxyAtFault {
+	switch {
+	case proxyAtFault && proxyNeverTried(cause):
+		return "Cannot reach NetBox through the secure socks proxy: " + cause + ". The Grafana server log has the full error."
+	case proxyAtFault:
 		return "Cannot reach NetBox through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach the NetBox URL (on Grafana Cloud, the PDC agent of the selected network); the Grafana server log has the full error."
 	}
 	// Grafana never connects to NetBox on this route: the proxy resolves and
 	// dials the URL, so whether Grafana could reach it is beside the point.
 	return "Cannot reach NetBox: " + cause + ". Check the NetBox URL, which the proxy (on Grafana Cloud, the PDC agent) connects to; the Grafana server log has the full error."
+}
+
+// proxyNeverTried reports whether a cause stopped the request before the proxy
+// tried to reach NetBox: its own TLS, or the credentials exchange. Their
+// sentences say what to check; asking whether the proxy reaches the NetBox URL
+// would send the reader to a hop it never tried.
+func proxyNeverTried(cause string) bool {
+	return cause == causeProxyTLS || cause == causeProxyAuth
 }
 
 // proxiedCause names why a request through the secure socks proxy failed, and
@@ -504,7 +515,8 @@ func healthErrorMessage(err error, viaProxy bool) string {
 //     proxy would send the reader to the one hop that did its job.
 //   - TLS that fails on the proxy's own hop is the proxy's, and Skip TLS
 //     verify does not govern it, so it gets a sentence of its own.
-//   - A request that failed for no named reason is the proxy's only on its hop.
+//   - A request that failed for no named reason is the proxy's only on its
+//     hop, where a refused credentials exchange gets a sentence of its own.
 //   - The rest name the proxy: a refusal or an unreachable host is the proxy's
 //     reply, and net/http's timeout error no longer carries the dialer's, so
 //     for a timeout, a reset or a closed connection the datasource's route
@@ -520,9 +532,39 @@ func proxiedCause(err error) (cause string, proxyAtFault bool) {
 		}
 		return cause, false
 	case causeFailed:
-		return cause, proxyHop(err)
+		switch {
+		case !proxyHop(err):
+			return cause, false
+		case socksCredentialsRefused(err):
+			return causeProxyAuth, true
+		}
+		return cause, true
 	}
 	return cause, true
+}
+
+// socksCredentialsRefused reports whether a failure on the proxy's hop is the
+// SOCKS client's word that the credentials exchange failed
+// (golang.org/x/net/internal/socks): the proxy refused them, accepts no method
+// Grafana offers, or the username is empty, which the client refuses to send.
+// It is asked only on the secure socks proxy's route: net/http's own SOCKS5
+// client, for a socks5:// proxy in Grafana's environment, says the same words
+// about credentials the datasource's settings do not hold.
+func socksCredentialsRefused(err error) bool {
+	words := strings.ToLower(innermost(err).Error())
+	return strings.Contains(words, "username/password") || strings.Contains(words, "authentication method")
+}
+
+// innermost is the error at the end of err's chain: the cause itself, without
+// the wrappers on the way in, which name the request.
+func innermost(err error) error {
+	for {
+		next := errors.Unwrap(err)
+		if next == nil {
+			return err
+		}
+		err = next
+	}
 }
 
 // proxyHop reports whether err failed on the hop to the secure socks proxy,
@@ -609,15 +651,7 @@ func transportCause(err error) string {
 	// on the way in (a url.Error's request line, the client's "read body
 	// <url>: …") names the request, and a filter value in it would pick the
 	// category. Same order as above, for the same reason.
-	cause := err
-	for {
-		next := errors.Unwrap(cause)
-		if next == nil {
-			break
-		}
-		cause = next
-	}
-	words := strings.ToLower(cause.Error())
+	words := strings.ToLower(innermost(err).Error())
 	has := func(subs ...string) bool {
 		for _, sub := range subs {
 			if strings.Contains(words, sub) {
@@ -633,11 +667,6 @@ func transportCause(err error) string {
 		return causeRedirected
 	case has("not an absolute http(s) url", "unsupported protocol scheme"):
 		return causeNoScheme
-	// The SOCKS client's words for a credentials exchange that failed
-	// (golang.org/x/net/internal/socks), including an empty username, which it
-	// refuses to send.
-	case has("username/password", "authentication method"):
-		return causeProxyAuth
 	case has("no such host", "server misbehaving"):
 		return causeUnresolved
 	case has("certificate"):
@@ -722,12 +751,17 @@ func queryErrorMessage(err error, viaProxy bool) string {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
 		}
 	}
-	if viaProxy {
-		if cause, proxyAtFault := proxiedCause(err); proxyAtFault {
-			return "Couldn't reach NetBox through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach NetBox (on Grafana Cloud, the PDC agent); the Grafana server log has the full error."
-		}
+	if !viaProxy {
+		return "Couldn't reach NetBox: " + transportCause(err) + ". The Grafana server log has the full error."
 	}
-	return "Couldn't reach NetBox: " + transportCause(err) + ". The Grafana server log has the full error."
+	cause, proxyAtFault := proxiedCause(err)
+	switch {
+	case proxyAtFault && proxyNeverTried(cause):
+		return "Couldn't reach NetBox through the secure socks proxy: " + cause + ". The Grafana server log has the full error."
+	case proxyAtFault:
+		return "Couldn't reach NetBox through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach NetBox (on Grafana Cloud, the PDC agent); the Grafana server log has the full error."
+	}
+	return "Couldn't reach NetBox: " + cause + ". The Grafana server log has the full error."
 }
 
 // queryErrorResponse logs the raw upstream error (sanitized) and returns a data

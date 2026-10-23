@@ -18,10 +18,11 @@
   Grafana Cloud, the PDC agent — rather than at the NetBox URL. Before, a
   stopped agent, or one whose traffic to NetBox is dropped, read as "Cannot
   reach NetBox … Check the NetBox URL". Credentials the proxy refuses, or an
-  empty `secureSocksProxyUsername`, name that setting. A failure on NetBox's
-  side of the proxy, such as its certificate, still points at the NetBox URL,
-  as the proxy reaches it. The settings page shows the switch as the plugin
-  SDK reads the setting: on only for the JSON boolean `true`.
+  empty `secureSocksProxyUsername`, name that setting. A failure Grafana can
+  tell is NetBox's, such as its certificate, points at the NetBox URL as the
+  proxy reaches it; a timeout or a dropped connection names the proxy either
+  way. The settings page shows the switch as the plugin SDK reads the
+  setting: on only for the JSON boolean `true`.
 - **Proxy settings the plugin SDK cannot use are refused by name.** With the
   proxy on, a `secureSocksProxyUsername` that is not a string (a placeholder
   left blank in a provisioning file is null) made every request fail inside

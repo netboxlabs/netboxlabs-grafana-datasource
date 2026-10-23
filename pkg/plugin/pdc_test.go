@@ -385,6 +385,7 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 			t.Errorf("%d request(s) reached NetBox directly", n)
 		}
 		assertNamesTheProxyOnly(t, res.Message, deadProxy, netbox.URL)
+		assertPointsAtTheAgent(t, res.Message)
 	})
 
 	// The proxy is up but cannot reach NetBox. On Grafana Cloud the reader
@@ -398,6 +399,7 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
 		}
 		assertNamesTheProxyOnly(t, res.Message, socks.addr, netbox.URL)
+		assertPointsAtTheAgent(t, res.Message)
 	})
 
 	// The agent's traffic to NetBox is dropped, so the CONNECT is never
@@ -415,6 +417,7 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 			t.Errorf("message %q does not say the request timed out", res.Message)
 		}
 		assertNamesTheProxyOnly(t, res.Message, socks.addr, netbox.URL)
+		assertPointsAtTheAgent(t, res.Message)
 	})
 
 	// An answer NetBox sent back through the proxy is not the proxy's failure:
@@ -531,6 +534,9 @@ func TestSaveAndTest_SecureSocksProxy(t *testing.T) {
 		if !strings.Contains(res.Message, "TLS connection to the proxy") || strings.Contains(res.Message, "Skip TLS verify") {
 			t.Errorf("message %q does not put the TLS failure on the proxy's hop", res.Message)
 		}
+		if strings.Contains(res.Message, "can reach the NetBox URL") {
+			t.Errorf("message %q asks whether the proxy reaches NetBox, which it never tried", res.Message)
+		}
 	})
 
 	// The switch is on, but Grafana has no proxy configured: the SDK sends the
@@ -597,13 +603,17 @@ func assertPointsAtTheURLTheProxyReaches(t *testing.T, msg string) {
 }
 
 // assertNamesTheProxyCredentials checks a credentials failure names the
-// setting that carries the PDC network.
+// setting that carries the PDC network, and does not send the reader to check
+// whether the proxy reaches NetBox: it never got that far.
 func assertNamesTheProxyCredentials(t *testing.T, msg string) {
 	t.Helper()
 	for _, want := range []string{"credentials", "secureSocksProxyUsername", "PDC network's ID"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message %q does not mention %q", msg, want)
 		}
+	}
+	if strings.Contains(msg, "can reach the NetBox URL") {
+		t.Errorf("message %q asks whether the proxy reaches NetBox, which it never tried", msg)
 	}
 }
 
@@ -659,15 +669,22 @@ func grafanaTLSToProxy(t *testing.T) map[string]string {
 // catalogue review requires that no message carry a host, port or path.
 func assertNamesTheProxyOnly(t *testing.T, msg, proxyAddr, netboxURL string) {
 	t.Helper()
-	for _, want := range []string{"secure socks proxy", "PDC agent"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("message %q does not mention %q", msg, want)
-		}
+	if !strings.Contains(msg, "secure socks proxy") {
+		t.Errorf("message %q does not mention the secure socks proxy", msg)
 	}
 	for _, leak := range []string{proxyAddr, strings.TrimPrefix(netboxURL, "http://")} {
 		if strings.Contains(msg, leak) {
 			t.Errorf("message %q leaks %q", msg, leak)
 		}
+	}
+}
+
+// assertPointsAtTheAgent checks a failure in reaching NetBox through the proxy
+// names the PDC agent, the hop that dials NetBox on Grafana Cloud.
+func assertPointsAtTheAgent(t *testing.T, msg string) {
+	t.Helper()
+	if !strings.Contains(msg, "PDC agent") {
+		t.Errorf("message %q does not mention the PDC agent", msg)
 	}
 }
 
@@ -736,14 +753,17 @@ func blamesTheProxy(msg string) bool {
 	return strings.Contains(msg, "through the secure socks proxy")
 }
 
+// socksHop wraps err as the SOCKS dialer wraps a failure before the tunnel to
+// NetBox is up.
+func socksHop(err error) error {
+	return &net.OpError{Op: "socks connect", Net: "tcp", Err: err}
+}
+
 // The decision behind the wording, on the error shapes Go produces: the SOCKS
-// dialer wraps a failure on the proxy's own hop in a *net.OpError whose Op is
-// "socks connect", and only those, or a cause only the proxy route can have,
-// name the proxy.
+// dialer wraps a failure before the tunnel is up in a *net.OpError whose Op is
+// "socks connect". Only those, or a cause the route decides (a refusal, a
+// timeout, a dropped connection), name the proxy.
 func TestProxiedCause(t *testing.T) {
-	socksHop := func(err error) error {
-		return &net.OpError{Op: "socks connect", Net: "tcp", Err: err}
-	}
 	certErr := &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}
 	for _, tc := range []struct {
 		name      string
@@ -762,11 +782,31 @@ func TestProxiedCause(t *testing.T) {
 		{"an answer NetBox sent that the client could not use", errors.New("malformed HTTP response"), causeFailed, false},
 		{"a cancelled request", fmt.Errorf("request failed: %w", context.Canceled), causeCancelled, false},
 		{"refused, on either hop", fmt.Errorf("request failed: %w", syscall.ECONNREFUSED), causeRefused, true},
+		{"the proxy cannot reach the host", socksHop(errors.New("unknown error host unreachable")), causeUnreachable, true},
+		// The client sends NetBox's name unresolved, so only the proxy's own
+		// address can fail to resolve.
+		{"the proxy's address does not resolve", socksHop(&net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "proxy", IsNotFound: true}}), causeUnresolved, true},
+		{"timed out, on either hop", fmt.Errorf("request failed: %w", context.DeadlineExceeded), causeTimeout, true},
+		{"reset, on either hop", fmt.Errorf("request failed: %w", syscall.ECONNRESET), causeReset, true},
+		{"closed, on either hop", fmt.Errorf("read body: %w", io.ErrUnexpectedEOF), causeClosed, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if cause, blame := proxiedCause(tc.err); cause != tc.wantCause || blame != tc.wantBlame {
 				t.Errorf("proxiedCause = %q, %v; want %q, %v", cause, blame, tc.wantCause, tc.wantBlame)
 			}
 		})
+	}
+}
+
+// A datasource that does not use Grafana's secure socks proxy can still go
+// through a SOCKS5 proxy from Grafana's environment (HTTPS_PROXY=socks5://…),
+// whose client says the same words when it refuses credentials. Its message
+// must not send the reader to settings the datasource does not use.
+func TestErrorMessages_DirectRouteNeverMentionsTheProxySettings(t *testing.T) {
+	err := fmt.Errorf("request failed: %w", socksHop(errors.New("username/password authentication failed")))
+	for _, msg := range []string{healthErrorMessage(err, false), queryErrorMessage(err, false)} {
+		if mentionsTheProxy(msg) || strings.Contains(msg, "secureSocksProxy") {
+			t.Errorf("direct message %q mentions the secure socks proxy's settings", msg)
+		}
 	}
 }

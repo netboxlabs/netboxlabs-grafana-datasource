@@ -89,8 +89,11 @@ func translateFilters(table string, filters []provider.Filter, e entity, c *cata
 	names := make([]string, len(filters))
 	rows := map[string][]provider.Filter{}
 	for i, f := range filters {
-		if sendsNothing(f) || leftAsWritten(f) {
+		if sendsNothing(f) {
 			continue
+		}
+		if reason := netboxOnly(f); reason != "" {
+			return nil, false, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: reason}
 		}
 		names[i] = netboxName(f)
 		rows[names[i]] = append(rows[names[i]], f)
@@ -122,14 +125,24 @@ func sendsNothing(f provider.Filter) bool {
 	return f.Field == "" || f.Operator != opEmpty && f.Operator != opNEmpty && len(splitValues(f.Value)) == 0
 }
 
-// leftAsWritten is a filter whose refusal further on already says what is
-// true: q (NetBox's search, which the replica does not run), tag and tag_id
-// with their lookups (the replica stores no tags), cf_* (a custom field is not
-// a column). The vocabulary would call the first a method and the tags paths,
-// which says less.
-func leftAsWritten(f provider.Filter) bool {
+// netboxOnly is the refusal of a filter only NetBox can answer, with each of its
+// lookups, or "": q (NetBox's search), tag and tag_id (the replica publishes no
+// tags) and cf_* (NetBox matches a custom field inside its JSON data). These are
+// among the most common filters on a NetBox-mode dashboard, and the vocabulary
+// would call the first a method and the tags a path, while a custom field is not
+// in it at all and reached "no such column", which read like a fault of the
+// plugin; each is named for what it is.
+func netboxOnly(f provider.Filter) string {
 	base, _, _ := strings.Cut(f.Field, "__")
-	return base == "q" || base == "tag" || base == "tag_id" || strings.HasPrefix(f.Field, "cf_")
+	switch {
+	case base == "q":
+		return "q is NetBox's search, which NetBox runs itself and this replica cannot; filter on the fields themselves, or " + netboxModeAdvice
+	case base == "tag" || base == "tag_id":
+		return base + " filters on tags, which this replica does not publish (replica-cache v1.40); " + netboxModeAdvice
+	case strings.HasPrefix(f.Field, "cf_"):
+		return base + " filters on a custom field, which NetBox matches in its own custom-field data and this replica cannot; " + netboxModeAdvice
+	}
+	return ""
 }
 
 // netboxName is the query parameter NetBox mode sends a row as

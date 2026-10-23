@@ -856,25 +856,37 @@ func TestTranslate_SkipsRowsThatSendNothing(t *testing.T) {
 	wantFilters(t, got, append(quiet, provider.Filter{Field: "name", Operator: "ic", Value: "core", Label: "name"})...)
 }
 
-// q, the tag filters and custom fields keep the reasons they have today (the
-// replica stores no tags and no search, and a custom field is not a column), so
-// they pass through as written, lookups included.
-func TestTranslate_LeavesQTagAndCustomFieldsToTodaysReasons(t *testing.T) {
-	asWritten := []provider.Filter{
-		{Field: "q", Value: "core"}, {Field: "tag", Value: "prod"}, {Field: "tag", Operator: "n", Value: "prod"},
-		{Field: "tag_id", Value: "1"}, {Field: "tag_id", Operator: "n", Value: "1"},
-		{Field: "cf_lifecycle_phase", Value: "production"}, {Field: "cf_lifecycle_phase", Operator: "ic", Value: "prod"},
-	}
-	wantFilters(t, vocabDevices().translate(t, asWritten...), asWritten...)
-
-	p := newTestProvider(t, newFakeService())
-	for _, f := range asWritten {
-		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Filters: []provider.Filter{f}})
-		var u *UnsupportedFilterError
-		if !errors.As(err, &u) || u.Reason != "this replica has no such column to filter on" {
-			t.Errorf("%+v: %v, want today's refusal", f, err)
+// q, the tag filters and custom fields are among the most common filters on a
+// NetBox-mode dashboard, and NetBox mode answers each, so each is refused saying
+// what it is and where it works, lookups included, before anything is sent: "no
+// such column" read like a fault of the plugin.
+func TestTranslate_RefusesSearchTagsAndCustomFieldsSayingWhy(t *testing.T) {
+	for _, c := range []struct {
+		filter provider.Filter
+		reason string
+	}{
+		{provider.Filter{Field: "q", Value: "core"}, "q is NetBox's search, which NetBox runs itself and this replica cannot; filter on the fields themselves, or "},
+		{provider.Filter{Field: "tag", Value: "prod"}, "tag filters on tags, which this replica does not publish (replica-cache v1.40); "},
+		{provider.Filter{Field: "tag", Operator: "n", Value: "prod"}, "tag filters on tags, which this replica does not publish (replica-cache v1.40); "},
+		{provider.Filter{Field: "tag_id", Value: "1"}, "tag_id filters on tags, which this replica does not publish (replica-cache v1.40); "},
+		{provider.Filter{Field: "tag_id", Operator: "n", Value: "1"}, "tag_id filters on tags, which this replica does not publish (replica-cache v1.40); "},
+		{provider.Filter{Field: "cf_lifecycle_phase", Value: "production"}, "cf_lifecycle_phase filters on a custom field, which NetBox matches in its own custom-field data and this replica cannot; "},
+		{provider.Filter{Field: "cf_lifecycle_phase", Operator: "ic", Value: "prod"}, "cf_lifecycle_phase filters on a custom field, which NetBox matches in its own custom-field data and this replica cannot; "},
+	} {
+		u := vocabDevices().refusal(t, c.filter)
+		if u.Reason != c.reason+netboxModeAdvice || u.Field != c.filter.Field || u.Operator != c.filter.Operator {
+			t.Errorf("%+v: refused %q on %s %q,\nwant %q", c.filter, u.Reason, u.Field, u.Operator, c.reason+netboxModeAdvice)
 		}
 	}
+
+	f := newFakeService()
+	p := newTestProvider(t, f)
+	_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Filters: []provider.Filter{{Field: "q", Value: "core"}}})
+	var u *UnsupportedFilterError
+	if !errors.As(err, &u) || !strings.HasPrefix(u.Reason, "q is NetBox's search") {
+		t.Errorf("q through the query: %v, want the search refusal", err)
+	}
+	noRequestsFor(t, f, "dcim/devices")
 }
 
 // An entity the vocabulary does not describe — a plugin's model — keeps the

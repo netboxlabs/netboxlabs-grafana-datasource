@@ -2201,13 +2201,21 @@ func netboxComputedWarning(col string) string {
 	return fmt.Sprintf("%q is computed by NetBox and is not available in replica-cache mode, so it is missing from this result. Use a datasource in NetBox mode for it.", col)
 }
 
+// needsBrowserURLWarning is the sentence for a display_url with no link base.
+const needsBrowserURLWarning = `"display_url" needs a NetBox address to build links: this replica reports none, so set the datasource's Browser URL to the http(s) address browsers reach NetBox at.`
+
 // "Is not a column this backend produces" is true of a typo and of utilization
 // alike, and leaves the reader to work out which one they wrote. For the
 // columns NetBox computes the cause is known — its serializers add them, and
 // the replica serves database rows — so the warning says so, and says what to
 // use instead. A typo keeps the plain sentence.
+//
+// The two counts are ones NetBox's own database has no column for (measured on
+// the 4.4.10 demo database: no table has a prefix_count or a tags_count), so
+// they exist only where a serializer adds them. interface_count would not do:
+// dcim/devices and virtualization/virtual-machines store it.
 func TestQuery_NetBoxComputedColumnIsNamed(t *testing.T) {
-	for _, col := range []string{"utilization", "used", "available", "family", "display", "url", "tags", "interface_count", "tags_count"} {
+	for _, col := range []string{"utilization", "used", "available", "family", "display", "url", "tags", "prefix_count", "tags_count"} {
 		for _, shape := range missingColumnShapes(col) {
 			t.Run(col+"/"+shape.name, func(t *testing.T) {
 				f := newFakeService()
@@ -2242,8 +2250,11 @@ func TestQuery_NetBoxComputedColumnIsNamed(t *testing.T) {
 // The name alone proves nothing: the replica stores some counters, and one it
 // serves is a column like any other. Measured on replica-cache v1.40.1 loaded
 // from a NetBox 4.4.10 database (27 tables with data), dcim/devices stores ten
-// of them (console_port_count among them), so the rows decide, and a count the
-// entity does not store is the one that is computed.
+// of them (console_port_count among them), so the rows decide, and a count no
+// table stores is the one that is computed: vlan_count, which that database has
+// no column for anywhere. (The fake devices table here stores only
+// console_port_count; power_port_count would pass for the wrong reason, as the
+// real table has it.)
 func TestQuery_ServedCountColumnIsNotComputed(t *testing.T) {
 	f := newFakeService()
 	f.addEntity("dcim/devices", "id:BIGINT:pk", "name:VARCHAR", "console_port_count:INTEGER")
@@ -2265,12 +2276,12 @@ func TestQuery_ServedCountColumnIsNotComputed(t *testing.T) {
 		})
 	}
 
-	res, err := p.Query(context.Background(), missingColumnShapes("power_port_count")[0].spec)
+	res, err := p.Query(context.Background(), missingColumnShapes("vlan_count")[0].spec)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if want := []string{netboxComputedWarning("power_port_count")}; !slices.Equal(res.Warnings, want) {
-		t.Errorf("a count this entity does not store is NetBox's: warnings = %q, want %q", res.Warnings, want)
+	if want := []string{netboxComputedWarning("vlan_count")}; !slices.Equal(res.Warnings, want) {
+		t.Errorf("a count no table stores is NetBox's: warnings = %q, want %q", res.Warnings, want)
 	}
 }
 
@@ -2300,7 +2311,7 @@ func TestNetBoxComputed(t *testing.T) {
 	for name, want := range map[string]bool{
 		"utilization": true, "used": true, "available": true, "family": true,
 		"display": true, "url": true, "tags": true,
-		"interface_count": true, "tags_count": true, "vlan_count": true,
+		"site_count": true, "tags_count": true, "vlan_count": true,
 
 		"name": false, "status": false, "site": false, "display_url": false,
 		"family_value": false, "used_by": false, "urls": false,
@@ -2323,7 +2334,7 @@ func TestMissingColumnWarning(t *testing.T) {
 		linkable bool
 		want     string
 	}{
-		{"display_url", false, `"display_url" needs a NetBox address to build links: this replica reports none, so set the datasource's Browser URL.`},
+		{"display_url", false, needsBrowserURLWarning},
 		{"display_url", true, `"display_url" is not a column this backend produces for this object type, so it is missing from this result.`},
 		{"utilization", true, netboxComputedWarning("utilization")},
 		{"utilization", false, netboxComputedWarning("utilization")},
@@ -2341,8 +2352,6 @@ func TestMissingColumnWarning(t *testing.T) {
 // no help — leaves the reader looking at the query when the remedy is one
 // field in the datasource's settings.
 func TestQuery_DisplayURLWithoutBaseNamesTheBrowserURL(t *testing.T) {
-	const want = `"display_url" needs a NetBox address to build links: this replica reports none, so set the datasource's Browser URL.`
-
 	for _, shape := range missingColumnShapes("display_url") {
 		t.Run("no address at all/"+shape.name, func(t *testing.T) {
 			f := newFakeService()
@@ -2351,13 +2360,40 @@ func TestQuery_DisplayURLWithoutBaseNamesTheBrowserURL(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Query: %v", err)
 			}
-			if !slices.Equal(res.Warnings, []string{want}) {
-				t.Errorf("warnings = %q, want %q", res.Warnings, want)
+			if !slices.Equal(res.Warnings, []string{needsBrowserURLWarning}) {
+				t.Errorf("warnings = %q, want %q", res.Warnings, needsBrowserURLWarning)
 			}
 			if slices.Contains(res.Columns, "display_url") {
 				t.Errorf("display_url announced with no address to build it from: %v", res.Columns)
 			}
 		})
+	}
+
+	// A Browser URL that is set but is not an http(s) address with a host is no
+	// link base (WithFallbackNetBoxURL keeps only that), and the field is free
+	// text: "netbox.example.com" is what gets typed. Told to "set" it, the reader
+	// finds it set; the sentence says what to set it to.
+	for _, tc := range []struct{ name, browser string }{
+		{"no scheme", "netbox.example.com"},
+		{"a scheme that is not http(s)", "ftp://netbox.example.com"},
+		{"no host", "https://"},
+	} {
+		for _, shape := range missingColumnShapes("display_url") {
+			t.Run("an unusable Browser URL: "+tc.name+"/"+shape.name, func(t *testing.T) {
+				f := newFakeService()
+				f.entities["dcim/devices"] = lonelyDevices()
+				res, err := newTestProvider(t, f, WithFallbackNetBoxURL(tc.browser)).Query(context.Background(), shape.spec)
+				if err != nil {
+					t.Fatalf("Query: %v", err)
+				}
+				if !slices.Equal(res.Warnings, []string{needsBrowserURLWarning}) {
+					t.Errorf("warnings = %q, want %q", res.Warnings, needsBrowserURLWarning)
+				}
+				if slices.Contains(res.Columns, "display_url") {
+					t.Errorf("display_url announced from %q, which is not a link base: %v", tc.browser, res.Columns)
+				}
+			})
+		}
 	}
 
 	// A link base, from either source, is the remedy working: the column is

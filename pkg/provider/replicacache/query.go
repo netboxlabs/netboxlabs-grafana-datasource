@@ -746,10 +746,15 @@ func unresolvedRelationWarnings(spec provider.QuerySpec, rows []map[string]inter
 // "Is not a column this backend produces" holds for all of them and helps with
 // none: it cannot tell a typo from a column that exists in NetBox mode, nor say
 // what to change.
+//
+// The Browser URL sentence says what to set it to, not only that it be set: the
+// field is free text and only an http(s) address with a host becomes a link base
+// (see linkBaseOf), so a Browser URL typed as netbox.example.com is set and
+// still no base, and "set it" would send the reader to a field already filled in.
 func missingColumnWarning(name string, linkable bool) string {
 	switch {
 	case name == deepLinkColumn && !linkable:
-		return fmt.Sprintf("%q needs a NetBox address to build links: this replica reports none, so set the datasource's Browser URL.", name)
+		return fmt.Sprintf("%q needs a NetBox address to build links: this replica reports none, so set the datasource's Browser URL to the http(s) address browsers reach NetBox at.", name)
 	case netboxComputed(name):
 		return fmt.Sprintf("%q is computed by NetBox and is not available in replica-cache mode, so it is missing from this result. Use a datasource in NetBox mode for it.", name)
 	}
@@ -769,8 +774,10 @@ func missingColumnWarning(name string, linkable bool) string {
 // database (27 tables with data): dcim/devices stores ten counters
 // (console_port_count and nine more), dcim/device-types ten template counts and
 // virtualization/virtual-machines two, and no table stores utilization, used,
-// available, family, display, url or tags. So the rows decide first, and this
-// decides only what to say about a column they do not have.
+// available, family, display, url or tags. The database has one more counter
+// column, member_count on dcim_virtualchassis, on a table that replica holds no
+// data for. So the rows decide first, and this decides only what to say about a
+// column they do not have.
 //
 // cf_<name>_count is not NetBox's: the shared flattener builds it from the
 // custom-field blob (see expandCustomFields), so a missing one is a custom field

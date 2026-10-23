@@ -968,6 +968,22 @@ func TestAlertTable_ValueFieldNamedByProviderWarning(t *testing.T) {
 		}
 	})
 
+	// The needle is the QUOTED name. A bare one finds itself inside the warning
+	// about a longer column that starts the same way — cf_score is the front of
+	// cf_score_count — and would return the first of these for it.
+	t.Run("the quoted name is the needle, not the front of a longer column's", func(t *testing.T) {
+		const (
+			longer = `"cf_score_count" is not a column this backend produces for this object type, so it is missing from this result.`
+			value  = `"cf_score" is not a column this backend produces for this object type, so it is missing from this result.`
+		)
+		resp := newTestDatasource(&fakeProvider{result: result(longer, value)}).query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(
+			`{"queryType":"objects","objectType":"ipam/prefixes","alertTable":true,"fields":["prefix"],"valueField":"cf_score"}`,
+		)}, consumerAlert)
+		if resp.Error == nil || resp.Error.Error() != value {
+			t.Errorf("error = %v, want %q: the first warning that quotes this exact name", resp.Error, value)
+		}
+	})
+
 	t.Run("no warning quotes it: today's message", func(t *testing.T) {
 		resp := newTestDatasource(&fakeProvider{result: result(other)}).query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(q)}, consumerAlert)
 		if resp.Error == nil {

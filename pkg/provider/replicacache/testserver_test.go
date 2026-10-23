@@ -811,6 +811,13 @@ func (f *fakeService) forget() {
 	f.requests = nil
 }
 
+// requestCount is how many requests the fake has recorded.
+func (f *fakeService) requestCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.requests)
+}
+
 func (f *fakeService) countRequestsFor(entity string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1206,4 +1213,33 @@ func (f *fakeService) addTopologyTables() {
 	f.addEntity("dcim/cable-paths", "id:BIGINT:pk", "is_active:BOOLEAN", "path:VARCHAR", "is_complete:BOOLEAN")
 	f.addEntity("wireless/wireless-links", "id:BIGINT:pk", "_interface_a_device_id:BIGINT", "_interface_b_device_id:BIGINT",
 		"interface_a_id:BIGINT", "interface_b_id:BIGINT")
+}
+
+// addAssignmentTables serves the tables an address's owner type is learned
+// from, fed and empty, with the columns replica-cache v1.40.1 serves them
+// with (GET /v1/_meta/schema on a replica of NetBox 4.4.10), cut down to what
+// the learning reads: an address names its assignment by content type id and
+// object id, a NAT'd address its inside address; a device and a virtual
+// machine each cache their primary addresses; an interface and a VM interface
+// name their owner. The topology's tables come with it, being where a cable
+// path and a termination's type are read.
+func (f *fakeService) addAssignmentTables() {
+	f.addTopologyTables()
+	f.addColumns("dcim/devices", "primary_ip4_id:BIGINT", "primary_ip6_id:BIGINT")
+	f.addEntity("virtualization/virtual-machines", "id:BIGINT:pk", "primary_ip4_id:BIGINT", "primary_ip6_id:BIGINT")
+	f.addEntity("virtualization/interfaces", "id:BIGINT:pk", "virtual_machine_id:BIGINT")
+	f.addEntity("ipam/ip-addresses", "id:BIGINT:pk", "address:VARCHAR", "assigned_object_type_id:INTEGER",
+		"assigned_object_id:BIGINT", "nat_inside_id:BIGINT")
+	f.addEntity("ipam/fhrp-groups", "id:BIGINT:pk")
+	for _, table := range []string{"dcim/devices", "dcim/interfaces", "dcim/front-ports", "dcim/rear-ports", "dcim/cable-terminations",
+		"dcim/cable-paths", "virtualization/virtual-machines", "virtualization/interfaces", "ipam/ip-addresses", "ipam/fhrp-groups"} {
+		f.entities[table] = []map[string]interface{}{}
+	}
+}
+
+// addRows appends rows to an entity of the fake.
+func (f *fakeService) addRows(objectType string, rows ...map[string]interface{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entities[objectType] = append(f.entities[objectType], rows...)
 }

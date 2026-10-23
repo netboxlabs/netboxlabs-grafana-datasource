@@ -53,6 +53,12 @@ type Provider struct {
 	cat        *catalog
 	catExpires time.Time
 	catFlight  *flight[*catalog]
+
+	// The content-type ids learned from the replica's rows, kept for
+	// catalogTTL. See contenttypes.go.
+	typeMu     sync.Mutex
+	types      *typeCache
+	typeFlight *flight[*typeLearning]
 }
 
 // customFieldDataColumn is the JSON blob a NetBox model's custom fields live

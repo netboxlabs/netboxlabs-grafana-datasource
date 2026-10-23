@@ -250,6 +250,18 @@ type termination struct {
 	Cable    int    `json:"cable_id"`
 	End      string `json:"cable_end"`
 	ObjectID int    `json:"termination_id"`
+	// TypeID is the object's content type id, 0 where the read did not ask.
+	TypeID int `json:"termination_type_id"`
+}
+
+// component is the row of a component table this termination is, if any: the
+// one with its object's id, on its cable, at its end. An object terminates at
+// most one cable and every termination on one end of a cable has one type
+// (Cable.clean), so a component that matches is the termination's object,
+// whichever table it is found in, and two components of one id on the two
+// ends of a cable are told apart by the end.
+func (t termination) component() cabledComponent {
+	return cabledComponent{t.ObjectID, t.Cable, t.End}
 }
 
 // cabledComponent is what joins a termination to its device: a component's
@@ -347,7 +359,7 @@ func (p *Provider) physicalEdges(ctx context.Context, inSet map[string]bool, nod
 		slices.SortFunc(ts, func(a, b termination) int { return cmp.Compare(a.ID, b.ID) })
 		var out []string
 		for _, t := range ts {
-			d, ok := device[cabledComponent{t.ObjectID, t.Cable, t.End}]
+			d, ok := device[t.component()]
 			if !ok {
 				continue
 			}

@@ -1251,6 +1251,68 @@ func TestFilterFields_OnlyStoredColumns(t *testing.T) {
 	}
 }
 
+// NetBox compares a device's or VM's name and the iexact serials without
+// regard to case, which one value needs the replica's iexact for, so a build
+// without it (before DATA-408) is not offered = on them; the lookups it can
+// send stay. A build with it is offered = again.
+func TestFilterFields_CaseInsensitiveNameNeedsIExact(t *testing.T) {
+	for _, anchored := range []bool{false, true} {
+		f := newFakeService()
+		f.addEntity("virtualization/virtual-machines", "id:BIGINT:pk", "name:VARCHAR", "serial:VARCHAR")
+		if anchored {
+			f.schema = withAnchoredText(f.schema)
+		}
+		p := newTestProvider(t, f)
+		devices, vms := filterOps(t, p, "dcim/devices"), filterOps(t, p, "virtualization/virtual-machines")
+		for what, ops := range map[string][]string{"devices name": devices["name"], "devices serial": devices["serial"], "VMs name": vms["name"]} {
+			if !slices.Contains(ops, "n") || !slices.Contains(ops, "ic") {
+				t.Errorf("anchored=%v: %s %v, want not equal and contains still offered", anchored, what, ops)
+			}
+			if slices.Contains(ops, "") != anchored {
+				t.Errorf("anchored=%v: %s %v, want = offered exactly on a build with iexact", anchored, what, ops)
+			}
+		}
+		// A VM's serial is exact in NetBox, so = needs no iexact.
+		if !slices.Contains(vms["serial"], "") {
+			t.Errorf("anchored=%v: VMs serial %v, want = offered", anchored, vms["serial"])
+		}
+	}
+}
+
+// Autocomplete reads the column a NetBox filter reads: a prefix's children and
+// depth are the counts it caches as _children and _depth.
+func TestFieldValues_ReadTheColumnTheFilterReads(t *testing.T) {
+	f := newFakeService()
+	f.addEntity("ipam/prefixes", "id:BIGINT:pk", "prefix:VARCHAR", "_children:BIGINT", "_depth:INTEGER")
+	f.entities["ipam/prefixes"] = []map[string]interface{}{
+		{"id": float64(1), "prefix": "10.0.0.0/8", "_children": float64(3), "_depth": float64(0)},
+		{"id": float64(2), "prefix": "10.1.0.0/16", "_children": float64(0), "_depth": float64(1)},
+	}
+	p := newTestProvider(t, f)
+	for _, c := range []struct {
+		field, column string
+		want          []string
+	}{
+		{"children", "_children", []string{"0", "3"}},
+		{"depth", "_depth", []string{"0", "1"}},
+		{"prefix", "prefix", []string{"10.0.0.0/8", "10.1.0.0/16"}},
+	} {
+		f.mu.Lock()
+		f.requests = nil
+		f.mu.Unlock()
+		got, err := p.FieldValues(context.Background(), "ipam/prefixes", c.field, "", 100)
+		if err != nil {
+			t.Fatalf("FieldValues(%s): %v", c.field, err)
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("FieldValues(%s) = %v, want %v", c.field, got, c.want)
+		}
+		if req, ok := f.requestWith("ipam/prefixes", "fields"); !ok || req.query.Get("fields") != c.column {
+			t.Errorf("FieldValues(%s) projected %v, want fields=%s", c.field, req.query, c.column)
+		}
+	}
+}
+
 // Deep links point at the NetBox the replica reports it mirrors. A replica that
 // reports none, with no Browser URL to fall back on (TestDeepLinks_* below),
 // yields rows without a link column, not links to nowhere; BaseURL agrees with

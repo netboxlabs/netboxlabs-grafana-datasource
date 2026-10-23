@@ -32,6 +32,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err := rejectBranch(ctx); err != nil {
 		return nil, err
 	}
+	if err := refuseInternalOperators(spec.Filters); err != nil {
+		return nil, err
+	}
 	e, c, err := p.entityFor(ctx, spec.ObjectType)
 	if err != nil {
 		return nil, err

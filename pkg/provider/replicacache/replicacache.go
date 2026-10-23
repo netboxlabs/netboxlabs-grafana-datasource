@@ -508,12 +508,15 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 		limit = 1000
 	}
 	pk := e.pk()
-	// A stored column is read as itself. A related name FilterFields offers
-	// (site, site_slug) is read under expand=, projected to the primary key
-	// alone: the service returns the expanded columns beside it, and the
-	// search below is the TARGET column's, since that is what ilike runs on.
-	// Anything else — a name this replica cannot produce — has nothing to read.
-	col, stored := e.column(field)
+	// A stored column is read as itself, and a NetBox filter as the column it
+	// reads, which is not always its name (valueColumn: a prefix's children are
+	// its cached _children). A related name (site; a plugin's site_slug too) is
+	// read under expand=, projected to the primary key alone: the service
+	// returns the expanded columns beside it, and the search below is the
+	// TARGET column's, since that is what ilike runs on. Anything else — a name
+	// this replica cannot produce — has nothing to read.
+	column := valueColumn(e, field)
+	col, stored := e.column(column)
 	var params url.Values
 	if !stored {
 		via, target, ok := e.expandedColumn(field)
@@ -539,7 +542,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	// locally, the same answer as for a column that cannot be searched upstream.
 	pushDown := q != "" && slices.Contains(col.Operators, "ilike") && literalPushable(q)
 	if pushDown {
-		fv, err := buildFilterValues([]provider.Filter{{Field: field, Operator: opIContns, Value: q}}, nil)
+		fv, err := buildFilterValues([]provider.Filter{{Field: column, Operator: opIContns, Value: q}}, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -551,7 +554,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 		}
 	}
 	if stored {
-		params = withFields(params, []string{field})
+		params = withFields(params, []string{column})
 	} else {
 		params = withFields(params, []string{pk})
 	}
@@ -603,7 +606,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 			// that nothing in the deployment corresponds to.
 			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errRowWithoutID, Message: rowShapeGuidance}
 		}
-		v, present := obj[field]
+		v, present := obj[column]
 		if !present {
 			// The projection asked for this column, so its absence is the
 			// service failing to answer rather than the object having no value
@@ -614,7 +617,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errRowWithoutField, Message: rowShapeGuidance}
 		}
 		s := valueString(v)
-		if isAddress(field) {
+		if isAddress(column) {
 			s = withSingleHostMask(s)
 		}
 		if s == "" || seen[s] {

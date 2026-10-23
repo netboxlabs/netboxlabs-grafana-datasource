@@ -25,6 +25,7 @@ import {
 } from '../hooks/useBranchingInstalled';
 import {
   EMPTY_FAMILY_OPERATORS,
+  FieldOption,
   FilterField,
   filterFieldOptionsFrom,
   filterOperatorsFor,
@@ -63,6 +64,16 @@ export const ORDERING_TOOLTIP = [
   'Ask NetBox to sort before the row limit applies, so a limited panel shows the first rows by this field',
   'rather than an arbitrary set. Only the fields NetBox is known to sort are offered.',
   'Not free at scale: on 6.8M devices this measured 2.3s to 27.6s depending on the field, against 0.9s unsorted.',
+].join(' ');
+
+/** Copy for the Sort by picker in replica-cache mode. ORDERING_TOOLTIP is
+ *  NetBox's — its allow-list, and a cost measured on a NetBox of 6.8M devices —
+ *  so neither claim is made here: the list is the replica's stored columns and
+ *  the related names it resolves, and a sort it cannot apply says so in a panel
+ *  note instead of failing. */
+export const ORDERING_CACHE_TOOLTIP = [
+  'Ask the replica to sort before the row limit applies, so a limited panel shows the first rows by this field',
+  'rather than an arbitrary set. Offered: its stored columns and the related names it resolves.',
 ].join(' ');
 
 /** Copy for the Sort by picker while it is disabled. Names the setting to
@@ -129,7 +140,10 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   const branchRetained = (query.branch ?? '') !== '';
   const branchDisabled = branchingInstalled === false && !branchRetained;
   const [objectTypes, setObjectTypes] = useState<ObjectTypeOption[]>([]);
-  const [fields, setFields] = useState<string[]>([]);
+  // Kept as the backend described them, not reduced to names: in replica-cache
+  // mode the Sort by list is the ones it marks sortable.
+  const [fieldInfo, setFieldInfo] = useState<FieldOption[]>([]);
+  const fields = useMemo(() => fieldInfo.map((f) => f.name), [fieldInfo]);
   const [filterFields, setFilterFields] = useState<FilterField[]>([]);
   const [loadingTypes, setLoadingTypes] = useState(true);
 
@@ -165,8 +179,8 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   useEffect(() => {
     let active = true;
     const branch = query.branch ? getTemplateSrv().replace(query.branch) : undefined;
-    const p = fieldType ? datasource.getFields(fieldType, branch) : Promise.resolve<Array<{ name: string }>>([]);
-    p.then((f) => active && setFields(f.map((x) => x.name))).catch(() => active && setFields([]));
+    const p = fieldType ? datasource.getFields(fieldType, branch) : Promise.resolve<FieldOption[]>([]);
+    p.then((f) => active && setFieldInfo(f)).catch(() => active && setFieldInfo([]));
     return () => {
       active = false;
     };
@@ -213,25 +227,32 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   //
   // None of that reasoning is about replica-cache. There the sortable set is
   // the STORED columns plus the related names the backend resolves server-side
-  // (site, site_slug…), which is exactly the filterable set it publishes from
-  // its catalogue — so the options come from the schema like every other
-  // picker. A measured allow-list was wrong for it in both directions:
-  // dcim/racks and every plugin model have no entry and so got no sort control
-  // at all, while a dcim/devices entry could not know which related names THIS
-  // replica can resolve (a target that has received no data cannot be sorted
-  // on, and the backend leaves it out of the set).
+  // (site, site_slug…), and the backend says which entries of /fields those are
+  // (`sortable`) — so the options come from the schema like every other picker.
+  // It is not the filter list: NetBox's filters are not the columns sort= takes
+  // (`children` and `depth` are filters on `_children` and `_depth`, which the
+  // replica refuses by their filter names), and the stored columns NetBox has no
+  // filter for (`created`, `last_updated`…) sort fine. Nor is it all of /fields:
+  // the `<field>_value` aliases, custom fields and the link are built from rows
+  // and cannot be sorted on. A measured allow-list was wrong for it in both
+  // directions: dcim/racks and every plugin model have no entry and so got no
+  // sort control at all, while a dcim/devices entry could not know which related
+  // names THIS replica can resolve (a target that has received no data cannot be
+  // sorted on, and the backend leaves it out of the set).
   //
   // A sort already stored is kept in the list even when the schema has not
   // arrived yet, or no longer has that column, so the control does not vanish
   // from under a saved panel.
   const orderingOptions: Array<SelectableValue<string>> = useMemo(() => {
-    const names = cacheMode ? filterFields.map((f) => f.name) : orderingFieldsFor(query.objectType);
+    const names = cacheMode
+      ? fieldInfo.filter((f) => f.sortable).map((f) => f.name)
+      : orderingFieldsFor(query.objectType);
     if (cacheMode && sortField && !names.includes(sortField)) {
       names.push(sortField);
       names.sort();
     }
     return names.map((f) => ({ label: f, value: f }));
-  }, [cacheMode, filterFields, query.objectType, sortField]);
+  }, [cacheMode, fieldInfo, query.objectType, sortField]);
   // Fast paging walks by cursor, and NetBox refuses ?ordering= together with
   // ?start= ("Ordering cannot be specified in conjunction with cursor
   // pagination"), so a sort cannot reach a query that takes that walk.
@@ -560,7 +581,9 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             label="Sort by"
             labelWidth={20}
             disabled={orderingDisabled}
-            tooltip={orderingDisabled ? ORDERING_DISABLED_TOOLTIP : ORDERING_TOOLTIP}
+            tooltip={
+              orderingDisabled ? ORDERING_DISABLED_TOOLTIP : cacheMode ? ORDERING_CACHE_TOOLTIP : ORDERING_TOOLTIP
+            }
           >
             <Select
               inputId="query-ordering"

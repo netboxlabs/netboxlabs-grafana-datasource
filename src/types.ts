@@ -147,6 +147,9 @@ export interface ObjectTypeOption {
 export interface FieldOption {
   name: string;
   type: string;
+  /** replica-cache mode only: the backend can order a query by this column (a
+   * stored column or a related name). The Sort by picker offers these. */
+  sortable?: boolean;
 }
 
 /** A valid filter parameter for an object type and the operators NetBox supports on it. */

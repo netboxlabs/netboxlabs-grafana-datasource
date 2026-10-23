@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { createTheme } from '@grafana/data';
-import { ORDERING_DISABLED_TOOLTIP, ORDERING_TOOLTIP, QueryEditor } from './QueryEditor';
+import { ORDERING_CACHE_TOOLTIP, ORDERING_DISABLED_TOOLTIP, ORDERING_TOOLTIP, QueryEditor } from './QueryEditor';
 import { FAST_PAGING_TOOLTIP } from './ConfigEditor';
 import {
   IP_CONTEXT_FIELD_GROUPS,
@@ -579,17 +579,17 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
   });
 
   it('offers related names in replica-cache mode, which sorts on them server-side', async () => {
-    // The backend publishes the sortable set as its filterable set: stored
-    // columns plus the related names it resolves under expand=. Nothing here
-    // decides which; the picker shows what the backend said.
+    // The backend marks what it can sort by on /fields: the stored columns plus
+    // the related names it resolves under expand=. Nothing here decides which;
+    // the picker shows what the backend said.
     const ds = {
       ...datasource,
       uid: 'ds-sort-cache-related',
       datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
-      getFilterFields: jest.fn().mockResolvedValue([
-        { name: 'name', operators: ['', 'ic'] },
-        { name: 'site', operators: ['', 'ic'] },
-        { name: 'site_slug', operators: ['', 'ic'] },
+      getFields: jest.fn().mockResolvedValue([
+        { name: 'name', type: 'string', sortable: true },
+        { name: 'site', type: 'string', sortable: true },
+        { name: 'site_slug', type: 'string', sortable: true },
       ]),
     } as any;
     setup({}, ds);
@@ -671,20 +671,19 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
     expect(await screen.findByLabelText('ordering-direction')).not.toBeDisabled();
   });
 
-  it('builds replica-cache sort options from the stored columns, not the NetBox allow-list', async () => {
+  it('builds replica-cache sort options from the sortable columns, not the NetBox allow-list', async () => {
     // The allow-list is NetBox's, and it was wrong for the cache in both
     // directions: dcim/racks and every plugin model have no entry and so got no
     // sort control at all, while dcim/devices offered site and role, which are
     // derived and which the backend drops with a note. The cache's sortable set
-    // is its STORED columns, which the backend already publishes as the
-    // filterable set.
+    // is the columns /fields marks sortable.
     const ds = {
       ...datasource,
       uid: 'ds-sort-cache-options',
       datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
-      getFilterFields: jest.fn().mockResolvedValue([
-        { name: 'asset_tag', operators: [''] },
-        { name: 'name', operators: ['', 'ic'] },
+      getFields: jest.fn().mockResolvedValue([
+        { name: 'asset_tag', type: 'string', sortable: true },
+        { name: 'name', type: 'string', sortable: true },
       ]),
     } as any;
     // dcim/racks has no allow-list entry at all, so in NetBox mode this object
@@ -698,6 +697,45 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
     expect(screen.getByText('name')).toBeInTheDocument();
   });
 
+  it('offers what the backend can sort by in replica-cache mode, not the filter names', async () => {
+    // The Sort by list was the filter list once. NetBox's filters are not the
+    // columns sort= takes: children and depth are filters on _children and
+    // _depth, which sort= refuses by those names, and created, last_updated, the
+    // slugs and every stored column NetBox has no filter for are columns it
+    // accepts. What a row can show but sort= cannot build (the choice alias, a
+    // custom field, the link) is in /fields too, and not marked.
+    const ds = {
+      ...datasource,
+      uid: 'ds-sort-cache-regression',
+      datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+      getFields: jest.fn().mockResolvedValue([
+        { name: 'created', type: 'string', sortable: true },
+        { name: 'last_updated', type: 'string', sortable: true },
+        { name: 'site', type: 'string', sortable: true },
+        { name: 'site_slug', type: 'string', sortable: true },
+        { name: '_children', type: 'number', sortable: true },
+        { name: 'status', type: 'string', sortable: true },
+        { name: 'status_value', type: 'string' },
+        { name: 'cf_tier', type: 'string' },
+        { name: 'display_url', type: 'string' },
+      ]),
+      getFilterFields: jest.fn().mockResolvedValue([
+        { name: 'children', operators: [''] },
+        { name: 'depth', operators: [''] },
+        { name: 'status', operators: [''] },
+      ]),
+    } as any;
+    setup({ objectType: 'ipam/prefixes' }, ds);
+
+    const menu = await openMenu(await screen.findByLabelText('Sort by'));
+    for (const name of ['created', 'last_updated', 'site', 'site_slug', '_children', 'status']) {
+      expect(menu.getByText(name)).toBeInTheDocument();
+    }
+    for (const name of ['status_value', 'cf_tier', 'display_url', 'children', 'depth']) {
+      expect(menu.queryByText(name)).not.toBeInTheDocument();
+    }
+  });
+
   it('keeps a stored sort in the options when the schema does not list it', async () => {
     // Otherwise the control vanishes from under a saved panel while the schema
     // loads, or for good if the column is gone.
@@ -705,7 +743,7 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
       ...datasource,
       uid: 'ds-sort-cache-stored',
       datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
-      getFilterFields: jest.fn().mockResolvedValue([{ name: 'name', operators: [''] }]),
+      getFields: jest.fn().mockResolvedValue([{ name: 'name', type: 'string', sortable: true }]),
     } as any;
     setup({ objectType: 'dcim/racks', ordering: '-serial' }, ds);
 
@@ -751,6 +789,15 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
     expect(ORDERING_DISABLED_TOOLTIP).not.toMatch(/cannot sort a fast-paged query/i);
     // Same layout budget as the tooltip above: a paragraph here breaks the row.
     expect(ORDERING_DISABLED_TOOLTIP.length).toBeLessThan(FAST_PAGING_TOOLTIP.length);
+  });
+
+  // ORDERING_TOOLTIP is NetBox's: its allow-list and a cost measured on a NetBox
+  // with 6.8M devices. In replica-cache mode the picker is another list and the
+  // cost is not that one, so the tooltip is its own and says neither.
+  it('has its own sort tooltip in replica-cache mode, true of that list', () => {
+    expect(ORDERING_CACHE_TOOLTIP).toMatch(/replica/i);
+    expect(ORDERING_CACHE_TOOLTIP).not.toMatch(/6\.8M|27\.6s|known to sort/);
+    expect(ORDERING_CACHE_TOOLTIP.length).toBeLessThan(FAST_PAGING_TOOLTIP.length);
   });
 });
 

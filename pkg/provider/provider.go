@@ -43,6 +43,11 @@ const (
 type Field struct {
 	Name string    `json:"name"`
 	Type FieldType `json:"type"`
+	// Sortable says the provider can order a query by this column. Only a
+	// provider whose sortable set is not the NetBox allow-list sets it (the
+	// editor offers NetBox mode's own list otherwise), and it sets it on exactly
+	// what a query's Ordering accepts, so the editor's Sort by list is that set.
+	Sortable bool `json:"sortable,omitempty"`
 }
 
 // FilterField is a queryable filter parameter for an object type and the set of

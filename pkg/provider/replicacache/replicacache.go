@@ -316,6 +316,12 @@ type cfEntry struct {
 // JSON, in which an object custom field is a number like any integer one, so
 // there is no telling which fields have an id. A query that selects one still
 // gets it where the value is an id (see addCustomFieldIDAliases).
+//
+// Sortable marks what a query's Ordering accepts, which is the editor's Sort by
+// list here: the stored columns and the available expansions (planRequest sorts
+// on those and puts a note on anything else). The <field>_value aliases, the
+// custom fields and the link are built from rows after they are read, so they
+// are listed and not sortable.
 func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Field, error) {
 	if err := rejectBranch(ctx); err != nil {
 		return nil, err
@@ -337,13 +343,13 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 			continue
 		}
 		t := fieldTypeOf(col.Type)
-		out = append(out, provider.Field{Name: col.Name, Type: t})
+		out = append(out, provider.Field{Name: col.Name, Type: t, Sortable: true})
 		if slices.Contains(choices, col.Name) {
 			out = append(out, provider.Field{Name: col.Name + "_value", Type: t})
 		}
 	}
 	for _, name := range e.expandedColumns() {
-		out = append(out, provider.Field{Name: name, Type: provider.FieldTypeString})
+		out = append(out, provider.Field{Name: name, Type: provider.FieldTypeString, Sortable: true})
 	}
 	if e.has(customFieldDataColumn) {
 		cf, err := p.customFieldNames(ctx, objectType)

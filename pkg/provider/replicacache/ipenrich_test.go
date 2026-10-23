@@ -388,7 +388,7 @@ func TestResolveIPs_UnclassifiedAssignmentWarns(t *testing.T) {
 	}
 	wantRow(t, res, "10.8.0.2", map[string]interface{}{"address_assigned_object_type": "dcim.interface", "device_name": "spine-01"})
 	want := []string{
-		"1 of 3 rows matched several address records, some of them assigned to objects this replica cannot identify, so the record they show is the one with the lowest id, which may not be the one NetBox mode picks.",
+		"1 of 3 rows matched several address records, some of them assigned to objects this replica cannot identify, so the record they show is the one with the lowest id among those NetBox mode could pick, which may not be the one it picks.",
 		"2 addresses are assigned to objects this replica cannot identify (it does not serve NetBox's content-type names), so their interface and device columns are blank.",
 	}
 	if !reflect.DeepEqual(res.Warnings, want) {
@@ -975,5 +975,36 @@ func TestResolveScope_CarriesTheListingsWarnings(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(res.Warnings, " "), "Only the first 10,000 rows") {
 		t.Errorf("warnings = %q, want the listing's partial-check warning", res.Warnings)
+	}
+}
+
+// Records that carry one unknown type are of one model, whichever it is, so
+// they are ranked together: a pick that is the same under every reading of
+// each unknown type is NetBox mode's, and when it is not, the record kept is
+// one NetBox mode could pick — never one that loses under every reading.
+func TestResolveIPs_UnknownTypeSettlesWhatItCan(t *testing.T) {
+	captureLogs(t) // the learn logs the contradiction it rules 999 out on
+	f := ipWorld()
+	f.addFakeRows("ipam/ip-addresses",
+		// Both on the unknown type: the active one wins as an interface and
+		// as anything else.
+		ipAddr(802, "10.8.0.4/24", 999, 5).with("status", "deprecated").with("description", "802"),
+		ipAddr(803, "10.8.0.4/24", 999, 5).with("description", "803"),
+		// The unassigned, deprecated one loses under every reading; the
+		// other two each win under one.
+		ipAddr(805, "10.8.0.5/24", 0, 0).with("status", "deprecated").with("description", "805"),
+		ipAddr(830, "10.8.0.5/24", 999, 5).with("description", "830"),
+		ipAddr(831, "10.8.0.5/24", idInterface, 12).with("description", "831"))
+	res := resolveIPs(t, newTestProvider(t, f), []string{"10.8.0.4", "10.8.0.5"}, "match_count", "address_description")
+	wantRow(t, res, "10.8.0.4", map[string]interface{}{"match_count": float64(2), "address_description": "803"})
+	wantRow(t, res, "10.8.0.5", map[string]interface{}{"match_count": float64(3), "address_description": "830"})
+	var undecided []string
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "matched several address records") {
+			undecided = append(undecided, w)
+		}
+	}
+	if len(undecided) != 1 || !strings.HasPrefix(undecided[0], "1 of 2 rows") {
+		t.Errorf("undecided-pick warnings %q, want one, for 10.8.0.5 alone", undecided)
 	}
 }

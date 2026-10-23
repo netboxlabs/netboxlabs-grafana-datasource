@@ -383,7 +383,8 @@ with no record, ties broken in NetBox's order.
   addresses. An address on an object of a type it cannot learn shows no
   interface, device or VM, and the result carries a warning counting those
   addresses — alert rules refuse it. A host whose pick such a type could change
-  keeps its lowest-id record, with a warning too.
+  keeps the lowest-id record of those NetBox mode could pick, with a warning
+  too.
 - **NetBox scope.** The filters are NetBox's filters on `ipam/ip-addresses`,
   answered as an objects query answers them. `parent`, `mask_length` and
   `family` are refused: the replica has no address-within-prefix filter. Scope

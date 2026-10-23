@@ -236,7 +236,7 @@ func TestRelated_ParentOnRolesIsDirectChildrenOnly(t *testing.T) {
 	}
 }
 
-// A target stored flat — device roles before NetBox 4.3, platforms before 4.6
+// A target stored flat — device roles before NetBox 4.3, platforms before 4.4
 // — has no tree to read: a tree filter on it is the nodes named.
 func TestRelated_FlatTargetResolvesWithoutDescendants(t *testing.T) {
 	f := relatedFake()
@@ -510,7 +510,8 @@ func TestRelated_NullWithValuesNegated(t *testing.T) {
 
 // On = NetBox returns rows matching either (site=null&site=ams1 → AMS1's
 // devices and those with no site), which the replica's filters, ANDed, cannot
-// say. Two rows of one name are one parameter, so they are refused too.
+// say. Two rows of one name are one parameter, so they are refused too. The
+// values are checked first, as NetBox checks them, so the site is read.
 func TestRelated_NullWithValuesExactRefused(t *testing.T) {
 	f := relatedFake()
 	p := newTestProvider(t, f)
@@ -520,6 +521,74 @@ func TestRelated_NullWithValuesExactRefused(t *testing.T) {
 	} {
 		wantReason(t, relatedRefusal(t, p, "dcim/devices", filters...),
 			"NetBox returns rows matching either null or the values, and this replica cannot combine the two")
+	}
+	noRequestsFor(t, f, "dcim/devices")
+}
+
+// NetBox's form sets null apart and checks the other values first, so a value
+// it refuses is its answer, not null beside values (NetBox 4.4.10:
+// site_id=null&site_id=abc → "“abc” is not a valid value.", in either order;
+// site=null&site=ams9 → "Select a valid choice. ams9 is not one of the
+// available choices.").
+func TestRelated_NetBoxsValueErrorsComeBeforeNullBesideValues(t *testing.T) {
+	f := relatedFake()
+	p := newTestProvider(t, f)
+	for _, c := range []struct {
+		f      provider.Filter
+		reason string
+	}{
+		{provider.Filter{Field: "site_id", Value: "null,abc"}, "“abc” is not a valid value."},
+		{provider.Filter{Field: "site_id", Value: "abc,null"}, "“abc” is not a valid value."},
+		{provider.Filter{Field: "site", Value: "null,ams9"}, "Select a valid choice. ams9 is not one of the available choices."},
+	} {
+		wantReason(t, relatedRefusal(t, p, "dcim/devices", c.f), c.reason)
+	}
+	noRequestsFor(t, f, "dcim/devices")
+}
+
+// A related filter is resolved only when every object its values name is
+// read: more than MaxLimit matches — a device name shared by that many, a
+// tree node with that many below it — is refused, naming the filter, rather
+// than answered from the part read.
+func TestRelated_MoreThanTheReadLimitIsRefused(t *testing.T) {
+	f := relatedFake()
+	f.addInterfaces()
+	f.entities["dcim/interfaces"] = []map[string]interface{}{}
+	devices := make([]map[string]interface{}, MaxLimit+1)
+	roles := []map[string]interface{}{treeNode(5, "Core", "core", nil, 1, 1, 2*(MaxLimit+1)+2, 0)}
+	for i := range devices {
+		devices[i] = relatedDevice(100+i, "a", 1, 5, nil)
+		roles = append(roles, treeNode(100+i, fmt.Sprintf("R%d", i), fmt.Sprintf("r%d", i), 5, 1, 2*i+2, 2*i+3, 1))
+	}
+	f.entities["dcim/devices"], f.entities["dcim/device-roles"] = devices, roles
+	p := newTestProvider(t, f)
+
+	u := relatedRefusal(t, p, "dcim/interfaces", provider.Filter{Field: "device", Value: "a"})
+	wantReason(t, u, "device matches more than 10,000 objects in dcim/devices, more than this datasource reads to resolve one filter")
+	noRequestsFor(t, f, "dcim/interfaces")
+
+	u = relatedRefusal(t, p, "dcim/devices", provider.Filter{Field: "role", Value: "core"})
+	wantReason(t, u, "role matches more than 10,000 objects in dcim/device-roles, more than this datasource reads to resolve one filter")
+	if len(f.sentWith("dcim/devices", "filter[role_id]__in")) != 0 {
+		t.Error("devices were read with a part of core's descendants")
+	}
+}
+
+// The lookup of a related filter's values is held to the request budget
+// before it is sent, and a lookup past it is refused naming the filter as
+// written — the client, refusing it, could name only the target's column
+// (slug).
+func TestRelated_ALookupPastTheBudgetNamesTheFilter(t *testing.T) {
+	f := relatedFake()
+	p := newTestProvider(t, f)
+	slugs := make([]string, 3000)
+	for i := range slugs {
+		slugs[i] = fmt.Sprintf("site-%04d", i)
+	}
+	u := relatedRefusal(t, p, "dcim/devices", provider.Filter{Field: "site", Operator: "n", Value: strings.Join(slugs, ",")})
+	wantReason(t, u, "site carries 3,000 values, which takes the lookup in dcim/sites past the 16 KB this datasource sends at once")
+	if u.Field != "site" || u.Operator != "n" {
+		t.Errorf("the refusal names %s %q, want site n", u.Field, u.Operator)
 	}
 	noRequestsFor(t, f, "dcim/sites", "dcim/devices")
 }
@@ -623,7 +692,7 @@ func TestRelated_ModelChoiceTakesTheLastValue(t *testing.T) {
 			t.Errorf("%+v: terminations %v, want %v", c.filters, got, c.want)
 		}
 	}
-	if read := f.sentWith("dcim/cables", "filter[id]__in"); len(read) == 0 || read[2].query.Get("filter[id]__in") != "7" {
+	if read := f.sentWith("dcim/cables", "filter[id]__in"); len(read) < 3 || read[2].query.Get("filter[id]__in") != "7" {
 		t.Errorf("cables read %v, want cable=07 read as 7", read)
 	}
 }

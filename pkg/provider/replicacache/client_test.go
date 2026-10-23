@@ -635,6 +635,8 @@ func TestClient_RefusesQueriesOverTheBudget(t *testing.T) {
 			"name", "3,000", "filter[name]__in"},
 		{"a walk", provider.QuerySpec{Filters: []provider.Filter{{Field: "id", Value: strings.Join(ids, ",")}, {Field: "name", Operator: "n", Value: "w1"}}},
 			"id", "4,000", "filter[id]__in"},
+		{"one long value", provider.QuerySpec{Filters: []provider.Filter{{Field: "name", Value: strings.Repeat("w", 16<<10)}}},
+			"name", "1", "filter[name]__eq"},
 	} {
 		c.spec.ObjectType = widgets
 		_, err := p.Query(context.Background(), c.spec)
@@ -643,7 +645,11 @@ func TestClient_RefusesQueriesOverTheBudget(t *testing.T) {
 			t.Errorf("%s: err = %v, want an UnsupportedError", c.name, err)
 			continue
 		}
-		if want := fmt.Sprintf("the filter on %s carries %s values", c.column, c.values); !strings.Contains(u.Detail, want) {
+		want := fmt.Sprintf("the filter on %s carries %s values,", c.column, c.values)
+		if c.values == "1" {
+			want = fmt.Sprintf("the filter on %s carries one value,", c.column)
+		}
+		if !strings.Contains(u.Detail, want) {
 			t.Errorf("%s: %q, want it to say %q", c.name, u.Detail, want)
 		}
 		if sent := f.sentWith(widgets, c.tooLong); len(sent) != 0 {

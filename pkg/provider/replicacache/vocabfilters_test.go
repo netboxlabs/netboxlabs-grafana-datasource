@@ -305,15 +305,15 @@ func TestTranslate_CabledIsTheCableColumn(t *testing.T) {
 func TestTranslate_EmptyOnANumberIsIsNull(t *testing.T) {
 	interfaces := vocabInterfaces()
 	wantFilters(t, interfaces.translate(t, provider.Filter{Field: "mtu", Operator: "empty"}),
-		provider.Filter{Field: "mtu", Operator: opIsNull, Label: "mtu"})
+		provider.Filter{Field: "mtu", Operator: opIsNull, Label: "mtu", LabelOperator: "empty"})
 	wantFilters(t, interfaces.translate(t, provider.Filter{Field: "mtu", Operator: "nempty"}),
-		provider.Filter{Field: "mtu", Operator: opNotNull, Label: "mtu"})
+		provider.Filter{Field: "mtu", Operator: opNotNull, Label: "mtu", LabelOperator: "nempty"})
 	wantFilters(t, interfaces.translate(t, provider.Filter{Field: "mtu__empty", Value: "false"}),
 		provider.Filter{Field: "mtu", Operator: opNotNull, Label: "mtu__empty"})
 	// Both spellings are one NetBox name, so the last row's answer stands, as
 	// NetBox mode sends them under one key.
 	wantFilters(t, interfaces.translate(t, provider.Filter{Field: "mtu", Operator: "empty"}, provider.Filter{Field: "mtu__empty", Value: "3"}),
-		provider.Filter{Field: "mtu", Operator: opNotNull, Label: "mtu"})
+		provider.Filter{Field: "mtu", Operator: opNotNull, Label: "mtu", LabelOperator: "empty"})
 }
 
 // local_context_data=true is "has a local config context": IS NOT NULL on it.
@@ -352,11 +352,11 @@ func TestTranslate_ValueNullIsIsNull(t *testing.T) {
 	wantFilters(t, addresses.translate(t, provider.Filter{Field: "role", Value: "null"}),
 		provider.Filter{Field: "role", Operator: opIsNull, Label: "role"})
 	wantFilters(t, addresses.translate(t, provider.Filter{Field: "role", Operator: "ie", Value: "null"}),
-		provider.Filter{Field: "role", Operator: opIsNull, Label: "role"})
+		provider.Filter{Field: "role", Operator: opIsNull, Label: "role", LabelOperator: "ie"})
 	wantFilters(t, devices.translate(t, provider.Filter{Field: "asset_tag", Operator: "n", Value: "null"}),
-		provider.Filter{Field: "asset_tag", Operator: opNotNull, Label: "asset_tag"})
+		provider.Filter{Field: "asset_tag", Operator: opNotNull, Label: "asset_tag", LabelOperator: "n"})
 	wantFilters(t, addresses.translate(t, provider.Filter{Field: "role", Operator: "nie", Value: "null"}),
-		provider.Filter{Field: "role", Operator: opNotNull, Label: "role"})
+		provider.Filter{Field: "role", Operator: opNotNull, Label: "role", LabelOperator: "nie"})
 	// Two names NetBox ANDs: no row is both null and not null. The replica takes
 	// one isnull per column, so this is answered here.
 	devices.matchesNothing(t, provider.Filter{Field: "asset_tag", Value: "null"}, provider.Filter{Field: "asset_tag", Operator: "n", Value: "null"})
@@ -384,8 +384,8 @@ func TestTranslate_ValueNullIsIsNull(t *testing.T) {
 }
 
 // NetBox's IS NULL is taken on a column of any type that lists the replica's
-// isnull, text included, and refused, by the name the user wrote, on one that
-// does not.
+// isnull, text included, and refused, by the name and operator the user wrote,
+// on one that does not.
 func TestValidateFilters_NetBoxNullOnAnyColumnThatTakesIt(t *testing.T) {
 	e := entity{Table: "dcim_device", Ingested: true, Columns: []column{
 		{Name: "asset_tag", Type: "VARCHAR", Nullable: true, Operators: []string{"eq", "in", "isnull", "ilike"}},
@@ -397,10 +397,47 @@ func TestValidateFilters_NetBoxNullOnAnyColumnThatTakesIt(t *testing.T) {
 			t.Errorf("%s on text: %v", op, err)
 		}
 	}
-	err := validateFilters([]provider.Filter{{Field: "_children", Operator: opIsNull, Label: "children"}}, e, c)
+	err := validateFilters([]provider.Filter{{Field: "_children", Operator: opIsNull, Label: "children", LabelOperator: "n"}}, e, c)
 	var u *UnsupportedFilterError
-	if !errors.As(err, &u) || u.Field != "children" || !strings.Contains(u.Reason, "does not take that operator") {
-		t.Errorf("IS NULL on a column without isnull = %v, want a refusal naming children", err)
+	if !errors.As(err, &u) || u.Field != "children" || u.Operator != "n" || !strings.HasPrefix(u.Reason, "this replica cannot test _children for a value") {
+		t.Errorf("IS NULL on a column without isnull = %v, want a refusal naming children n", err)
+	}
+}
+
+// The translation sends NetBox's null, its empty lookups and cabled as IS NULL
+// or IS NOT NULL, operators no query names. A refusal of one names the filter
+// as the user wrote it, operator included — owner = null, asset_tag not null,
+// mtu is empty — never the operator it was sent as, and says what to do: here
+// the replica does not store the column (owner is a NetBox 4.6 filter, the
+// interfaces fixture stores neither mtu nor cable_id).
+func TestQuery_NullTestsAreRefusedAsWritten(t *testing.T) {
+	f := newFakeService()
+	f.addEntity("dcim/interfaces", "id:BIGINT:pk", "name:VARCHAR")
+	p := newTestProvider(t, f)
+	for _, c := range []struct {
+		objectType string
+		f          provider.Filter
+		column     string
+	}{
+		{"dcim/devices", provider.Filter{Field: "owner", Value: "null"}, "owner_id"},
+		{"dcim/devices", provider.Filter{Field: "owner", Operator: "n", Value: "null"}, "owner_id"},
+		{"dcim/devices", provider.Filter{Field: "asset_tag", Operator: "n", Value: "null"}, "asset_tag"},
+		{"dcim/interfaces", provider.Filter{Field: "mtu", Operator: "empty"}, "mtu"},
+		{"dcim/interfaces", provider.Filter{Field: "cabled", Value: "true"}, "cable_id"},
+	} {
+		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: c.objectType, Filters: []provider.Filter{c.f}})
+		var u *UnsupportedFilterError
+		if !errors.As(err, &u) {
+			t.Errorf("%+v: err = %v, want an UnsupportedFilterError", c.f, err)
+			continue
+		}
+		if u.Field != c.f.Field || u.Operator != c.f.Operator || strings.Contains(err.Error(), "is null") || strings.Contains(err.Error(), "is not null") {
+			t.Errorf("%+v: %v; want it to name %s %q as written", c.f, err, c.f.Field, c.f.Operator)
+		}
+		wantReason(t, u, "this replica does not store "+c.column)
+		if !strings.HasSuffix(u.Reason, "remove it, or choose a filter the editor offers") {
+			t.Errorf("%+v: reason = %q, want it to say what to do", c.f, u.Reason)
+		}
 	}
 }
 
@@ -454,7 +491,7 @@ func TestTranslate_ValueNullWithValuesRefused(t *testing.T) {
 	wantReason(t, devices.refusal(t, provider.Filter{Field: "asset_tag", Value: "null,A-1"}), want)
 	wantReason(t, devices.refusal(t, provider.Filter{Field: "asset_tag", Value: "null"}, provider.Filter{Field: "asset_tag", Value: "A-1"}), want)
 	wantFilters(t, devices.translate(t, provider.Filter{Field: "asset_tag", Operator: "n", Value: "null,A-1"}),
-		provider.Filter{Field: "asset_tag", Operator: opNotNull, Label: "asset_tag"},
+		provider.Filter{Field: "asset_tag", Operator: opNotNull, Label: "asset_tag", LabelOperator: "n"},
 		provider.Filter{Field: "asset_tag", Operator: "n", Value: "A-1", Label: "asset_tag"})
 }
 
@@ -501,7 +538,7 @@ func TestTranslate_TimeZoneNullIsRefused(t *testing.T) {
 	wantFilters(t, sites.translate(t, provider.Filter{Field: "time_zone", Value: "Europe/Amsterdam"}),
 		provider.Filter{Field: "time_zone", Value: "Europe/Amsterdam", Label: "time_zone"})
 	wantFilters(t, sites.translate(t, provider.Filter{Field: "time_zone", Operator: "ie", Value: "null"}),
-		provider.Filter{Field: "time_zone", Operator: opIsNull, Label: "time_zone"})
+		provider.Filter{Field: "time_zone", Operator: opIsNull, Label: "time_zone", LabelOperator: "ie"})
 }
 
 // The replica has no regular expressions, so NetBox's regex lookups are refused
@@ -573,9 +610,9 @@ func TestTranslate_MACNullIsIsNull(t *testing.T) {
 	wantFilters(t, macs.translate(t, provider.Filter{Field: "mac_address", Value: "null"}),
 		provider.Filter{Field: "mac_address", Operator: opIsNull, Label: "mac_address"})
 	wantFilters(t, macs.translate(t, provider.Filter{Field: "mac_address", Operator: "n", Value: "null"}),
-		provider.Filter{Field: "mac_address", Operator: opNotNull, Label: "mac_address"})
+		provider.Filter{Field: "mac_address", Operator: opNotNull, Label: "mac_address", LabelOperator: "n"})
 	wantFilters(t, macs.translate(t, provider.Filter{Field: "mac_address", Operator: "n", Value: "null, 5856.9fd1.e300"}),
-		provider.Filter{Field: "mac_address", Operator: opNotNull, Label: "mac_address"},
+		provider.Filter{Field: "mac_address", Operator: opNotNull, Label: "mac_address", LabelOperator: "n"},
 		provider.Filter{Field: "mac_address", Operator: "n", Value: "58:56:9f:d1:e3:00", Label: "mac_address"})
 }
 

@@ -27,19 +27,22 @@ import (
 // checked as NetBox's form checks it, then looked up in the target's table, and
 // the filter is sent on the foreign key as the ids NetBox would compare.
 //
-// Measured on NetBox 4.4.10 (GET only):
+// Measured on NetBox 4.4.10 (GET only), on dcim/devices unless named:
 //
 //	site=AMS1                    400 Select a valid choice. AMS1 is not one of the available choices.
 //	site_id=999&site_id=abc      400 “abc” is not a valid value.
+//	site_id=null&site_id=abc     400 “abc” is not a valid value.
 //	site_id=01, +1, 1_0          400 Select a valid choice. 01 is not one of the available choices.
 //	primary_ip4=10.10.10.14      400 Select a valid choice. … (NetBox writes it 10.10.10.14/24)
 //	primary_ip4=garbage, …/33    400 Invalid IP address format: garbage
-//	primary_mac_address=gar bage 400 Invalid MAC address format: garbage
 //	role=parity-role-parent      the 3 devices on its child role
 //	site=ams1&site_id=2          0 rows: two names are ANDed
 //	site=ams1&site=nyc1          both sites' devices: one name's values are ORed
 //	tenant=null                  the 2 devices with no tenant; tenant__n=null the other 16
-//	cable=null, abc, 1.0, 99999  400 Select a valid choice. That choice is not one of the available choices.
+//	dcim/interfaces primary_mac_address=gar bage
+//	                             400 Invalid MAC address format: garbage
+//	dcim/cable-terminations cable=null, abc, 1.0, 99999
+//	                             400 Select a valid choice. That choice is not one of the available choices.
 
 // maxTreeNodes bounds the nodes one tree filter may match. Each can cost a read
 // of the nodes below it, one request apiece, so a filter matching more is
@@ -154,6 +157,17 @@ func (p *Provider) resolveRelatedFilters(ctx context.Context, table string, filt
 			return nil, false, err
 		}
 	}
+	// NetBox's form sets null apart and answers for the other values first —
+	// one it cannot read, one it does not find (site_id=null&site_id=abc is
+	// "“abc” is not a valid value.", site=null&site=ams9 "Select a valid
+	// choice. ams9 …") — so null beside values on = is refused only once they
+	// are known to be good. NetBox then returns rows matching either, which
+	// the replica, ANDing its filters, cannot.
+	for _, n := range all {
+		if n.null && len(n.values) > 0 && !n.entry.Exclude {
+			return nil, false, n.refuse("NetBox returns rows matching either null or the values, and this replica cannot combine the two; filter on null and on the values in separate queries, or " + netboxModeAdvice)
+		}
+	}
 
 	resolved := map[string][]provider.Filter{}
 	for _, col := range columns {
@@ -180,19 +194,7 @@ func (p *Provider) resolveRelatedFilters(ctx context.Context, table string, filt
 // the query, then every value it parses but would not find, being written
 // otherwise than the target's field is (NetBox compares str() of that field
 // with the value as given). Each sets the values as compared and as read.
-// NetBox's form sets null apart before it checks the rest, so a value it
-// refuses is refused before null beside values is.
 func (n *relatedName) check(c *catalog) error {
-	if err := n.checkValues(c); err != nil {
-		return err
-	}
-	if n.null && len(n.values) > 0 && !n.entry.Exclude {
-		return n.refuse("NetBox returns rows matching either null or the values, and this replica cannot combine the two; filter on null and on the values in separate queries, or " + netboxModeAdvice)
-	}
-	return nil
-}
-
-func (n *relatedName) checkValues(c *catalog) error {
 	if n.entry.Kind == kindModelChoice && (n.entry.ToField == "" || n.entry.ToField == "id") && len(n.values) > 0 {
 		// A ModelChoiceFilter reads the last value (translateFilters kept
 		// it) as int() reads it, and finds the object by that number: 01 is
@@ -303,13 +305,20 @@ func (p *Provider) resolve(ctx context.Context, n *relatedName, t relatedTarget,
 		fields = append(fields, field)
 	}
 	// A tree filter on a model the replica's NetBox stores flat (device roles
-	// before 4.3, platforms before 4.6) has no tree to read: the nodes named
+	// before 4.3, platforms before 4.4) has no tree to read: the nodes named
 	// are the answer.
 	tree := n.entry.Kind == kindTree && t.e.has("tree_id") && t.e.has("lft") && t.e.has("rght")
 	if tree {
 		fields = append(fields, "tree_id", "lft", "rght")
 	}
-	q := withFields(url.Values{param(field, "in"): {strings.Join(slices.Compact(slices.Sorted(slices.Values(n.reads))), ",")}}, fields)
+	reads := slices.Compact(slices.Sorted(slices.Values(n.reads)))
+	q := withFields(url.Values{param(field, "in"): {strings.Join(reads, ",")}}, fields)
+	// The client would refuse a lookup past the budget too, but could name
+	// only the target's column (slug); here the filter is known as written.
+	if !fitsBudget(q) {
+		return n.refuse(fmt.Sprintf("%s carries %s, which takes the lookup in %s past the %d KB this datasource sends at once; select fewer values, or %s",
+			n.first.Field, valueCount(len(reads)), t.objectType, queryBudget>>10, netboxModeAdvice))
+	}
 	rows, err := p.readTarget(ctx, n, t, q, field, tree)
 	if err != nil {
 		return err
@@ -482,7 +491,7 @@ func combineRelated(column string, names []*relatedName) ([]provider.Filter, boo
 	)
 	for _, n := range names {
 		if n.null {
-			nulls = append(nulls, provider.Filter{Field: column, Operator: nullOperator(!n.entry.Exclude), Label: n.first.Field})
+			nulls = append(nulls, provider.Filter{Field: column, Operator: nullOperator(!n.entry.Exclude), Label: n.first.Field, LabelOperator: n.first.Operator})
 		}
 		switch {
 		case len(n.values) == 0:
@@ -558,18 +567,4 @@ func (n *relatedName) takes(c *catalog) string {
 // dcim_site (see loadVocab).
 func tableOf(label string) string {
 	return strings.Replace(label, ".", "_", 1)
-}
-
-// servedTable is the entity the catalogue serves a table as, and its object
-// type; false when the replica serves no such table.
-func (c *catalog) servedTable(table string) (string, entity, bool) {
-	if c == nil {
-		return "", entity{}, false
-	}
-	for _, objectType := range slices.Sorted(maps.Keys(c.Entities)) {
-		if e := c.Entities[objectType]; e.Table == table {
-			return objectType, e, true
-		}
-	}
-	return "", entity{}, false
 }

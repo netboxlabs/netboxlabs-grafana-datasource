@@ -3,8 +3,11 @@ package replicacache
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
@@ -31,6 +34,13 @@ type catalog struct {
 	// Entities is keyed by object type ("dcim/devices"), the route path minus
 	// its "/v1/" prefix — the same value a saved query names in NetBox mode.
 	Entities map[string]entity
+
+	// tables is the object type each table is served as: the way from one of
+	// NetBox's models to the entity serving it (servedTable), which every
+	// filter on a related object asks, and the editor once per such filter.
+	// Built on first use, once — a catalogue is not changed after it is read.
+	tablesOnce sync.Once
+	tables     map[string]string
 }
 
 type entity struct {
@@ -67,6 +77,30 @@ type reference struct {
 	ExpandKey string
 	Columns   []string
 	Available bool
+}
+
+// servedTable is the entity the catalogue serves a table as (NetBox's table
+// for one of its models: dcim_site for dcim.site), and its object type; false
+// when the replica serves no such table. A table is one entity's on every
+// catalogue measured (v1.40.1: 76 entities, 76 tables); were two to share one,
+// the first object type in order would answer, as the index keeps it.
+func (c *catalog) servedTable(table string) (string, entity, bool) {
+	if c == nil {
+		return "", entity{}, false
+	}
+	c.tablesOnce.Do(func() {
+		c.tables = make(map[string]string, len(c.Entities))
+		for _, objectType := range slices.Sorted(maps.Keys(c.Entities)) {
+			if _, taken := c.tables[c.Entities[objectType].Table]; !taken {
+				c.tables[c.Entities[objectType].Table] = objectType
+			}
+		}
+	})
+	objectType, ok := c.tables[table]
+	if !ok {
+		return "", entity{}, false
+	}
+	return objectType, c.Entities[objectType], true
 }
 
 func (e entity) column(name string) (column, bool) {

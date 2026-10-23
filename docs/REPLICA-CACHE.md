@@ -193,8 +193,8 @@ with _=_ and _not_, and compare what NetBox's compare: the slug, name, RD,
 address or MAC address its filter names, else the id — `site = ams1` is the
 site whose slug is `ams1`, not one named so. Each value is looked up in the
 related object's table first, and the filter is sent as the ids found (a
-request more for each such filter, and for each tree node with nodes below
-it):
+request more for each such filter, and one for each tree node named that has
+nodes below it and is not itself below another node named):
 
 - every value is checked as NetBox's form checks it, and a value NetBox
   refuses is refused with NetBox's own message, so a dashboard or an alert
@@ -206,20 +206,23 @@ it):
   format_), or written without its mask (`10.0.0.1` for `10.0.0.1/32`) or in
   another notation; a MAC address that does not parse (NetBox 4.4's _Invalid
   MAC address format_), or not written in NetBox's capitals with colons;
-- `null` is "no value" (`tenant = null`; _not_ `null` is "has one"), with
-  nothing looked up. `null` beside other values works on _not_ and is refused
-  on _=_, where NetBox returns rows matching either, which the replica cannot
-  combine;
-- a **tree** filter — a device's `role` and `location` (and `platform` on
-  NetBox 4.6), a prefix's `location`, `region` and `site_group`, a site's
-  `region` and `group`, and their `_id` forms — includes every node below each
-  one named, as NetBox's does, up to 100 nodes per filter; a `parent` filter
-  is the direct children alone;
+- `null` is "no value" where NetBox's filter takes it (`tenant = null`; _not_
+  `null` is "has one"), with nothing looked up. `null` beside other values
+  works on _not_ and is refused on _=_, where NetBox returns rows matching
+  either, which the replica cannot combine (once the other values are known to
+  be good: NetBox's own error for one of them comes first);
+- a **tree** filter — a device's `role` (nested from NetBox 4.3), `platform`
+  (from 4.4) and `location`, a prefix's `location`, `region` and
+  `site_group`, a site's `region` and `group`, and their `_id` forms —
+  includes every node below each one named, as NetBox's does, up to 100 nodes
+  per filter; on a replica of a NetBox that stores the model flat, it is the
+  nodes named. A `parent` filter is the direct children alone;
 - the values, and the rows, of one filter match any of them; different filters
   (`site` and `site_id`) must all match, and what a _not_ excludes is taken off
   what the others select, as in NetBox;
 - a cable termination's `cable` takes one value, the last given, as NetBox's
-  does.
+  does, and refuses `null`, which its form has no choice for, with NetBox's
+  _Select a valid choice. That choice is not one of the available choices._
 
 A related filter whose table has received no data on this replica, or that the
 replica does not serve (a device's `config_template_id`), cannot be checked as
@@ -308,10 +311,10 @@ panel note.
 10,000-row ceiling. The truncation and alert-table rules are the same as in
 NetBox mode. A request is kept within 16 KB: a filter whose values would take
 it past that — thousands of values, or of the ids a filter on related objects
-names — is refused before anything is sent, with a message naming the column
-and how many values it carries. A filter on a related object whose values
-name more than 10,000 objects, or a tree node with more than 10,000 below it,
-is refused too.
+names — is refused before anything is sent, with a message saying how many
+values it carries and naming the filter (or, for the ids, the column they are
+sent on). A filter on a related object whose values name more than 10,000
+objects, or a tree node with more than 10,000 below it, is refused too.
 
 ## Freshness
 

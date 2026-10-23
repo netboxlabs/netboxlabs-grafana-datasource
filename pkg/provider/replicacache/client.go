@@ -620,12 +620,21 @@ func overBudget(q url.Values) error {
 			}
 		}
 	}
-	detail := "This query is too long to send to replica-cache: its request would pass the 16 KB this datasource sends at once. Filter on fewer values."
+	detail := fmt.Sprintf("This query is too long to send to replica-cache: its request would pass the %d KB this datasource sends at once. Filter on fewer values.", queryBudget>>10)
 	if column, _, ok := strings.Cut(strings.TrimPrefix(key, "filter["), "]"); ok {
-		detail = fmt.Sprintf("This query is too long to send to replica-cache: the filter on %s carries %s values, which takes the request past the 16 KB this datasource sends at once. Select fewer values, or filter on something that matches fewer objects.",
-			column, thousands(len(strings.Split(value, ","))))
+		detail = fmt.Sprintf("This query is too long to send to replica-cache: the filter on %s carries %s, which takes the request past the %d KB this datasource sends at once. Select fewer values, or filter on something that matches fewer objects.",
+			column, valueCount(len(strings.Split(value, ","))), queryBudget>>10)
 	}
 	return &UnsupportedError{Feature: "a request this long", Detail: detail}
+}
+
+// valueCount is how many values a filter carries, in words: one value, 3,000
+// values.
+func valueCount(n int) string {
+	if n == 1 {
+		return "one value"
+	}
+	return thousands(n) + " values"
 }
 
 func truncate(s string) string {

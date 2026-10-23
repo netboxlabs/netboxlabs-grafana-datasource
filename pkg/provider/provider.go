@@ -63,6 +63,13 @@ type Filter struct {
 	// the user knows. Empty means Field is as written. It never travels in a
 	// query: callers set Field, and only the provider fills this in.
 	Label string `json:"-"`
+	// LabelOperator is the operator as the user wrote it, set beside Label by
+	// a provider that sends the filter with an operator of its own, one no
+	// query names (replica-cache sends owner=null as IS NULL), so that a
+	// refusal names the operator the user knows; "" is an exact match, as in
+	// Operator. It is read only where Operator is such an operator of the
+	// provider's, and never travels in a query.
+	LabelOperator string `json:"-"`
 }
 
 // QuerySpec describes an object query.

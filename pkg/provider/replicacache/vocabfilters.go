@@ -81,6 +81,9 @@ const netboxModeAdvice = "use a datasource in NetBox mode for this filter"
 // does not cover — a plugin's model — keeps the catalogue's rules: its filters
 // come back as written.
 func translateFilters(table string, filters []provider.Filter, e entity, c *catalog) (out []provider.Filter, none bool, err error) {
+	if err := refuseNullCharacters(filters); err != nil {
+		return nil, false, err
+	}
 	vocab, covered := vocabFor(table)
 	if !covered {
 		return filters, false, nil
@@ -116,6 +119,22 @@ func translateFilters(table string, filters []provider.Filter, e entity, c *cata
 		}
 	}
 	return out, none || nullAndNotNull(out), nil
+}
+
+// refuseNullCharacters refuses a filter with a null character in any of its
+// values, with NetBox's own message, before anything reads the filter: NetBox
+// answers it with 400 "Null characters are not allowed." on every filter read
+// through a Django CharField (NetBox 4.4.10: name=, description__ic=, prefix=,
+// q=), and stored text cannot hold one (PostgreSQL's cannot), so sent on it
+// would match no row — an empty result an alert rule reads as nothing wrong. A
+// plugin's filterset reads text the same way, so its table is no exception.
+func refuseNullCharacters(filters []provider.Filter) error {
+	for _, f := range filters {
+		if f.Field != "" && strings.ContainsRune(f.Value, 0) {
+			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: nullCharacterReason}
+		}
+	}
+	return nil
 }
 
 // sendsNothing is a row buildFilterValues skips, as NetBox mode sends no

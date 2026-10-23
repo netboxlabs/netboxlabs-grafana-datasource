@@ -161,6 +161,9 @@ filtering.
 
 NetBox's meaning is kept:
 
+- a value with a null character is refused, on any filter, with NetBox's own
+  _Null characters are not allowed._: no stored text holds one, so it would
+  match no row where NetBox answers with an error;
 - a device's or virtual machine's `name`, and the `serial` of a device, rack,
   module or inventory item, match without regard to case, as in NetBox (one
   value, through the replica's _= (ci)_). Several values match exactly — the
@@ -215,12 +218,11 @@ NetBox's meaning is kept:
   notation — also finds the prefix that equals it, its host bits ignored. The
   VRF plays no part, IPv4 and IPv6 never contain each other, and an IPv4-mapped
   address (`::ffff:10.0.0.1`) is IPv6. A value that is not an address or prefix
-  finds nothing, as in NetBox, without a request; one with a null character is
-  refused with NetBox's own message. Several values are refused: NetBox uses
-  only the last, so a multi-value variable would show one selection without
-  saying so. It needs replica-cache v1.39 or later, whose schema route states
-  it (on an older build the filter is refused, saying so), and is offered on
-  prefixes alone: NetBox has no `contains` on an aggregate;
+  finds nothing, as in NetBox, without a request. Several values are refused:
+  NetBox uses only the last, so a multi-value variable would show one selection
+  without saying so. It needs replica-cache v1.39 or later, whose schema route
+  states it (on an older build the filter is refused, saying so), and is offered
+  on prefixes alone: NetBox has no `contains` on an aggregate;
 - a MAC address in any spelling NetBox reads (`58-56-9F-D1-E3-00`,
   `5856.9fd1.e300`, …) matches the stored address, and a value NetBox cannot
   read makes the whole filter match nothing, as there. _contains_ and the other

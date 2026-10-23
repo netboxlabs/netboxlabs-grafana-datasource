@@ -222,6 +222,19 @@ func distinct(values []string) []string {
 	return out
 }
 
+// decodeRows reads rows into T, refusing one that is not the shape asked for.
+func decodeRows[T any](objectType string, rows []json.RawMessage) ([]T, error) {
+	out := make([]T, 0, len(rows))
+	for _, raw := range rows {
+		var v T
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, &TransportError{Op: "reading " + objectType, Err: err, Message: rowShapeGuidance}
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
 // rowID reads a row's primary key by the rule every consumer of these rows
 // applies (toInt): a positive whole number below 2^53.
 func rowID(raw json.RawMessage, pk string) (int, error) {

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -208,9 +209,10 @@ func TestAssignmentTypes_FHRPByElimination(t *testing.T) {
 	t.Run("the one left", func(t *testing.T) {
 		f := world()
 		wantTypes(t, learn(t, newTestProvider(t, f), idInterface, idVMInterface, idFHRPGroup), all)
-		// Every address carrying the id was read, by that id alone.
+		// Every address carrying the id was read, by that id alone, and read again
+		// once the tables were (see EliminationReadsInOrder).
 		sent := f.sentWith("ipam/ip-addresses", "filter[assigned_object_type_id]__eq")
-		if len(sent) != 1 || sent[0].query.Get("filter[assigned_object_type_id]__eq") != "86" {
+		if len(sent) != 2 || sent[0].query.Get("filter[assigned_object_type_id]__eq") != "86" || sent[1].query.Get("filter[assigned_object_type_id]__eq") != "86" {
 			t.Errorf("addresses read by type: %v", sent)
 		}
 	})
@@ -493,7 +495,7 @@ func TestAssignmentTypes_LoadingIsNotCachedAsUnknown(t *testing.T) {
 // The tables are read after the addresses that carry the id, never before: a
 // VM interface and the address assigned to it appear together, and an absence
 // read first and an address read second would see the address and not the
-// interface.
+// interface. This pins what comes of it; EliminationReadsInOrder pins the order.
 func TestAssignmentTypes_AbsenceIsReadAfterTheAddresses(t *testing.T) {
 	f := assignFake()
 	f.pathOrigin(idInterface, 5)
@@ -511,6 +513,165 @@ func TestAssignmentTypes_AbsenceIsReadAfterTheAddresses(t *testing.T) {
 	p := newTestProvider(t, f)
 
 	notNamed(t, learn(t, p, idInterface, idVMInterface), idVMInterface, "virtualization.vminterface")
+}
+
+// eliminationTrace is the reads of an elimination, by what each is for, in the
+// order they were sent.
+func eliminationTrace(f *fakeService) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, r := range f.requests {
+		switch {
+		case r.entity == "_meta/schema":
+			out = append(out, "catalogue")
+		case r.entity == "ipam/ip-addresses" && r.query.Has("filter[assigned_object_type_id]__eq"):
+			out = append(out, "addresses carrying the id")
+		case r.entity == "virtualization/interfaces" && r.query.Has("filter[id]__in"):
+			out = append(out, "VM interfaces by id")
+		case r.entity == "virtualization/interfaces":
+			out = append(out, "VM interfaces, any")
+		case r.entity == "ipam/fhrp-groups":
+			out = append(out, "groups")
+		}
+	}
+	return out
+}
+
+// The elimination's reads, in the order that makes them mean something: the
+// catalogue, the addresses carrying the id, then what a type's having rows
+// and the objects' being its rows, then the groups, then the addresses again
+// (what is the same in both was there throughout), then the catalogue again.
+func TestAssignmentTypes_EliminationReadsInOrder(t *testing.T) {
+	f := assignFake()
+	f.pathOrigin(idInterface, 5)
+	f.fhrpAddress(idFHRPGroup, 300, 2)
+	p := newTestProvider(t, f)
+	if _, err := p.catalogue(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	f.forget()
+
+	wantTypes(t, learn(t, p, idInterface, idFHRPGroup), contentTypes{idInterface: "dcim.interface", idFHRPGroup: "ipam.fhrpgroup"})
+	want := []string{"catalogue", "addresses carrying the id", "VM interfaces, any", "VM interfaces by id", "groups", "addresses carrying the id", "catalogue"}
+	if got := eliminationTrace(f); !slices.Equal(got, want) {
+		t.Errorf("read in this order:\n  %q\nwant\n  %q", got, want)
+	}
+}
+
+// The last VM is deleted after the addresses carrying its type were read and
+// before the VM interface table is: NetBox deletes its interfaces and their
+// addresses with it, so the table reads empty. The deleted interface's id is an
+// FHRP group's (the demo's VM interfaces 1 and 2 are its groups 1 and 2), so
+// without a second look the VM interface type would be named the group's, and
+// kept. An address that is in both reads proves its interface was there
+// throughout: deletion cascades and ids are not reused.
+func TestAssignmentTypes_DeletionDuringTheReadsRulesNothingOut(t *testing.T) {
+	f := assignFake()
+	f.pathOrigin(idInterface, 5)
+	f.addRows("virtualization/virtual-machines", ownerRow(1, 0, 0))
+	f.addRows("virtualization/interfaces", vmIfaceRow(1, 1))
+	f.addRows("ipam/ip-addresses", addrRow(13, idVMInterface, 1, 0))
+	f.fhrpAddress(idFHRPGroup, 300, 1)
+	var once sync.Once
+	f.afterRequest = func(entity string, q url.Values) {
+		if entity == "ipam/ip-addresses" && q.Get("filter[assigned_object_type_id]__eq") == "11" {
+			once.Do(func() {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				f.entities["virtualization/virtual-machines"] = []map[string]interface{}{}
+				f.entities["virtualization/interfaces"] = []map[string]interface{}{}
+				f.entities["ipam/ip-addresses"] = slices.DeleteFunc(f.entities["ipam/ip-addresses"], func(r map[string]interface{}) bool { return r["id"] == float64(13) })
+			})
+		}
+	}
+	p := newTestProvider(t, f)
+
+	notNamed(t, learn(t, p, idInterface, idVMInterface), idVMInterface, "virtualization.vminterface")
+	// Undecided, not settled: asked about again soon, not unknown for the TTL.
+	p.typeMu.Lock()
+	defer p.typeMu.Unlock()
+	if p.types.asked[idVMInterface] || p.types.deferred[idVMInterface].IsZero() {
+		t.Errorf("the id was settled (asked %v, deferred until %v), want undecided", p.types.asked[idVMInterface], p.types.deferred[idVMInterface])
+	}
+}
+
+// Any difference between the two reads of the addresses leaves the id
+// undecided: one that appears is as much a sign the replica is changing as one
+// that goes.
+func TestAssignmentTypes_AddressesThatChangeDuringTheReadsRuleNothingOut(t *testing.T) {
+	for name, change := range map[string]func(f *fakeService){
+		"one appears": func(f *fakeService) { f.addRows("ipam/ip-addresses", addrRow(301, idFHRPGroup, 2, 0)) },
+		"one is reassigned": func(f *fakeService) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			for _, r := range f.entities["ipam/ip-addresses"] {
+				if r["id"] == float64(300) {
+					r["assigned_object_id"] = float64(3)
+				}
+			}
+			f.entities["ipam/fhrp-groups"] = append(f.entities["ipam/fhrp-groups"], idRow(3))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := assignFake()
+			f.pathOrigin(idInterface, 5)
+			f.fhrpAddress(idFHRPGroup, 300, 2)
+			var once sync.Once
+			f.afterRequest = func(entity string, q url.Values) {
+				if entity == "ipam/ip-addresses" && q.Has("filter[assigned_object_type_id]__eq") {
+					once.Do(func() { change(f) })
+				}
+			}
+			p := newTestProvider(t, f)
+
+			wantTypes(t, learn(t, p, idInterface, idFHRPGroup), contentTypes{idInterface: "dcim.interface"})
+			p.typeMu.Lock()
+			defer p.typeMu.Unlock()
+			if p.types.asked[idFHRPGroup] || p.types.deferred[idFHRPGroup].IsZero() {
+				t.Errorf("the id was settled, want undecided")
+			}
+		})
+	}
+}
+
+// More addresses than can be read the second time are a difference too, whatever
+// the first of them say: the first ten thousand are the same.
+func TestAssignmentTypes_AddressesPastTheCapOnTheSecondReadRuleNothingOut(t *testing.T) {
+	f := assignFake()
+	f.pathOrigin(idInterface, 5)
+	f.addRows("ipam/fhrp-groups", idRow(2))
+	rows := make([]map[string]interface{}, MaxLimit)
+	for i := range rows {
+		rows[i] = addrRow(1000+i, idFHRPGroup, 2, 0)
+	}
+	f.addRows("ipam/ip-addresses", rows...)
+	// The first read is MaxLimit rows in pages of 1000; one more turns up after it.
+	var pages atomic.Int32
+	f.afterRequest = func(entity string, q url.Values) {
+		if entity == "ipam/ip-addresses" && q.Has("filter[assigned_object_type_id]__eq") && pages.Add(1) == MaxLimit/pageSize {
+			f.addRows("ipam/ip-addresses", addrRow(1000+MaxLimit, idFHRPGroup, 2, 0))
+		}
+	}
+	p := newTestProvider(t, f)
+
+	wantTypes(t, learn(t, p, idInterface, idFHRPGroup), contentTypes{idInterface: "dcim.interface"})
+}
+
+// The groups are matched to the objects by id: a route that hands one group
+// back twice, and another not at all, has not shown both exist.
+func TestAssignmentTypes_GroupsAreMatchedByID(t *testing.T) {
+	logs := captureLogs(t)
+	f := assignFake()
+	f.pathOrigin(idInterface, 5)
+	f.addRows("ipam/fhrp-groups", idRow(1), idRow(1))
+	f.addRows("ipam/ip-addresses", addrRow(300, idFHRPGroup, 1, 0), addrRow(301, idFHRPGroup, 2, 0))
+	p := newTestProvider(t, f)
+
+	wantTypes(t, learn(t, p, idInterface, idFHRPGroup), contentTypes{idInterface: "dcim.interface"})
+	if got := logs.warnings(); len(got) != 1 || !strings.Contains(got[0], "86") {
+		t.Errorf("logged %q, want one line naming id 86", got)
+	}
 }
 
 // Objects the addresses are assigned to that are rows of a type not yet ruled

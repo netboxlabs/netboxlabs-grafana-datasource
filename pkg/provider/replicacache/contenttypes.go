@@ -92,7 +92,7 @@ type typeCache struct {
 	// expires.
 	conflicted map[int]bool
 	// deferred is every id left undecided only because the replica was still
-	// loading, and when to ask about it again.
+	// loading or changing, and when to ask about it again.
 	deferred map[int]time.Time
 	expires  time.Time
 }
@@ -101,11 +101,12 @@ func newTypeCache() *typeCache {
 	return &typeCache{learned: contentTypes{}, asked: map[int]bool{}, conflicted: map[int]bool{}, deferred: map[int]time.Time{}, expires: time.Now().Add(catalogTTL)}
 }
 
-// loadingRetry is how long an id left undecided because the replica was still
-// loading waits before it is asked about again: a replica that loads for an
-// hour is not read seventeen times for every panel refresh, and one that has
-// finished is not left unknown for the catalogue's ten minutes.
-const loadingRetry = time.Minute
+// undecidedRetry is how long an id left undecided because the replica was still
+// loading, or changing under the reads, waits before it is asked about again: a
+// replica that loads for an hour is not read nineteen times for every panel
+// refresh, and one that has finished is not left unknown for the catalogue's ten
+// minutes.
+const undecidedRetry = time.Minute
 
 // settled reports whether a learn has nothing more to say about id for now.
 func (c *typeCache) settled(id int) bool {
@@ -136,7 +137,7 @@ type typeLearning struct {
 	learned    contentTypes
 	conflicted map[int]bool
 	// undecided is the id the elimination could not decide because the replica
-	// was still loading.
+	// was still loading or was changing under its reads.
 	undecided map[int]bool
 	reads     readStats
 }
@@ -197,7 +198,7 @@ func (p *Provider) assignmentTypes(ctx context.Context, typeIDs []int, st *readS
 					tc.learned, tc.conflicted = l.learned, l.conflicted
 					for _, id := range need {
 						if l.undecided[id] {
-							tc.deferred[id] = time.Now().Add(loadingRetry)
+							tc.deferred[id] = time.Now().Add(undecidedRetry)
 						} else {
 							tc.asked[id] = true
 						}
@@ -272,7 +273,7 @@ func (p *Provider) learnTypes(ctx context.Context, ids []int, known contentTypes
 			// Recorded, so that no later learn logs it again.
 			disagreements = append(disagreements, el.contradiction)
 			l.conflicted[el.candidate] = true
-		case el.loading:
+		case el.unsettled:
 			l.undecided[el.candidate] = true
 		}
 	}
@@ -385,24 +386,61 @@ func (p *Provider) rowsByID(ctx context.Context, objectType, column string, ids 
 	return rows, err
 }
 
-// routeRowsByID is the rows of objectType with one of ids, from the row route
-// and not from what the catalogue says of the table, in as many requests as
-// the ids need.
-func (p *Provider) routeRowsByID(ctx context.Context, objectType string, ids []int, st *readStats) ([]json.RawMessage, error) {
+// routeIDsByID is those of ids that the row route of objectType holds a row
+// for, from the route and not from what the catalogue says of the table, in as
+// many requests as the ids need. A set of ids, not a count of rows: one row
+// handed back twice is not two rows.
+func (p *Provider) routeIDsByID(ctx context.Context, objectType string, ids []int, st *readStats) (map[int]bool, error) {
 	params, key := url.Values{"fields": {"id"}}, param("id", "in")
 	batches, err := batchValues(key, intStrings(ids), 0, params)
 	if err != nil {
 		return nil, err
 	}
-	var out []json.RawMessage
+	found := map[int]bool{}
 	for _, batch := range batches {
 		rows, _, err := p.readRoute(ctx, objectType, withParam(params, key, strings.Join(batch, ",")), MaxLimit, st)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, rows...)
+		for _, raw := range rows {
+			id, err := rowID(raw, "id")
+			if err != nil {
+				return nil, &TransportError{Op: "reading " + objectType, Err: err, Message: rowShapeGuidance}
+			}
+			found[id] = true
+		}
 	}
-	return out, nil
+	return found, nil
+}
+
+// carryingAddresses is the addresses that carry a content type id, each by id
+// and with the object it is assigned to (0 for none), from the row route. more
+// says there are more than can be read.
+func (p *Provider) carryingAddresses(ctx context.Context, typeID int, st *readStats) (carrying map[int]int, more bool, err error) {
+	rows, more, err := p.readRoute(ctx, "ipam/ip-addresses",
+		url.Values{param("assigned_object_type_id", "eq"): {strconv.Itoa(typeID)}, "fields": {"id,assigned_object_id"}}, MaxLimit, st)
+	if err != nil {
+		return nil, false, err
+	}
+	addresses, err := decodeRows[assignedAddress]("ipam/ip-addresses", rows)
+	if err != nil {
+		return nil, false, err
+	}
+	carrying = make(map[int]int, len(addresses))
+	for _, a := range addresses {
+		carrying[a.ID] = max(a.ObjectID, 0)
+	}
+	return carrying, more, nil
+}
+
+// allFound reports whether every one of ids is in found.
+func allFound(found map[int]bool, ids []int) bool {
+	for _, id := range ids {
+		if !found[id] {
+			return false
+		}
+	}
+	return true
 }
 
 // distinctSorted is ids without repeats, ascending.
@@ -611,8 +649,9 @@ type elimination struct {
 	group bool
 	// contradiction says why it is not, when the rows contradict it.
 	contradiction string
-	// loading says it is not decided, because the replica was still loading.
-	loading bool
+	// unsettled says it is not decided, because the replica was still loading
+	// or was changing under the reads.
+	unsettled bool
 }
 
 // fhrpByElimination is the FHRP group's id, when exactly one id in hand is
@@ -639,6 +678,13 @@ type elimination struct {
 //   - The objects those addresses are assigned to are then looked for, by id,
 //     among the rows of each type not ruled out: any is that type's, and the id
 //     may be too.
+//   - The addresses are read again once the tables and the groups have been,
+//     and must be the same, each with the same object. Deleting the last VM
+//     deletes its interfaces and their addresses (a GenericRelation), so a table
+//     read empty after the addresses were read proves nothing, and the deleted
+//     interfaces' ids may well be groups' ids; an address in both reads had its
+//     object throughout, since deletion cascades and ids are not reused. Any
+//     difference leaves the id undecided.
 //   - The replica must have loaded everything it will, on a catalogue read now:
 //     while it loads, or reloads inside the cached catalogue's time to live, a
 //     table with no rows may be rows not yet received. It is looked at before
@@ -646,6 +692,12 @@ type elimination struct {
 //
 // Ids the rows disagree on are not "left": one of them might be the group's. A
 // table the catalogue does not list cannot be ruled out, nor checked.
+//
+// Two limits remain. The replica reports no snapshot epoch, so a whole reload
+// (complete, loading, complete again) inside the few requests between the two
+// catalogue reads is not seen. And a not-replicated 404 is an empty table once
+// the snapshot is complete — an empty NetBox table is never fed, which is the
+// premise this learning rests on.
 func (p *Provider) fhrpByElimination(ctx context.Context, ids []int, learned contentTypes, conflicted map[int]bool, st *readStats) (elimination, error) {
 	var left []int
 	for _, typeID := range ids {
@@ -674,7 +726,7 @@ func (p *Provider) fhrpByElimination(ctx context.Context, ids []int, learned con
 		return elimination{}, err
 	}
 	if !c.SnapshotComplete {
-		el.loading = true
+		el.unsettled = true
 		return el, nil
 	}
 	tables := []string{"ipam/ip-addresses", "ipam/fhrp-groups"}
@@ -687,27 +739,22 @@ func (p *Provider) fhrpByElimination(ctx context.Context, ids []int, learned con
 		}
 	}
 
-	rows, more, err := p.readRoute(ctx, "ipam/ip-addresses",
-		url.Values{param("assigned_object_type_id", "eq"): {strconv.Itoa(el.candidate)}, "fields": {"id,assigned_object_id"}}, MaxLimit, st)
+	first, more, err := p.carryingAddresses(ctx, el.candidate, st)
 	if err != nil {
 		return elimination{}, err
 	}
 	// Every address, or the check is of some of them.
-	if more || len(rows) == 0 {
+	if more || len(first) == 0 {
 		return el, nil
-	}
-	addresses, err := decodeRows[assignedAddress]("ipam/ip-addresses", rows)
-	if err != nil {
-		return elimination{}, err
 	}
 	unassigned := false
 	var objectIDs []int
-	for _, a := range addresses {
-		if a.ObjectID <= 0 {
+	for _, object := range first {
+		if object == 0 {
 			unassigned = true
 			continue
 		}
-		objectIDs = append(objectIDs, a.ObjectID)
+		objectIDs = append(objectIDs, object)
 	}
 	objects := distinctSorted(objectIDs)
 
@@ -722,32 +769,36 @@ func (p *Provider) fhrpByElimination(ctx context.Context, ids []int, learned con
 		}
 	}
 	for _, other := range others {
-		rows, err := p.routeRowsByID(ctx, other.table, objects, st)
+		found, err := p.routeIDsByID(ctx, other.table, objects, st)
 		if err != nil {
 			return elimination{}, err
 		}
-		if len(rows) > 0 {
+		if len(found) > 0 {
 			return el, nil
 		}
 	}
-	var groups []json.RawMessage
+	var groups map[int]bool
 	if !unassigned {
-		if groups, err = p.routeRowsByID(ctx, "ipam/fhrp-groups", objects, st); err != nil {
+		if groups, err = p.routeIDsByID(ctx, "ipam/fhrp-groups", objects, st); err != nil {
 			return elimination{}, err
 		}
 	}
 
+	again, moreAgain, err := p.carryingAddresses(ctx, el.candidate, st)
+	if err != nil {
+		return elimination{}, err
+	}
 	if c, err = p.catalogue(ctx, true); err != nil {
 		return elimination{}, err
 	}
-	if !c.SnapshotComplete {
-		el.loading = true
+	if !c.SnapshotComplete || moreAgain || !maps.Equal(first, again) {
+		el.unsettled = true
 		return el, nil
 	}
 	switch {
 	case unassigned:
 		el.contradiction = fmt.Sprintf("%d (carried by an address assigned to nothing, though no other type is left for it)", el.candidate)
-	case len(groups) != len(objects):
+	case !allFound(groups, objects):
 		el.contradiction = fmt.Sprintf("%d (carried by an address assigned to no FHRP group, though no other type is left for it)", el.candidate)
 	default:
 		el.group = true

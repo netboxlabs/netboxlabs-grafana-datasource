@@ -2,73 +2,31 @@
 
 ## Unreleased
 
-- **The secure SOCKS proxy can be turned on from the settings page.** On
-  self-hosted Grafana with a secure SOCKS5 data source proxy configured, the
-  page has a **Secure Socks Proxy** section whose **Enabled** switch routes the
-  datasource through it; before, only the API or a provisioning file could. On
-  Grafana Cloud, Private Data Source Connect adds its own network selector, and
-  only to the data sources Grafana lists, which do not include this plugin yet.
-  The README gives the two `jsonData` fields that route it through a PDC network
-  over the API: `enableSecureSocksProxy`, and `secureSocksProxyUsername` set to
-  the network's ID.
-- **Failures through the secure SOCKS proxy say so.** For a datasource routed
-  through the proxy, a failure the proxy can cause (a refused, unreachable or
-  timed-out connection, or the proxy's own TLS) reads, on Save & test and on
-  panels, "through the secure socks proxy", and points at the proxy — on
-  Grafana Cloud, the PDC agent — rather than at the NetBox URL. Before, a
-  stopped agent, or one whose traffic to NetBox is dropped, read as "Cannot
-  reach NetBox … Check the NetBox URL". Credentials the proxy refuses, or an
-  empty `secureSocksProxyUsername`, name that setting. A failure Grafana can
-  tell is NetBox's, such as its certificate, points at the NetBox URL as the
-  proxy reaches it; a timeout or a dropped connection names the proxy either
-  way. The settings page shows the switch as the plugin SDK reads the
-  setting: on only for the JSON boolean `true`.
-- **Proxy settings the plugin SDK cannot use are refused by name.** With the
-  proxy on, a `secureSocksProxyUsername` that is not a string (a placeholder
-  left blank in a provisioning file is null) made every request fail inside
-  the SDK; an `enableSecureSocksProxy` written to mean on but not as a JSON
-  boolean (`"true"`, `"yes"`, `1`) silently left the proxy off. Both now fail
-  with a message naming the setting, on Save & test and on panels. A flag that
-  reads as off (`"false"`, `0`) is still accepted as off.
-- **Editing the API token keeps the page's other unsaved secrets.** The token
-  field replaced every secret not saved yet, including any that another control
-  on the page had set. It now changes only the token.
-
-- **Go 1.26.10 and `golang.org/x/net` 0.60.0.** The backend is built with fixes
-  for advisories published on 2026-10-08 in Go's HTTP/1 and HTTP/2 handling,
-  MIME header parsing, TLS and `html/template` (GO-2026-6599, 6600, 6603,
-  6605, 6607, 6608, 6610, 6611, 6612, 6613, 6617), and on 2026-10-21 in
-  `crypto/x509`, which now refuses intermediate certificates that are no longer
-  trusted (GO-2026-6809). `golang.org/x/sys` and `golang.org/x/text` move with
-  `x/net`.
-
-- **The API token only goes to the configured NetBox URL.** Paging and
-  object-type discovery followed the URLs NetBox writes into its responses,
-  which NetBox builds from the request as it arrived: behind a proxy that does
-  not pass `X-Forwarded-Proto`/`X-Forwarded-Host`, they name plain http or the
-  proxy's upstream host, and the token went with them. Every request is now
-  built on the configured URL, and a request or redirect that would leave it is
-  refused. The standard upgrade from `http://` to `https://` on the same host
-  (port 80 to 443) is still followed; a NetBox on another https port is
-  configured with its `https://` URL.
-- **Branch caches stay bounded.** The schema, field and custom-field caches were
-  keyed on the branch value as the query sent it, so on a NetBox without
-  netbox-branching every new value cached another entry and downloaded the
-  OpenAPI schema again. Values are resolved first: a branch name and its schema
-  id share one entry, and without netbox-branching every value is main, as
-  NetBox treats it, so no `X-NetBox-Branch` header is sent. Expired schema and
-  field entries are dropped, and panels opening together on a cold cache share
-  one schema download.
-
-- **The recording-rule recipe is corrected.** _Cutting the cost: record the
-  NetBox side once_ in `docs/alerting/rule-time-join.md` now labels the
-  recorded `netbox_device_info` series through join keys, so no `label_replace`
-  is needed, and its joins take each device's newest series. Before, a NetBox
-  edit to a device's site, role or tenant put every alert built on the recipe
-  into error for about four minutes (`found duplicate series`). The recipe now
-  shows the rule as a provisioning file, and states its limits: up to 10,000
-  devices and a full inventory read on every run, past which the metrics should
-  carry NetBox labels from collection instead.
+- **Secure SOCKS proxy switch on the settings page.** On self-hosted Grafana
+  with a secure SOCKS5 data source proxy, the datasource can be routed through
+  it from the settings page. Grafana Cloud's PDC network selector appears once
+  Grafana lists the plugin; until then, route it over the API (see the README).
+- **Proxy failures say so.** When a request fails at the proxy or the PDC agent,
+  Save & test and panels say "through the secure socks proxy" instead of
+  blaming the NetBox URL, and refused credentials name
+  `secureSocksProxyUsername`.
+- **Proxy settings that break routing are refused.** A non-string
+  `secureSocksProxyUsername` made every request fail, and an
+  `enableSecureSocksProxy` written as `"true"` or `"yes"` left the proxy silently
+  off; both are now reported by name.
+- **Editing the API token keeps the page's other unsaved secrets.**
+- **The API token stays on the configured NetBox URL.** Paging and object-type
+  discovery no longer follow URLs NetBox writes into its responses, which behind
+  a proxy can name another host or plain http. Redirects off the configured URL
+  are refused, except http to https on the same host.
+- **Branch caches stay bounded.** Without netbox-branching, a new branch value no
+  longer adds a cache entry and downloads the OpenAPI schema again.
+- **Recording-rule recipe fixed.** Alerts built on the recipe in
+  `docs/alerting/rule-time-join.md` no longer go into error for minutes after a
+  device's site, role or tenant changes, and the recipe states its limits.
+- **Go 1.26.10 and `golang.org/x/net` 0.60.0**, for the Go security advisories
+  of 2026-10-08 and 2026-10-21 (GO-2026-6599, 6600, 6603, 6605,
+  6607, 6608, 6610–6613, 6617, 6809).
 
 ## 1.0.3 (2026-10-06)
 

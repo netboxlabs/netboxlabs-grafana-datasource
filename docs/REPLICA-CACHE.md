@@ -319,7 +319,9 @@ contains_, _not starts with_, _not ends with_, _not (ci)_). Every text match is
 case-insensitive and literal: a `%` or `_` in a value is that character, not a
 wildcard. A plugin's object types, which NetBox's filtersets do not describe,
 keep the replica's list on every stored column and related name (`site
-contains ams` works there).
+contains ams` works there). There, a filter on a related name compares the
+target's name, not the longer text the column may show (a `vrf` shown as
+`name (rd)` matches on `name`); `<key>_id` matches exactly.
 
 The replica compares with greater and less than only, so **_or equal_** is
 sent as the strict comparison that is exactly equivalent on a whole-number
@@ -393,8 +395,9 @@ name (`name (rd)`, as NetBox mode does), and a VRF may have none: filter by
 the **Sort by** list offers exactly those. A related name sorts by the name the
 replica joins in, even where the column shows more (`vrf` shows `name (rd)`),
 which is how NetBox orders most related objects (a site, a VRF, a device by
-name first). Sorting on a related name whose target has no data is dropped and
-stated in a panel note.
+name first; [Known divergences](#known-divergences) lists the others). Sorting
+on a related name whose target has no data is dropped and stated in a panel
+note.
 
 A name NetBox sorts naturally — one it declares with its `natural_sort`
 collation: a device's, a site's, an interface's, a VM's, a VRF's `name`, and a
@@ -547,6 +550,10 @@ mode on the same data:
   differ from NetBox mode's, which a note says; and a name with a zero-valued
   digit run followed by text, or a non-ASCII name, can sort differently. The
   rows themselves are in NetBox's order ([Sorting](#what-a-query-returns)).
+  Rows whose related names tie (two clusters or VRFs of one name) follow the
+  related object's id, where NetBox orders VRFs by route distinguisher and
+  clusters by the row's own id. A query with a negation it cannot count does
+  not carry the note on rows kept.
 - **A NetBox scope cut off by its limit** keeps different first rows than NetBox
   mode; the total agrees, and alert rules refuse it as truncated.
 - **An FHRP group** in a related column (an FHRP group assignment's `group`)
@@ -556,8 +563,11 @@ mode on the same data:
   replica names only by a content type it does not name.
 - **Sorting on a related name** follows the name the replica joins in. NetBox
   orders by the related model's own ordering, which is that name for most (a
-  site, a VRF, a device) but not all: a device type by its manufacturer first,
-  a rack by its site.
+  site, a VRF, a device) but not all: a device type by its manufacturer, a rack
+  by its site, a site's region by id, a VLAN by its site and group, a cable or
+  wireless link by id, an interface by its device, a location by its site, a
+  circuit or provider account by its provider, an IPAM role by its weight and an
+  FHRP group by its protocol, each first.
 - **An address assigned to an object that does not exist** (NetBox does not
   check the target of a generic assignment) can, on a tenant with no VM
   interfaces and when that object's id equals an FHRP group's id, lead the data

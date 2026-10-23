@@ -314,3 +314,32 @@ func TestReadStats_KeepsTheOldestInstant(t *testing.T) {
 		t.Errorf("%+v: one read of unknown age makes the whole of unknown age", st)
 	}
 }
+
+// rowID accepts exactly what toInt accepts of a decoded id: a positive whole
+// number below 2^53. Anything else — a string, null, a boolean, a fraction, a
+// missing key — is a row without a usable id, never a guessed one.
+func TestRowID_AcceptsOnlyAPositiveWholeNumber(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		want int
+		err  error
+	}{
+		{`{"id": 7}`, 7, nil},
+		{`{"id": 7.0}`, 7, nil},
+		{`{"id": 9007199254740991}`, 9007199254740991, nil},
+		{`{"id": 9007199254740992}`, 0, errRowWithoutID},
+		{`{"id": 0}`, 0, errRowWithoutID},
+		{`{"id": -3}`, 0, errRowWithoutID},
+		{`{"id": 7.5}`, 0, errRowWithoutID},
+		{`{"id": "7"}`, 0, errRowWithoutID},
+		{`{"id": null}`, 0, errRowWithoutID},
+		{`{"id": true}`, 0, errRowWithoutID},
+		{`{"name": "x"}`, 0, errRowWithoutID},
+		{`null`, 0, errMalformedRow},
+	} {
+		got, err := rowID(json.RawMessage(tc.row), "id")
+		if got != tc.want || err != tc.err {
+			t.Errorf("rowID(%s) = %d, %v; want %d, %v", tc.row, got, err, tc.want, tc.err)
+		}
+	}
+}

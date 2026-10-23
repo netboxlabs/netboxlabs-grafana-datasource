@@ -169,7 +169,8 @@ def describe_filter(filterset_class, model, name, filter_):
 models = {}
 for app in APPS:
     try:
-        urls = importlib.import_module(app + '.api.urls')
+        # APPS is the fixed list above, NetBox's own apps: nothing user-supplied is imported.
+        urls = importlib.import_module(app + '.api.urls')  # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
     except ImportError:
         continue
     router = getattr(urls, 'router', None)

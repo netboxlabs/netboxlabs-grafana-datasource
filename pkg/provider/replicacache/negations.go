@@ -2,6 +2,7 @@ package replicacache
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -62,8 +63,11 @@ type negation struct {
 }
 
 func (n negation) positive() provider.Filter {
-	return provider.Filter{Field: n.field, Operator: n.op, Value: strings.Join(n.values, ",")}
+	return provider.Filter{Field: n.field, Operator: n.op, Value: strings.Join(n.values, ","), Label: n.source.Label}
 }
+
+// label is the negated field as the user wrote it, for a refusal.
+func (n negation) label() string { return fieldLabel(n.source) }
 
 // splitNegations separates the negations from the filters the replica takes.
 // Every "n" on one field becomes one negation over all its values; a text
@@ -129,11 +133,11 @@ func validateNegations(negs []negation, e entity, c *catalog) error {
 			return err
 		}
 		if n.op == opExact && isAddress(n.field) {
-			return &UnsupportedFilterError{Field: n.field, Operator: n.source.Operator,
+			return &UnsupportedFilterError{Field: n.label(), Operator: n.source.Operator,
 				Reason: "NetBox matches an IP address by its host whatever the mask, which this backend can test only as a filter it sends, never as one it excludes; filter on what to keep instead"}
 		}
 		if col, _ := filterColumn(e, c, n.field); !rowComparable(col.Type) {
-			return &UnsupportedFilterError{Field: n.field, Operator: n.source.Operator,
+			return &UnsupportedFilterError{Field: n.label(), Operator: n.source.Operator,
 				Reason: fmt.Sprintf("the replica converts a %s value before comparing it, which the rows read here cannot be tested against; filter on what to keep instead", strings.ToLower(col.Type))}
 		}
 	}
@@ -231,9 +235,11 @@ func subtractNegations(filters []provider.Filter, negs []negation, e entity, c *
 		}
 		var kept []provider.Filter
 		var set []string
+		label := ""
 		for _, f := range filters {
 			if f.Field == n.field && equalityOperator(f.Operator) {
 				set = append(set, splitValues(f.Value)...)
+				label = cmp.Or(label, f.Label)
 				continue
 			}
 			kept = append(kept, f)
@@ -252,7 +258,7 @@ func subtractNegations(filters []provider.Filter, negs []negation, e entity, c *
 		if len(left) == 0 {
 			return nil, nil, true
 		}
-		filters = append(kept, provider.Filter{Field: n.field, Operator: opExact, Value: strings.Join(left, ",")})
+		filters = append(kept, provider.Filter{Field: n.field, Operator: opExact, Value: strings.Join(left, ","), Label: label})
 	}
 	return filters, rest, false
 }
@@ -581,7 +587,7 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 			return negatedRows{}, err
 		}
 		if base > MaxLimit {
-			return negatedRows{}, &UnsupportedFilterError{Field: nq.negs[0].field, Operator: nq.negs[0].source.Operator,
+			return negatedRows{}, &UnsupportedFilterError{Field: nq.negs[0].label(), Operator: nq.negs[0].source.Operator,
 				Reason: fmt.Sprintf("the replica cannot count rows for these negated filters together, so the rows are read and tested here, which works up to %s rows; the other filters match %s. Narrow them, or negate fewer values",
 					thousands(MaxLimit), thousands(base))}
 		}
@@ -660,7 +666,7 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 		out = withCount(cnt, out, w.matched)
 	case needAll:
 		// The base outgrew MaxLimit between the count and the walk.
-		return negatedRows{}, &UnsupportedFilterError{Field: nq.negs[0].field, Operator: nq.negs[0].source.Operator,
+		return negatedRows{}, &UnsupportedFilterError{Field: nq.negs[0].label(), Operator: nq.negs[0].source.Operator,
 			Reason: fmt.Sprintf("the rows matching the other filters grew past %s while they were being read, so the matches could not all be counted; narrow the other filters", thousands(MaxLimit))}
 	}
 	// Stopped short of the end with fewer rows than wanted, and nothing to

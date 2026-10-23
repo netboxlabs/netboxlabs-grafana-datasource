@@ -64,10 +64,12 @@ const (
 //	path          a filter NetBox applies through other relations: tenant → group [Path]
 //	refuse        a filter whose meaning a replica cannot reproduce [Reason]
 //
-// Two fields do not depend on the kind. Exclude is set on every kind but refuse,
-// when NetBox negates the filter (site__n; cabled is an isnull that excludes).
-// Single is set on every kind, refusals included (ipam.prefix family is refused
-// and single-valued): it follows the filter's class, not what the filter does.
+// Two fields are not tied to a kind: either can be set on an entry of any kind.
+// Exclude is set when NetBox negates the filter (site__n; cabled is an isnull
+// that excludes), and never on a refusal, whose meaning nothing reads. Single
+// is set when the filter reads one value, refusals included (ipam.prefix family
+// is refused and single-valued): it follows the filter's class, not what the
+// filter does.
 type vocabEntry struct {
 	Kind string `json:"k"`
 	// Column is the column the filter reads on this model, as Django names it
@@ -75,9 +77,10 @@ type vocabEntry struct {
 	// the end). It is empty on a path, a method and a refusal.
 	Column string `json:"c,omitempty"`
 	// Lookup is NetBox's lookup on a value or mac filter: exact, or iexact on the
-	// filters NetBox matches without regard to case (devices' name and serial,
-	// VMs' name, and the serial of racks, modules and inventory items; a VM's
-	// serial is exact), or icontains, gt, ...
+	// base filters NetBox matches without regard to case (devices' name and
+	// serial, VMs' name, and the serial of racks, modules and inventory items; a
+	// VM's serial is exact), or icontains, gt, ... Every text filter's __ie and
+	// __nie variants are iexact too, whatever its base's lookup.
 	Lookup  string `json:"l,omitempty"`
 	Exclude bool   `json:"x,omitempty"`
 	// ToField is the field of the target a related, tree or modelchoice filter

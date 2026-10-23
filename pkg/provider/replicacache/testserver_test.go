@@ -545,18 +545,23 @@ func matches(v interface{}, op, want string) bool {
 // operators. withHost false is a build before host.
 func (f *fakeService) addAddressEntity(withHost bool) {
 	f.addEntity("ipam/ip-addresses", "id:BIGINT:pk", "address:VARCHAR")
-	if !withHost {
-		return
+	if withHost {
+		f.addOperators("ipam/ip-addresses", "address", "host")
 	}
+}
+
+// addOperators lists more operators on one column of an entity's catalogue
+// entry, as a replica-cache build that has them does (host, contains).
+func (f *fakeService) addOperators(objectType, col string, ops ...string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	e := f.schema.Entities["/v1/ipam/ip-addresses"]
+	e := f.schema.Entities["/v1/"+objectType]
 	for i := range e.Columns {
-		if e.Columns[i].Name == "address" {
-			e.Columns[i].Operators = append(e.Columns[i].Operators, "host")
+		if e.Columns[i].Name == col {
+			e.Columns[i].Operators = append(slices.Clone(e.Columns[i].Operators), ops...)
 		}
 	}
-	f.schema.Entities["/v1/ipam/ip-addresses"] = e
+	f.schema.Entities["/v1/"+objectType] = e
 }
 
 // isTextOperator is the service's type gate: these four bind VARCHAR alone.
@@ -708,13 +713,112 @@ func withAnchoredText(s *fakeSchema) *fakeSchema {
 	return s
 }
 
+// netboxTables is the table replica-cache v1.40.1 reads for each NetBox object
+// type it serves, as its catalogue reports them (GET /v1/_meta/schema on a
+// replica of NetBox 4.4.10). The table is what ties an entity to NetBox's
+// filter vocabulary (vocabFor), so the fake has to carry the real one: a name
+// derived from the path (ipam_ip-addresses) is covered by nothing, and every
+// filter on it would quietly keep the catalogue-only rules.
+var netboxTables = map[string]string{
+	"circuits/circuit-terminations":   "circuits_circuittermination",
+	"circuits/circuit-types":          "circuits_circuittype",
+	"circuits/circuits":               "circuits_circuit",
+	"circuits/provider-accounts":      "circuits_provideraccount",
+	"circuits/provider-networks":      "circuits_providernetwork",
+	"circuits/providers":              "circuits_provider",
+	"core/object-types":               "core_objecttype",
+	"dcim/cable-paths":                "dcim_cablepath",
+	"dcim/cable-terminations":         "dcim_cabletermination",
+	"dcim/cables":                     "dcim_cable",
+	"dcim/console-ports":              "dcim_consoleport",
+	"dcim/console-server-ports":       "dcim_consoleserverport",
+	"dcim/device-bays":                "dcim_devicebay",
+	"dcim/device-roles":               "dcim_devicerole",
+	"dcim/device-types":               "dcim_devicetype",
+	"dcim/devices":                    "dcim_device",
+	"dcim/front-ports":                "dcim_frontport",
+	"dcim/interfaces":                 "dcim_interface",
+	"dcim/inventory-item-roles":       "dcim_inventoryitemrole",
+	"dcim/inventory-items":            "dcim_inventoryitem",
+	"dcim/locations":                  "dcim_location",
+	"dcim/mac-addresses":              "dcim_macaddress",
+	"dcim/manufacturers":              "dcim_manufacturer",
+	"dcim/module-bays":                "dcim_modulebay",
+	"dcim/module-types":               "dcim_moduletype",
+	"dcim/modules":                    "dcim_module",
+	"dcim/platforms":                  "dcim_platform",
+	"dcim/power-feeds":                "dcim_powerfeed",
+	"dcim/power-outlets":              "dcim_poweroutlet",
+	"dcim/power-panels":               "dcim_powerpanel",
+	"dcim/power-ports":                "dcim_powerport",
+	"dcim/rack-roles":                 "dcim_rackrole",
+	"dcim/rack-types":                 "dcim_racktype",
+	"dcim/racks":                      "dcim_rack",
+	"dcim/rear-ports":                 "dcim_rearport",
+	"dcim/regions":                    "dcim_region",
+	"dcim/site-groups":                "dcim_sitegroup",
+	"dcim/sites":                      "dcim_site",
+	"dcim/virtual-chassis":            "dcim_virtualchassis",
+	"dcim/virtual-device-contexts":    "dcim_virtualdevicecontext",
+	"ipam/aggregates":                 "ipam_aggregate",
+	"ipam/asn-ranges":                 "ipam_asnrange",
+	"ipam/asns":                       "ipam_asn",
+	"ipam/fhrp-group-assignments":     "ipam_fhrpgroupassignment",
+	"ipam/fhrp-groups":                "ipam_fhrpgroup",
+	"ipam/ip-addresses":               "ipam_ipaddress",
+	"ipam/ip-ranges":                  "ipam_iprange",
+	"ipam/prefixes":                   "ipam_prefix",
+	"ipam/rirs":                       "ipam_rir",
+	"ipam/roles":                      "ipam_role",
+	"ipam/service-templates":          "ipam_servicetemplate",
+	"ipam/services":                   "ipam_service",
+	"ipam/vlan-groups":                "ipam_vlangroup",
+	"ipam/vlans":                      "ipam_vlan",
+	"ipam/vrfs":                       "ipam_vrf",
+	"tenancy/tenant-groups":           "tenancy_tenantgroup",
+	"tenancy/tenants":                 "tenancy_tenant",
+	"virtualization/cluster-groups":   "virtualization_clustergroup",
+	"virtualization/cluster-types":    "virtualization_clustertype",
+	"virtualization/clusters":         "virtualization_cluster",
+	"virtualization/interfaces":       "virtualization_vminterface",
+	"virtualization/virtual-disks":    "virtualization_virtualdisk",
+	"virtualization/virtual-machines": "virtualization_virtualmachine",
+	"vpn/ike-policies":                "vpn_ikepolicy",
+	"vpn/ike-proposals":               "vpn_ikeproposal",
+	"vpn/ipsec-policies":              "vpn_ipsecpolicy",
+	"vpn/ipsec-profiles":              "vpn_ipsecprofile",
+	"vpn/ipsec-proposals":             "vpn_ipsecproposal",
+	"vpn/l2vpn-terminations":          "vpn_l2vpntermination",
+	"vpn/l2vpns":                      "vpn_l2vpn",
+	"vpn/tunnel-groups":               "vpn_tunnelgroup",
+	"vpn/tunnel-terminations":         "vpn_tunneltermination",
+	"vpn/tunnels":                     "vpn_tunnel",
+	"wireless/wireless-lan-groups":    "wireless_wirelesslangroup",
+	"wireless/wireless-lans":          "wireless_wirelesslan",
+	"wireless/wireless-links":         "wireless_wirelesslink",
+}
+
+// fakeTable is the table the fake's catalogue gives an object type: NetBox's
+// own for a NetBox type, and one derived from the path for a plugin's, which
+// the vocabulary does not cover. A NetBox type missing from netboxTables is a
+// test that would bypass the vocabulary without saying so, so it stops here.
+func fakeTable(objectType string) string {
+	if table, ok := netboxTables[objectType]; ok {
+		return table
+	}
+	if !strings.HasPrefix(objectType, "plugins/") {
+		panic("fakeTable: add NetBox's table for " + objectType + " to netboxTables")
+	}
+	return strings.ReplaceAll(objectType, "/", "_")
+}
+
 // addEntity registers an ingested entity with plain columns, for tests that
 // use an object type the devices fixture does not carry. cols is "name:TYPE";
 // the primary key is "id" unless a col is "<name>:TYPE:pk".
 func (f *fakeService) addEntity(objectType string, cols ...string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	e := fakeEntity{Table: strings.ReplaceAll(objectType, "/", "_"), PrimaryKey: "id", Ingested: true, DataAsOf: strp("2026-09-22T14:03:11Z")}
+	e := fakeEntity{Table: fakeTable(objectType), PrimaryKey: "id", Ingested: true, DataAsOf: strp("2026-09-22T14:03:11Z")}
 	for _, c := range cols {
 		parts := strings.Split(c, ":")
 		col := fakeColumn{Name: parts[0], Type: parts[1], Nullable: true, Operators: []string{"eq", "gt", "lt", "in", "isnull"}}

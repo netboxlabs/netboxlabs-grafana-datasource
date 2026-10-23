@@ -36,10 +36,20 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err != nil {
 		return nil, err
 	}
-	if err := validateChoiceValues(spec.ObjectType, spec.Filters); err != nil {
+	// NetBox's own filter vocabulary comes first (vocabfilters.go), on a fed
+	// entity and an unfed one alike: it is NetBox's, not the replica's. none is
+	// a filter that no row can match: no request is needed.
+	filters, none, err := translateFilters(e.Table, spec.Filters, e, c)
+	if err != nil {
 		return nil, err
 	}
-	filters := spec.Filters
+	// From here on the request is planned from the filters as translated, never
+	// as written: one NetBox reads from another column (cabled is cable_id)
+	// must not be checked, expanded or counted as the name it was written as.
+	spec.Filters = filters
+	if err := validateChoiceValues(spec.ObjectType, filters); err != nil {
+		return nil, err
+	}
 	// An entity the catalogue has as unfed is NOT refused here: the row route
 	// answers 404 for it, classified as not-replicated by the client, and it
 	// is current where the catalogue can be ten minutes stale. Nor is the
@@ -56,13 +66,13 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	var (
 		plan request
 		negs []negation
-		// none is a filter that no row can match: no request is needed.
-		none bool
 	)
 	if e.Ingested {
-		if filters, none, err = rewriteComparisons(filters, e, c); err != nil {
+		var unsatisfiable bool
+		if filters, unsatisfiable, err = rewriteComparisons(filters, e, c); err != nil {
 			return nil, err
 		}
+		none = none || unsatisfiable
 		filters, negs = splitNegations(filters)
 		if err := validateFilters(filters, e, c); err != nil {
 			return nil, err

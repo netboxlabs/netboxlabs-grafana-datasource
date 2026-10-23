@@ -104,6 +104,7 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 	// planned" to "status is planned". replica-cache expresses the same thing
 	// with `in`, so the values are collected and emitted once.
 	exactValues := map[string][]string{}
+	exactLabels := map[string]string{}
 	var exactOrder []string
 
 	// Non-exact operators cannot be unioned, so a repeated one on the same field
@@ -119,6 +120,9 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 		if op == "exact" {
 			op = opExact
 		}
+		refuse := func(reason string) (url.Values, error) {
+			return nil, &UnsupportedFilterError{Field: fieldLabel(f), Operator: f.Operator, Reason: reason}
+		}
 
 		// The empty family is a predicate on the column, not a comparison, so it
 		// ignores Value entirely. Set rather than Add: two empty-family rows on
@@ -126,6 +130,13 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 		// the NetBox provider resolves the same conflict.
 		if op == opEmpty || op == opNEmpty {
 			q.Set(param(f.Field, "isnull"), boolString(op == opEmpty))
+			continue
+		}
+		// NetBox's own IS NULL and IS NOT NULL (translateFilters), which take no
+		// value either. Two names that ask for both on one column have already
+		// been answered as no row (nullAndNotNull), so Set loses nothing.
+		if op == opIsNull || op == opNotNull {
+			q.Set(param(f.Field, "isnull"), boolString(op == opIsNull))
 			continue
 		}
 
@@ -138,55 +149,49 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 		case opExact:
 			if _, ok := exactValues[f.Field]; !ok {
 				exactOrder = append(exactOrder, f.Field)
+				exactLabels[f.Field] = fieldLabel(f)
 			}
 			exactValues[f.Field] = append(exactValues[f.Field], values...)
 		case opGT, opLT:
 			if len(values) > 1 {
-				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-					Reason: "a comparison accepts a single value, but several were given"}
+				return refuse("a comparison accepts a single value, but several were given")
 			}
 			key := f.Field + "|" + op
 			if seen[key] {
-				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-					Reason: "the same comparison is applied twice to this field; this backend cannot combine them, so remove one"}
+				return refuse("the same comparison is applied twice to this field; this backend cannot combine them, so remove one")
 			}
 			seen[key] = true
 			q.Set(param(f.Field, op), values[0])
 		case opIContns, opIStarts, opIEnds, opIExact:
 			if len(values) > 1 {
-				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-					Reason: "this backend cannot combine several values for a text match; select one value or filter on equality"}
+				return refuse("this backend cannot combine several values for a text match; select one value or filter on equality")
 			}
 			wire := wireTextOperator[op]
 			key := f.Field + "|" + wire
 			if seen[key] {
-				return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-					Reason: "the same text match is applied twice to this field; this backend cannot combine them, so remove one"}
+				return refuse("the same text match is applied twice to this field; this backend cannot combine them, so remove one")
 			}
 			seen[key] = true
 			q.Set(param(f.Field, wire), values[0])
 		case "n", "nic", "nisw", "niew", "nie":
 			// Query answers these itself (negations.go) once it knows the
 			// columns; one that reaches here is on an entity with none yet.
-			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-				Reason: "a negated filter works once this replica has received data for this object type"}
+			return refuse("a negated filter works once this replica has received data for this object type")
 		case opGTE, opLTE:
 			// rewriteComparisons turns these into gt/lt wherever it can, which
 			// needs the column's type; validateFilters refuses them on any other
 			// column, so one that reaches here is on an entity the replica has no
 			// columns for yet.
-			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-				Reason: "greater/less than or equal works on number columns once this replica has received data for this object type"}
+			return refuse("greater/less than or equal works on number columns once this replica has received data for this object type")
 		default:
-			return nil, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-				Reason: "this backend supports only equality, text match, greater/less than (or equal, on number columns) and is-empty"}
+			return refuse("this backend supports only equality, text match, greater/less than (or equal, on number columns) and is-empty")
 		}
 	}
 
 	for _, field := range exactOrder {
 		values := exactValues[field]
 		if isAddress != nil && isAddress(field) {
-			if err := setAddressMatch(q, field, values); err != nil {
+			if err := setAddressMatch(q, field, exactLabels[field], values); err != nil {
 				return nil, err
 			}
 			continue
@@ -194,6 +199,16 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 		setEquality(q, field, values)
 	}
 	return q, nil
+}
+
+// fieldLabel is the name a refusal gives a filter: the field as the user wrote
+// it where translateFilters sent it on another column (children on
+// _children), else the field itself.
+func fieldLabel(f provider.Filter) string {
+	if f.Label != "" {
+		return f.Label
+	}
+	return f.Field
 }
 
 // setEquality writes an exact filter: eq for one value, and `in` for the
@@ -223,8 +238,9 @@ func setEquality(q url.Values, field string, values []string) {
 // NetBox ORs masked and bare values. When every masked value's address is
 // among the bare ones, the OR is the host match alone — each record a masked
 // value matches has that host — so they merge. Otherwise the replica, which has
-// no OR, cannot express it, and the filter is refused rather than narrowed.
-func setAddressMatch(q url.Values, field string, values []string) error {
+// no OR, cannot express it, and the filter is refused rather than narrowed;
+// the refusal names it by label, the field as the user wrote it.
+func setAddressMatch(q url.Values, field, label string, values []string) error {
 	var hosts, exact []string
 	bare := map[netip.Addr]bool{}
 	var maskedAddrs []netip.Addr
@@ -247,7 +263,7 @@ func setAddressMatch(q url.Values, field string, values []string) error {
 	}
 	switch {
 	case len(hosts) > 0 && len(exact) > 0 && !covered:
-		return &UnsupportedFilterError{Field: field, Operator: "exact",
+		return &UnsupportedFilterError{Field: label, Operator: "exact",
 			Reason: "it mixes addresses with and without a mask. NetBox matches the first exactly and the second by host, whatever its mask, and returns either; this backend cannot combine the two, so write every value with a mask or every value without one"}
 	case len(hosts) > 0:
 		q.Set(param(field, "host"), strings.Join(hosts, ","))
@@ -439,10 +455,15 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 		if op == "exact" {
 			op = opExact
 		}
+		label := fieldLabel(f)
+		refuse := func(reason string) error {
+			return &UnsupportedFilterError{Field: label, Operator: f.Operator, Reason: reason}
+		}
 		// A row with an operator and no value emits no parameter (as in
 		// NetBox mode; see buildFilterValues), so it is not judged either: a
 		// saved query carrying one used to run.
-		if op != opEmpty && op != opNEmpty && len(splitValues(f.Value)) == 0 {
+		nullTest := op == opIsNull || op == opNotNull
+		if op != opEmpty && op != opNEmpty && !nullTest && len(splitValues(f.Value)) == 0 {
 			continue
 		}
 		var col column
@@ -450,32 +471,40 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 			col = own
 		} else if via, target, ok := e.expandedColumn(f.Field); ok {
 			if !via.Ref.Available {
-				return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-					Reason: fmt.Sprintf("%s cannot be resolved on this replica: %s has received no data, so nothing can be filtered by it; %s still holds the raw id",
-						f.Field, strings.TrimPrefix(via.Ref.Path, "/v1/"), via.Name)}
+				return refuse(fmt.Sprintf("%s cannot be resolved on this replica: %s has received no data, so nothing can be filtered by it; %s still holds the raw id",
+					label, strings.TrimPrefix(via.Ref.Path, "/v1/"), via.Name))
 			}
 			col = targetColumn(c, via.Ref, target)
 		} else {
-			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: "this replica has no such column to filter on"}
+			return refuse("this replica has no such column to filter on")
+		}
+		// NetBox's own IS NULL (the literal null, mtu__empty, cabled; see
+		// translateFilters) means what it says on any column, text included —
+		// it is not the empty lookup, whose "" is the problem on text — so only
+		// the operator is asked of the column.
+		if nullTest {
+			if !slices.Contains(col.Operators, "isnull") {
+				return refuse(fmt.Sprintf("the backend does not take that operator on a %s column", strings.ToLower(col.Type)))
+			}
+			continue
 		}
 		// An anchored match on a text column of a replica that lists only
 		// ilike gets the reason that names what does work, not the generic
 		// "does not take that operator".
 		if wire, anchored := wireTextOperator[op]; anchored && op != opIContns &&
 			slices.Contains(col.Operators, "ilike") && !slices.Contains(col.Operators, wire) {
-			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: textMatchReason}
+			return refuse(textMatchReason)
 		}
 		if op == opEmpty || op == opNEmpty {
 			if fieldTypeOf(col.Type) == provider.FieldTypeString {
-				return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: emptyOnTextReason(f.Field)}
+				return refuse(emptyOnTextReason(label))
 			}
 			if !col.Nullable {
-				return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: "that column is NOT NULL on this replica, so nothing in it is ever empty"}
+				return refuse("that column is NOT NULL on this replica, so nothing in it is ever empty")
 			}
 		}
 		if !slices.Contains(seamOperators(col), op) {
-			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-				Reason: fmt.Sprintf("the backend does not take that operator on a %s column", strings.ToLower(col.Type))}
+			return refuse(fmt.Sprintf("the backend does not take that operator on a %s column", strings.ToLower(col.Type)))
 		}
 		// The replica refuses "4.0" on a whole-number column rather than
 		// comparing it as 4, and NetBox answers "Enter a whole number". Said
@@ -489,11 +518,9 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 			for _, v := range splitValues(f.Value) {
 				switch {
 				case scale == 0 && !wholeNumber.MatchString(v):
-					return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-						Reason: fmt.Sprintf("a %s column holds whole numbers, and %q is not one", strings.ToLower(col.Type), v)}
+					return refuse(fmt.Sprintf("a %s column holds whole numbers, and %q is not one", strings.ToLower(col.Type), v))
 				case scale > 0 && !plainDecimal.MatchString(v):
-					return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
-						Reason: fmt.Sprintf("a %s column takes a plain decimal such as 10.5, and %q is not one", strings.ToLower(col.Type), v)}
+					return refuse(fmt.Sprintf("a %s column takes a plain decimal such as 10.5, and %q is not one", strings.ToLower(col.Type), v))
 				}
 			}
 		}
@@ -562,7 +589,7 @@ func validateTextOperators(filters []provider.Filter, c *catalog) error {
 			continue
 		}
 		if !c.offersOperator(wire) {
-			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: textMatchReason}
+			return &UnsupportedFilterError{Field: fieldLabel(f), Operator: f.Operator, Reason: textMatchReason}
 		}
 	}
 	return nil

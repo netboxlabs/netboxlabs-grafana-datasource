@@ -108,25 +108,97 @@ also read as in NetBox: the replica stores a single-host address without its
 mask (`10.0.0.1`), and it is shown with it (`10.0.0.1/32`, `/128` for IPv6),
 in rows and in the value list.
 
-**Filters** offer, per column, the operators the replica accepts on it: equality
-(multi-value → `in`), a case-insensitive **contains** on text columns, and,
-on a replica-cache build that lists them (`istartswith`, `iendswith`,
-`iexact` in the schema route), _starts with_, _ends with_ and _= (ci)_ on text
-columns as well; greater/less than, and _or equal_ on whole-number
-columns; _is empty_ / _has any value_ on nullable non-text columns;
-and the negation of each match (_not equal_, _not contains_, _not starts
-with_, _not ends with_, _not (ci)_). Related names filter too (`site contains
-ams`, `site starts with dc-`). Every text match is case-insensitive and
-literal: a `%` or `_` in a value is that character, not a wildcard.
+**Filters follow NetBox's own.** A filter is offered and accepted exactly when
+NetBox has it on that object type — under NetBox's name, with NetBox's lookups
+and NetBox's meaning — and the replica can answer it; otherwise it is refused
+with a message saying why. What NetBox has is read from its own filtersets
+(NetBox 4.4 and 4.6, the union of the two: a filter only 4.6 has, such as
+`face` _not_, is honoured on a replica of NetBox 4.4, which ignores it and
+returns every row). It matters because NetBox ignores a filter it does not have
+and returns every row: a filter only this mode understood would make a
+dashboard right here and silently wrong in NetBox mode. A refusal names
+NetBox's filter where it has one: a device has `rack_id`, not `rack`; NetBox's
+`site` already compares the slug, so there is no `site_slug`; a prefix's
+`children` is the count the replica stores as `_children`.
+
+_Changed from earlier builds of this mode:_ the filters only this mode took are
+withdrawn — text matches on related names (`site contains ams`), and filters on
+columns NetBox has no filter for. A saved query using one fails with the
+message rather than filtering.
+
+NetBox's meaning is kept:
+
+- a device's or virtual machine's `name`, and the `serial` of a device, rack,
+  module or inventory item, match without regard to case, as in NetBox (one
+  value, through the replica's _= (ci)_). Several values match exactly — the
+  replica has no case-insensitive _in_ — a known divergence: the values a
+  multi-select variable offers come from the data, in its case;
+- a boolean (`enabled`, `mgmt_only`, `cabled`, `local_context_data`) reads the
+  last value given, as NetBox's form does: `true`, `True` or `2`, and `false`,
+  `False` or `3`. NetBox ignores anything else — `1` and `0` included — and
+  returns every row, so it is refused here;
+- a single-valued filter (`face`, `airflow`, `cable_end`, an aggregate's
+  `prefix`) takes the last value given;
+- the literal `null` is "no value" where NetBox reads it so: on text, MAC
+  address and most choice filters (`asset_tag = null`, `role = null`; _not_
+  `null` is "has a value"). `null` beside other values works on _not_ and is
+  refused on _=_, where NetBox returns rows matching either, which the replica
+  cannot combine. A choice filter with no null choice (`status`) refuses it with
+  NetBox's own "Select a valid choice", and a text search on `null` is refused,
+  as NetBox answers it with an error;
+- a filter NetBox reads from a column the replica caches is sent on that
+  column: a prefix's `children` and `depth` on `_children` and `_depth`,
+  `cabled` on the cable column;
+- _is empty_ / _has any value_ on a number (`mtu`) is NetBox's own `IS NULL`.
+  It is not offered where NetBox answers it with an error (`speed`, a prefix's
+  `children` and `depth`: their `__empty` keeps the number filter's form);
+- a prefix's `prefix` reads each value as NetBox does (netmask and hostmask
+  notation, `10.1.2.0/024`, a bare address as `/32`) and compares the network
+  as given: one with host bits set matches nothing, and is an error beside
+  another value, as in NetBox. An aggregate's zeroes the host bits;
+- a MAC address in any spelling NetBox reads (`58-56-9F-D1-E3-00`,
+  `5856.9fd1.e300`, …) matches the stored address, and a value NetBox cannot
+  read makes the whole filter match nothing, as there. _contains_ and the other
+  text searches compare the text as written.
+
+**Refused by name** — use a datasource in NetBox mode for these:
+
+- filters NetBox applies through more than one relation, or through a reverse
+  or many-to-many one: `tenant_group`, a device's `region`, `site_group` and
+  `manufacturer`, an interface's `mac_address`;
+- filters NetBox computes with a query of its own: an IP address's `device` and
+  `virtual_machine`, a prefix's `within`;
+- content-type filters: the replica has no content-type names;
+- decimal and date/time filters — a rack's `weight`, a device's `position` and
+  `latitude`, a device type's `u_height`, `created` — which the replica does not
+  store as NetBox's types (a decimal arrives as text: a device type's
+  `u_height = 1` finds two in NetBox and none in its replica, which holds
+  `1.0`). Their _is empty_ / _has any value_ still works where NetBox's is
+  `IS NULL`;
+- NetBox lookups with no equivalent here (`mask_length`, `family`, _regex_).
+
+Filters on a related object (`site`, `role`, `tenant`, …) and their `_id` forms
+are offered with _=_ and _not_. For now `site` and the like still compare the
+name the replica joins in, where NetBox compares the slug or name its filter
+names, and a tree filter (`role`, `role_id`) matches the node itself, without
+the descendants NetBox includes.
+
+Within that, the operators the replica takes decide: equality (multi-value →
+`in`), a case-insensitive **contains** on text, and, on a replica-cache build
+that lists them (`istartswith`, `iendswith`, `iexact` in the schema route),
+_starts with_, _ends with_ and _= (ci)_ as well; greater/less than and _or
+equal_ on whole numbers; and the negation of each match (_not equal_, _not
+contains_, _not starts with_, _not ends with_, _not (ci)_). Every text match is
+case-insensitive and literal: a `%` or `_` in a value is that character, not a
+wildcard. A plugin's object types, which NetBox's filtersets do not describe,
+keep the replica's list on every stored column and related name (`site
+contains ams` works there).
 
 The replica compares with greater and less than only, so **_or equal_** is
 sent as the strict comparison that is exactly equivalent on a whole-number
-column: `u_height >= 42` as `> 41`, `u_height >= 42.5` as `> 42`. At the edge
-of the type, `<=` its largest value is _has any value_. NetBox's decimal fields
-(a rack's `weight`, a device's `position`, a site's `latitude`) reach the
-replica as text, so they are not offered _or equal_, and their greater/less
-than compares text: `weight > 9` does not match `10.00`. Filter those with
-equality, or in NetBox mode.
+column: `vc_position >= 2` as `> 1`, `vc_position >= 2.5` as `> 2`, and the same
+at the scale of a plugin's `DECIMAL` column. At the edge of the type, `<=` its
+largest value is _has any value_.
 
 The replica has no **negation**, so the data source answers one exactly
 itself, with NetBox's meaning: a row is dropped when its value matches, a row
@@ -157,18 +229,20 @@ whose schema lists the replica's `host` operator on the column: a value without
 a mask matches every record with that address, whatever its mask
 (`address = 10.0.0.1` finds `10.0.0.1/24`), and a value with a mask matches
 that exact address (`10.0.0.1/32` finds the single-host record only). A value
-that is not an address matches nothing. Related names that hold an address,
-such as `primary_ip4`, match the same way; NetBox itself has no such filter.
-A filter that mixes values with and without a mask fails with a message, unless
-every masked value's address is also listed without one. On a build without
-`host` the comparison is on the stored text.
+that is not an address matches nothing. A device's `primary_ip4` and
+`primary_ip6` match the same way for now. A filter that mixes values with and
+without a mask fails with a message, unless every masked value's address is
+also listed without one. On a build without `host` the comparison is on the
+stored text.
 
 These are deliberately not offered:
 
 - _starts with_, _ends with_ and _= (ci)_ on a replica whose schema lists only
   `ilike`. That build's one text match is a contains; anchoring it or matching
   whole values is not expressible there, and a saved query using one fails with
-  a message rather than matching more rows than it asked for.
+  a message rather than matching more rows than it asked for. One device or VM
+  `name` (or `serial`) is refused there too, NetBox matching it without regard
+  to case; several still match exactly.
 - _is empty_ on a **text** column. NetBox stores a blank text field as `""`,
   the replica tests `IS NULL`, and the two answer opposite questions — a rule
   that switched modes would silently invert. Use a datasource in NetBox mode
@@ -177,7 +251,7 @@ These are deliberately not offered:
   or UUID type), since the rows read here could not be tested the same way.
 - _not equal_ on an IP address. NetBox matches an address by its host
   whatever the mask, which the replica can do only as a filter it applies, not
-  one the data source excludes.
+  one the data source excludes. (NetBox's own `address` filter has no _not_.)
 - _regex_ and the other NetBox lookups the replica has no equivalent for. A
   saved query using one fails with a message rather than being approximated.
 

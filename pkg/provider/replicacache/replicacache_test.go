@@ -3,6 +3,7 @@ package replicacache
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -996,13 +997,31 @@ func TestFields_CachesTheCustomFieldNames(t *testing.T) {
 	}
 }
 
-// The operators come from the catalogue, translated to the editor's tokens.
-// The two withholdings that remain are deliberate: is-empty on TEXT (NetBox
-// stores a blank as "", the backend tests IS NULL — DATA-206) and on a NOT
-// NULL column (nothing is ever empty there).
+// pluginDevices is the devices fixture's table under a plugin's object type.
+// The vocabulary covers no plugin, so its filters are the catalogue's, which
+// is what the tests using it are about; NetBox's own devices offer NetBox's
+// filters (TestFilterFields_OffersNetBoxVocabularyOnly).
+const pluginDevices = "plugins/acme/devices"
+
+func withPluginDevices(s *fakeSchema) *fakeSchema {
+	e := s.Entities["/v1/dcim/devices"]
+	e.Table = fakeTable(pluginDevices)
+	e.Columns = slices.Clone(e.Columns)
+	s.Entities["/v1/"+pluginDevices] = e
+	return s
+}
+
+// The operators come from the catalogue, translated to the editor's tokens,
+// on a table the vocabulary does not cover. The two withholdings that remain
+// are deliberate: is-empty on TEXT (NetBox stores a blank as "", the backend
+// tests IS NULL — DATA-206) and on a NOT NULL column (nothing is ever empty
+// there).
 func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
-	p := newTestProvider(t, newFakeService())
-	ff, err := p.FilterFields(context.Background(), "dcim/devices")
+	f := newFakeService()
+	f.schema = withPluginDevices(f.schema)
+	f.entities[pluginDevices] = []map[string]interface{}{}
+	p := newTestProvider(t, f)
+	ff, err := p.FilterFields(context.Background(), pluginDevices)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1030,19 +1049,45 @@ func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 		}
 	}
 	// Every advertised operator is one a query accepts.
-	assertAdvertisedOperatorsAccepted(t, p, ops)
+	assertAdvertisedOperatorsAccepted(t, p, pluginDevices, ops)
 }
 
 // assertAdvertisedOperatorsAccepted runs one query per advertised operator, so
 // the check covers every step a filter passes through — the rewrites as well
 // as the translation — not the translator alone. What the fake then answers
 // is beside the point; a refusal is what an advertised operator must never get.
-func assertAdvertisedOperatorsAccepted(t *testing.T, p *Provider, ops map[string][]string) {
+// The value is one the filter takes: NetBox's booleans read true, not 1. A
+// NetBox relation whose target has received no data is left out: its values
+// cannot be checked until that table is fed, which the editor cannot know
+// when it lists the filter.
+func assertAdvertisedOperatorsAccepted(t *testing.T, p *Provider, objectType string, ops map[string][]string) {
 	t.Helper()
+	e, c, err := p.entityFor(context.Background(), objectType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vocab, covered := vocabFor(e.Table)
 	for name, list := range ops {
+		value := "1"
+		if covered {
+			switch entry := pickVocab(vocab[name], e); entry.Kind {
+			case kindBool, kindIsNull, kindLocalContext:
+				value = "true"
+			case kindPrefix:
+				value = "10.0.0.0/8"
+			case kindMAC:
+				value = "58:56:9f:d1:e3:00"
+			case kindRelated, kindTree, kindModelChoice:
+				target := strings.Replace(entry.Target, ".", "_", 1)
+				fed := slices.ContainsFunc(slices.Collect(maps.Values(c.Entities)), func(e entity) bool { return e.Table == target && e.Ingested })
+				if !fed {
+					continue
+				}
+			}
+		}
 		for _, op := range list {
-			_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
-				Filters: []provider.Filter{{Field: name, Operator: op, Value: "1"}}})
+			_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: objectType,
+				Filters: []provider.Filter{{Field: name, Operator: op, Value: value}}})
 			var refused *UnsupportedFilterError
 			if errors.As(err, &refused) {
 				t.Errorf("%s advertises %q but a query with it is refused: %v", name, op, err)
@@ -1055,9 +1100,10 @@ func assertAdvertisedOperatorsAccepted(t *testing.T, p *Provider, ops map[string
 // and expanded names only; the translator accepts every one advertised.
 func TestFilterFields_OffersAnchoredMatchesWhenTheCatalogueListsThem(t *testing.T) {
 	f := newFakeService()
-	f.schema = withAnchoredText(devicesSchema())
+	f.schema = withAnchoredText(withPluginDevices(devicesSchema()))
+	f.entities[pluginDevices] = []map[string]interface{}{}
 	p := newTestProvider(t, f)
-	ff, err := p.FilterFields(context.Background(), "dcim/devices")
+	ff, err := p.FilterFields(context.Background(), pluginDevices)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1076,7 +1122,133 @@ func TestFilterFields_OffersAnchoredMatchesWhenTheCatalogueListsThem(t *testing.
 			t.Errorf("%s: %v, want %v", name, ops[name], want)
 		}
 	}
-	assertAdvertisedOperatorsAccepted(t, p, ops)
+	assertAdvertisedOperatorsAccepted(t, p, pluginDevices, ops)
+}
+
+// filterOps is FilterFields as a map from name to operators.
+func filterOps(t *testing.T, p *Provider, objectType string) map[string][]string {
+	t.Helper()
+	ff, err := p.FilterFields(context.Background(), objectType)
+	if err != nil {
+		t.Fatalf("FilterFields(%s): %v", objectType, err)
+	}
+	ops := map[string][]string{}
+	for _, x := range ff {
+		ops[x.Name] = x.Operators
+	}
+	return ops
+}
+
+// The editor offers NetBox's filters, under NetBox's names, with the lookups
+// NetBox has on them: a device filters on site (NetBox compares its slug) with
+// = and not, and has no rack (NetBox's is rack_id), no site_slug and no site
+// contains; a prefix filters on children, which the replica stores as
+// _children; an interface on enabled.
+func TestFilterFields_OffersNetBoxVocabularyOnly(t *testing.T) {
+	f := newFakeService()
+	f.schema = withAnchoredText(f.schema)
+	f.addEntity("ipam/prefixes", "id:BIGINT:pk", "prefix:VARCHAR", "_children:BIGINT")
+	f.addEntity("dcim/interfaces", "id:BIGINT:pk", "name:VARCHAR", "enabled:BOOLEAN")
+	p := newTestProvider(t, f)
+
+	text := []string{"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie"}
+	devices := filterOps(t, p, "dcim/devices")
+	for name, want := range map[string][]string{
+		"site": {"", "n"}, "site_id": {"", "n"}, "rack_id": {"", "n"}, "tenant": {"", "n"}, "role": {"", "n"},
+		"name": text, "serial": text, "status": text,
+		"id": {"", "n", "gt", "gte", "lt", "lte", "empty", "nempty"},
+		// A decimal NetBox compares as a number, which the replica cannot; its
+		// __empty is a boolean NetBox answers, IS NULL.
+		"position": {"empty", "nempty"},
+	} {
+		if !slices.Equal(devices[name], want) {
+			t.Errorf("devices %s: %v, want %v", name, devices[name], want)
+		}
+	}
+	// No filter NetBox lacks: rack and the _slug names were the cache's own,
+	// created is a date the replica holds as text (and created__empty a 400),
+	// is_full_depth is the device type's.
+	for _, absent := range []string{"rack", "site_slug", "role_slug", "tenant_slug", "created", "is_full_depth", "custom_field_data", "cf_lifecycle_phase"} {
+		if ops, ok := devices[absent]; ok {
+			t.Errorf("devices offer %s %v; NetBox has no such filter the replica can answer", absent, ops)
+		}
+	}
+
+	prefixes := filterOps(t, p, "ipam/prefixes")
+	if want := []string{"", "n", "gt", "gte", "lt", "lte"}; !slices.Equal(prefixes["children"], want) {
+		t.Errorf("prefixes children: %v, want %v", prefixes["children"], want)
+	}
+	if ops, ok := prefixes["_children"]; ok {
+		t.Errorf("prefixes offer _children %v; NetBox's filter is children", ops)
+	}
+	if want := []string{""}; !slices.Equal(prefixes["prefix"], want) {
+		t.Errorf("prefixes prefix: %v, want %v", prefixes["prefix"], want)
+	}
+
+	interfaces := filterOps(t, p, "dcim/interfaces")
+	if want := []string{""}; !slices.Equal(interfaces["enabled"], want) {
+		t.Errorf("interfaces enabled: %v, want %v", interfaces["enabled"], want)
+	}
+
+	// And a query takes every one offered.
+	assertAdvertisedOperatorsAccepted(t, p, "dcim/devices", devices)
+	assertAdvertisedOperatorsAccepted(t, p, "ipam/prefixes", prefixes)
+	assertAdvertisedOperatorsAccepted(t, p, "dcim/interfaces", interfaces)
+}
+
+// NetBox answers speed__empty, children__empty and depth__empty with a 400 —
+// their __empty keeps the number filter's class, so true fails its form — so
+// is-empty is not offered on them, nullable numbers though they are; mtu__empty
+// is a boolean filter, and is. A filter refused on its own (a decimal stored as
+// text) whose __empty is a boolean is offered with is-empty alone.
+func TestFilterFields_NoEmptyWhereNetBoxErrors(t *testing.T) {
+	f := newFakeService()
+	f.addEntity("ipam/prefixes", "id:BIGINT:pk", "prefix:VARCHAR", "_children:BIGINT", "_depth:INTEGER")
+	f.addEntity("dcim/interfaces", "id:BIGINT:pk", "name:VARCHAR", "mtu:INTEGER", "speed:INTEGER")
+	f.addEntity("dcim/device-types", "id:BIGINT:pk", "model:VARCHAR", "u_height:VARCHAR")
+	p := newTestProvider(t, f)
+
+	interfaces, prefixes := filterOps(t, p, "dcim/interfaces"), filterOps(t, p, "ipam/prefixes")
+	for name, ops := range map[string][]string{"speed": interfaces["speed"], "children": prefixes["children"], "depth": prefixes["depth"]} {
+		if len(ops) == 0 {
+			t.Errorf("%s is not offered at all", name)
+		}
+		if slices.Contains(ops, "empty") || slices.Contains(ops, "nempty") {
+			t.Errorf("%s: %v; NetBox answers %s__empty with an error", name, ops, name)
+		}
+	}
+	if !slices.Contains(interfaces["mtu"], "empty") || !slices.Contains(interfaces["mtu"], "nempty") {
+		t.Errorf("mtu: %v, want is-empty and has-any-value", interfaces["mtu"])
+	}
+	if got := filterOps(t, p, "dcim/device-types")["u_height"]; !slices.Equal(got, []string{"empty", "nempty"}) {
+		t.Errorf("device types u_height: %v, want is-empty and has-any-value alone", got)
+	}
+}
+
+// The vocabulary is the union of NetBox 4.4's filters and 4.6's, and a replica
+// mirrors one NetBox: owner, a filter only 4.6 has, on its owner_id column, is
+// not offered on a replica whose table lacks the column, and is on one that
+// stores it.
+func TestFilterFields_OnlyStoredColumns(t *testing.T) {
+	f := newFakeService()
+	devices := filterOps(t, newTestProvider(t, f), "dcim/devices")
+	for _, name := range []string{"owner", "owner_id", "primary_ip4", "config_template_id"} {
+		if ops, ok := devices[name]; ok {
+			t.Errorf("devices offer %s %v, on a column this replica does not store", name, ops)
+		}
+	}
+
+	f.mu.Lock()
+	e := f.schema.Entities["/v1/dcim/devices"]
+	e.Columns = append(slices.Clone(e.Columns), fakeColumn{Name: "owner_id", Type: "BIGINT", Nullable: true, Operators: []string{"eq", "gt", "lt", "in", "isnull"}})
+	f.schema.Entities["/v1/dcim/devices"] = e
+	f.mu.Unlock()
+	devices = filterOps(t, newTestProvider(t, f), "dcim/devices")
+	for _, name := range []string{"owner", "owner_id"} {
+		if want := []string{"", "n"}; !slices.Equal(devices[name], want) {
+			t.Errorf("a replica that stores owner_id: %s %v, want %v", name, devices[name], want)
+		}
+	}
 }
 
 // Deep links point at the NetBox the replica reports it mirrors. A replica that

@@ -422,8 +422,9 @@ func TestFilterFields_OfferNegationsBesideTheirPositives(t *testing.T) {
 	}
 }
 
-// A negated related name (site) is tested on the name the replica joins in,
-// which comes with expand= whatever the projection lists.
+// A negated related filter (site, which NetBox compares by slug) excludes the
+// ids its values name, keeping the device with no site as Django's exclude()
+// does; the name the replica joins in plays no part, so nothing is expanded.
 func TestQuery_NegatedRelatedName(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/sites"] = []map[string]interface{}{
@@ -435,12 +436,15 @@ func TestQuery_NegatedRelatedName(t *testing.T) {
 	f.entities["dcim/devices"][2]["site_id"] = nil
 	p := newTestProvider(t, f)
 
-	res := negationQuery(t, p, provider.QuerySpec{Fields: []string{"name"}, Filters: []provider.Filter{{Field: "site", Operator: "n", Value: "DC-1"}}})
+	res := negationQuery(t, p, provider.QuerySpec{Fields: []string{"name"}, Filters: []provider.Filter{{Field: "site", Operator: "n", Value: "dc-1"}}})
 	if got := ids(res); !slices.Equal(got, []int{2, 3}) || res.Total != 2 {
 		t.Errorf("rows = %v (Total %d), want [2 3]: DC-2 and the device with no site", got, res.Total)
 	}
 	if !slices.Equal(res.Columns, []string{"name"}) {
 		t.Errorf("Columns = %v, want [name]", res.Columns)
+	}
+	if expanded := f.sentWith("dcim/devices", "expand"); len(expanded) != 0 {
+		t.Errorf("requests %v expand a name; the filter is on site_id", expanded)
 	}
 }
 
@@ -625,12 +629,14 @@ func TestQuery_NegationRowsAndTotalFromDifferentMomentsReportTheOlder(t *testing
 }
 
 // The rows are decoded with their numbers intact: a 64-bit value float64
-// rounds would be kept by the row test while the replica's count drops it.
+// rounds would be kept by the row test while the replica's count drops it. The
+// tenant is there to be found: NetBox's tenant_id checks the id exists.
 func TestQuery_NegationComparesLargeIntegersExactly(t *testing.T) {
 	f := newFakeService()
 	big := device(1, "A", "active")
 	big["tenant_id"] = int64(9007199254740993)
 	f.entities["dcim/devices"] = []map[string]interface{}{big, device(2, "B", "active")}
+	f.entities["tenancy/tenants"] = []map[string]interface{}{{"id": int64(9007199254740993), "name": "Big", "slug": "big"}}
 	p := newTestProvider(t, f)
 
 	res := negationQuery(t, p, provider.QuerySpec{Filters: []provider.Filter{{Field: "tenant_id", Operator: "n", Value: "9007199254740993"}}})

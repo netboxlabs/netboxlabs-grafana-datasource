@@ -53,6 +53,16 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if err := validateChoiceValues(spec.ObjectType, filters); err != nil {
 		return nil, err
 	}
+	// A filter on a related object compares what NetBox's compares — a slug,
+	// an RD, an address — which only the target's table holds, so its values
+	// are looked up there (relatednames.go) and it is sent on the foreign key,
+	// as the ids they name: not expanded, nor counted as the name.
+	var unmatched bool
+	if filters, unmatched, err = p.resolveRelatedFilters(ctx, e.Table, filters, e, c); err != nil {
+		return nil, err
+	}
+	none = none || unmatched
+	spec.Filters = filters
 	// An entity the catalogue has as unfed is NOT refused here: the row route
 	// answers 404 for it, classified as not-replicated by the client, and it
 	// is current where the catalogue can be ten minutes stale. Nor is the

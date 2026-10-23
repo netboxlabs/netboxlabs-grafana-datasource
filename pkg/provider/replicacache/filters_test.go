@@ -355,37 +355,6 @@ func TestBuildFilterValuesAllowsARangeOnOneField(t *testing.T) {
 	}
 }
 
-// The is-empty refusal used to recommend "filter on equality with an empty
-// value". Following that advice lands in the branch below, which drops the
-// filter and returns the unfiltered population — the very outcome the refusal
-// exists to prevent. This pins both halves: the advice, and the behaviour that
-// makes the old advice wrong.
-func TestIsEmptyRefusalDoesNotRecommendADiscardedFilter(t *testing.T) {
-	c := catalogFromFake(t, devicesSchema())
-	err := validateFilters([]provider.Filter{{Field: "name", Operator: "empty"}}, c.Entities["dcim/devices"], c)
-	if err == nil {
-		t.Fatal("is-empty on a text column must still be refused")
-	}
-	msg := err.Error()
-	if strings.Contains(msg, "equality with an empty value") {
-		t.Errorf("recommends a filter that is discarded: %q", msg)
-	}
-	if !strings.Contains(msg, "NetBox mode") {
-		t.Errorf("should point at what actually works: %q", msg)
-	}
-
-	// Why that advice was wrong: an equality filter with an empty value emits
-	// no parameter at all. Same as NetBox mode, which drops empties too — so
-	// this is consistency, not a gap to close here.
-	q, err := buildFilterValues([]provider.Filter{{Field: "serial", Operator: "exact", Value: ""}}, nil)
-	if err != nil {
-		t.Fatalf("buildFilterValues: %v", err)
-	}
-	if len(q) != 0 {
-		t.Errorf("an empty equality value must emit no filter, got %v", q)
-	}
-}
-
 // The catalogue's operators translate to the editor's tokens.
 func TestSeamOperators_TranslateTheCatalogue(t *testing.T) {
 	all := []string{"eq", "gt", "lt", "in", "isnull"}
@@ -395,11 +364,14 @@ func TestSeamOperators_TranslateTheCatalogue(t *testing.T) {
 		col  column
 		want []string
 	}{
-		{"nullable text", column{Type: "VARCHAR", Nullable: true, Operators: text}, []string{"", "n", "ic", "nic", "gt", "lt"}},
+		// Text that lists gt is offered is-empty and has-any-value too, which are
+		// asked of the replica as a comparison with the empty string
+		// (TestSeamOperators_TextEmptiness).
+		{"nullable text", column{Type: "VARCHAR", Nullable: true, Operators: text}, []string{"", "n", "ic", "nic", "gt", "lt", "empty", "nempty"}},
 		// DATA-408: a replica that lists the anchored matches gets them offered,
 		// in the editor's tokens; one that lists only ilike does not (above).
 		{"text with the anchored matches", column{Type: "VARCHAR", Nullable: true, Operators: append(slices.Clone(text), "istartswith", "iendswith", "iexact")},
-			[]string{"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie", "gt", "lt"}},
+			[]string{"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie", "gt", "lt", "empty", "nempty"}},
 		{"nullable number", column{Type: "BIGINT", Nullable: true, Operators: all}, []string{"", "n", "gt", "gte", "lt", "lte", "empty", "nempty"}},
 		{"not null number", column{Type: "BIGINT", Operators: all}, []string{"", "n", "gt", "gte", "lt", "lte"}},
 		// >= and <= only where a strict comparison is their exact rewrite.
@@ -433,7 +405,10 @@ func TestValidateFilters_AgainstTheCatalogue(t *testing.T) {
 		{"exact is spelled two ways", provider.Filter{Field: "id", Operator: "exact", Value: "1"}, true},
 		{"empty on nullable number", provider.Filter{Field: "position", Operator: "empty"}, true},
 		{"empty on NOT NULL", provider.Filter{Field: "id", Operator: "empty"}, false},
-		{"empty on text", provider.Filter{Field: "name", Operator: "empty"}, false},
+		// A row that reaches the check as is-empty on text was not rewritten
+		// (rewriteEmptiness answers it first), and would be sent as IS NULL.
+		{"raw empty on text", provider.Filter{Field: "name", Operator: "empty"}, false},
+		{"has any value on text, as rewritten", provider.Filter{Field: "name", Operator: opWireGTBlank}, true},
 		{"unknown column", provider.Filter{Field: "colour", Value: "x"}, false},
 		{"expanded name, text op", provider.Filter{Field: "site", Operator: "ic", Value: "ams"}, true},
 		{"expanded slug, contains", provider.Filter{Field: "site_slug", Operator: "ic", Value: "ams"}, true},

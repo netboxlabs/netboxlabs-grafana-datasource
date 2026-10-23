@@ -72,6 +72,14 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	}
 	none = none || unreadable
 	spec.Filters = filters
+	// NetBox's empty lookup on text is put on the comparison the replica takes
+	// (emptiness.go): has any value is sent, is empty is a negation answered
+	// below with the others. It is NetBox's vocabulary that says a filter is on
+	// text there, not the replica's columns, so an entity with no data yet is
+	// rewritten too, and a catalogue ten minutes stale cannot send the replica's
+	// isnull, which answers the opposite question, to one that has the rows.
+	filters = rewriteEmptiness(filters, e, c)
+	spec.Filters = filters
 	// An entity the catalogue has as unfed is NOT refused here: the row route
 	// answers 404 for it, classified as not-replicated by the client, and it
 	// is current where the catalogue can be ten minutes stale. Nor is the
@@ -84,7 +92,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	//
 	// Negations are answered here rather than by the service (negations.go),
 	// which needs the columns: on an unfed entity they stay among the filters
-	// and buildFilterValues refuses them, saying so.
+	// and buildFilterValues refuses them, saying so (is empty on text is one).
 	var (
 		plan request
 		negs []negation

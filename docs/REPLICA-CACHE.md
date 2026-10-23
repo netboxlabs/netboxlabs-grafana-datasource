@@ -105,7 +105,17 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
   one of them, beside the ids, as NetBox mode returns related names by
   default. A reference whose target has received no data is not offered, and a
   saved panel that asks for it gets a warning naming the cause instead of a
-  blank column;
+  blank column. The bare column (`vrf`, `device`, `rack`) shows the object as
+  NetBox mode does, by NetBox's display of it, where that is more than its
+  name: a VRF as `name (rd)`, a rack as `name (facility id)`, a VLAN as
+  `name (vid)`, an interface or other device component as `name (label)`, a
+  provider account as `account (name)`, a cable or wireless link without a
+  label or SSID as `#<id>`, a device with an asset tag as `name (asset tag)`
+  and an unnamed one as NetBox names it (`<virtual chassis>:<position>`, or
+  `<manufacturer> <model> (<id>)`). The parts the replica's own join does not
+  return are read from the related table, one request more per such column
+  shown (`site_slug` and the other `<name>_<column>` columns are the related
+  object's own columns, as they are);
 - **custom fields** as `cf_<name>` columns, expanded the same way as in NetBox
   mode (a list field also gets its `cf_<name>_count`). Their names are read from
   a small sample of rows, because the replica's schema cannot list them. For the
@@ -297,7 +307,7 @@ A related filter whose table has received no data on this replica, or that the
 replica does not serve (a device's `config_template_id`), cannot be checked as
 NetBox checks it: a value on it is refused, naming the table, and the editor
 does not offer it. `null` still works on it. The result columns are unchanged:
-`site` is still the site's name.
+`site` still shows the site as NetBox does, by its name.
 
 Within that, the operators the replica takes decide: equality (multi-value →
 `in`), a case-insensitive **contains** on text, and, on a replica-cache build
@@ -374,14 +384,16 @@ variable's values from the slug column — `slug` on the sites, roles or tenants
 table, `site_slug`, `role_slug` or `tenant_slug` on one that references them —
 not from the name a value list offers for `site` (NetBox mode offers names there
 too, and its `site` filter takes the slug as well). The `vrf` filter compares the
-route distinguisher, which a table that references a VRF does not show (the
-reference is the VRF's `name`), and a VRF may have none: filter by `vrf_id`, with
-the ids from the VRFs table's `id`.
+route distinguisher alone, which a table that references a VRF shows beside the
+name (`name (rd)`, as NetBox mode does), and a VRF may have none: filter by
+`vrf_id`, with the ids from the VRFs table's `id`.
 
 **Sorting** works on stored columns and on related names (`site`, `-role`), and
-the **Sort by** list offers exactly those.
-Sorting on a related name whose target has no data is dropped and stated in a
-panel note.
+the **Sort by** list offers exactly those. A related name sorts by the name the
+replica joins in, even where the column shows more (`vrf` shows `name (rd)`),
+which is how NetBox orders most related objects (a site, a VRF, a device by
+name first). Sorting on a related name whose target has no data is dropped and
+stated in a panel note.
 
 **Limits.** Pages of 1,000 rows, walked by cursor up to the data source's
 10,000-row ceiling. The truncation and alert-table rules are the same as in
@@ -517,6 +529,15 @@ mode on the same data:
   is refused in alert rules as truncated, as in NetBox mode.
 - **A NetBox scope cut off by its limit** keeps different first rows than NetBox
   mode; the total agrees, and alert rules refuse it as truncated.
+- **An FHRP group** in a related column (an FHRP group assignment's `group`)
+  shows the group's name. NetBox shows
+  `[<name> ]<protocol>: <group id>[ (<first address>)]`, for example
+  `edge VRRPv2: 10 (10.0.0.1/24)`; the first address is the group's, which the
+  replica names only by a content type it does not name.
+- **Sorting on a related name** follows the name the replica joins in. NetBox
+  orders by the related model's own ordering, which is that name for most (a
+  site, a VRF, a device) but not all: a device type by its manufacturer first,
+  a rack by its site.
 - **An address assigned to an object that does not exist** (NetBox does not
   check the target of a generic assignment) can, on a tenant with no VM
   interfaces and when that object's id equals an FHRP group's id, lead the data

@@ -8,7 +8,6 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
@@ -1186,17 +1185,9 @@ func (en *enrichment) deviceColumns(row *ipRow, d deviceRecord, addressID int) {
 	row.ref("device_site", d.SiteID, d.Site)
 	row.ref("device_location", d.LocationID, d.Location)
 	row.ref("device_tenant", d.TenantID, d.Tenant)
-	var rack *string
-	if rr, ok := en.racks[d.RackID]; ok && rr.Name != nil {
-		shown := *rr.Name
-		// Rack.__str__: the facility id beside the name when it has one.
-		if rr.Facility != nil && *rr.Facility != "" {
-			shown += " (" + *rr.Facility + ")"
-		}
-		rack = &shown
-	}
 	if en.sel.has("device_rack") {
-		row.ref("device_rack", d.RackID, rack)
+		rr := en.racks[d.RackID]
+		row.ref("device_rack", d.RackID, rackDisplay(rr.Name, rr.Facility))
 	}
 }
 
@@ -1212,13 +1203,8 @@ func (en *enrichment) prefixColumns(row *ipRow, host string) {
 	row.ref("prefix_tenant", pr.TenantID, pr.Tenant)
 	row.ref("prefix_role", pr.RoleID, pr.Role)
 	en.vrfColumn(row, "prefix_vrf", pr.VRF)
-	var vlan *string
-	if v, ok := en.vlans[pr.VLAN]; ok && v.Name != nil && v.VID != nil {
-		// VLAN.__str__.
-		shown := *v.Name + " (" + strconv.Itoa(*v.VID) + ")"
-		vlan = &shown
-	}
-	row.ref("prefix_vlan", pr.VLAN, vlan)
+	v := en.vlans[pr.VLAN]
+	row.ref("prefix_vlan", pr.VLAN, vlanDisplay(v.Name, v.VID))
 	// The scope is named from the most specific level cached on the prefix. A
 	// scope with no level cached cannot be named, and is a gap like any other.
 	scope, scopeID := (*string)(nil), pr.Scope
@@ -1234,31 +1220,11 @@ func (en *enrichment) prefixColumns(row *ipRow, host string) {
 	row.ref("prefix_scope", scopeID, scope)
 }
 
-// vrfColumn sets a VRF as NetBox displays one (VRF.__str__): the name, and the
-// route distinguisher beside it when there is one.
+// vrfColumn sets a VRF as NetBox displays one (vrfDisplay); one the replica
+// does not hold is a gap.
 func (en *enrichment) vrfColumn(row *ipRow, col string, id int) {
-	var shown *string
-	if v, ok := en.vrfs[id]; ok && v.Name != nil {
-		s := *v.Name
-		if v.RD != nil && *v.RD != "" {
-			s += " (" + *v.RD + ")"
-		}
-		shown = &s
-	}
-	row.ref(col, id, shown)
-}
-
-// interfaceDisplay is a device interface as NetBox displays it
-// (ComponentModel.__str__): the label beside the name when it has one. A VM
-// interface has no label, and displays as its name.
-func interfaceDisplay(name, label *string) interface{} {
-	if name == nil {
-		return nil
-	}
-	if label != nil && *label != "" {
-		return *name + " (" + *label + ")"
-	}
-	return *name
+	v := en.vrfs[id]
+	row.ref(col, id, vrfDisplay(v.Name, v.RD))
 }
 
 // textValue is a text column as NetBox serializes it: null stays null, a blank

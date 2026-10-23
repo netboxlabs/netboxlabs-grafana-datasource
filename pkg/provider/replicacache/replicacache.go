@@ -531,13 +531,21 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	// A stored column is read as itself, and a NetBox filter as the column it
 	// reads, which is not always its name (valueColumn: a prefix's children are
 	// its cached _children). A related name (site; a plugin's site_slug too) is
-	// read under expand=, projected to the primary key alone: the service
+	// read under expand=, projected to the primary key alone (and the reference,
+	// for a display composed here): the service
 	// returns the expanded columns beside it, and the search below is the
 	// TARGET column's, since that is what ilike runs on. Anything else — a name
 	// this replica cannot produce — has nothing to read.
 	column := valueColumn(e, field)
 	col, stored := e.column(column)
-	var params url.Values
+	var (
+		params url.Values
+		// display is the related column, when its values are its objects'
+		// NetBox displays (displays.go), which only the rows can compose: the
+		// search is then matched here, on what is offered, and the id it is
+		// composed for is read beside the key.
+		display []expansion
+	)
 	if !stored {
 		via, target, ok := e.expandedColumn(field)
 		if !ok || !via.Ref.Available {
@@ -545,6 +553,11 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 		}
 		params = url.Values{"expand": {via.Ref.ExpandKey}}
 		col = targetColumn(c, via.Ref, target)
+		if t, known := c.Entities[strings.TrimPrefix(via.Ref.Path, "/v1/")]; known && field == via.Ref.ExpandKey {
+			if _, composed := relatedDisplays[t.Table]; composed {
+				display = []expansion{{key: field, via: via.Name, target: strings.TrimPrefix(via.Ref.Path, "/v1/")}}
+			}
+		}
 	}
 
 	// A substring search is only pushed down when the catalogue says the
@@ -560,7 +573,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	// buildFilterValues splits on commas as a multi-value dashboard filter,
 	// which is not what someone typing "a,b" means. That text is matched
 	// locally, the same answer as for a column that cannot be searched upstream.
-	pushDown := q != "" && slices.Contains(col.Operators, "ilike") && literalPushable(q)
+	pushDown := q != "" && slices.Contains(col.Operators, "ilike") && literalPushable(q) && display == nil
 	if pushDown {
 		fv, err := buildFilterValues([]provider.Filter{{Field: column, Operator: opIContns, Value: q}}, nil)
 		if err != nil {
@@ -573,9 +586,12 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 			params[k] = vs
 		}
 	}
-	if stored {
+	switch {
+	case stored:
 		params = withFields(params, []string{column})
-	} else {
+	case display != nil:
+		params = withFields(params, []string{pk, display[0].via})
+	default:
 		params = withFields(params, []string{pk})
 	}
 
@@ -590,7 +606,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	needle := strings.ToLower(q)
 	seen := map[string]bool{}
 	seenIDs := map[int]bool{}
-	var out []string
+	objs := make([]map[string]interface{}, 0, len(raws))
 	for _, r := range raws {
 		var obj map[string]interface{}
 		if err := json.Unmarshal(r, &obj); err != nil {
@@ -627,8 +643,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 			// that nothing in the deployment corresponds to.
 			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errRowWithoutID, Message: rowShapeGuidance}
 		}
-		v, present := obj[column]
-		if !present {
+		if _, present := obj[column]; !present {
 			// The projection asked for this column, so its absence is the
 			// service failing to answer rather than the object having no value
 			// — and treating the two alike turned an incomplete response into a
@@ -637,7 +652,18 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 			// instance, none missing the column they were projected onto.
 			return nil, &TransportError{Op: "reading a value row for " + objectType, Err: errRowWithoutField, Message: rowShapeGuidance}
 		}
-		s := valueString(v)
+		objs = append(objs, obj)
+	}
+	if display != nil {
+		// A target that lacks a part keeps the name, with a warning the value
+		// list has no room for; the rows say it.
+		if _, err := p.showRelatedDisplays(ctx, c, e, display, objs, func(string) bool { return true }); err != nil {
+			return nil, err
+		}
+	}
+	var out []string
+	for _, obj := range objs {
+		s := valueString(obj[column])
 		if isAddress(column) {
 			s = withSingleHostMask(s)
 		}

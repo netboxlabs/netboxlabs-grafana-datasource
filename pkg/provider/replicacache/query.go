@@ -181,6 +181,17 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	}
 	showSingleHostMasks(rows, cols, addressField(e, c))
 	showMACs(rows, cols, macField(e, c))
+	if !spec.CountOnly {
+		// A related column shows NetBox's display of its object, as NetBox mode
+		// does (displays.go), once the rows are in their order: the sort reads the
+		// name the expansion joined in, as the replica sorted by it.
+		wanted := wantedColumns(spec)
+		displayWarnings, err := p.showRelatedDisplays(ctx, c, e, plan.expanded, rows, func(key string) bool { return wanted == nil || wanted[key] })
+		if err != nil {
+			return nil, err
+		}
+		plan.warnings = append(plan.warnings, displayWarnings...)
+	}
 	if asOf == nil {
 		asOf = e.DataAsOf
 	}
@@ -859,6 +870,19 @@ func netboxComputed(name string) bool {
 		return true
 	}
 	return strings.HasSuffix(name, "_count") && !strings.HasPrefix(name, "cf_")
+}
+
+// wantedColumns is selectedFields as a set, nil for every column (an empty
+// Fields).
+func wantedColumns(spec provider.QuerySpec) map[string]bool {
+	if len(spec.Fields) == 0 {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, f := range selectedFields(spec) {
+		out[f] = true
+	}
+	return out
 }
 
 // selectedFields is every column the caller needs the value of: the ones it

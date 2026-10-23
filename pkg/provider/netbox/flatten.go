@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"strings"
+
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // flattenObject converts a single NetBox object (raw JSON) into a flat set of
@@ -50,67 +51,14 @@ func flattenObject(raw json.RawMessage) ([]string, map[string]interface{}, error
 	return cols, vals, nil
 }
 
+// flattenField delegates to the shared contract in pkg/provider. It lives
+// there because a panel saved against one backend and pointed at another has to
+// keep its columns, which only holds if both expand a field the same way.
 func flattenField(key string, v interface{}, add func(name string, v interface{})) {
-	switch val := v.(type) {
-	case nil:
-		add(key, nil)
-	case bool, float64, string:
-		add(key, val)
-	case map[string]interface{}:
-		if key == "custom_fields" {
-			for _, ck := range sortedKeys(val) {
-				flattenField("cf_"+ck, val[ck], add)
-			}
-			return
-		}
-		add(key, nestedDisplay(val))
-		if id, ok := val["id"]; ok {
-			add(key+"_id", id)
-		} else if _, hasVal := val["value"]; hasVal {
-			// Choice field: expose the raw value alongside the label.
-			add(key+"_value", val["value"])
-		}
-		if slug, ok := val["slug"].(string); ok && slug != "" {
-			add(key+"_slug", slug)
-		}
-	case []interface{}:
-		if len(val) == 0 {
-			add(key, "")
-			add(key+"_count", float64(0))
-			return
-		}
-		parts := make([]string, 0, len(val))
-		for _, el := range val {
-			if m, ok := el.(map[string]interface{}); ok {
-				parts = append(parts, nestedDisplay(m))
-			} else {
-				parts = append(parts, fmt.Sprintf("%v", el))
-			}
-		}
-		add(key, strings.Join(parts, "; "))
-		add(key+"_count", float64(len(val)))
-	default:
-		b, _ := json.Marshal(v)
-		add(key, string(b))
-	}
+	provider.FlattenField(key, v, add)
 }
 
-// nestedDisplay picks the most human-friendly string from a nested object or
-// choice field.
-func nestedDisplay(m map[string]interface{}) string {
-	for _, k := range []string{"display", "name", "label", "address", "prefix", "cid", "model", "rgb"} {
-		if s, ok := m[k].(string); ok && s != "" {
-			return s
-		}
-	}
-	if v, ok := m["value"]; ok {
-		if s, ok := v.(string); ok {
-			return s
-		}
-		return fmt.Sprintf("%v", v)
-	}
-	return ""
-}
+func nestedDisplay(m map[string]interface{}) string { return provider.NestedDisplay(m) }
 
 // orderedKeys returns the top-level object keys of a JSON document in document
 // order.
@@ -169,18 +117,4 @@ func skipValue(dec *json.Decoder) error {
 		return err
 	}
 	return nil
-}
-
-func sortedKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	// stable, deterministic column order for custom fields
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j-1] > keys[j]; j-- {
-			keys[j-1], keys[j] = keys[j], keys[j-1]
-		}
-	}
-	return keys
 }

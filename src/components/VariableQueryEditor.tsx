@@ -3,8 +3,20 @@ import { Alert, InlineField, Select, Input, Stack, Button, IconButton } from '@g
 import { SelectableValue } from '@grafana/data';
 import { DataSource } from '../datasource';
 import { getTemplateSrv } from '@grafana/runtime';
-import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, BRANCH_FIELD_DISABLED_TOOLTIP } from '../hooks/useBranchingInstalled';
-import { FieldOption, FilterRow, NetBoxVariableQuery, ObjectTypeOption, validateFilters } from '../types';
+import {
+  useBranchingInstalled,
+  BRANCH_FIELD_TOOLTIP,
+  branchUnavailableTooltip,
+  BRANCH_FIELD_RETAINED_TOOLTIP,
+} from '../hooks/useBranchingInstalled';
+import {
+  FieldOption,
+  FilterField,
+  FilterRow,
+  NetBoxVariableQuery,
+  ObjectTypeOption,
+  validateFilters,
+} from '../types';
 
 interface Props {
   query: NetBoxVariableQuery;
@@ -14,9 +26,25 @@ interface Props {
 
 export function VariableQueryEditor({ query, onChange, datasource }: Props) {
   const branchingInstalled = useBranchingInstalled(datasource);
-  const branchDisabled = branchingInstalled === false;
+  // Same exception as QueryEditor: disabled when branching is unavailable,
+  // EXCEPT when the query already carries a branch. A saved variable keeps its
+  // branch when its datasource is switched to a backend that has none, and the
+  // backend then rejects every refresh and says to clear it — advice that
+  // needs the only control able to do so to be live.
+  const branchRetained = (query.branch ?? '') !== '';
+  const branchDisabled = branchingInstalled === false && !branchRetained;
   const [objectTypes, setObjectTypes] = useState<ObjectTypeOption[]>([]);
   const [fields, setFields] = useState<string[]>([]);
+  // Filterable columns are a DIFFERENT set from selectable ones, and the
+  // difference is not cosmetic: Fields lists every column a row can show —
+  // site_slug, cf_*, the <field>_value aliases — while the filters are the ones
+  // NetBox has on the object type, and a device has `site` (which compares the
+  // slug) but no `site_slug`. Filtering on a column that is not a filter fails
+  // in replica-cache mode, and in NetBox mode is ignored and returns every row.
+  // QueryEditor has always used /filter-fields for its filter picker; this
+  // editor reused the value list for both, so its filter picker offered
+  // columns that cannot be filtered.
+  const [filterFields, setFilterFields] = useState<string[]>([]);
 
   useEffect(() => {
     datasource.getObjectTypes().then(setObjectTypes).catch(() => setObjectTypes([]));
@@ -29,6 +57,10 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
       ? datasource.getFields(query.objectType, branch)
       : Promise.resolve<FieldOption[]>([]);
     p.then((f) => active && setFields(f.map((x) => x.name))).catch(() => active && setFields([]));
+    const fp = query.objectType
+      ? datasource.getFilterFields(query.objectType, branch)
+      : Promise.resolve<FilterField[]>([]);
+    fp.then((f) => active && setFilterFields(f.map((x) => x.name))).catch(() => active && setFilterFields([]));
     return () => {
       active = false;
     };
@@ -41,6 +73,12 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
   const fieldOptions: Array<SelectableValue<string>> = useMemo(
     () => fields.map((f) => ({ label: f, value: f })),
     [fields]
+  );
+  // Falls back to the value list when the backend publishes no filterable set,
+  // so a provider without that resource keeps the picker it had.
+  const filterFieldOptions: Array<SelectableValue<string>> = useMemo(
+    () => (filterFields.length > 0 ? filterFields.map((f) => ({ label: f, value: f })) : fieldOptions),
+    [filterFields, fieldOptions]
   );
 
   const filters = query.filters ?? [];
@@ -55,7 +93,13 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
         label="Branch"
         labelWidth={16}
         disabled={branchDisabled}
-        tooltip={branchDisabled ? BRANCH_FIELD_DISABLED_TOOLTIP : BRANCH_FIELD_TOOLTIP}
+        tooltip={
+          branchDisabled
+            ? branchUnavailableTooltip(datasource)
+            : branchingInstalled === false
+              ? BRANCH_FIELD_RETAINED_TOOLTIP
+              : BRANCH_FIELD_TOOLTIP
+        }
       >
         <Input
           id="variable-branch"
@@ -101,7 +145,7 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
             <InlineField label={i === 0 ? 'Filter' : ' '} labelWidth={16}>
               <Select
                 width={24}
-                options={fieldOptions}
+                options={filterFieldOptions}
                 allowCustomValue
                 value={f.field ? { label: f.field, value: f.field } : null}
                 placeholder="field"

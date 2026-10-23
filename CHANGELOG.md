@@ -36,6 +36,31 @@
   devices and a full inventory read on every run, past which the metrics should
   carry NetBox labels from collection instead.
 
+- **IP enrichment's prefix fallback asks about the host.** A masked or
+  IPv4-mapped input no longer misses the prefixes that hold the address.
+
+- **An alert table that matches nothing evaluates empty, in both modes.** It
+  used to fail with `value field … not found`.
+
+- **Replica-cache mode** reads a replica-cache (v1.35+) instead of NetBox's
+  REST API, for large instances. No annotations, tags, contacts or branches.
+- **Replica-cache filters are NetBox's**: names, lookups and meaning. A filter
+  NetBox lacks (a device's `rack`) is refused naming `rack_id`, not ignored.
+- **Replica-cache rows read and sort as NetBox's do**: choice labels (stored
+  value in `<field>_value`), related objects' display text, NetBox's name order.
+- **Replica-cache text matches have negations**, and _is empty_ finds null or
+  blank values, both answered as NetBox does.
+- **Replica-cache answers prefix `contains`**, NetBox's filter for the prefixes
+  holding an address or prefix (replica-cache v1.39+).
+- **Replica-cache results state their freshness**; the new **Max data age**
+  setting makes alert rules and expressions refuse stale or unknown-age data.
+- **Replica-cache links come from the replica's NetBox URL, or else the Browser
+  URL**; with neither, a `display_url` column warns to set it.
+- **Replica-cache warns of columns only NetBox computes** (`utilization`,
+  `tags`…), and an alert table on one fails saying so.
+- **Topology, Topology edges and IP enrichment work in replica-cache mode.**
+  Where cache mode differs from NetBox: `docs/REPLICA-CACHE.md`.
+
 ## 1.0.3 (2026-10-06)
 
 - **Build dependencies updated for new advisories.** `source-map-js` 1.2.2 fixes

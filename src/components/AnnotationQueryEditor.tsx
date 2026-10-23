@@ -2,7 +2,7 @@ import React from 'react';
 import { InlineField, MultiSelect, Input, Stack } from '@grafana/ui';
 import { SelectableValue } from '@grafana/data';
 import { DataSource } from '../datasource';
-import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, BRANCH_FIELD_DISABLED_TOOLTIP } from '../hooks/useBranchingInstalled';
+import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, branchUnavailableTooltip } from '../hooks/useBranchingInstalled';
 import { NetBoxQuery } from '../types';
 
 interface Props {
@@ -61,7 +61,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
         label="Branch"
         labelWidth={20}
         disabled={branchDisabled}
-        tooltip={branchDisabled ? BRANCH_FIELD_DISABLED_TOOLTIP : BRANCH_FIELD_TOOLTIP}
+        tooltip={branchDisabled ? branchUnavailableTooltip(datasource) : BRANCH_FIELD_TOOLTIP}
       >
         <Input
           id="annotation-branch"

@@ -43,6 +43,11 @@ const (
 type Field struct {
 	Name string    `json:"name"`
 	Type FieldType `json:"type"`
+	// Sortable says the provider can order a query by this column. Only a
+	// provider whose sortable set is not the NetBox allow-list sets it (the
+	// editor offers NetBox mode's own list otherwise), and it sets it on exactly
+	// what a query's Ordering accepts, so the editor's Sort by list is that set.
+	Sortable bool `json:"sortable,omitempty"`
 }
 
 // FilterField is a queryable filter parameter for an object type and the set of
@@ -57,6 +62,19 @@ type Filter struct {
 	Field    string `json:"field"`
 	Operator string `json:"operator"` // NetBox lookup, e.g. "" (exact), "ic", "n", "gte"
 	Value    string `json:"value"`
+	// Label is the field as the user wrote it, set by a provider that rewrites
+	// a filter onto another column before sending it (replica-cache sends
+	// NetBox's children filter as _children), so that a refusal names the field
+	// the user knows. Empty means Field is as written. It never travels in a
+	// query: callers set Field, and only the provider fills this in.
+	Label string `json:"-"`
+	// LabelOperator is the operator as the user wrote it, set beside Label by
+	// a provider that sends the filter with an operator of its own, one no
+	// query names (replica-cache sends owner=null as IS NULL), so that a
+	// refusal names the operator the user knows; "" is an exact match, as in
+	// Operator. It is read only where Operator is such an operator of the
+	// provider's, and never travels in a query.
+	LabelOperator string `json:"-"`
 }
 
 // QuerySpec describes an object query.
@@ -78,6 +96,12 @@ type QuerySpec struct {
 	//
 	// Result.Columns is unaffected; only Result.Rows is guaranteed to carry
 	// these values.
+	//
+	// A second use: the alert table names its value field here when Return
+	// fields is left at "All columns", and a provider that cannot produce a
+	// requested key field says so in a Warnings entry quoting its name with %q,
+	// which the alert table relays (it falls back to its own message when none
+	// does).
 	KeyFields []string `json:"keyFields"`
 	// Ordering asks the SOURCE to sort, naming one field, optionally prefixed
 	// with "-" for descending (e.g. "name", "-last_updated"). Empty means the
@@ -197,6 +221,17 @@ type Result struct {
 	// a column is empty for a reason the data cannot show, so a rule may evaluate
 	// on a result that carries them.
 	Notes []string `json:"notes,omitempty"`
+	// DataAsOf is the instant every change committed at or before which is
+	// reflected in these rows, when the producer knows it. replica-cache
+	// reports it per entity; the NetBox API is live and leaves it nil. Nil
+	// means unknown, never "no data".
+	DataAsOf *time.Time `json:"dataAsOf,omitempty"`
+	// SnapshotComplete says whether the producer has finished its initial
+	// load. False means the rows may be a fraction of the fleet with nothing
+	// else to say so — measured: 0.7% of a tenant served as a confident 200.
+	// Nil when the producer has no such notion, which is also what tells the
+	// plugin layer that a maximum data age cannot apply to it.
+	SnapshotComplete *bool `json:"snapshotComplete,omitempty"`
 	// Capped, when non-nil, reports that an expensive per-row enrichment
 	// deliberately measured only the first Cap.Measured rows and left its columns
 	// blank on the rest.
@@ -377,6 +412,14 @@ type Graph struct {
 	// device has no healthy upstream", which silences a page. Each entry is a
 	// complete, user-facing sentence.
 	Warnings []string `json:"warnings,omitempty"`
+	// Notes, DataAsOf and SnapshotComplete have Result's contracts, for the
+	// graph as a whole. A graph is built from several reads, so DataAsOf is
+	// the OLDEST instant among them — a link read from a table one hour behind
+	// is one hour old, however fresh the devices are — and nil when any read's
+	// age is unknown. The NetBox API is live and leaves all three unset.
+	Notes            []string   `json:"notes,omitempty"`
+	DataAsOf         *time.Time `json:"dataAsOf,omitempty"`
+	SnapshotComplete *bool      `json:"snapshotComplete,omitempty"`
 }
 
 // Provider is the enrichment backend the datasource depends on.

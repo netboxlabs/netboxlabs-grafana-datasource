@@ -1,0 +1,764 @@
+package replicacache
+
+import (
+	"fmt"
+	"maps"
+	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+)
+
+// A filter in replica-cache mode means what it means in NetBox mode, or is
+// refused saying why. NetBox ignores a filter it does not have and returns
+// every row, so a filter only this backend took (a text match on a related
+// name, a column NetBox has no filter for) made a dashboard right here and
+// silently wrong on switching modes. This file reads each filter as NetBox
+// would — by NetBox's own vocabulary for the model (vocab.go) — and puts it
+// in the replica's terms: the column NetBox reads, the operator that means
+// what NetBox's lookup means. What follows in the pipeline (comparisons.go,
+// negations.go, filters.go) sends what this produces.
+
+// Internal operators, produced here and nowhere else: IS NULL and IS NOT NULL on
+// a column, sent as filter[c]__isnull. NetBox spells them several ways (the
+// literal null, mtu__empty, cabled, local_context_data), none of them an
+// operator a query names, and a NetBox lookup is a Python identifier, so a
+// name with a space is never one a saved query carries. A row written with
+// one keeps the operator the user wrote in LabelOperator, beside Label, for a
+// refusal to name (operatorLabel).
+const (
+	opIsNull  = "is null"
+	opNotNull = "is not null"
+)
+
+// internalOperators are the operators this datasource writes for itself, which
+// a query never names: the two above, the replica's containment (opContains,
+// containment.go), and the two that ask the replica NetBox's empty lookup on
+// text (opWireGTBlank and opNotGTBlank, emptiness.go). Query refuses a filter
+// that names one before anything reads it, on any object type: a plugin's,
+// which nothing translates, would otherwise have a hand-written "is null" taken
+// for what the translation means by it.
+var internalOperators = map[string]bool{
+	opIsNull: true, opNotNull: true, opContains: true, opWireGTBlank: true, opNotGTBlank: true,
+}
+
+// refuseInternalOperators is that refusal. A row with no field sends nothing,
+// whatever its operator, and is left alone as everywhere else.
+func refuseInternalOperators(filters []provider.Filter) error {
+	for _, f := range filters {
+		if f.Field != "" && internalOperators[f.Operator] {
+			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator,
+				Reason: "that operator is one this datasource writes for itself, not one a query can name; use an operator the editor offers"}
+		}
+	}
+	return nil
+}
+
+// nullValue is the literal NetBox's forms read as no value (django-filter's
+// null_value, "null"): IS NULL where the filter takes it.
+const nullValue = "null"
+
+// netboxModeAdvice ends a refusal of a filter NetBox mode answers.
+const netboxModeAdvice = "use a datasource in NetBox mode for this filter"
+
+// translateFilters reads the caller's filters by NetBox's vocabulary for the
+// replica table, before anything else reads them. Each row is looked up under
+// the name NetBox mode sends it as (field, field__<operator>, field__empty for
+// both emptiness tests), and is rewritten onto the column NetBox reads with
+// NetBox's meaning, passed on unchanged for the steps that answer it (a filter
+// on a related object, a prefix's contains), or refused. Every rewritten row
+// keeps the field as written in Label, for refusals.
+//
+// The rows of one NetBox name are one filter there: NetBox mode adds every
+// row's values to one key (netbox/enrich.go), so they are read together — a
+// single-valued filter's last value, the case-insensitive name's count, the
+// literal null — and written at the first of them.
+//
+// none is a filter no row can match (a MAC address NetBox cannot read, a
+// prefix with host bits set), so no request is needed. A table the vocabulary
+// does not cover — a plugin's model — keeps the catalogue's rules: its filters
+// come back as written.
+func translateFilters(table string, filters []provider.Filter, e entity, c *catalog) (out []provider.Filter, none bool, err error) {
+	if err := refuseNullCharacters(filters); err != nil {
+		return nil, false, err
+	}
+	vocab, covered := vocabFor(table)
+	if !covered {
+		return filters, false, nil
+	}
+	tr := translation{vocab: vocab, table: table, e: e, c: c}
+	names := make([]string, len(filters))
+	rows := map[string][]provider.Filter{}
+	for i, f := range filters {
+		if sendsNothing(f) {
+			continue
+		}
+		if reason := netboxOnly(f); reason != "" {
+			return nil, false, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: reason}
+		}
+		names[i] = netboxName(f)
+		rows[names[i]] = append(rows[names[i]], f)
+	}
+	out = make([]provider.Filter, 0, len(filters))
+	done := map[string]bool{}
+	for i, f := range filters {
+		name := names[i]
+		switch {
+		case name == "":
+			out = append(out, f)
+		case !done[name]:
+			done[name] = true
+			translated, unmatchable, err := tr.filter(name, rows[name])
+			if err != nil {
+				return nil, false, err
+			}
+			none = none || unmatchable
+			out = append(out, translated...)
+		}
+	}
+	return out, none || nullAndNotNull(out), nil
+}
+
+// refuseNullCharacters refuses a filter with a null character in any of its
+// values, with NetBox's own message, before anything reads the filter: NetBox
+// answers it with 400 "Null characters are not allowed." on every filter read
+// through a Django CharField (NetBox 4.4.10: name=, description__ic=, prefix=,
+// q=), and stored text cannot hold one (PostgreSQL's cannot), so sent on it
+// would match no row — an empty result an alert rule reads as nothing wrong. A
+// plugin's filterset reads text the same way, so its table is no exception.
+func refuseNullCharacters(filters []provider.Filter) error {
+	for _, f := range filters {
+		if f.Field != "" && strings.ContainsRune(f.Value, 0) {
+			return &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: nullCharacterReason}
+		}
+	}
+	return nil
+}
+
+// sendsNothing is a row buildFilterValues skips, as NetBox mode sends no
+// parameter for it either: no field, or no value on an operator that needs
+// one. It is not judged, so a saved query carrying one keeps running.
+func sendsNothing(f provider.Filter) bool {
+	return f.Field == "" || f.Operator != opEmpty && f.Operator != opNEmpty && len(splitValues(f.Value)) == 0
+}
+
+// netboxOnly is the refusal of a filter only NetBox can answer, with each of its
+// lookups, or "": q (NetBox's search), tag and tag_id (the replica publishes no
+// tags) and cf_* (NetBox matches a custom field inside its JSON data). These are
+// among the most common filters on a NetBox-mode dashboard, and the vocabulary
+// would call the first a method and the tags a path, while a custom field is not
+// in it at all and reached "no such column", which read like a fault of the
+// plugin; each is named for what it is.
+func netboxOnly(f provider.Filter) string {
+	base, _, _ := strings.Cut(f.Field, "__")
+	switch {
+	case base == "q":
+		return "q is NetBox's search, which NetBox runs itself and this replica cannot; filter on the fields themselves, or " + netboxModeAdvice
+	case base == "tag" || base == "tag_id":
+		return base + " filters on tags, which this replica does not publish (replica-cache v1.40); " + netboxModeAdvice
+	case strings.HasPrefix(f.Field, "cf_"):
+		return base + " filters on a custom field, which NetBox matches in its own custom-field data and this replica cannot; " + netboxModeAdvice
+	}
+	return ""
+}
+
+// netboxName is the query parameter NetBox mode sends a row as
+// (netbox/enrich.go buildFilterValues): the field for an exact match,
+// field__empty for "is empty" and "has any value" alike, field__<operator>
+// otherwise.
+func netboxName(f provider.Filter) string {
+	switch f.Operator {
+	case opExact, "exact":
+		return f.Field
+	case opEmpty, opNEmpty:
+		return f.Field + "__empty"
+	}
+	return f.Field + "__" + f.Operator
+}
+
+// rowValues is what NetBox mode sends for a row: its comma-separated values,
+// trimmed, and true for "is empty", false for "has any value".
+func rowValues(f provider.Filter) []string {
+	switch f.Operator {
+	case opEmpty:
+		return []string{"true"}
+	case opNEmpty:
+		return []string{"false"}
+	}
+	return splitValues(f.Value)
+}
+
+// translation is one table's vocabulary and the replica it is read against.
+type translation struct {
+	vocab map[string][]vocabEntry
+	table string
+	e     entity
+	c     *catalog
+}
+
+// filter translates the rows of one NetBox name.
+func (tr translation) filter(name string, rows []provider.Filter) ([]provider.Filter, bool, error) {
+	first := rows[0]
+	alts, ok := tr.vocab[name]
+	if !ok {
+		return refused(first, tr.lacks(name, first.Field))
+	}
+	entry := pickVocab(alts, tr.e)
+	var values []string
+	for _, r := range rows {
+		values = append(values, rowValues(r)...)
+	}
+	// NetBox's single-valued filters read the last value of the parameter
+	// (QueryDict.get), whatever came before it: face=front&face=rear is rear,
+	// airflow=front-to-rear&airflow=null is null. A prefix's contains is left
+	// whole: several values are to be refused there, not narrowed to the last.
+	if entry.Single && entry.Kind != kindContains {
+		values = values[len(values)-1:]
+	}
+	switch entry.Kind {
+	case kindRelated, kindTree, kindModelChoice, kindContains:
+		if entry.Single && entry.Kind != kindContains {
+			last := rows[len(rows)-1]
+			return []provider.Filter{{Field: last.Field, Operator: last.Operator, Value: values[0], Label: last.Field}}, false, nil
+		}
+		return rows, false, nil
+	case kindValue, kindMAC:
+		return tr.values(name, entry, rows, values)
+	case kindBool, kindIsNull, kindLocalContext, kindEmpty:
+		last := values[len(values)-1]
+		b, ok := netboxBool(last)
+		if !ok {
+			return refused(first, fmt.Sprintf("NetBox ignores %q for %s and returns every row; use true or false", last, name))
+		}
+		return []provider.Filter{booleanFilter(entry, b, first)}, false, nil
+	case kindAddress:
+		// NetBox's filter_address is the net_in match setAddressMatch makes.
+		return []provider.Filter{{Field: entry.Column, Value: strings.Join(values, ","), Label: first.Field}}, false, nil
+	case kindPrefix:
+		return tr.prefix(entry, first, values)
+	case kindPath:
+		return refused(first, fmt.Sprintf("NetBox filters %s through %s, which this replica cannot join; %s", first.Field, entry.Path, netboxModeAdvice))
+	case kindMethod:
+		return refused(first, fmt.Sprintf("NetBox computes %s with a query of its own (%s), which this replica cannot run; %s", first.Field, entry.Method, netboxModeAdvice))
+	}
+	return refused(first, refusedReason(entry.Reason, name, first.Field))
+}
+
+// refused refuses a NetBox name's filter, naming it as the user wrote it.
+func refused(f provider.Filter, reason string) ([]provider.Filter, bool, error) {
+	return nil, false, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: reason}
+}
+
+// lacks is the refusal of a name NetBox does not have on the model, saying
+// what to do instead. A field NetBox has with a lookup it lacks (site__ic)
+// points at NetBox's other lookups on it, where it has any besides equality
+// (an interface's enabled has none, so enabled__ic points nowhere); otherwise
+// the filter that does what was meant is named where NetBox has one the
+// replica takes: <x>_id for a relation NetBox filters by id alone (a device's
+// rack), <x> for an <x>_slug (NetBox's site is the slug) and for a cached _<x>
+// (a prefix's children). One NetBox applies through another relation (a
+// device's region) is no alternative: it is refused too.
+func (tr translation) lacks(name, field string) string {
+	reason := fmt.Sprintf("NetBox has no %s filter on %s, so a dashboard filtering on it would return every row in NetBox mode", name, tr.objectType())
+	base := field
+	if i := strings.LastIndex(field, "__"); i >= 0 && lookupSuffixes[field[i+2:]] {
+		base = field[:i]
+	}
+	if tr.takesFilter(base) {
+		if tr.hasLookups(base) {
+			return reason + "; use another of NetBox's lookups on " + base
+		}
+		return reason + "; remove it, or choose a filter the editor offers"
+	}
+	for _, alt := range []string{base + "_id", strings.TrimSuffix(base, "_slug"), strings.TrimPrefix(base, "_")} {
+		if alt != base && tr.takesFilter(alt) {
+			return reason + "; filter on " + alt + " instead"
+		}
+	}
+	return reason + "; remove it, or choose a filter the editor offers"
+}
+
+// hasLookups reports whether NetBox has a lookup on a filter besides its
+// equality (base__n, base__ic, …) that the translation takes.
+func (tr translation) hasLookups(base string) bool {
+	for name := range tr.vocab {
+		if lookup, ok := strings.CutPrefix(name, base+"__"); ok && lookupSuffixes[lookup] && tr.takesFilter(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// takesFilter reports whether the translation takes a NetBox filter on this
+// model rather than refusing it for what it is (a path, a method, a refusal).
+func (tr translation) takesFilter(name string) bool {
+	alts, ok := tr.vocab[name]
+	if !ok {
+		return false
+	}
+	switch pickVocab(alts, tr.e).Kind {
+	case kindRefuse, kindPath, kindMethod:
+		return false
+	}
+	return true
+}
+
+// lookupSuffixes are the lookups a filter name can end in, as the editor's
+// operators spell them.
+var lookupSuffixes = map[string]bool{
+	"n": true, "ie": true, "nie": true, "ic": true, "nic": true, "isw": true, "nisw": true, "iew": true, "niew": true,
+	"regex": true, "iregex": true, "gt": true, "gte": true, "lt": true, "lte": true, "empty": true,
+}
+
+// objectType is the object type the catalogue serves the table as — what the
+// user picked — for a refusal to name; the table when the catalogue has none.
+func (tr translation) objectType() string {
+	if objectType, _, ok := tr.c.servedTable(tr.table); ok {
+		return objectType
+	}
+	return tr.table
+}
+
+// lookupOperators is the editor's operator for each of NetBox's lookups on a
+// value filter, and for its negation where NetBox has one.
+var lookupOperators = map[string]struct{ match, negated string }{
+	"exact":       {opExact, "n"},
+	"iexact":      {opIExact, "nie"},
+	"icontains":   {opIContns, "nic"},
+	"istartswith": {opIStarts, "nisw"},
+	"iendswith":   {opIEnds, "niew"},
+	"gt":          {opGT, ""},
+	"gte":         {opGTE, ""},
+	"lt":          {opLT, ""},
+	"lte":         {opLTE, ""},
+}
+
+// textSearch is a lookup NetBox cannot run on None: asset_tag__ic=null is a
+// 500 on NetBox 4.4.10, "Cannot use None as a query value".
+func textSearch(lookup string) bool {
+	switch lookup {
+	case "icontains", "istartswith", "iendswith":
+		return true
+	}
+	return false
+}
+
+// timeZoneNull is a site's time zone filter, or its negation, on the literal
+// null: NetBox reads it as the empty string, not as IS NULL, its form being a
+// time zone field's (NetBox 4.4.10: time_zone=null → the 3 sites with a blank
+// time zone, time_zone__n=null → none), which the replica cannot send yet. The
+// vocabulary gives the two no nv (vocab.go); time_zone__ie and __nie read
+// null as IS NULL and carry it.
+func (tr translation) timeZoneNull(entry vocabEntry) bool {
+	return tr.table == "dcim_site" && entry.Column == "time_zone" && !entry.NullValue
+}
+
+// values translates a value or MAC filter: one column compared with NetBox's
+// lookup.
+func (tr translation) values(name string, entry vocabEntry, rows []provider.Filter, values []string) ([]provider.Filter, bool, error) {
+	first := rows[0]
+	// NetBox's regex and iregex are PostgreSQL's ~ and ~*; the replica has no
+	// regular-expression match to send them as.
+	if entry.Lookup == "regex" || entry.Lookup == "iregex" {
+		return refused(first, fmt.Sprintf("the replica has no regular-expression match, so it cannot answer %s; %s", name, netboxModeAdvice))
+	}
+	ops, known := lookupOperators[entry.Lookup]
+	op := ops.match
+	if entry.Exclude {
+		op = ops.negated
+	}
+	if !known || (entry.Exclude && ops.negated == "") {
+		return refused(first, fmt.Sprintf("NetBox compares %s by %s, which the replica cannot reproduce; %s", first.Field, entry.Lookup, netboxModeAdvice))
+	}
+	on := func(op string, values []string, label string) provider.Filter {
+		return provider.Filter{Field: entry.Column, Operator: op, Value: strings.Join(values, ","), Label: label}
+	}
+
+	// A MAC address filter (the base and its negation) reads each value as an
+	// EUI-48 address, and one NetBox cannot read makes the whole filter match
+	// nothing: MultiValueMACAddressFilter answers the ValidationError with
+	// qs.none() (NetBox 4.6.10: a valid address beside garbage → 0 rows). The
+	// replica stores PostgreSQL's macaddr text, so the value is written so. The
+	// text searches compare the text as written, and so go as written.
+	normalised := entry.Kind == kindMAC && entry.Lookup == "exact"
+	if normalised {
+		values = slices.Clone(values)
+		for i, v := range values {
+			if v == nullValue && entry.NullValue {
+				continue
+			}
+			mac, ok := netaddrEUI48(v)
+			if !ok {
+				return nil, true, nil
+			}
+			values[i] = mac
+		}
+	}
+
+	if slices.Contains(values, nullValue) {
+		switch {
+		case textSearch(entry.Lookup):
+			return refused(first, fmt.Sprintf("NetBox answers null on %s with an error; remove the filter", name))
+		case tr.timeZoneNull(entry):
+			return refused(first, fmt.Sprintf("NetBox reads null on %s as an empty time zone, which this replica cannot send yet; %s", first.Field, netboxModeAdvice))
+		case entry.NullValue:
+			// NetBox's form reads null as None, and Django's exact and iexact
+			// read None as IS NULL (NetBox 4.4.10: asset_tag=null → the 18
+			// devices with none), excluded on a negation.
+			rest := slices.DeleteFunc(slices.Clone(values), func(v string) bool { return v == nullValue })
+			if len(rest) == 0 {
+				return []provider.Filter{{Field: entry.Column, Operator: nullOperator(!entry.Exclude), Label: first.Field, LabelOperator: first.Operator}}, false, nil
+			}
+			if !entry.Exclude {
+				return refused(first, "NetBox returns rows matching either null or the values, and this replica cannot combine the two; filter on null and on the values in separate queries, or "+netboxModeAdvice)
+			}
+			return []provider.Filter{{Field: entry.Column, Operator: opNotNull, Label: first.Field, LabelOperator: first.Operator}, on(op, rest, first.Field)}, false, nil
+		case tr.isChoice(entry.Column):
+			// A choice whose form has no null choice (status): NetBox's 400,
+			// in its words.
+			return refused(first, fmt.Sprintf("Select a valid choice. null is not one of the available choices. NetBox mode answers the same; filter on one of the stored values instead, which %s_value shows", entry.Column))
+		}
+		// Anywhere else null is a value like any other; a number filter's form
+		// refuses it, as validateFilters does here.
+	}
+
+	// NetBox compares a device's or VM's name, and the serial of a device, rack,
+	// module or inventory item, without regard to case: its base filter's lookup
+	// is iexact. One value is the replica's iexact. Several are an exact in, the
+	// documented divergence: the replica has no case-insensitive in, and the
+	// values a multi-select variable offers come from the data, in its case.
+	// Values equal but for case are one value to iexact, and go as one.
+	if entry.Lookup == "iexact" && !entry.Exclude && !strings.Contains(name, "__") {
+		folded := map[string]bool{}
+		for _, v := range values {
+			folded[strings.ToLower(v)] = true
+		}
+		if len(folded) > 1 {
+			return []provider.Filter{on(opExact, values, first.Field)}, false, nil
+		}
+		if !tr.takes(entry.Column, wireTextOperator[opIExact]) {
+			return refused(first, fmt.Sprintf("this replica cannot compare %s case-insensitively as NetBox does (a newer replica-cache build can); filter on id, or use a datasource in NetBox mode", first.Field))
+		}
+		return []provider.Filter{on(opIExact, values[:1], first.Field)}, false, nil
+	}
+
+	// Otherwise row by row, as written, so the steps after this refuse two rows
+	// they cannot combine as they always have.
+	if entry.Single || normalised {
+		return []provider.Filter{on(op, values, first.Field)}, false, nil
+	}
+	out := make([]provider.Filter, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, on(op, rowValues(r), r.Field))
+	}
+	return out, false, nil
+}
+
+// takes reports whether the replica takes a wire operator on a column: the
+// column's own list where the entity has it, else the build's, there being no
+// column to ask on an entity that has not received data.
+func (tr translation) takes(column, wire string) bool {
+	if col, ok := tr.e.column(column); ok {
+		return slices.Contains(col.Operators, wire)
+	}
+	return tr.c.offersOperator(wire)
+}
+
+// isChoice reports whether NetBox's filter on a column is a choice filter, by
+// the choice-label map: every choice filter whose form takes no null (status,
+// type) has its column labelled there (checked over NetBox 4.4.10's and
+// 4.6.10's filtersets). The other filters on a labelled column are text ones,
+// whose nv decides null before this is asked, and on 4.6 a console port's
+// speed__ie, a number filter whose form refuses null as well.
+func (tr translation) isChoice(column string) bool {
+	_, ok := loadChoiceLabels()[tr.objectType()][column]
+	return ok
+}
+
+// netboxBool reads a boolean as NetBox's form does (Django's NullBooleanSelect,
+// which reads the last value): true, True and 2 are true, false, False and 3
+// are false. Anything else — 1, 0, TRUE, yes — is no answer, and NetBox drops
+// the filter and returns every row (NetBox 4.4.10: mgmt_only=1 → every
+// interface).
+func netboxBool(v string) (bool, bool) {
+	switch v {
+	case "true", "True", "2":
+		return true, true
+	case "false", "False", "3":
+		return false, true
+	}
+	return false, false
+}
+
+// booleanFilter is a boolean NetBox filter's answer in the replica's terms,
+// for the filter as written, first.
+func booleanFilter(entry vocabEntry, b bool, first provider.Filter) provider.Filter {
+	f := provider.Filter{Field: entry.Column, Label: first.Field}
+	switch entry.Kind {
+	case kindBool:
+		// Equality on the column; an excluding one keeps the rows NetBox's
+		// exclude() keeps, NULL included.
+		f.Value = strconv.FormatBool(b)
+		if entry.Exclude {
+			f.Operator = "n"
+		}
+	case kindIsNull:
+		// cabled=true is the cable column IS NOT NULL (an isnull that
+		// excludes); mtu__empty=true is mtu IS NULL.
+		f.Operator, f.LabelOperator = nullOperator(b != entry.Exclude), first.Operator
+	case kindLocalContext:
+		// NetBox's _local_context_data: true is "has one".
+		f.Operator, f.LabelOperator = nullOperator(!b), first.Operator
+	case kindEmpty:
+		// NetBox's empty lookup on text, NULL or "", left as the emptiness
+		// operators on the column: the replica's isnull cannot say both there, so
+		// rewriteEmptiness puts them on the comparison it can be asked
+		// (emptiness.go). true is "is empty" and false "has any value".
+		f.Operator = opNEmpty
+		if b {
+			f.Operator = opEmpty
+		}
+	}
+	return f
+}
+
+func nullOperator(isNull bool) string {
+	if isNull {
+		return opIsNull
+	}
+	return opNotNull
+}
+
+// nullAndNotNull reports a column both IS NULL and IS NOT NULL, from two names
+// NetBox ANDs (asset_tag=null, asset_tag__n=null): no row is both, and the
+// replica takes one isnull per column, so the answer is given here.
+func nullAndNotNull(filters []provider.Filter) bool {
+	isNull, notNull := map[string]bool{}, map[string]bool{}
+	for _, f := range filters {
+		switch f.Operator {
+		case opIsNull:
+			isNull[f.Field] = true
+		case opNotNull:
+			notNull[f.Field] = true
+		}
+	}
+	for field := range isNull {
+		if notNull[field] {
+			return true
+		}
+	}
+	return false
+}
+
+// prefix translates NetBox's filter_prefix: equality on the stored cidr text,
+// mask always written (cidrText), with each value read as netaddr's
+// IPNetwork reads it. It never goes through the address match, whatever the
+// catalogue lists on the column (addressField leaves network columns out).
+//
+// An aggregate's is single-valued and takes IPNetwork(value).cidr, host bits
+// zeroed (NetBox 4.4.10: prefix=10.250.3.4/15 finds 10.250.0.0/15); a value
+// that does not parse is queryset.none(). A prefix's drops what does not parse
+// and compares the networks as given, each network once, in whichever spelling:
+// one with host bits set matches nothing alone (prefix=10.10.10.5/24 → 0 rows,
+// so does 10.10.10.5/24 beside itself or 10.10.10.5/255.255.255.0) and is
+// PostgreSQL's invalid-cidr error beside a different network (a 500), so it is
+// refused there.
+func (tr translation) prefix(entry vocabEntry, first provider.Filter, values []string) ([]provider.Filter, bool, error) {
+	if entry.Single {
+		p, ok := netaddrNetwork(values[0])
+		if !ok {
+			return nil, true, nil
+		}
+		return []provider.Filter{{Field: entry.Column, Value: cidrText(p.Masked()), Label: first.Field}}, false, nil
+	}
+	var networks []netip.Prefix
+	for _, v := range values {
+		if p, ok := netaddrNetwork(v); ok && !slices.Contains(networks, p) {
+			networks = append(networks, p)
+		}
+	}
+	texts := make([]string, 0, len(networks))
+	for _, p := range networks {
+		if p != p.Masked() {
+			if len(networks) == 1 {
+				return nil, true, nil
+			}
+			return refused(first, fmt.Sprintf("NetBox answers this with an error, because %s has bits set past its mask; write it as %s", p, p.Masked()))
+		}
+		texts = append(texts, cidrText(p))
+	}
+	if len(texts) == 0 {
+		return nil, true, nil
+	}
+	return []provider.Filter{{Field: entry.Column, Value: strings.Join(texts, ","), Label: first.Field}}, false, nil
+}
+
+// cidrText is a network as PostgreSQL prints a cidr: the address as it prints
+// one (pgAddrText), the mask always, /32 included.
+func cidrText(p netip.Prefix) string {
+	return pgAddrText(p.Addr()) + "/" + strconv.Itoa(p.Bits())
+}
+
+// refusedReason is the sentence for a filter the vocabulary refuses, by its
+// reason: what the replica holds that NetBox compares otherwise.
+func refusedReason(reason, name, field string) string {
+	why, lookup, _ := strings.Cut(reason, ":")
+	switch why {
+	case "decimal":
+		return fmt.Sprintf("the replica stores %s as text with a fixed scale, so it cannot compare it as NetBox compares a number; %s", field, netboxModeAdvice)
+	case "date":
+		// Timestamps arrive as text and dates as a day count (DATA-250).
+		return fmt.Sprintf("the replica does not store %s as a date, so it cannot compare it as NetBox compares a date; %s", field, netboxModeAdvice)
+	case "contenttype":
+		return fmt.Sprintf("NetBox matches %s by content-type name, and the replica has no content-type names; %s", field, netboxModeAdvice)
+	case "array":
+		return fmt.Sprintf("the replica stores %s as JSON text, so it cannot compare its elements as NetBox does; %s", field, netboxModeAdvice)
+	case "uuid":
+		return fmt.Sprintf("the replica cannot compare %s as NetBox compares a UUID; %s", field, netboxModeAdvice)
+	case "wwn":
+		return fmt.Sprintf("NetBox reads %s as a WWN in any of its spellings, which the replica cannot reproduce on the stored text; %s", field, netboxModeAdvice)
+	case "badempty":
+		// The filter keeps its number or date class with the isnull lookup, so
+		// true fails its form: speed__empty is "Enter a whole number.".
+		return fmt.Sprintf("NetBox answers %s with an error; remove the filter", name)
+	case "lookup":
+		return fmt.Sprintf("NetBox compares %s by %s, which the replica cannot reproduce; %s", field, lookup, netboxModeAdvice)
+	}
+	return fmt.Sprintf("NetBox's %s filter is not one the replica can reproduce; %s", name, netboxModeAdvice)
+}
+
+// networkColumns are the columns NetBox's prefix filters read on the entity's
+// table (a prefix's or an aggregate's prefix): networks, stored as cidr, each
+// with its mask. None is ever matched by host (see addressField).
+func networkColumns(e entity) map[string]bool {
+	vocab, covered := vocabFor(e.Table)
+	if !covered {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, alts := range vocab {
+		for _, entry := range alts {
+			if entry.Kind == kindPrefix {
+				out[entry.Column] = true
+			}
+		}
+	}
+	return out
+}
+
+// valueColumn is the stored column a filter's values come from, for
+// autocomplete: the column NetBox's filter reads where it compares that
+// column's own values (a value, MAC, boolean, address or prefix filter), which
+// is not always its name — a prefix's children are its cached _children. Any
+// other name is returned as it is: a relation keeps the expanded name it is
+// read under.
+func valueColumn(e entity, field string) string {
+	vocab, covered := vocabFor(e.Table)
+	if !covered {
+		return field
+	}
+	alts, ok := vocab[field]
+	if !ok {
+		return field
+	}
+	switch entry := pickVocab(alts, e); entry.Kind {
+	case kindValue, kindMAC, kindBool, kindAddress, kindPrefix:
+		if e.has(entry.Column) {
+			return entry.Column
+		}
+	}
+	return field
+}
+
+// vocabFilterFields is what the editor offers on an entity the vocabulary
+// covers: NetBox's own filters, under NetBox's names, where the replica stores
+// the column NetBox reads (a 4.6-only filter is not offered on a replica of
+// 4.4, whose table lacks its column), each with the lookups NetBox has on it
+// that the translation can send and the column takes. A filter on a related
+// object offers = and not where its target is a table with data: its values
+// are checked against that table, so on any other they are refused, and the
+// editor does not offer what a query refuses. is-empty and has-any-value go
+// where NetBox's __empty is a boolean the replica can answer — IS NULL on a
+// column that takes it, or NetBox's empty lookup on a text column that takes gt
+// (emptiness.go) — and only there: a number's or a date's __empty keeps that
+// class and is a NetBox 400 (speed__empty). A decimal or date NetBox compares as
+// such, which the replica cannot, is offered with those two alone. A prefix's
+// contains is offered with = alone, where the replica has the operator for it
+// (containment.go).
+func vocabFilterFields(vocab map[string][]vocabEntry, e entity, c *catalog) []provider.FilterField {
+	var out []provider.FilterField
+	for _, name := range slices.Sorted(maps.Keys(vocab)) {
+		if strings.Contains(name, "__") {
+			continue // a lookup, offered as its filter's operator
+		}
+		if ops := vocabOperators(vocab, name, e, c); len(ops) > 0 {
+			out = append(out, provider.FilterField{Name: name, Operators: ops})
+		}
+	}
+	return out
+}
+
+func vocabOperators(vocab map[string][]vocabEntry, name string, e entity, c *catalog) []string {
+	base := pickVocab(vocab[name], e)
+	col, stored := e.column(base.Column)
+	var ops []string
+	switch base.Kind {
+	case kindRelated, kindTree, kindModelChoice:
+		if _, target, served := c.servedTable(tableOf(base.Target)); stored && served && target.Ingested {
+			ops = append(ops, opExact)
+			if n, ok := vocab[name+"__n"]; ok && pickVocab(n, e).Kind == base.Kind {
+				ops = append(ops, "n")
+			}
+		}
+	case kindIsNull, kindLocalContext:
+		if stored && slices.Contains(col.Operators, "isnull") {
+			ops = append(ops, opExact)
+		}
+	case kindContains:
+		// No lookups: NetBox has no contains__n. The prefix column lists the
+		// operator on a build that has it, and the schema route its limit.
+		if stored && c.offersContains() && slices.Contains(col.Operators, "contains") {
+			ops = append(ops, opExact)
+		}
+	case kindValue, kindMAC, kindBool, kindAddress, kindPrefix:
+		if !stored {
+			break
+		}
+		for _, op := range seamOperators(col) {
+			switch op {
+			case opEmpty, opNEmpty:
+				// NetBox's __empty decides, below.
+			case opExact:
+				// One value of a case-insensitive name needs the replica's iexact.
+				if base.Lookup != "iexact" || slices.Contains(col.Operators, wireTextOperator[opIExact]) {
+					ops = append(ops, op)
+				}
+			default:
+				if v, ok := vocab[name+"__"+op]; ok {
+					switch variant := pickVocab(v, e); variant.Kind {
+					case kindRefuse, kindPath, kindMethod:
+					default:
+						if variant.Column == base.Column {
+							ops = append(ops, op)
+						}
+					}
+				}
+			}
+		}
+	}
+	if (len(ops) > 0 && base.Kind == kindValue) || base.Kind == kindRefuse {
+		if v, ok := vocab[name+"__empty"]; ok {
+			empty := pickVocab(v, e)
+			col, stored := e.column(empty.Column)
+			switch {
+			case empty.Kind == kindIsNull && stored && slices.Contains(col.Operators, "isnull"):
+				ops = append(ops, opEmpty, opNEmpty)
+			case empty.Kind == kindEmpty && stored && answersTextEmptiness(col):
+				ops = append(ops, opEmpty, opNEmpty)
+			}
+		}
+	}
+	return ops
+}

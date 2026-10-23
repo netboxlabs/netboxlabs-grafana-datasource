@@ -469,6 +469,28 @@ func TestQuerySendsNoProjectionForAllColumns(t *testing.T) {
 	}
 }
 
+// KeyFields with no Fields is an ordinary query: a join mapping puts its source
+// there, and an alert table left at "All columns" puts its value field there
+// (pkg/plugin). Reading it as a selection would narrow the table to the key
+// alone, so it stays unprojected and keeps every column.
+func TestQueryKeepsAllColumnsWhenOnlyKeyFieldsAreGiven(t *testing.T) {
+	objects := map[string]func(url.Values) []map[string]interface{}{
+		"dcim/devices": fixed(deviceFixtures()...),
+	}
+	spy := &listSpy{}
+	p := (&fakeNetBox{honorFields: true, spy: spy, objects: objects}).start(t)
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", KeyFields: []string{"status"}, Limit: 100})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if v, ok := spy.fieldsFor("dcim/devices"); ok {
+		t.Errorf("a query with only key fields sent ?fields=%q; it must stay unprojected", v)
+	}
+	if len(res.Columns) < 10 {
+		t.Errorf("columns = %v, want the full flattened set", res.Columns)
+	}
+}
+
 // TestQueryRefetchesWhenProjectionYieldsNothing pins the fallback: a NetBox that
 // answers a projected request with objects carrying none of the requested
 // properties must cost the user a second request, not their whole table.

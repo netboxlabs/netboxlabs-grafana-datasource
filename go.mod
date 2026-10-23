@@ -5,6 +5,7 @@ go 1.26.9
 require (
 	github.com/grafana/grafana-plugin-sdk-go v0.296.4
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
+	golang.org/x/text v0.42.0
 )
 
 require (
@@ -79,7 +80,6 @@ require (
 	golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto v0.0.0-20210630183607-d20f26d13c79 // indirect
 	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect

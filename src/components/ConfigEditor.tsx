@@ -44,10 +44,11 @@ export const MODE_TOOLTIP =
  *  field has here because the second is not guessable: a replica that reports
  *  no NetBox URL has no other source of the address its links point at, so
  *  someone who leaves this empty against one gets no links, and nothing else
- *  on the form says why.
+ *  on the form says why. It says http(s) too, because the link base is held to
+ *  that (an address of another shape is no base) and nothing else reports it.
  */
 export const BROWSER_URL_CACHE_TOOLTIP =
-  "Where users' browsers reach the NetBox the replica mirrors. 'View in NetBox' links are built from it when the replica reports no NetBox URL, and rewritten to it otherwise. Leave empty only if the replica reports a NetBox URL that browsers can reach.";
+  "Where users' browsers reach the NetBox the replica mirrors, as an http:// or https:// address. 'View in NetBox' links are built from it when the replica reports no NetBox URL, and rewritten to it otherwise. Leave empty only if the replica reports a NetBox URL that browsers can reach.";
 
 const MODE_OPTIONS: Array<{ label: string; value: ProviderMode; description: string }> = [
   { label: 'NetBox API', value: 'netbox', description: 'Query the NetBox instance directly.' },
@@ -187,7 +188,7 @@ export function ConfigEditor(props: Props) {
             id="config-public-url"
             width={40}
             value={jsonData.publicUrl ?? ''}
-            placeholder="(optional) where browsers reach NetBox"
+            placeholder={isCache ? 'https://netbox.example.com' : '(optional) where browsers reach NetBox'}
             onChange={(e: ChangeEvent<HTMLInputElement>) => onJsonChange({ publicUrl: e.target.value })}
           />
         </InlineField>

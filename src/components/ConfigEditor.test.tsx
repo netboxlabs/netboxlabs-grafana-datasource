@@ -296,6 +296,25 @@ describe('replica-cache mode', () => {
     expect(BROWSER_URL_CACHE_TOOLTIP).toMatch(/built from it when the replica reports no NetBox URL/i);
     expect(BROWSER_URL_CACHE_TOOLTIP).toMatch(/rewritten to it otherwise/i);
   });
+
+  // Only an http:// or https:// address with a host is a link base; anything
+  // else is no base, and the rows come without a link column and without a
+  // message. The tooltip is where the form says so.
+  it('cache-mode Browser URL tooltip says the address must be http(s)', () => {
+    expect(BROWSER_URL_CACHE_TOOLTIP).toMatch(/http:\/\/ or https:\/\//);
+  });
+
+  // "Optional" is true in NetBox mode and half true here: against a replica that
+  // reports no NetBox URL the field is the only way to get links.
+  it('does not call the Browser URL optional in replica-cache mode, as it does in NetBox mode', () => {
+    const cache = render(
+      <ConfigEditor options={makeOptions({ mode: 'replica-cache' })} onOptionsChange={jest.fn()} />
+    ).container;
+    expect(cache.querySelector<HTMLInputElement>('#config-public-url')!.placeholder).not.toMatch(/optional/i);
+
+    const netbox = render(<ConfigEditor options={makeOptions({})} onOptionsChange={jest.fn()} />).container;
+    expect(netbox.querySelector<HTMLInputElement>('#config-public-url')!.placeholder).toMatch(/optional/i);
+  });
 });
 
 // The URL and Browser URL fields sit in the same place in both modes, so

@@ -114,7 +114,7 @@ func (p *Provider) recordsByHost(ctx context.Context, ips []string, addresses en
 	if col, ok := addresses.column("address"); addresses.Ingested && (!ok || !slices.Contains(col.Operators, "host")) {
 		return nil, nil, &UnsupportedError{
 			Feature: "IP enrichment",
-			Detail:  "This replica-cache build cannot match an address by its host whatever its mask (a newer build adds it), which is how NetBox finds an IP's records. Ask NetBox Labs to upgrade the replica, or use a datasource in NetBox mode for IP enrichment.",
+			Detail:  "This replica-cache build cannot match an address by its host whatever its mask (v1.38 added it), which is how NetBox finds an IP's records. Ask NetBox Labs to upgrade the replica, or use a datasource in NetBox mode for IP enrichment.",
 		}
 	}
 	rows, capped, err := p.listBatched(ctx, addressesEntity, param("address", "host"), hosts, 0, MaxLimit, addressRecordParams(addresses), st)
@@ -444,7 +444,7 @@ func (en *enrichment) run(ctx context.Context, hosts []string, byHost map[string
 		en.warnings = append(en.warnings, pickUndecidedWarning(undecided, len(rows)))
 	}
 	if unresolved > 0 {
-		en.warnings = append(en.warnings, unresolvedAssignmentWarning(unresolved))
+		en.warnings = append(en.warnings, unresolvedAssignmentWarning(unresolved, en.sel))
 	}
 	if dangling > 0 {
 		en.warnings = append(en.warnings, fmt.Sprintf(
@@ -491,11 +491,61 @@ func pickUndecidedWarning(rows, total int) string {
 // unresolvedAssignmentWarning counts the rows whose address is assigned to an
 // object of a type the rows did not teach (contenttypes.go): their owner
 // columns are blank because the type is unknown, not because there is none.
-func unresolvedAssignmentWarning(n int) string {
-	if n == 1 {
-		return "1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its interface and device columns are blank."
+// It names the columns of this frame the type blanks, as NetBox mode's device
+// hop warning does — a column alone by its name, several of one group by the
+// group's — since a warning naming a column the panel lacks sends its reader
+// after the wrong gap.
+func unresolvedAssignmentWarning(n int, sel ipSelection) string {
+	blank := typedColumns(sel)
+	verb := "column is"
+	if len(blank) > 1 || (len(blank) == 1 && strings.HasSuffix(blank[0], "*")) {
+		verb = "columns are"
 	}
-	return fmt.Sprintf("%d addresses are assigned to objects this replica cannot identify (it does not serve NetBox's content-type names), so their interface and device columns are blank.", n)
+	if n == 1 {
+		return fmt.Sprintf("1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its %s %s blank.", joinNames(blank), verb)
+	}
+	return fmt.Sprintf("%s addresses are assigned to objects this replica cannot identify (it does not serve NetBox's content-type names), so their %s %s blank.",
+		provider.HumanInt(n), joinNames(blank), verb)
+}
+
+// typedColumns is the selected columns an assignment's type fills, in the
+// order the warning names them: the type itself, the interface, the device,
+// the virtual machine, the primary flag. A group with several selected
+// columns is named as the group.
+func typedColumns(sel ipSelection) []string {
+	var out []string
+	if sel.has("address_assigned_object_type") {
+		out = append(out, "address_assigned_object_type")
+	}
+	for _, group := range []string{"interface_", "device_"} {
+		var cols []string
+		for _, c := range provider.IPEnrichColumns() {
+			if strings.HasPrefix(c, group) && sel.has(c) {
+				cols = append(cols, c)
+			}
+		}
+		switch len(cols) {
+		case 0:
+		case 1:
+			out = append(out, cols[0])
+		default:
+			out = append(out, group+"*")
+		}
+	}
+	for _, c := range []string{"vm_name", provider.IsPrimaryIPColumn} {
+		if sel.has(c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// joinNames is names as a sentence lists them: "a", "a and b", "a, b and c".
+func joinNames(names []string) string {
+	if len(names) < 2 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
 // enrichmentFreshness states the age of the answer as an objects query states

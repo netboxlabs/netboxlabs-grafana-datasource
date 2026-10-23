@@ -78,6 +78,12 @@ type QuerySpec struct {
 	//
 	// Result.Columns is unaffected; only Result.Rows is guaranteed to carry
 	// these values.
+	//
+	// A second use: the alert table names its value field here when Return
+	// fields is left at "All columns", and a provider that cannot produce a
+	// requested key field says so in a Warnings entry quoting its name with %q,
+	// which the alert table relays (it falls back to its own message when none
+	// does).
 	KeyFields []string `json:"keyFields"`
 	// Ordering asks the SOURCE to sort, naming one field, optionally prefixed
 	// with "-" for descending (e.g. "name", "-last_updated"). Empty means the

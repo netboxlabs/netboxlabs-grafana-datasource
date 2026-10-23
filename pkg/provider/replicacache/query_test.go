@@ -2171,3 +2171,223 @@ func TestQuery_ReportsFreshness(t *testing.T) {
 		t.Errorf("notes=%v warnings=%v", res.Notes, res.Warnings)
 	}
 }
+
+// lonelyDevices is one device that references nothing, so a result carries no
+// dangling-reference warning to stand beside the one under test.
+func lonelyDevices() []map[string]interface{} {
+	return []map[string]interface{}{{"id": float64(1), "name": "CORE-1", "custom_field_data": `{"lifecycle_phase":"production"}`}}
+}
+
+// queryShape is one way of naming a column: how the caller put it in the spec.
+type queryShape struct {
+	name string
+	spec provider.QuerySpec
+}
+
+// missingColumnShapes are the two ways a query names a column the result may
+// lack: selected in Return fields, and as the alert table's value field under
+// "All columns" — Fields empty, the name only in KeyFields (pkg/plugin's alert
+// branch). Both reach the same backstop, and the second is the one an alert
+// rule runs, so what is said in one must be said in the other.
+func missingColumnShapes(col string) []queryShape {
+	return []queryShape{
+		{"selected", provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", col}}},
+		{"all columns", provider.QuerySpec{ObjectType: "dcim/devices", KeyFields: []string{col}}},
+	}
+}
+
+// netboxComputedWarning is the sentence for a missing column NetBox computes.
+func netboxComputedWarning(col string) string {
+	return fmt.Sprintf("%q is computed by NetBox and is not available in replica-cache mode, so it is missing from this result. Use a datasource in NetBox mode for it.", col)
+}
+
+// "Is not a column this backend produces" is true of a typo and of utilization
+// alike, and leaves the reader to work out which one they wrote. For the
+// columns NetBox computes the cause is known — its serializers add them, and
+// the replica serves database rows — so the warning says so, and says what to
+// use instead. A typo keeps the plain sentence.
+func TestQuery_NetBoxComputedColumnIsNamed(t *testing.T) {
+	for _, col := range []string{"utilization", "used", "available", "family", "display", "url", "tags", "interface_count", "tags_count"} {
+		for _, shape := range missingColumnShapes(col) {
+			t.Run(col+"/"+shape.name, func(t *testing.T) {
+				f := newFakeService()
+				f.entities["dcim/devices"] = lonelyDevices()
+				res, err := newTestProvider(t, f).Query(context.Background(), shape.spec)
+				if err != nil {
+					t.Fatalf("Query: %v", err)
+				}
+				if want := []string{netboxComputedWarning(col)}; !slices.Equal(res.Warnings, want) {
+					t.Errorf("warnings = %q, want exactly %q", res.Warnings, want)
+				}
+			})
+		}
+	}
+
+	for _, shape := range missingColumnShapes("serail") {
+		t.Run("a typo/"+shape.name, func(t *testing.T) {
+			f := newFakeService()
+			f.entities["dcim/devices"] = lonelyDevices()
+			res, err := newTestProvider(t, f).Query(context.Background(), shape.spec)
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			want := []string{`"serail" is not a column this backend produces for this object type, so it is missing from this result.`}
+			if !slices.Equal(res.Warnings, want) {
+				t.Errorf("warnings = %q, want %q: a name NetBox does not compute keeps the plain sentence", res.Warnings, want)
+			}
+		})
+	}
+}
+
+// The name alone proves nothing: the replica stores some counters, and one it
+// serves is a column like any other. Measured on replica-cache v1.40.1 loaded
+// from a NetBox 4.4.10 database (27 tables with data), dcim/devices stores ten
+// of them (console_port_count among them), so the rows decide, and a count the
+// entity does not store is the one that is computed.
+func TestQuery_ServedCountColumnIsNotComputed(t *testing.T) {
+	f := newFakeService()
+	f.addEntity("dcim/devices", "id:BIGINT:pk", "name:VARCHAR", "console_port_count:INTEGER")
+	f.entities["dcim/devices"] = []map[string]interface{}{{"id": float64(1), "name": "CORE-1", "console_port_count": float64(2)}}
+	p := newTestProvider(t, f)
+
+	for _, shape := range missingColumnShapes("console_port_count") {
+		t.Run("served/"+shape.name, func(t *testing.T) {
+			res, err := p.Query(context.Background(), shape.spec)
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if len(res.Warnings) != 0 {
+				t.Errorf("a column the replica stores is not computed by NetBox: %q", res.Warnings)
+			}
+			if got := res.Rows[0]["console_port_count"]; got != float64(2) {
+				t.Errorf("console_port_count = %#v, want the stored 2", got)
+			}
+		})
+	}
+
+	res, err := p.Query(context.Background(), missingColumnShapes("power_port_count")[0].spec)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if want := []string{netboxComputedWarning("power_port_count")}; !slices.Equal(res.Warnings, want) {
+		t.Errorf("a count this entity does not store is NetBox's: warnings = %q, want %q", res.Warnings, want)
+	}
+}
+
+// cf_<name>_count is the contract's own count of a custom field's list, built
+// from the blob like every cf_ column, so one that is missing is a custom
+// field this deployment does not have — not something NetBox computes.
+func TestQuery_CustomFieldCountIsNotComputed(t *testing.T) {
+	for _, shape := range missingColumnShapes("cf_nope_count") {
+		t.Run(shape.name, func(t *testing.T) {
+			f := newFakeService()
+			f.entities["dcim/devices"] = lonelyDevices()
+			res, err := newTestProvider(t, f).Query(context.Background(), shape.spec)
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			want := []string{`"cf_nope_count" is not a column this backend produces for this object type, so it is missing from this result.`}
+			if !slices.Equal(res.Warnings, want) {
+				t.Errorf("warnings = %q, want %q", res.Warnings, want)
+			}
+		})
+	}
+}
+
+// The predicate's edges: the seven names, any other _count except a custom
+// field's, and nothing that merely resembles them.
+func TestNetBoxComputed(t *testing.T) {
+	for name, want := range map[string]bool{
+		"utilization": true, "used": true, "available": true, "family": true,
+		"display": true, "url": true, "tags": true,
+		"interface_count": true, "tags_count": true, "vlan_count": true,
+
+		"name": false, "status": false, "site": false, "display_url": false,
+		"family_value": false, "used_by": false, "urls": false,
+		"cf_tier": false, "cf_tier_count": false, "cf_count": false,
+		"count": false, "account": false, "": false,
+	} {
+		if got := netboxComputed(name); got != want {
+			t.Errorf("netboxComputed(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// The Browser URL sentence claims the replica reports no NetBox, and is told so
+// only by there being no link base. Given one, a display_url that is missing
+// anyway has no cause the provider can name, and says the plain thing rather
+// than send the reader to a setting that is already filled in.
+func TestMissingColumnWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		linkable bool
+		want     string
+	}{
+		{"display_url", false, `"display_url" needs a NetBox address to build links: this replica reports none, so set the datasource's Browser URL.`},
+		{"display_url", true, `"display_url" is not a column this backend produces for this object type, so it is missing from this result.`},
+		{"utilization", true, netboxComputedWarning("utilization")},
+		{"utilization", false, netboxComputedWarning("utilization")},
+		{"serail", false, `"serail" is not a column this backend produces for this object type, so it is missing from this result.`},
+	} {
+		if got := missingColumnWarning(tc.name, tc.linkable); got != tc.want {
+			t.Errorf("missingColumnWarning(%q, linkable=%v) = %q, want %q", tc.name, tc.linkable, got, tc.want)
+		}
+	}
+}
+
+// display_url is built from the NetBox address the provider links to: the one
+// the replica reports, else the datasource's Browser URL. With neither, the
+// column cannot exist, and "is not a column this backend produces" — true, and
+// no help — leaves the reader looking at the query when the remedy is one
+// field in the datasource's settings.
+func TestQuery_DisplayURLWithoutBaseNamesTheBrowserURL(t *testing.T) {
+	const want = `"display_url" needs a NetBox address to build links: this replica reports none, so set the datasource's Browser URL.`
+
+	for _, shape := range missingColumnShapes("display_url") {
+		t.Run("no address at all/"+shape.name, func(t *testing.T) {
+			f := newFakeService()
+			f.entities["dcim/devices"] = lonelyDevices()
+			res, err := newTestProvider(t, f).Query(context.Background(), shape.spec)
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if !slices.Equal(res.Warnings, []string{want}) {
+				t.Errorf("warnings = %q, want %q", res.Warnings, want)
+			}
+			if slices.Contains(res.Columns, "display_url") {
+				t.Errorf("display_url announced with no address to build it from: %v", res.Columns)
+			}
+		})
+	}
+
+	// A link base, from either source, is the remedy working: the column is
+	// there and nothing is said.
+	for _, tc := range []struct {
+		name     string
+		reported string
+		opts     []Option
+		link     string
+	}{
+		{"a Browser URL", "", []Option{WithFallbackNetBoxURL("https://netbox.example.com")}, "https://netbox.example.com/dcim/devices/1/"},
+		{"a reported URL", "https://nb.internal", nil, "https://nb.internal/dcim/devices/1/"},
+		{"both, the reported one wins", "https://nb.internal", []Option{WithFallbackNetBoxURL("https://netbox.example.com")}, "https://nb.internal/dcim/devices/1/"},
+	} {
+		for _, shape := range missingColumnShapes("display_url") {
+			t.Run(tc.name+"/"+shape.name, func(t *testing.T) {
+				f := newFakeService()
+				f.entities["dcim/devices"] = lonelyDevices()
+				f.schema.NetBoxURL = tc.reported
+				res, err := newTestProvider(t, f, tc.opts...).Query(context.Background(), shape.spec)
+				if err != nil {
+					t.Fatalf("Query: %v", err)
+				}
+				if len(res.Warnings) != 0 {
+					t.Errorf("display_url was built, so nothing is missing: %q", res.Warnings)
+				}
+				if got := res.Rows[0]["display_url"]; got != tc.link {
+					t.Errorf("display_url = %v, want %s", got, tc.link)
+				}
+			})
+		}
+	}
+}

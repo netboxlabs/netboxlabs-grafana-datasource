@@ -283,24 +283,41 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 	}
 
 	if qm.AlertTable {
-		fields := qm.Fields
-		if qm.ValueField != "" && len(fields) > 0 && !slices.Contains(fields, qm.ValueField) {
-			fields = append(slices.Clone(fields), qm.ValueField)
+		fields, keyFields := qm.Fields, joinKeySources(qm.JoinKeys)
+		// The provider has to be told the value field is read, and where depends on
+		// the selection. Among Return fields it is one more of them. "All columns"
+		// is Fields left empty, which a provider reads as no selection at all, so
+		// adding it there would narrow the result to that one column and cost the
+		// rule its labels; as a key field it is read without being displayed, and a
+		// column the provider cannot produce is reported by it, in its own words,
+		// instead of being found missing here with no reason to give.
+		if qm.ValueField != "" && !slices.Contains(fields, qm.ValueField) {
+			switch {
+			case len(fields) > 0:
+				fields = append(slices.Clone(fields), qm.ValueField)
+			case !slices.Contains(keyFields, qm.ValueField):
+				keyFields = append(keyFields, qm.ValueField)
+			}
 		}
 		res, err := d.provider.Query(ctx, provider.QuerySpec{
 			ObjectType: qm.ObjectType,
 			Filters:    qm.Filters,
 			Fields:     fields,
-			KeyFields:  joinKeySources(qm.JoinKeys),
+			KeyFields:  keyFields,
 			Ordering:   queryOrdering(qm.Ordering, c),
 			Limit:      qm.Limit,
 		})
 		if err != nil {
 			return queryErrorResponse(err)
 		}
-		if qm.ValueField != "" && !slices.Contains(res.Columns, qm.ValueField) {
-			return backend.ErrDataResponse(backend.StatusBadRequest,
-				fmt.Sprintf("value field %q not found in results — add it to Return fields", qm.ValueField))
+		// Only a result with rows can lack the value field. A provider names its
+		// columns from the rows it returns, so an empty result has none to look in,
+		// and a rule whose filter matches nothing — nothing offline, nothing over
+		// the threshold — is the healthy evaluation, not an error to say "add it to
+		// Return fields" about. It is not exempt from the checks below: a warning
+		// or a truncation on an empty result still refuses it.
+		if qm.ValueField != "" && len(res.Rows) > 0 && !slices.Contains(res.Columns, qm.ValueField) {
+			return backend.ErrDataResponse(backend.StatusBadRequest, valueFieldMissing(res, qm.ValueField))
 		}
 		// Grafana alert evaluation cannot see frame notices, so an alert-shaped
 		// result that is truncated, capped or degraded must fail loudly instead of
@@ -425,6 +442,27 @@ func queryOrdering(ordering string, c consumer) string {
 		return ""
 	}
 	return ordering
+}
+
+// valueFieldMissing is the refusal for an alert table whose value field is not a
+// column of its result. A provider that could not produce the column has usually
+// said why, in a warning that quotes its name, and that sentence names the cause
+// and what to use instead — which "add it to Return fields" cannot do for a
+// column no selection brings back. The first warning that quotes the field is
+// the message; with none, the field was simply not selected or does not exist,
+// and the advice stands.
+//
+// Quoted as %q because that is how replica-cache writes a column name into a
+// warning, so the same verb finds it again. NetBox mode quotes none, and keeps
+// the advice.
+func valueFieldMissing(res *provider.Result, field string) string {
+	quoted := fmt.Sprintf("%q", field)
+	for _, w := range res.Warnings {
+		if strings.Contains(w, quoted) {
+			return w
+		}
+	}
+	return fmt.Sprintf("value field %q not found in results — add it to Return fields", field)
 }
 
 // refuse is resultRefusal plus the datasource-level staleness rule, applied

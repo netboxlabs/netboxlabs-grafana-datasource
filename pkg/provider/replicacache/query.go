@@ -152,11 +152,12 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		cols = append(cols, applyChoiceLabels(spec.ObjectType, rows, len(spec.Fields) == 0)...)
 		cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
 		cols = append(cols, addUnsetCustomFieldColumns(spec, rows)...)
-		if addDeepLinks(p.linkBase(c), spec.ObjectType, rows, e.pk()) {
+		base := p.linkBase(c)
+		if addDeepLinks(base, spec.ObjectType, rows, e.pk()) {
 			cols = append(cols, deepLinkColumn)
 		}
 		warnings = append(warnings, danglingReferenceWarnings(plan.expanded, rows)...)
-		warnings = append(warnings, unresolvedRelationWarnings(spec, rows, plan.unavailable)...)
+		warnings = append(warnings, unresolvedRelationWarnings(spec, rows, plan.unavailable, base != "")...)
 	}
 
 	snapshotComplete := c.SnapshotComplete
@@ -702,7 +703,12 @@ func hasColumn(rows []map[string]interface{}, name string) bool {
 //
 // A blank column at least reads as a blank; a missing one a panel selected is
 // invisible.
-func unresolvedRelationWarnings(spec provider.QuerySpec, rows []map[string]interface{}, skip map[string]bool) []string {
+//
+// Each says what it can about why (missingColumnWarning). linkable is whether a
+// NetBox address exists to build display_url from (see linkBase): with one, every
+// row of a non-empty result carries the column, so its absence is the absence of
+// the address.
+func unresolvedRelationWarnings(spec provider.QuerySpec, rows []map[string]interface{}, skip map[string]bool, linkable bool) []string {
 	// Both empty, not just Fields. "All columns" with a join mapping leaves
 	// Fields empty while KeyFields still names a source that has to exist, and
 	// skipping on Fields alone let applyJoinKeys announce an output column that
@@ -730,10 +736,51 @@ func unresolvedRelationWarnings(spec provider.QuerySpec, rows []map[string]inter
 		if skip[f] || hasColumn(rows, f) {
 			continue
 		}
-		out = append(out, fmt.Sprintf(
-			"%q is not a column this backend produces for this object type, so it is missing from this result.", f))
+		out = append(out, missingColumnWarning(f, linkable))
 	}
 	return out
+}
+
+// missingColumnWarning is the sentence for a requested column the result lacks,
+// from the most specific cause the provider can name to the plain statement.
+// "Is not a column this backend produces" holds for all of them and helps with
+// none: it cannot tell a typo from a column that exists in NetBox mode, nor say
+// what to change.
+func missingColumnWarning(name string, linkable bool) string {
+	switch {
+	case name == deepLinkColumn && !linkable:
+		return fmt.Sprintf("%q needs a NetBox address to build links: this replica reports none, so set the datasource's Browser URL.", name)
+	case netboxComputed(name):
+		return fmt.Sprintf("%q is computed by NetBox and is not available in replica-cache mode, so it is missing from this result. Use a datasource in NetBox mode for it.", name)
+	}
+	return fmt.Sprintf("%q is not a column this backend produces for this object type, so it is missing from this result.", name)
+}
+
+// netboxComputed says whether NetBox, not its database, produces a column: the
+// ones its serializers compute (display, url, family, tags and the count of a
+// related object) and the utilization figures a NetBox-mode query adds. The
+// replica serves database rows, so none of them is there to be read, and a
+// request for one is not a typo but a column that exists in NetBox mode and
+// cannot here.
+//
+// It is asked only of a column the result LACKS, because the name alone proves
+// nothing: the replica stores some counters, and a stored one is served like any
+// other column. Measured on replica-cache v1.40.1 loaded from a NetBox 4.4.10
+// database (27 tables with data): dcim/devices stores ten counters
+// (console_port_count and nine more), dcim/device-types ten template counts and
+// virtualization/virtual-machines two, and no table stores utilization, used,
+// available, family, display, url or tags. So the rows decide first, and this
+// decides only what to say about a column they do not have.
+//
+// cf_<name>_count is not NetBox's: the shared flattener builds it from the
+// custom-field blob (see expandCustomFields), so a missing one is a custom field
+// this deployment does not have, which the plain sentence already says.
+func netboxComputed(name string) bool {
+	switch name {
+	case "utilization", "used", "available", "family", "display", "url", "tags":
+		return true
+	}
+	return strings.HasSuffix(name, "_count") && !strings.HasPrefix(name, "cf_")
 }
 
 // selectedFields is every column the caller needs the value of: the ones it

@@ -10,6 +10,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
 	"fmt"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/models"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
@@ -929,4 +930,234 @@ func TestUnknownObjectTypeUsesTheProvidersOwnWording(t *testing.T) {
 	if got := queryErrorMessage(noDetail); !strings.Contains(got, "app_label.model") {
 		t.Errorf("want the NetBox wording as the fallback, got %q", got)
 	}
+}
+
+// computedWarning is the sentence replica-cache writes for a column NetBox
+// computes (netboxComputed there), as an alert table's value field meets it.
+const computedWarning = `"utilization" is computed by NetBox and is not available in replica-cache mode, so it is missing from this result. Use a datasource in NetBox mode for it.`
+
+// A value field the provider could not produce already has its reason: the
+// provider's own sentence, which names the cause and what to use instead.
+// "Add it to Return fields" is the wrong advice for a column that no selection
+// can bring back, so the sentence that quotes the field is the message — the
+// first one that does, since a result can carry warnings about other columns
+// as well.
+func TestAlertTable_ValueFieldNamedByProviderWarning(t *testing.T) {
+	const other = `"cf_tier" is not a column this backend produces for this object type, so it is missing from this result.`
+	result := func(warnings ...string) *provider.Result {
+		return &provider.Result{
+			Columns:  []string{"prefix"},
+			Rows:     []map[string]interface{}{{"prefix": "10.0.0.0/24"}},
+			Total:    1,
+			Warnings: warnings,
+		}
+	}
+	const q = `{"queryType":"objects","objectType":"ipam/prefixes","alertTable":true,"fields":["prefix"],"valueField":"utilization"}`
+
+	t.Run("the warning that quotes the value field is the message", func(t *testing.T) {
+		fp := &fakeProvider{result: result(other, computedWarning)}
+		resp := newTestDatasource(fp).query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(q)}, consumerAlert)
+		if resp.Error == nil {
+			t.Fatal("an alert table whose value field is missing must fail")
+		}
+		if got := resp.Error.Error(); got != computedWarning {
+			t.Errorf("error = %q, want the provider's own sentence %q", got, computedWarning)
+		}
+		if !slices.Contains(fp.querySpec.Fields, "utilization") {
+			t.Errorf("provider Fields = %v, want the value field appended so it is asked for", fp.querySpec.Fields)
+		}
+	})
+
+	t.Run("no warning quotes it: today's message", func(t *testing.T) {
+		resp := newTestDatasource(&fakeProvider{result: result(other)}).query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(q)}, consumerAlert)
+		if resp.Error == nil {
+			t.Fatal("an alert table whose value field is missing must fail")
+		}
+		const want = `value field "utilization" not found in results — add it to Return fields`
+		if got := resp.Error.Error(); got != want {
+			t.Errorf("error = %q, want %q", got, want)
+		}
+	})
+
+	// The alert-table shape is refused for whoever asks, a dashboard preview
+	// included, and in the same words.
+	for _, tc := range []struct {
+		name string
+		c    consumer
+	}{
+		{"alert", consumerAlert}, {"expression", consumerExpression}, {"dashboard", consumerDashboard},
+	} {
+		t.Run("asked by "+tc.name, func(t *testing.T) {
+			resp := newTestDatasource(&fakeProvider{result: result(computedWarning)}).query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(q)}, tc.c)
+			if resp.Error == nil || resp.Error.Error() != computedWarning {
+				t.Errorf("error = %v, want %q", resp.Error, computedWarning)
+			}
+		})
+	}
+}
+
+// "All columns" is Fields left empty, and the value field cannot be added to
+// it: that would turn "everything" into the value field alone. It goes to the
+// provider as a key field instead, which is how a provider is told that a
+// column matters beyond the display. Without it, an alert table on "All
+// columns" never told the provider which column the rule evaluates, so the
+// provider could not say why that one was missing, and the rule author got only
+// "add it to Return fields" — advice that cannot help for a computed column.
+func TestAlertTable_ValueFieldNamedWithAllColumns(t *testing.T) {
+	result := func() *provider.Result {
+		return &provider.Result{
+			Columns:  []string{"prefix"},
+			Rows:     []map[string]interface{}{{"prefix": "10.0.0.0/24"}},
+			Total:    1,
+			Warnings: []string{computedWarning},
+		}
+	}
+	run := func(t *testing.T, q string) (*fakeProvider, backend.DataResponse) {
+		t.Helper()
+		fp := &fakeProvider{result: result()}
+		return fp, newTestDatasource(fp).query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(q)}, consumerAlert)
+	}
+	const head = `{"queryType":"objects","objectType":"ipam/prefixes","alertTable":true,`
+
+	t.Run("the provider is asked to check it, and its sentence is the message", func(t *testing.T) {
+		fp, resp := run(t, head+`"valueField":"utilization"}`)
+		if resp.Error == nil || resp.Error.Error() != computedWarning {
+			t.Fatalf("error = %v, want %q", resp.Error, computedWarning)
+		}
+		if len(fp.querySpec.Fields) != 0 {
+			t.Errorf("provider Fields = %v: All columns must stay All columns", fp.querySpec.Fields)
+		}
+		if !slices.Equal(fp.querySpec.KeyFields, []string{"utilization"}) {
+			t.Errorf("provider KeyFields = %v, want the value field, so the provider's own check sees it", fp.querySpec.KeyFields)
+		}
+	})
+
+	t.Run("after the join sources", func(t *testing.T) {
+		fp, _ := run(t, head+`"joinKeys":[{"source":"prefix","output":"prefix_key"}],"valueField":"utilization"}`)
+		if want := []string{"prefix", "utilization"}; !slices.Equal(fp.querySpec.KeyFields, want) {
+			t.Errorf("provider KeyFields = %v, want %v", fp.querySpec.KeyFields, want)
+		}
+	})
+
+	t.Run("once, when a join reads it too", func(t *testing.T) {
+		fp, _ := run(t, head+`"joinKeys":[{"source":"utilization","output":"u"}],"valueField":"utilization"}`)
+		if want := []string{"utilization"}; !slices.Equal(fp.querySpec.KeyFields, want) {
+			t.Errorf("provider KeyFields = %v, want %v", fp.querySpec.KeyFields, want)
+		}
+	})
+
+	// With Return fields chosen the value field is appended to them, as before,
+	// and is not also a key field.
+	t.Run("with Return fields it is appended to them instead", func(t *testing.T) {
+		fp, _ := run(t, head+`"fields":["prefix"],"valueField":"utilization"}`)
+		if want := []string{"prefix", "utilization"}; !slices.Equal(fp.querySpec.Fields, want) {
+			t.Errorf("provider Fields = %v, want %v", fp.querySpec.Fields, want)
+		}
+		if len(fp.querySpec.KeyFields) != 0 {
+			t.Errorf("provider KeyFields = %v, want none: the value field is already asked for", fp.querySpec.KeyFields)
+		}
+	})
+
+	t.Run("without a value field nothing is added", func(t *testing.T) {
+		fp, _ := run(t, head+`"limit":100}`)
+		if len(fp.querySpec.KeyFields) != 0 {
+			t.Errorf("provider KeyFields = %v, want none", fp.querySpec.KeyFields)
+		}
+	})
+}
+
+// An alert table with a value field and no rows is the healthy state of most
+// rules: nothing is offline, nothing is over the threshold. An empty result has
+// no columns to find the value field in — a provider names columns from rows —
+// so looking for it there failed every such rule, with "add it to Return
+// fields" for a field that was already selected.
+//
+// Healthy means no rows, not no checks: a result that carries a warning is
+// still refused, since an empty answer from a replica that is still loading is
+// not "nothing matched".
+func TestAlertTable_EmptyResultWithValueFieldIsHealthy(t *testing.T) {
+	const head = `{"queryType":"objects","objectType":"ipam/prefixes","alertTable":true,`
+	for _, tc := range []struct{ name, json string }{
+		{"with Return fields", head + `"fields":["prefix"],"valueField":"utilization"}`},
+		{"with All columns", head + `"valueField":"utilization"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// What a provider returns for a filter that matches nothing: no
+			// rows, so no columns.
+			fp := &fakeProvider{result: &provider.Result{Columns: nil, Rows: nil, Total: 0}}
+			resp := newTestDatasource(fp).query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(tc.json)}, consumerAlert)
+			if resp.Error != nil {
+				t.Fatalf("an alert table that matched nothing is a healthy evaluation: %v", resp.Error)
+			}
+			if len(resp.Frames) != 1 {
+				t.Fatalf("frames = %d, want one empty frame", len(resp.Frames))
+			}
+			f := resp.Frames[0]
+			if f.Meta == nil || f.Meta.Type != data.FrameTypeNumericLong {
+				t.Errorf("frame meta = %+v, want numeric-long, as for any alert table", f.Meta)
+			}
+			if last := f.Fields[len(f.Fields)-1]; last.Name != "value" || last.Len() != 0 {
+				t.Errorf("last field = %q with %d values, want an empty value column", last.Name, last.Len())
+			}
+		})
+	}
+
+	t.Run("a warning still refuses it", func(t *testing.T) {
+		const loading = "This replica is still loading its initial snapshot; results may be incomplete and their age is unknown."
+		fp := &fakeProvider{result: &provider.Result{Warnings: []string{loading}}}
+		resp := newTestDatasource(fp).query(context.Background(), backend.DataQuery{
+			RefID: "A", JSON: []byte(head + `"valueField":"utilization"}`),
+		}, consumerAlert)
+		if resp.Error == nil {
+			t.Fatal("an empty result from a loading replica must fail, not evaluate as nothing matched")
+		}
+		for _, want := range []string{"degraded", loading} {
+			if !strings.Contains(resp.Error.Error(), want) {
+				t.Errorf("error %q must contain %q", resp.Error, want)
+			}
+		}
+	})
+}
+
+// The provider words the warning and this layer finds it again by the value
+// field's name; through the real provider, neither half's idea of the sentence
+// can drift from the other's.
+func TestAlertTable_ComputedValueFieldThroughReplicaCache(t *testing.T) {
+	srv := replicaStub(t, "")
+	cfg := &models.PluginSettings{
+		Mode: models.ModeReplicaCache, URL: srv.URL, NetBoxID: "nb-1",
+		Secrets: &models.SecretPluginSettings{APIToken: "t"},
+	}
+	p, err := newProvider(cfg, srv.Client())
+	if err != nil {
+		t.Fatalf("newProvider: %v", err)
+	}
+	d := &Datasource{cfg: cfg, provider: p}
+	run := func(json string) backend.DataResponse {
+		return d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(json)}, consumerAlert)
+	}
+	const head = `{"queryType":"objects","objectType":"dcim/devices","alertTable":true,`
+
+	for _, tc := range []struct{ name, json string }{
+		{"with Return fields", head + `"fields":["name"],"valueField":"utilization"}`},
+		{"with All columns", head + `"valueField":"utilization"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if resp := run(tc.json); resp.Error == nil || resp.Error.Error() != computedWarning {
+				t.Errorf("error = %v, want %q", resp.Error, computedWarning)
+			}
+		})
+	}
+
+	// And the same shape with a value field the replica does serve is untouched.
+	t.Run("a served value field still evaluates", func(t *testing.T) {
+		resp := run(head + `"valueField":"id"}`)
+		if resp.Error != nil {
+			t.Fatalf("a value field the replica stores must work under All columns: %v", resp.Error)
+		}
+		f := resp.Frames[0]
+		if last := f.Fields[len(f.Fields)-1]; last.Name != "value" || last.Len() != 1 || last.At(0).(float64) != 7 {
+			t.Errorf("value column = %q %v, want the device id 7", last.Name, last.At(0))
+		}
+	})
 }

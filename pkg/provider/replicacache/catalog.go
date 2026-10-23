@@ -50,6 +50,13 @@ type catalog struct {
 	tables     map[string]string
 }
 
+// offersContains reports whether this replica-cache build has the containment
+// operator, by its schema route: v1.39 and later state its limit, and an older
+// build, whose answer to the operator is a 400, states none.
+func (c *catalog) offersContains() bool {
+	return c != nil && c.ContainsMaxValues > 0
+}
+
 type entity struct {
 	// Table is the replica table the entity reads: NetBox's own name for it
 	// (dcim_device) on a NetBox model, whatever the replica calls a plugin's. It

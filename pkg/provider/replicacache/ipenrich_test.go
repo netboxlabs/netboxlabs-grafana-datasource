@@ -389,16 +389,37 @@ func TestResolveIPs_UnclassifiedAssignmentWarns(t *testing.T) {
 	wantRow(t, res, "10.8.0.2", map[string]interface{}{"address_assigned_object_type": "dcim.interface", "device_name": "spine-01"})
 	want := []string{
 		"1 of 3 rows matched several address records, some of them assigned to objects this replica cannot identify, so the record they show is the one with the lowest id among those NetBox mode could pick, which may not be the one it picks.",
-		"2 addresses are assigned to objects this replica cannot identify (it does not serve NetBox's content-type names), so their interface and device columns are blank.",
+		"2 addresses are assigned to objects this replica cannot identify (it does not serve NetBox's content-type names), so their address_assigned_object_type, interface_*, device_*, vm_name and is_primary_ip columns are blank.",
 	}
 	if !reflect.DeepEqual(res.Warnings, want) {
 		t.Errorf("warnings = %q, want %q", res.Warnings, want)
 	}
 
-	// One address takes the singular.
-	res = resolveIPs(t, newTestProvider(t, f), []string{"10.8.0.1"}, "device_name")
-	if want := []string{"1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its interface and device columns are blank."}; !reflect.DeepEqual(res.Warnings, want) {
-		t.Errorf("warnings = %q, want %q", res.Warnings, want)
+	// One address takes the singular, and the warning names the columns the
+	// frame has that the type blanks: a column alone by its name, a group of
+	// them by the group's.
+	for fields, want := range map[string]string{
+		"device_name":                                 "1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its device_name column is blank.",
+		"address_assigned_object_type":                "1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its address_assigned_object_type column is blank.",
+		"device_name,device_site,vm_name":             "1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its device_* and vm_name columns are blank.",
+		"interface_name,is_primary_ip,ip,match_count": "1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its interface_name and is_primary_ip columns are blank.",
+	} {
+		res = resolveIPs(t, newTestProvider(t, f), []string{"10.8.0.1"}, strings.Split(fields, ",")...)
+		if !reflect.DeepEqual(res.Warnings, []string{want}) {
+			t.Errorf("%s: warnings = %q, want %q", fields, res.Warnings, want)
+		}
+	}
+	// A count is written as the result's other counts are.
+	many := ipWorld()
+	var ips []string
+	for i := range 1000 {
+		ip := fmt.Sprintf("10.9.%d.%d", i/250, 1+i%250)
+		ips = append(ips, ip)
+		many.addFakeRows(addressesEntity, ipAddr(20000+i, ip+"/24", 999, 5))
+	}
+	res = resolveIPs(t, newTestProvider(t, many), ips, "device_name")
+	if len(res.Warnings) != 1 || !strings.HasPrefix(res.Warnings[0], "1,000 addresses are assigned") {
+		t.Errorf("warnings = %q", res.Warnings)
 	}
 	// A frame with none of the columns the type fills has nothing blank to
 	// warn about.
@@ -880,8 +901,8 @@ func TestResolveIPs_RefusesWhatTheBuildCannotAnswer(t *testing.T) {
 	f.mu.Unlock()
 	_, err := newTestProvider(t, f).ResolveIPs(context.Background(), []string{"10.1.0.1"}, nil, 0)
 	var unsupported *UnsupportedError
-	if !errors.As(err, &unsupported) || !strings.Contains(err.Error(), "NetBox mode") {
-		t.Errorf("no host match: err = %v", err)
+	if !errors.As(err, &unsupported) || !strings.Contains(err.Error(), "NetBox mode") || !strings.Contains(err.Error(), "v1.38") {
+		t.Errorf("no host match: err = %v, want the refusal naming the build that added it", err)
 	}
 
 	f = ipWorld()

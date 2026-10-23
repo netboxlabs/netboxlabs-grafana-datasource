@@ -391,10 +391,14 @@ with no record, ties broken in NetBox's order.
   by VRF or tenant instead. A scope cut off by the row limit keeps the
   replica's first records, which can differ from NetBox mode's; alert rules
   refuse it as truncated in both modes.
-- **Prefix columns** need a replica-cache build with containment (v1.39).
+- IP enrichment needs a replica-cache build with the host match (v1.38), and
+  its prefix columns one with containment (v1.39).
 - A tenant with no VRFs, racks, VLANs, VMs or FHRP groups gets a complete
-  answer with no warning; a reference to an object the replica does not hold
-  yet (while it applies changes) leaves that column blank, with a warning.
+  answer with no warning. A device, VRF, tenant or other related object the
+  replica does not hold yet (while it applies changes) leaves its column blank,
+  with a warning. An address assigned to an object the replica does not hold
+  shows no owner and no warning, as NetBox mode shows one assigned to an object
+  that does not exist.
 - A read that fails fails the query, where NetBox mode blanks that lookup's
   columns with a warning; alert rules refuse either.
 

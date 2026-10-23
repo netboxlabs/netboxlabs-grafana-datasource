@@ -78,9 +78,13 @@ func ipWorld() *fakeService {
 		ipAddr(401, "198.51.100.250", 0, 0).with("nat_inside_id", float64(400)),
 		ipAddr(402, "10.9.9.9/24", 0, 0).with("nat_inside_id", float64(400)),
 		ipAddr(403, "2001:db8:ff::1", 0, 0).with("nat_inside_id", float64(400)),
-		// An inside that is a single host, stored bare, and its outside.
+		// An inside that is a single host, stored bare, and its outsides: two
+		// of one host (in two VRFs, say), served out of id order, which is the
+		// order between them.
 		ipAddr(404, "10.6.0.20", idInterface, 12),
 		ipAddr(405, "203.0.113.20", 0, 0).with("nat_inside_id", float64(404)),
+		ipAddr(409, "198.51.100.7/24", 0, 0).with("nat_inside_id", float64(404)),
+		ipAddr(408, "198.51.100.7", 0, 0).with("nat_inside_id", float64(404)),
 		ipAddr(500, "10.250.1.10/24", 0, 0).with("vrf_id", float64(1)),
 		ipAddr(501, "10.250.2.10/24", 0, 0).with("vrf_id", float64(2)),
 		// Anycast: three interface assignments; the deprecated one is out of
@@ -400,6 +404,9 @@ func TestResolveIPs_UnclassifiedAssignmentWarns(t *testing.T) {
 	// warn about.
 	res = resolveIPs(t, newTestProvider(t, f), []string{"10.8.0.1"}, "match_count", "address_dns_name")
 	noWarnings(t, res)
+	// Nor one that shows nothing of which record was picked.
+	res = resolveIPs(t, newTestProvider(t, f), []string{"10.8.0.3"}, "match_count")
+	noWarnings(t, res)
 }
 
 // NetBox's own renderings of the objects a row names.
@@ -426,7 +433,7 @@ func TestResolveIPs_NATColumns(t *testing.T) {
 		"address_nat_outside": "10.9.9.9/24; 198.51.100.250/32; 2001:db8:ff::1/128"})
 	wantRow(t, res, "198.51.100.250", map[string]interface{}{"address_nat_inside": "10.6.0.10/24", "address_nat_outside": ""})
 	wantRow(t, res, "203.0.113.20", map[string]interface{}{"address_nat_inside": "10.6.0.20/32", "address_nat_outside": ""})
-	wantRow(t, res, "10.6.0.20", map[string]interface{}{"address_nat_inside": nil, "address_nat_outside": "203.0.113.20/32"})
+	wantRow(t, res, "10.6.0.20", map[string]interface{}{"address_nat_inside": nil, "address_nat_outside": "198.51.100.7/32; 198.51.100.7/24; 203.0.113.20/32"})
 	wantRow(t, res, "10.1.0.1", map[string]interface{}{"address_nat_inside": nil, "address_nat_outside": ""})
 }
 
@@ -465,6 +472,18 @@ func TestResolveIPs_PrefixScopeNames(t *testing.T) {
 	for ip, scope := range map[string]interface{}{"10.10.10.5": "AMS1", "10.250.10.5": "parity-loc", "10.250.11.5": "parity-region",
 		"10.250.12.5": "parity-sitegroup", "10.250.99.1": nil} {
 		wantRow(t, res, ip, map[string]interface{}{"prefix_scope": scope})
+	}
+
+	// A scope with no level cached (NetBox caches one whenever it saves a
+	// scoped prefix) cannot be named: a gap, counted.
+	f := ipWorld()
+	r := ipPrefix(30, "10.252.0.0/16", 0, "")
+	r["scope_id"], r["scope_type_id"] = float64(4), float64(1)
+	f.addFakeRows("ipam/prefixes", r)
+	res = resolveIPs(t, newTestProvider(t, f), []string{"10.252.0.1"}, "prefix_cidr", "prefix_scope")
+	wantRow(t, res, "10.252.0.1", map[string]interface{}{"prefix_cidr": "10.252.0.0/16", "prefix_scope": nil})
+	if len(res.Warnings) != 1 || !strings.HasPrefix(res.Warnings[0], "Related objects are missing for 1 of 1 rows") {
+		t.Errorf("warnings = %q, want the uncached scope counted", res.Warnings)
 	}
 }
 
@@ -772,6 +791,18 @@ func TestResolveIPs_ReadsOnlyWhatTheColumnsNeed(t *testing.T) {
 			t.Errorf("is_primary_ip read %s", table)
 		}
 	}
+
+	// The flag alone on a VM's addresses reads the VM interface and the VM,
+	// which answer it, and no device.
+	f = ipWorld()
+	res := resolveIPs(t, newTestProvider(t, f), []string{"10.4.0.1", "10.4.0.2", "2001:db8:4::1"}, provider.IsPrimaryIPColumn)
+	noWarnings(t, res)
+	for ip, primary := range map[string]bool{"10.4.0.1": true, "10.4.0.2": false, "2001:db8:4::1": true} {
+		wantRow(t, res, ip, map[string]interface{}{provider.IsPrimaryIPColumn: primary})
+	}
+	if n := len(f.sentWith("dcim/devices", "filter[id]__in")); n != 0 {
+		t.Errorf("is_primary_ip on VM addresses read %d device batches", n)
+	}
 }
 
 // A reference NetBox keeps intact that names an object the replica does not
@@ -787,16 +818,36 @@ func TestResolveIPs_MissingRelatedObjectsWarn(t *testing.T) {
 	f.addRows("dcim/devices", ipDevice(5, "orphan", "active", 0, 0, 7, 0, 0, 0, 0))
 	f.addRows("dcim/interfaces", ipIface(14, 5, "eth9", "", ""))
 	f.addFakeRows("ipam/ip-addresses", ipAddr(852, "10.85.0.3/24", idInterface, 14))
-	res := resolveIPs(t, newTestProvider(t, f), []string{"10.85.0.1", "10.85.0.2", "10.85.0.3", "10.1.0.1"}, "address_tenant", "interface_name", "device_name", "device_rack")
+	// An interface whose device, and a VM interface whose VM, the replica does
+	// not hold.
+	f.addRows("dcim/interfaces", ipIface(15, 6, "eth10", "", ""))
+	f.addRows("virtualization/interfaces", map[string]interface{}{"id": float64(21), "name": "eth1", "description": "", "virtual_machine_id": float64(9)})
+	f.addFakeRows("ipam/ip-addresses",
+		ipAddr(853, "10.85.0.4/24", idInterface, 15),
+		ipAddr(854, "10.85.0.5/24", idVMInterface, 21))
+	ips := []string{"10.85.0.1", "10.85.0.2", "10.85.0.3", "10.85.0.4", "10.85.0.5", "10.1.0.1"}
+	res := resolveIPs(t, newTestProvider(t, f), ips, "address_tenant", "interface_name", "device_name", "device_rack", "vm_name", provider.IsPrimaryIPColumn)
 	wantRow(t, res, "10.85.0.1", map[string]interface{}{"address_tenant": nil})
 	wantRow(t, res, "10.85.0.2", map[string]interface{}{"interface_name": nil, "device_name": nil})
 	wantRow(t, res, "10.85.0.3", map[string]interface{}{"interface_name": "eth9", "device_name": "orphan", "device_rack": nil})
-	want := []string{"Related objects are missing for 2 of 4 rows: they reference objects this replica does not hold, so those columns are blank there."}
+	wantRow(t, res, "10.85.0.4", map[string]interface{}{"interface_name": "eth10", "device_name": nil, provider.IsPrimaryIPColumn: nil})
+	wantRow(t, res, "10.85.0.5", map[string]interface{}{"interface_name": "eth1", "vm_name": nil, provider.IsPrimaryIPColumn: nil})
+	want := []string{"Related objects are missing for 4 of 6 rows: they reference objects this replica does not hold, so those columns are blank there."}
 	if !reflect.DeepEqual(res.Warnings, want) {
 		t.Errorf("warnings = %q, want %q", res.Warnings, want)
 	}
+	// Each counts for the columns it blanks, and only those: the missing VM
+	// blanks is_primary_ip alone too, the missing device as well.
+	for _, ip := range []string{"10.85.0.4", "10.85.0.5"} {
+		res = resolveIPs(t, newTestProvider(t, f), []string{ip}, provider.IsPrimaryIPColumn)
+		if len(res.Warnings) != 1 {
+			t.Errorf("%s with is_primary_ip alone: warnings %q, want the missing owner counted", ip, res.Warnings)
+		}
+	}
 	// Not shown, not counted.
-	res = resolveIPs(t, newTestProvider(t, f), []string{"10.85.0.1", "10.85.0.3"}, "device_name")
+	res = resolveIPs(t, newTestProvider(t, f), []string{"10.85.0.1", "10.85.0.3", "10.85.0.5"}, "device_name")
+	noWarnings(t, res)
+	res = resolveIPs(t, newTestProvider(t, f), []string{"10.85.0.4", "10.85.0.5"}, "interface_name")
 	noWarnings(t, res)
 }
 
@@ -902,5 +953,27 @@ func TestResolveScope_CarriesTheListingsAge(t *testing.T) {
 	}
 	if want := time.Date(2026, 9, 22, 13, 0, 0, 0, time.UTC); res.DataAsOf == nil || !res.DataAsOf.Equal(want) {
 		t.Errorf("DataAsOf = %v, want the listing's %v", res.DataAsOf, want)
+	}
+}
+
+// The listing's own warnings are the scope's: a negated scope that could check
+// only part of the addresses says so, and an alert rule must see it.
+func TestResolveScope_CarriesTheListingsWarnings(t *testing.T) {
+	f := newFakeService()
+	f.addIPEnrichmentTables()
+	// 10,001 addresses with a DNS name, then two without, past the 10,000 rows
+	// the negated read checks.
+	rows := make([]map[string]interface{}, 0, MaxLimit+3)
+	for i := range MaxLimit + 1 {
+		rows = append(rows, ipAddr(1+i, fmt.Sprintf("10.%d.%d.%d/24", 100+i/65536, i/256%256, i%256), 0, 0).with("dns_name", fmt.Sprintf("h%d.example.net", i)))
+	}
+	rows = append(rows, ipAddr(MaxLimit+10, "10.200.0.1/24", 0, 0), ipAddr(MaxLimit+11, "10.200.0.2/24", 0, 0))
+	f.addRows(addressesEntity, rows...)
+	res, err := newTestProvider(t, f).ResolveScope(context.Background(), []provider.Filter{{Field: "dns_name", Operator: "empty"}}, []string{"match_count"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, " "), "Only the first 10,000 rows") {
+		t.Errorf("warnings = %q, want the listing's partial-check warning", res.Warnings)
 	}
 }

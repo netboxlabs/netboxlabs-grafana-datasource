@@ -113,10 +113,11 @@ NetBox has it on that object type — under NetBox's name, with NetBox's lookups
 and NetBox's meaning — and the replica can answer it; otherwise it is refused
 with a message saying why. What NetBox has is read from its own filtersets
 (NetBox 4.4 and 4.6, the union of the two: a filter only 4.6 has, such as
-`face` _not_, is honoured on a replica of NetBox 4.4, which ignores it and
-returns every row). It matters because NetBox ignores a filter it does not have
-and returns every row: a filter only this mode understood would make a
-dashboard right here and silently wrong in NetBox mode. A refusal names
+`face` _not_, is honoured here on a replica of NetBox 4.4, although NetBox 4.4
+itself ignores it and returns every row). It matters because NetBox ignores a
+filter it does not have and returns every row: a filter only this mode
+understood would make a dashboard right here and silently wrong in NetBox
+mode. A refusal names
 NetBox's filter where it has one: a device has `rack_id`, not `rack`; NetBox's
 `site` already compares the slug, so there is no `site_slug`; a prefix's
 `children` is the count the replica stores as `_children`.
@@ -145,7 +146,13 @@ NetBox's meaning is kept:
   refused on _=_, where NetBox returns rows matching either, which the replica
   cannot combine. A choice filter with no null choice (`status`) refuses it with
   NetBox's own "Select a valid choice", and a text search on `null` is refused,
-  as NetBox answers it with an error;
+  as NetBox answers it with an error. A site's `time_zone` (and its _not_) is
+  the exception on text: NetBox reads `null` there as an empty time zone, which
+  this replica cannot send yet, so it is refused;
+- a text search on a choice filter (`status` _contains_ `act`) is sent as a
+  text match on the stored value — a known divergence: NetBox first checks each
+  value against the field's choices and answers 400 for one that is not a
+  choice, and the replica cannot know an instance's own choices;
 - a filter NetBox reads from a column the replica caches is sent on that
   column: a prefix's `children` and `depth` on `_children` and `_depth`,
   `cabled` on the cable column;
@@ -175,7 +182,8 @@ NetBox's meaning is kept:
   `u_height = 1` finds two in NetBox and none in its replica, which holds
   `1.0`). Their _is empty_ / _has any value_ still works where NetBox's is
   `IS NULL`;
-- NetBox lookups with no equivalent here (`mask_length`, `family`, _regex_).
+- NetBox lookups with no equivalent here: `mask_length`, `family`, and _regex_,
+  the replica having no regular-expression match.
 
 Filters on a related object (`site`, `role`, `tenant`, …) and their `_id` forms
 are offered with _=_ and _not_. For now `site` and the like still compare the

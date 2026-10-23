@@ -151,7 +151,8 @@ func TestTranslate_RefusesFilterNetBoxLacks(t *testing.T) {
 }
 
 // A filter NetBox has, with a lookup NetBox does not have on it, is a name
-// NetBox lacks just the same: site__ic, tenant_id__empty.
+// NetBox lacks just the same: site__ic, tenant_id__empty. The refusal points at
+// the lookups NetBox does have on it.
 func TestTranslate_RefusesLookupNetBoxLacks(t *testing.T) {
 	devices := vocabDevices()
 	for _, c := range []struct {
@@ -163,9 +164,30 @@ func TestTranslate_RefusesLookupNetBoxLacks(t *testing.T) {
 		{provider.Filter{Field: "id", Operator: "nic", Value: "1"}, "id__nic"},
 	} {
 		u := devices.refusal(t, c.f)
-		want := fmt.Sprintf("NetBox has no %s filter on dcim/devices, so a dashboard filtering on it would return every row in NetBox mode", c.name)
+		want := fmt.Sprintf("NetBox has no %s filter on dcim/devices, so a dashboard filtering on it would return every row in NetBox mode; use another of NetBox's lookups on %s",
+			c.name, c.f.Field)
 		if u.Reason != want {
 			t.Errorf("reason = %q,\nwant %q", u.Reason, want)
+		}
+	}
+}
+
+// A name with no filter of NetBox's to point at says what to do instead, and
+// an alternative is named only where NetBox's own is one the replica takes: a
+// device's region is a filter NetBox applies through its site, which this
+// replica refuses, so region_slug and region__ic name none.
+func TestTranslate_NamesOnlyAnAlternativeTheReplicaTakes(t *testing.T) {
+	devices := vocabDevices()
+	for _, f := range []provider.Filter{
+		{Field: "nosuch", Value: "x"},
+		{Field: "region_slug", Value: "europe"},
+		{Field: "region", Operator: "ic", Value: "eu"},
+	} {
+		u := devices.refusal(t, f)
+		want := fmt.Sprintf("NetBox has no %s filter on dcim/devices, so a dashboard filtering on it would return every row in NetBox mode; remove it, or choose a filter the editor offers",
+			netboxName(f))
+		if u.Reason != want {
+			t.Errorf("%+v: reason = %q,\nwant %q", f, u.Reason, want)
 		}
 	}
 }
@@ -369,6 +391,30 @@ func TestValidateFilters_NetBoxNullOnAnyColumnThatTakesIt(t *testing.T) {
 	}
 }
 
+// The operators the translation writes for NetBox's IS NULL are this
+// datasource's own: a query that names one is refused before anything is
+// read, on a plugin's type as on NetBox's, rather than taken as IS NULL.
+func TestQuery_RefusesInternalOperators(t *testing.T) {
+	f := newFakeService()
+	f.addEntity("plugins/acme/widgets", "id:BIGINT:pk", "name:VARCHAR")
+	f.entities["plugins/acme/widgets"] = []map[string]interface{}{{"id": float64(1), "name": nil}}
+	f.entities["dcim/devices"] = []map[string]interface{}{deviceFixture(1, "CORE-1", 4001)}
+	p := newTestProvider(t, f)
+	for _, objectType := range []string{"plugins/acme/widgets", "dcim/devices"} {
+		for _, op := range []string{opIsNull, opNotNull} {
+			_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: objectType,
+				Filters: []provider.Filter{{Field: "name", Operator: op}}})
+			var u *UnsupportedFilterError
+			if !errors.As(err, &u) || u.Field != "name" || u.Operator != op || !strings.Contains(u.Reason, "not one a query can name") {
+				t.Errorf("%s %q: err = %v, want it refused as this datasource's own", objectType, op, err)
+			}
+		}
+		if n := f.countRequestsFor(objectType); n != 0 {
+			t.Errorf("%s: %d requests sent for a refused operator", objectType, n)
+		}
+	}
+}
+
 // "Has any value" from a comparison at the edge of its type (<= the largest
 // INTEGER) beside NetBox's own "is empty" on a number (mtu__empty, IS NULL) is
 // no row: nothing is sent.
@@ -403,21 +449,77 @@ func TestTranslate_ValueNullWithValuesRefused(t *testing.T) {
 // 500, "Cannot use None as a query value"), so it is refused, not searched.
 func TestTranslate_NullOnATextVariantRefused(t *testing.T) {
 	devices := vocabDevices()
-	for _, op := range []string{"ic", "nisw", "iew", "regex"} {
+	for _, op := range []string{"ic", "nisw", "iew"} {
 		u := devices.refusal(t, provider.Filter{Field: "asset_tag", Operator: op, Value: "null"})
 		wantReason(t, u, fmt.Sprintf("NetBox answers null on asset_tag__%s with an error", op))
 	}
 }
 
 // A choice filter whose form has no null choice refuses null with NetBox's own
-// message (4.4.10: status=null is a 400 saying so).
+// message (4.4.10: status=null is a 400 saying so), and says what to filter on.
 func TestTranslate_NullOnAChoiceWithoutNVIsRefused(t *testing.T) {
 	for _, op := range []string{"", "n"} {
 		u := vocabDevices().refusal(t, provider.Filter{Field: "status", Operator: op, Value: "null"})
-		if u.Reason != "Select a valid choice. null is not one of the available choices." {
-			t.Errorf("%q: reason = %q, want NetBox's", op, u.Reason)
+		wantReason(t, u, "Select a valid choice. null is not one of the available choices.")
+		if !strings.Contains(u.Reason, "status_value") {
+			t.Errorf("%q: reason = %q, want it to say what to filter on (the stored values status_value shows)", op, u.Reason)
 		}
 	}
+}
+
+// NetBox's time zone filter reads null as the empty string, not as IS NULL (its
+// form is a time zone field's): NetBox 4.4.10 answers time_zone=null with the
+// 3 sites whose time zone is blank and time_zone__n=null with none. The replica
+// cannot send either yet, so both are refused; a time zone goes as it is, and
+// the case-insensitive lookups, which do read null as IS NULL, as before.
+func TestTranslate_TimeZoneNullIsRefused(t *testing.T) {
+	sites := serve("dcim/sites", "dcim_site", textColumn("name"), textColumn("time_zone"))
+	for _, f := range []provider.Filter{
+		{Field: "time_zone", Value: "null"},
+		{Field: "time_zone", Operator: "n", Value: "null"},
+		{Field: "time_zone", Value: "UTC, null"},
+	} {
+		u := sites.refusal(t, f)
+		wantReason(t, u, "NetBox reads null on time_zone as an empty time zone, which this replica cannot send yet")
+		if !strings.HasSuffix(u.Reason, netboxModeAdvice) {
+			t.Errorf("%+v: reason = %q, want it to end %q", f, u.Reason, netboxModeAdvice)
+		}
+	}
+	wantFilters(t, sites.translate(t, provider.Filter{Field: "time_zone", Value: "Europe/Amsterdam"}),
+		provider.Filter{Field: "time_zone", Value: "Europe/Amsterdam", Label: "time_zone"})
+	wantFilters(t, sites.translate(t, provider.Filter{Field: "time_zone", Operator: "ie", Value: "null"}),
+		provider.Filter{Field: "time_zone", Operator: opIsNull, Label: "time_zone"})
+}
+
+// The replica has no regular expressions, so NetBox's regex lookups are refused
+// saying where they work, on text and MAC filters alike.
+func TestTranslate_RegexIsRefusedSayingWhereItWorks(t *testing.T) {
+	for _, c := range []struct {
+		s served
+		f provider.Filter
+	}{
+		{vocabDevices(), provider.Filter{Field: "name", Operator: "regex", Value: "^core"}},
+		{vocabDevices(), provider.Filter{Field: "asset_tag", Operator: "iregex", Value: "null"}},
+		{vocabMACs(), provider.Filter{Field: "mac_address", Operator: "regex", Value: "^58"}},
+	} {
+		u := c.s.refusal(t, c.f)
+		wantReason(t, u, fmt.Sprintf("the replica has no regular-expression match, so it cannot answer %s", netboxName(c.f)))
+		if !strings.HasSuffix(u.Reason, netboxModeAdvice) {
+			t.Errorf("%+v: reason = %q, want it to end %q", c.f, u.Reason, netboxModeAdvice)
+		}
+	}
+}
+
+// A single-valued relation (cable-terminations' cable, a ModelChoiceFilter)
+// keeps the last value given, across rows, before it is passed on.
+func TestTranslate_ModelChoiceKeepsTheLastValue(t *testing.T) {
+	terminations := serve("dcim/cable-terminations", "dcim_cabletermination", numberColumn("cable_id", "BIGINT"), textColumn("cable_end"))
+	wantFilters(t, terminations.translate(t, provider.Filter{Field: "cable", Value: "7, 9"}),
+		provider.Filter{Field: "cable", Value: "9", Label: "cable"})
+	wantFilters(t, terminations.translate(t, provider.Filter{Field: "cable", Value: "7"}, provider.Filter{Field: "cable", Value: "9"}),
+		provider.Filter{Field: "cable", Value: "9", Label: "cable"})
+	wantFilters(t, terminations.translate(t, provider.Filter{Field: "cable", Operator: "n", Value: "7,9"}),
+		provider.Filter{Field: "cable", Operator: "n", Value: "9", Label: "cable"})
 }
 
 // The last value is taken before null is read: airflow=front-to-rear&airflow=null
@@ -448,6 +550,20 @@ func TestTranslate_MACIsNormalised(t *testing.T) {
 	}
 	wantFilters(t, macs.translate(t, provider.Filter{Field: "mac_address", Operator: "n", Value: "5856.9fd1.e300, 58-56-9F-D1-E3-01"}),
 		provider.Filter{Field: "mac_address", Operator: "n", Value: "58:56:9f:d1:e3:00,58:56:9f:d1:e3:01", Label: "mac_address"})
+}
+
+// null on a MAC address filter is NetBox's IS NULL, as on text: it is not a
+// MAC address NetBox fails to read (4.6.10: mac_address__n=null → all 116, its
+// base → none of them, the column being NOT NULL there).
+func TestTranslate_MACNullIsIsNull(t *testing.T) {
+	macs := vocabMACs()
+	wantFilters(t, macs.translate(t, provider.Filter{Field: "mac_address", Value: "null"}),
+		provider.Filter{Field: "mac_address", Operator: opIsNull, Label: "mac_address"})
+	wantFilters(t, macs.translate(t, provider.Filter{Field: "mac_address", Operator: "n", Value: "null"}),
+		provider.Filter{Field: "mac_address", Operator: opNotNull, Label: "mac_address"})
+	wantFilters(t, macs.translate(t, provider.Filter{Field: "mac_address", Operator: "n", Value: "null, 5856.9fd1.e300"}),
+		provider.Filter{Field: "mac_address", Operator: opNotNull, Label: "mac_address"},
+		provider.Filter{Field: "mac_address", Operator: "n", Value: "58:56:9f:d1:e3:00", Label: "mac_address"})
 }
 
 // One value NetBox cannot read makes its whole MAC filter match nothing:
@@ -482,7 +598,10 @@ func TestTranslate_MACTextVariantsAsWritten(t *testing.T) {
 // netaddr's IPNetwork reads it, equality with the stored cidr, whose mask is
 // always written. A value that does not parse is dropped; one whose host bits
 // are set matches nothing alone (4.4.10: prefix=10.10.10.5/24 → 0) and is an
-// error beside another (a 500: invalid cidr).
+// error beside a different network (a 500: invalid cidr). The same network
+// twice is one value, in either spelling (4.4.10: 10.10.10.5/24 with itself
+// or with 10.10.10.5/255.255.255.0 → 0 rows; 10.10.10.0/24 with its netmask
+// spelling → its 1 row).
 func TestTranslate_PrefixFollowsFilterPrefix(t *testing.T) {
 	prefixes := vocabPrefixes()
 	for in, want := range map[string]string{
@@ -494,35 +613,45 @@ func TestTranslate_PrefixFollowsFilterPrefix(t *testing.T) {
 		"2001:DB8::/32":                       "2001:db8::/32",
 		"garbage, 10.1.2.0/24":                "10.1.2.0/24",
 		"10.1.2.0/24, 10.1.3.0/255.255.255.0": "10.1.2.0/24,10.1.3.0/24",
+		"10.1.2.0/24, 10.1.2.0/255.255.255.0": "10.1.2.0/24",
 	} {
 		wantFilters(t, prefixes.translate(t, provider.Filter{Field: "prefix", Value: in}),
 			provider.Filter{Field: "prefix", Value: want, Label: "prefix"})
 	}
-	prefixes.matchesNothing(t, provider.Filter{Field: "prefix", Value: "10.1.2.5/24"})
-	prefixes.matchesNothing(t, provider.Filter{Field: "prefix", Value: "10.1.2.5/24, garbage"})
-	prefixes.matchesNothing(t, provider.Filter{Field: "prefix", Value: "garbage"})
-	wantReason(t, prefixes.refusal(t, provider.Filter{Field: "prefix", Value: "10.1.2.5/24, 10.1.3.0/24"}), "NetBox answers this with an error")
+	for _, in := range []string{"10.1.2.5/24", "10.1.2.5/24, garbage", "garbage", "10.10.10.5/24, 10.10.10.5/24", "10.10.10.5/24, 10.10.10.5/255.255.255.0"} {
+		prefixes.matchesNothing(t, provider.Filter{Field: "prefix", Value: in})
+	}
+	prefixes.matchesNothing(t, provider.Filter{Field: "prefix", Value: "10.10.10.5/24"}, provider.Filter{Field: "prefix", Value: "10.10.10.5/24"})
+	for _, in := range []string{"10.1.2.5/24, 10.1.3.0/24", "10.10.10.5/24, 10.10.11.5/24", "10.10.10.5/24, 10.10.10.0/24"} {
+		wantReason(t, prefixes.refusal(t, provider.Filter{Field: "prefix", Value: in}), "NetBox answers this with an error")
+	}
+}
 
-	// On the wire it is equality on the cidr text, /32 written — never the
-	// address match, which would send a single host bare. (v1.40.1 lists
-	// contains on a prefix's prefix, and no host.)
-	f := newFakeService()
-	f.addEntity("ipam/prefixes", "id:BIGINT:pk", "prefix:VARCHAR")
-	f.addOperators("ipam/prefixes", "prefix", "contains")
-	f.entities["ipam/prefixes"] = []map[string]interface{}{
-		{"id": float64(1), "prefix": "10.1.2.3/32"}, {"id": float64(2), "prefix": "10.1.2.0/24"},
-	}
-	p := newTestProvider(t, f)
-	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "ipam/prefixes",
-		Filters: []provider.Filter{{Field: "prefix", Value: "10.1.2.3"}}})
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-	if len(res.Rows) != 1 || res.Rows[0]["prefix"] != "10.1.2.3/32" {
-		t.Errorf("rows = %v, want the /32", res.Rows)
-	}
-	if req, ok := f.requestWith("ipam/prefixes", "filter[prefix]__eq"); !ok || req.query.Get("filter[prefix]__eq") != "10.1.2.3/32" {
-		t.Errorf("sent %v, want filter[prefix]__eq=10.1.2.3/32", req.query)
+// On the wire a prefix is equality on the cidr text, /32 written, and never the
+// address match, which would send a single host bare and miss the stored /32 —
+// whatever the catalogue lists on the column: v1.40.1 lists contains and no
+// host there, and a build that listed host would change nothing.
+func TestQuery_PrefixNeverTakesTheHostMatch(t *testing.T) {
+	for _, ops := range [][]string{{"contains"}, {"contains", "host"}} {
+		f := newFakeService()
+		f.addEntity("ipam/prefixes", "id:BIGINT:pk", "prefix:VARCHAR")
+		f.addOperators("ipam/prefixes", "prefix", ops...)
+		f.entities["ipam/prefixes"] = []map[string]interface{}{
+			{"id": float64(1), "prefix": "10.1.2.3/32"}, {"id": float64(2), "prefix": "10.1.2.0/24"},
+		}
+		p := newTestProvider(t, f)
+		res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "ipam/prefixes",
+			Filters: []provider.Filter{{Field: "prefix", Value: "10.1.2.3"}}})
+		if err != nil {
+			t.Fatalf("%v: Query: %v", ops, err)
+		}
+		if len(res.Rows) != 1 || res.Rows[0]["prefix"] != "10.1.2.3/32" {
+			t.Errorf("%v: rows = %v, want the /32", ops, res.Rows)
+		}
+		req, ok := f.requestWith("ipam/prefixes", "filter[prefix]__eq")
+		if !ok || req.query.Get("filter[prefix]__eq") != "10.1.2.3/32" || req.query.Get("filter[prefix]__host") != "" {
+			t.Errorf("%v: sent %v, want filter[prefix]__eq=10.1.2.3/32 alone", ops, req.query)
+		}
 	}
 }
 

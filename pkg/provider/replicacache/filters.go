@@ -340,9 +340,16 @@ func showSingleHostMasks(rows []map[string]interface{}, cols []string, isAddress
 // compares IP addresses by NetBox's rule: whether the column it filters on —
 // the stored column, or an expanded name's target column — lists the
 // replica's host operator. The catalogue decides, not the column's name; a
-// build without host keeps equality on the text.
+// build without host keeps equality on the text. A network column (NetBox's
+// prefix filters read it; see networkColumns) never does, whatever the
+// catalogue lists: its values carry their mask, and the host match would send
+// a single host bare and miss the /32 stored with one.
 func addressField(e entity, c *catalog) func(field string) bool {
+	networks := networkColumns(e)
 	return func(field string) bool {
+		if networks[field] {
+			return false
+		}
 		if col, ok := e.column(field); ok {
 			return slices.Contains(col.Operators, "host")
 		}

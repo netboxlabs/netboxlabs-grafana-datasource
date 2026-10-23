@@ -3,7 +3,6 @@ package replicacache
 import (
 	"context"
 	"errors"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -1056,10 +1055,10 @@ func TestFilterFields_OperatorsComeFromTheCatalogue(t *testing.T) {
 // the check covers every step a filter passes through — the rewrites as well
 // as the translation — not the translator alone. What the fake then answers
 // is beside the point; a refusal is what an advertised operator must never get.
-// The value is one the filter takes: NetBox's booleans read true, not 1. A
-// NetBox relation whose target has received no data is left out: its values
-// cannot be checked until that table is fed, which the editor cannot know
-// when it lists the filter.
+// The value is one the filter takes: NetBox's booleans read true, not 1; a
+// relation's is a value its target holds, as NetBox writes it, read from the
+// target — the editor offers a relation only where its target has data, and
+// its values are checked there, so the check covers that read too.
 func assertAdvertisedOperatorsAccepted(t *testing.T, p *Provider, objectType string, ops map[string][]string) {
 	t.Helper()
 	e, c, err := p.entityFor(context.Background(), objectType)
@@ -1078,11 +1077,7 @@ func assertAdvertisedOperatorsAccepted(t *testing.T, p *Provider, objectType str
 			case kindMAC:
 				value = "58:56:9f:d1:e3:00"
 			case kindRelated, kindTree, kindModelChoice:
-				target := strings.Replace(entry.Target, ".", "_", 1)
-				fed := slices.ContainsFunc(slices.Collect(maps.Values(c.Entities)), func(e entity) bool { return e.Table == target && e.Ingested })
-				if !fed {
-					continue
-				}
+				value = relatedValue(t, p, c, name, entry)
 			}
 		}
 		for _, op := range list {
@@ -1094,6 +1089,30 @@ func assertAdvertisedOperatorsAccepted(t *testing.T, p *Provider, objectType str
 			}
 		}
 	}
+}
+
+// relatedValue is a value a related filter takes: its target's first row, by
+// the field the filter compares, as NetBox writes it. A target with no row to
+// take one from is a fixture that cannot show the filter works.
+func relatedValue(t *testing.T, p *Provider, c *catalog, name string, entry vocabEntry) string {
+	t.Helper()
+	objectType, target, ok := c.servedTable(tableOf(entry.Target))
+	if !ok {
+		t.Fatalf("%s is offered, but the replica serves no %s", name, entry.Target)
+	}
+	field := entry.ToField
+	if field == "" || field == "id" {
+		field = target.pk()
+	}
+	raws, _, _, err := p.client.list(context.Background(), objectType, withFields(nil, []string{field}), 1)
+	if err != nil || len(raws) == 0 {
+		t.Fatalf("%s is offered, but %s has no row to filter it by: %v", name, objectType, err)
+	}
+	row, err := decodeTargetRow(raws[0], target.pk(), field, entry.ToField, false)
+	if err != nil {
+		t.Fatalf("reading %s: %v", objectType, err)
+	}
+	return row.key
 }
 
 // A replica that lists DATA-408's operators gets them offered, on text columns
@@ -1143,12 +1162,16 @@ func filterOps(t *testing.T, p *Provider, objectType string) map[string][]string
 // NetBox has on them: a device filters on site (NetBox compares its slug) with
 // = and not, and has no rack (NetBox's is rack_id), no site_slug and no site
 // contains; a prefix filters on children, which the replica stores as
-// _children; an interface on enabled.
+// _children; an interface on enabled. The related objects hold a row each,
+// for the check that a query takes each relation to look its value up in.
 func TestFilterFields_OffersNetBoxVocabularyOnly(t *testing.T) {
 	f := newFakeService()
 	f.schema = withAnchoredText(f.schema)
 	f.addEntity("ipam/prefixes", "id:BIGINT:pk", "prefix:VARCHAR", "_children:BIGINT")
 	f.addEntity("dcim/interfaces", "id:BIGINT:pk", "name:VARCHAR", "enabled:BOOLEAN")
+	for _, target := range []string{"dcim/sites", "dcim/device-roles", "tenancy/tenants", "dcim/racks"} {
+		f.entities[target] = []map[string]interface{}{{"id": 1, "name": "One", "slug": "one"}}
+	}
 	p := newTestProvider(t, f)
 
 	text := []string{"", "n", "ic", "nic", "isw", "nisw", "iew", "niew", "ie", "nie"}
@@ -1228,7 +1251,8 @@ func TestFilterFields_NoEmptyWhereNetBoxErrors(t *testing.T) {
 // The vocabulary is the union of NetBox 4.4's filters and 4.6's, and a replica
 // mirrors one NetBox: owner, a filter only 4.6 has, on its owner_id column, is
 // not offered on a replica whose table lacks the column, and is on one that
-// stores it.
+// stores it — and serves NetBox 4.6's owners, with data, to check its values
+// against (no replica-cache build serves users_owner yet).
 func TestFilterFields_OnlyStoredColumns(t *testing.T) {
 	f := newFakeService()
 	devices := filterOps(t, newTestProvider(t, f), "dcim/devices")
@@ -1242,6 +1266,9 @@ func TestFilterFields_OnlyStoredColumns(t *testing.T) {
 	e := f.schema.Entities["/v1/dcim/devices"]
 	e.Columns = append(slices.Clone(e.Columns), fakeColumn{Name: "owner_id", Type: "BIGINT", Nullable: true, Operators: []string{"eq", "gt", "lt", "in", "isnull"}})
 	f.schema.Entities["/v1/dcim/devices"] = e
+	owners := devicesSchema().Entities["/v1/dcim/sites"]
+	owners.Table = "users_owner"
+	f.schema.Entities["/v1/users/owners"] = owners
 	f.mu.Unlock()
 	devices = filterOps(t, newTestProvider(t, f), "dcim/devices")
 	for _, name := range []string{"owner", "owner_id"} {

@@ -468,7 +468,7 @@ func (p *Provider) FilterFields(ctx context.Context, objectType string) ([]provi
 		return nil, err
 	}
 	if vocab, covered := vocabFor(e.Table); covered {
-		return vocabFilterFields(vocab, e), nil
+		return vocabFilterFields(vocab, e, c), nil
 	}
 	var out []provider.FilterField
 	for _, col := range e.Columns {

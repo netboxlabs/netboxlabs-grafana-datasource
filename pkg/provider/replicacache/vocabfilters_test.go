@@ -191,6 +191,20 @@ func TestTranslate_NamesOnlyAnAlternativeTheReplicaTakes(t *testing.T) {
 	}
 }
 
+// A lookup NetBox lacks on a filter that has no lookup besides equality — an
+// interface's enabled is a boolean, NetBox's = alone — points at no other
+// lookup: there is none to point at.
+func TestTranslate_NoOtherLookupToPointAt(t *testing.T) {
+	for _, f := range []provider.Filter{{Field: "enabled", Operator: "ic", Value: "t"}, {Field: "enabled", Operator: "n", Value: "true"}} {
+		u := vocabInterfaces().refusal(t, f)
+		want := fmt.Sprintf("NetBox has no %s filter on dcim/interfaces, so a dashboard filtering on it would return every row in NetBox mode; remove it, or choose a filter the editor offers",
+			netboxName(f))
+		if u.Reason != want {
+			t.Errorf("%+v: reason = %q,\nwant %q", f, u.Reason, want)
+		}
+	}
+}
+
 // A prefix's children and depth are counts NetBox caches on the row, as
 // _children and _depth, and its filters read them there (NetBox 4.4.10:
 // children=3 → 1 prefix). The replica stores the cached columns, so the filter

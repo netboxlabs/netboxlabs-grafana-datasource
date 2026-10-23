@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +38,18 @@ const (
 	// URLs never reach user-facing strings (see APIError.Classification), but
 	// they do reach logs, and an unbounded body in a log line is its own problem.
 	maxSnippet = 300
+
+	// queryBudget is the longest request this datasource sends: 16 KB of
+	// query string. It is ours, not the replica's — the local replica answered
+	// a 36 KB query, and the edge in front of the service rejects about 50 KB
+	// with a 431 — and keeps every request well inside both.
+	queryBudget = 16 << 10
+
+	// cursorReserve is the part of the budget kept for what each page adds to
+	// a request, limit= and cursor=. The cursor carries the last row's sort
+	// value: 130 to 200 bytes measured on the demo replica, about 250 under a
+	// 64-character device name, about 440 under a 200-character description.
+	cursorReserve = 1 << 10
 )
 
 // Client is a thin authenticated HTTP client for the replica-cache read API.
@@ -453,7 +467,14 @@ func (c *Client) walk(ctx context.Context, entity string, q url.Values, s scan) 
 // walkOn takes w further. Every call on one walker passes the same query and
 // scan but for scanCap. Each call has its own restart after a refused cursor,
 // as each call was its own walk before it could be resumed.
+//
+// A query past the budget is refused before the first page, so nothing is
+// sent: every page of a walk shares the base query, so the budget is decided
+// once, never page by page, and a walk is not refused partway.
 func (c *Client) walkOn(ctx context.Context, entity string, q url.Values, s scan, w *walker) (walked, error) {
+	if w.first && !fitsBudget(q) {
+		return walked{}, overBudget(q)
+	}
 	w.restarted = false
 	for !w.exhausted && (s.countAll || len(w.rows) < s.want) && (s.scanCap == 0 || w.scanned < s.scanCap) {
 		want := pageSize
@@ -567,6 +588,44 @@ func (c *Client) walkOn(ctx context.Context, entity string, q url.Values, s scan
 		w.exhausted = true
 	}
 	return w.result(), nil
+}
+
+// fitsBudget reports whether a request's base query — its filters, expand=,
+// fields= and sort=, encoded, without the limit= and cursor= a page adds —
+// leaves the page its reserve within the budget. It is asked once per request
+// or walk, before the first page, never per page: every page of a walk shares
+// the base query. A read split into several requests can size each with it,
+// so that none is refused partway.
+func fitsBudget(q url.Values) bool {
+	base := make(url.Values, len(q))
+	for k, vs := range q {
+		if k != "limit" && k != "cursor" {
+			base[k] = vs
+		}
+	}
+	return len(base.Encode())+cursorReserve <= queryBudget
+}
+
+// overBudget refuses a request past the budget, naming the filter that made it
+// long — the one with the longest value — by the replica's column, with how
+// many values it carries: the client does not know the name the user gave the
+// filter, which is often a related object's (a site's slugs, sent as the ids
+// they name).
+func overBudget(q url.Values) error {
+	var key, value string
+	for _, k := range slices.Sorted(maps.Keys(q)) {
+		for _, v := range q[k] {
+			if strings.HasPrefix(k, "filter[") && len(v) > len(value) {
+				key, value = k, v
+			}
+		}
+	}
+	detail := "This query is too long to send to replica-cache: its request would pass the 16 KB this datasource sends at once. Filter on fewer values."
+	if column, _, ok := strings.Cut(strings.TrimPrefix(key, "filter["), "]"); ok {
+		detail = fmt.Sprintf("This query is too long to send to replica-cache: the filter on %s carries %s values, which takes the request past the 16 KB this datasource sends at once. Select fewer values, or filter on something that matches fewer objects.",
+			column, thousands(len(strings.Split(value, ","))))
+	}
+	return &UnsupportedError{Feature: "a request this long", Detail: detail}
 }
 
 func truncate(s string) string {

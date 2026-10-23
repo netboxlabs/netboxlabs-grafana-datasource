@@ -590,6 +590,28 @@ func (f *fakeService) requestWith(entity, key string) (recordedRequest, bool) {
 	return recordedRequest{}, false
 }
 
+// sentWith is every recorded request to an entity that carried a parameter,
+// in the order sent.
+func (f *fakeService) sentWith(entity, key string) []recordedRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []recordedRequest
+	for _, r := range f.requests {
+		if r.entity == entity && r.query.Has(key) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// forget clears the recorded requests, so the next assertions see only what
+// follows.
+func (f *fakeService) forget() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = nil
+}
+
 func (f *fakeService) countRequestsFor(entity string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -845,6 +867,116 @@ func (f *fakeService) addReference(objectType, col, target, key string, cols ...
 		if e.Columns[i].Name == col {
 			e.Columns[i].References = &fakeReference{Path: "/v1/" + target, ExpandKey: key, Columns: cols, Available: known && t.Ingested}
 		}
+	}
+	f.schema.Entities["/v1/"+objectType] = e
+}
+
+// The tables a related filter is resolved through, as replica-cache v1.40.1
+// serves them from a NetBox 4.4.10 database (GET /v1/_meta/schema): a nested
+// model carries django-mptt's columns (tree_id, lft, rght, level, INTEGER)
+// beside its parent_id; a VRF stores its rd, though the catalogue's vrf
+// reference joins in the name alone; a component stores the device's site as
+// _site_id, with no reference declared.
+
+// addColumns appends columns to an entity of the fake's catalogue, each
+// nullable with the operators v1.40.1 lists for its type.
+func (f *fakeService) addColumns(objectType string, cols ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e := f.schema.Entities["/v1/"+objectType]
+	e.Columns = slices.Clone(e.Columns)
+	for _, c := range cols {
+		name, typ, _ := strings.Cut(c, ":")
+		col := fakeColumn{Name: name, Type: typ, Nullable: true, Operators: []string{"eq", "gt", "lt", "in", "isnull"}}
+		if typ == "VARCHAR" {
+			col.Operators = append(col.Operators, "ilike")
+		}
+		e.Columns = append(e.Columns, col)
+	}
+	f.schema.Entities["/v1/"+objectType] = e
+}
+
+// treeNode is a row of a nested model: its parent and its place in the tree.
+func treeNode(id int, name, slug string, parent interface{}, tree, lft, rght, level int) map[string]interface{} {
+	return map[string]interface{}{"id": id, "name": name, "slug": slug, "parent_id": parent,
+		"tree_id": tree, "lft": lft, "rght": rght, "level": level}
+}
+
+// addTreeRoles serves device roles as NetBox 4.3 and later store them, nested:
+// core > core-leaf > core-leaf-edge in one tree, access alone in another.
+func (f *fakeService) addTreeRoles() {
+	f.addColumns("dcim/device-roles", "parent_id:BIGINT", "tree_id:INTEGER", "lft:INTEGER", "rght:INTEGER", "level:INTEGER")
+	f.addReference("dcim/device-roles", "parent_id", "dcim/device-roles", "parent", "name", "slug")
+	f.entities["dcim/device-roles"] = []map[string]interface{}{
+		treeNode(5, "Core", "core", nil, 1, 1, 6, 0),
+		treeNode(8, "Core Leaf", "core-leaf", 5, 1, 2, 5, 1),
+		treeNode(9, "Core Leaf Edge", "core-leaf-edge", 8, 1, 3, 4, 2),
+		treeNode(6, "Access", "access", nil, 2, 1, 2, 0),
+	}
+}
+
+// addLocations serves dcim/locations, nested: dc > room, and lab alone. A
+// prefix scoped to one caches it as _location_id, on which NetBox's location
+// filter is a tree filter.
+func (f *fakeService) addLocations() {
+	f.addEntity("dcim/locations", "id:BIGINT:pk", "name:VARCHAR", "slug:VARCHAR", "parent_id:BIGINT",
+		"tree_id:INTEGER", "lft:INTEGER", "rght:INTEGER", "level:INTEGER")
+	f.entities["dcim/locations"] = []map[string]interface{}{
+		treeNode(1, "DC", "dc", nil, 1, 1, 4, 0),
+		treeNode(2, "Room", "room", 1, 1, 2, 3, 1),
+		treeNode(3, "Lab", "lab", nil, 2, 1, 2, 0),
+	}
+}
+
+// addVRFs serves ipam/vrfs with its rd and gives objectType a vrf_id that
+// references it as the catalogue does, by name alone: NetBox's vrf filter
+// compares the RD, which is never an expanded column.
+func (f *fakeService) addVRFs(objectType string, ingested bool) {
+	f.addEntity("ipam/vrfs", "id:BIGINT:pk", "name:VARCHAR", "rd:VARCHAR")
+	f.setIngested("ipam/vrfs", ingested)
+	f.entities["ipam/vrfs"] = []map[string]interface{}{
+		{"id": 1, "name": "Blue", "rd": "65000:1"},
+		{"id": 2, "name": "Red", "rd": nil},
+	}
+	f.addColumns(objectType, "vrf_id:BIGINT")
+	f.addReference(objectType, "vrf_id", "ipam/vrfs", "vrf", "name")
+}
+
+// addInterfaces serves dcim/interfaces with the device it belongs to (by
+// name, the catalogue's reference), the device's site cached as _site_id with
+// no reference, and a primary MAC address.
+func (f *fakeService) addInterfaces() {
+	f.addEntity("dcim/interfaces", "id:BIGINT:pk", "name:VARCHAR", "device_id:BIGINT", "_site_id:BIGINT", "primary_mac_address_id:BIGINT")
+	f.addReference("dcim/interfaces", "device_id", "dcim/devices", "device", "name")
+	f.addEntity("dcim/mac-addresses", "id:BIGINT:pk", "mac_address:VARCHAR")
+	f.addReference("dcim/interfaces", "primary_mac_address_id", "dcim/mac-addresses", "primary_mac_address", "mac_address")
+}
+
+// addCableTerminations serves dcim/cable-terminations and dcim/cables, where
+// NetBox's cable filter is a single-valued ModelChoiceFilter whose form takes
+// no null.
+func (f *fakeService) addCableTerminations() {
+	f.addEntity("dcim/cables", "id:BIGINT:pk", "label:VARCHAR")
+	f.addEntity("dcim/cable-terminations", "id:BIGINT:pk", "cable_id:BIGINT", "cable_end:VARCHAR")
+	f.addReference("dcim/cable-terminations", "cable_id", "dcim/cables", "cable", "label")
+	f.entities["dcim/cables"] = []map[string]interface{}{{"id": 7, "label": "C7"}, {"id": 9, "label": "C9"}}
+	f.entities["dcim/cable-terminations"] = []map[string]interface{}{
+		{"id": 1, "cable_id": 7, "cable_end": "A"},
+		{"id": 2, "cable_id": 9, "cable_end": "A"},
+		{"id": 3, "cable_id": 9, "cable_end": "B"},
+	}
+}
+
+// setIngested marks an entity of the fake's catalogue fed or unfed; an unfed
+// one lists no columns, as the service's does, and its row route answers 404
+// "no data received for this entity".
+func (f *fakeService) setIngested(objectType string, ingested bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e := f.schema.Entities["/v1/"+objectType]
+	e.Ingested = ingested
+	if !ingested {
+		e.Columns, e.DataAsOf = nil, nil
 	}
 	f.schema.Entities["/v1/"+objectType] = e
 }

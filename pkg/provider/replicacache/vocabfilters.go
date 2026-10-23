@@ -215,12 +215,13 @@ func refused(f provider.Filter, reason string) ([]provider.Filter, bool, error) 
 
 // lacks is the refusal of a name NetBox does not have on the model, saying
 // what to do instead. A field NetBox has with a lookup it lacks (site__ic)
-// points at NetBox's other lookups on it; otherwise the filter that does what
-// was meant is named where NetBox has one the replica takes: <x>_id for a
-// relation NetBox filters by id alone (a device's rack), <x> for an <x>_slug
-// (NetBox's site is the slug) and for a cached _<x> (a prefix's children). One
-// NetBox applies through another relation (a device's region) is no
-// alternative: it is refused too.
+// points at NetBox's other lookups on it, where it has any besides equality
+// (an interface's enabled has none, so enabled__ic points nowhere); otherwise
+// the filter that does what was meant is named where NetBox has one the
+// replica takes: <x>_id for a relation NetBox filters by id alone (a device's
+// rack), <x> for an <x>_slug (NetBox's site is the slug) and for a cached _<x>
+// (a prefix's children). One NetBox applies through another relation (a
+// device's region) is no alternative: it is refused too.
 func (tr translation) lacks(name, field string) string {
 	reason := fmt.Sprintf("NetBox has no %s filter on %s, so a dashboard filtering on it would return every row in NetBox mode", name, tr.objectType())
 	base := field
@@ -228,7 +229,10 @@ func (tr translation) lacks(name, field string) string {
 		base = field[:i]
 	}
 	if tr.takesFilter(base) {
-		return reason + "; use another of NetBox's lookups on " + base
+		if tr.hasLookups(base) {
+			return reason + "; use another of NetBox's lookups on " + base
+		}
+		return reason + "; remove it, or choose a filter the editor offers"
 	}
 	for _, alt := range []string{base + "_id", strings.TrimSuffix(base, "_slug"), strings.TrimPrefix(base, "_")} {
 		if alt != base && tr.takesFilter(alt) {
@@ -236,6 +240,17 @@ func (tr translation) lacks(name, field string) string {
 		}
 	}
 	return reason + "; remove it, or choose a filter the editor offers"
+}
+
+// hasLookups reports whether NetBox has a lookup on a filter besides its
+// equality (base__n, base__ic, …) that the translation takes.
+func (tr translation) hasLookups(base string) bool {
+	for name := range tr.vocab {
+		if lookup, ok := strings.CutPrefix(name, base+"__"); ok && lookupSuffixes[lookup] && tr.takesFilter(name) {
+			return true
+		}
+	}
+	return false
 }
 
 // takesFilter reports whether the translation takes a NetBox filter on this
@@ -626,32 +641,34 @@ func valueColumn(e entity, field string) string {
 // the column NetBox reads (a 4.6-only filter is not offered on a replica of
 // 4.4, whose table lacks its column), each with the lookups NetBox has on it
 // that the translation can send and the column takes. A filter on a related
-// object offers = and not. is-empty and has-any-value go where NetBox's
-// __empty is a boolean meaning IS NULL — and only there: a number's or a
-// date's __empty keeps that class and is a NetBox 400 (speed__empty). A
-// decimal or date NetBox compares as such, which the replica cannot, is offered
-// with those two alone. A prefix's contains is not offered: nothing answers it
-// yet, and the filter it is passed on as is refused.
-func vocabFilterFields(vocab map[string][]vocabEntry, e entity) []provider.FilterField {
+// object offers = and not where its target is a table with data: its values
+// are checked against that table, so on any other they are refused, and the
+// editor does not offer what a query refuses. is-empty and has-any-value go
+// where NetBox's __empty is a boolean meaning IS NULL — and only there: a
+// number's or a date's __empty keeps that class and is a NetBox 400
+// (speed__empty). A decimal or date NetBox compares as such, which the replica
+// cannot, is offered with those two alone. A prefix's contains is not offered:
+// nothing answers it yet, and the filter it is passed on as is refused.
+func vocabFilterFields(vocab map[string][]vocabEntry, e entity, c *catalog) []provider.FilterField {
 	var out []provider.FilterField
 	for _, name := range slices.Sorted(maps.Keys(vocab)) {
 		if strings.Contains(name, "__") {
 			continue // a lookup, offered as its filter's operator
 		}
-		if ops := vocabOperators(vocab, name, e); len(ops) > 0 {
+		if ops := vocabOperators(vocab, name, e, c); len(ops) > 0 {
 			out = append(out, provider.FilterField{Name: name, Operators: ops})
 		}
 	}
 	return out
 }
 
-func vocabOperators(vocab map[string][]vocabEntry, name string, e entity) []string {
+func vocabOperators(vocab map[string][]vocabEntry, name string, e entity, c *catalog) []string {
 	base := pickVocab(vocab[name], e)
 	col, stored := e.column(base.Column)
 	var ops []string
 	switch base.Kind {
 	case kindRelated, kindTree, kindModelChoice:
-		if stored {
+		if _, target, served := c.servedTable(tableOf(base.Target)); stored && served && target.Ingested {
 			ops = append(ops, opExact)
 			if n, ok := vocab[name+"__n"]; ok && pickVocab(n, e).Kind == base.Kind {
 				ops = append(ops, "n")

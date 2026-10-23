@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -581,5 +582,72 @@ func TestCursorWalkRestartsOnceWhenTheCursorIsRefused(t *testing.T) {
 	}
 	if u := provider.Classify(err); u == nil || u.Kind != provider.ErrorKindBadRequest {
 		t.Errorf("the second refusal is the service's 400, got %+v", u)
+	}
+}
+
+// fitsBudget measures a request's base query — its filters, expand, fields
+// and sort, without the page's limit and cursor — and keeps 1 KB of the 16 KB
+// for those two: the cursor carries the last row's sort value, 130 to 200
+// bytes on the demo replica and about 440 for a 200-character description.
+func TestFitsBudget_ReservesTheCursor(t *testing.T) {
+	const key = "filter[name]__in"
+	room := 16<<10 - 1<<10 - len(url.Values{key: {""}}.Encode())
+	if q := (url.Values{key: {strings.Repeat("a", room)}}); !fitsBudget(q) {
+		t.Errorf("a base query of %d bytes does not fit; 15 KB does", len(q.Encode()))
+	}
+	if q := (url.Values{key: {strings.Repeat("a", room+1)}}); fitsBudget(q) {
+		t.Errorf("a base query of %d bytes fits; past 15 KB the cursor has no room", len(q.Encode()))
+	}
+	full := url.Values{key: {strings.Repeat("a", room)}, "limit": {"1000"}, "cursor": {strings.Repeat("c", 900)}}
+	if !fitsBudget(full) {
+		t.Error("the limit and cursor were counted against the base query; the reserve is for them")
+	}
+}
+
+// A request past the budget is refused before it is sent, on every path that
+// sends one: a list's rows, a negated query's count terms, and its walk over
+// the rows. The refusal names the replica column of the longest filter and how
+// many values it carries; the client does not know the name the user wrote.
+func TestClient_RefusesQueriesOverTheBudget(t *testing.T) {
+	const widgets = "plugins/acme/widgets"
+	f := newFakeService()
+	f.addEntity(widgets, "id:BIGINT:pk", "name:VARCHAR")
+	f.entities[widgets] = []map[string]interface{}{{"id": 1, "name": "w1"}, {"id": 2, "name": "w2"}}
+	p := newTestProvider(t, f)
+
+	names, ids := make([]string, 3000), make([]string, 4000)
+	for i := range names {
+		names[i] = fmt.Sprintf("w%04d", i)
+	}
+	for i := range ids {
+		ids[i] = strconv.Itoa(i + 1)
+	}
+	for _, c := range []struct {
+		name    string
+		spec    provider.QuerySpec
+		column  string
+		values  string
+		tooLong string
+	}{
+		{"a list", provider.QuerySpec{Filters: []provider.Filter{{Field: "name", Value: strings.Join(names, ",")}}},
+			"name", "3,000", "filter[name]__in"},
+		{"a count term", provider.QuerySpec{CountOnly: true, Filters: []provider.Filter{{Field: "name", Operator: "n", Value: strings.Join(names, ",")}}},
+			"name", "3,000", "filter[name]__in"},
+		{"a walk", provider.QuerySpec{Filters: []provider.Filter{{Field: "id", Value: strings.Join(ids, ",")}, {Field: "name", Operator: "n", Value: "w1"}}},
+			"id", "4,000", "filter[id]__in"},
+	} {
+		c.spec.ObjectType = widgets
+		_, err := p.Query(context.Background(), c.spec)
+		var u *UnsupportedError
+		if !errors.As(err, &u) {
+			t.Errorf("%s: err = %v, want an UnsupportedError", c.name, err)
+			continue
+		}
+		if want := fmt.Sprintf("the filter on %s carries %s values", c.column, c.values); !strings.Contains(u.Detail, want) {
+			t.Errorf("%s: %q, want it to say %q", c.name, u.Detail, want)
+		}
+		if sent := f.sentWith(widgets, c.tooLong); len(sent) != 0 {
+			t.Errorf("%s: %d requests over the budget were sent", c.name, len(sent))
+		}
 	}
 }

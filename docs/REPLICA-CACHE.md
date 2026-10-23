@@ -79,11 +79,12 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
 - **related names**, resolved by the replica itself: for every reference whose
   target type has data, the target's name and slug (`site`, `site_slug`,
   `role`, `role_slug`, `tenant`, …) are offered as columns and resolved when a
-  query selects them, joins on them, filters or sorts by them. An **All
-  columns** query resolves every one of them, beside the ids, as NetBox mode
-  returns related names by default. A reference whose target has received no
-  data is not offered, and a saved panel that asks for it gets a warning
-  naming the cause instead of a blank column;
+  query selects them, joins on them or sorts by them (a filter on a related
+  object follows NetBox's own, below). An **All columns** query resolves every
+  one of them, beside the ids, as NetBox mode returns related names by
+  default. A reference whose target has received no data is not offered, and a
+  saved panel that asks for it gets a warning naming the cause instead of a
+  blank column;
 - **custom fields** as `cf_<name>` columns, expanded the same way as in NetBox
   mode (a list field also gets its `cf_<name>_count`). Their names are read from
   a small sample of rows, because the replica's schema cannot list them. For the
@@ -116,11 +117,10 @@ with a message saying why. What NetBox has is read from its own filtersets
 `face` _not_, is honoured here on a replica of NetBox 4.4, although NetBox 4.4
 itself ignores it and returns every row). It matters because NetBox ignores a
 filter it does not have and returns every row: a filter only this mode
-understood would make a dashboard right here and silently wrong in NetBox
-mode. A refusal names
-NetBox's filter where it has one: a device has `rack_id`, not `rack`; NetBox's
-`site` already compares the slug, so there is no `site_slug`; a prefix's
-`children` is the count the replica stores as `_children`.
+understood would make a dashboard right here and silently wrong in NetBox mode.
+A refusal names NetBox's filter where it has one: a device has `rack_id`, not
+`rack`; NetBox's `site` already compares the slug, so there is no `site_slug`;
+a prefix's `children` is the count the replica stores as `_children`.
 
 _Changed from earlier builds of this mode:_ the filters only this mode took are
 withdrawn — text matches on related names (`site contains ams`), and filters on
@@ -161,8 +161,10 @@ NetBox's meaning is kept:
   `children` and `depth`: their `__empty` keeps the number filter's form);
 - a prefix's `prefix` reads each value as NetBox does (netmask and hostmask
   notation, `10.1.2.0/024`, a bare address as `/32`) and compares the network
-  as given: one with host bits set matches nothing, and is an error beside
-  another value, as in NetBox. An aggregate's zeroes the host bits;
+  as given: one with host bits set matches nothing — alone, beside itself in
+  another spelling, or beside a value NetBox cannot read — and is an error
+  beside a different network, as in NetBox. An aggregate's zeroes the host
+  bits;
 - a MAC address in any spelling NetBox reads (`58-56-9F-D1-E3-00`,
   `5856.9fd1.e300`, …) matches the stored address, and a value NetBox cannot
   read makes the whole filter match nothing, as there. _contains_ and the other
@@ -185,11 +187,45 @@ NetBox's meaning is kept:
 - NetBox lookups with no equivalent here: `mask_length`, `family`, and _regex_,
   the replica having no regular-expression match.
 
-Filters on a related object (`site`, `role`, `tenant`, …) and their `_id` forms
-are offered with _=_ and _not_. For now `site` and the like still compare the
-name the replica joins in, where NetBox compares the slug or name its filter
-names, and a tree filter (`role`, `role_id`) matches the node itself, without
-the descendants NetBox includes.
+**Filters on a related object** (`site`, `role`, `tenant`, `vrf`, a device's
+`primary_ip4`, an interface's `device`, …, and their `_id` forms) are offered
+with _=_ and _not_, and compare what NetBox's compare: the slug, name, RD,
+address or MAC address its filter names, else the id — `site = ams1` is the
+site whose slug is `ams1`, not one named so. Each value is looked up in the
+related object's table first, and the filter is sent as the ids found (a
+request more for each such filter, and for each tree node with nodes below
+it):
+
+- every value is checked as NetBox's form checks it, and a value NetBox
+  refuses is refused with NetBox's own message, so a dashboard or an alert
+  rule gets the error NetBox mode gets rather than no rows: a value that names
+  nothing (_Select a valid choice. ams9 is not one of the available
+  choices._ — a site's name, which is not its slug, included); an id that is
+  no whole number (_“abc” is not a valid value._), or not written as NetBox
+  writes it (`01`, `+1`); an address that does not parse (_Invalid IP address
+  format_), or written without its mask (`10.0.0.1` for `10.0.0.1/32`) or in
+  another notation; a MAC address that does not parse (NetBox 4.4's _Invalid
+  MAC address format_), or not written in NetBox's capitals with colons;
+- `null` is "no value" (`tenant = null`; _not_ `null` is "has one"), with
+  nothing looked up. `null` beside other values works on _not_ and is refused
+  on _=_, where NetBox returns rows matching either, which the replica cannot
+  combine;
+- a **tree** filter — a device's `role` and `location` (and `platform` on
+  NetBox 4.6), a prefix's `location`, `region` and `site_group`, a site's
+  `region` and `group`, and their `_id` forms — includes every node below each
+  one named, as NetBox's does, up to 100 nodes per filter; a `parent` filter
+  is the direct children alone;
+- the values, and the rows, of one filter match any of them; different filters
+  (`site` and `site_id`) must all match, and what a _not_ excludes is taken off
+  what the others select, as in NetBox;
+- a cable termination's `cable` takes one value, the last given, as NetBox's
+  does.
+
+A related filter whose table has received no data on this replica, or that the
+replica does not serve (a device's `config_template_id`), cannot be checked as
+NetBox checks it: a value on it is refused, naming the table, and the editor
+does not offer it. `null` still works on it. The result columns are unchanged:
+`site` is still the site's name.
 
 Within that, the operators the replica takes decide: equality (multi-value →
 `in`), a case-insensitive **contains** on text, and, on a replica-cache build
@@ -237,11 +273,12 @@ whose schema lists the replica's `host` operator on the column: a value without
 a mask matches every record with that address, whatever its mask
 (`address = 10.0.0.1` finds `10.0.0.1/24`), and a value with a mask matches
 that exact address (`10.0.0.1/32` finds the single-host record only). A value
-that is not an address matches nothing. A device's `primary_ip4` and
-`primary_ip6` match the same way for now. A filter that mixes values with and
+that is not an address matches nothing. A filter that mixes values with and
 without a mask fails with a message, unless every masked value's address is
 also listed without one. On a build without `host` the comparison is on the
-stored text.
+stored text. A device's `primary_ip4` and `primary_ip6` are filters on a
+related object, which take the address as NetBox writes it, with its mask (see
+above).
 
 These are deliberately not offered:
 
@@ -269,7 +306,12 @@ panel note.
 
 **Limits.** Pages of 1,000 rows, walked by cursor up to the data source's
 10,000-row ceiling. The truncation and alert-table rules are the same as in
-NetBox mode.
+NetBox mode. A request is kept within 16 KB: a filter whose values would take
+it past that — thousands of values, or of the ids a filter on related objects
+names — is refused before anything is sent, with a message naming the column
+and how many values it carries. A filter on a related object whose values
+name more than 10,000 objects, or a tree node with more than 10,000 below it,
+is refused too.
 
 ## Freshness
 

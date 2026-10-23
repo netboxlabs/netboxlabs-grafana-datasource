@@ -1923,25 +1923,27 @@ func TestQuery_SingleHostAddressesShowTheirMask(t *testing.T) {
 // An expanded name whose target column lists host matches the same way:
 // "primary_ip4 = 10.0.0.11" finds the device whose primary address is
 // 10.0.0.11/21. Measured on a live replica: host works on an expanded name.
+// That is a plugin's table, whose filters keep the catalogue's rules: NetBox's
+// own devices filter primary_ip4 by NetBox's text for the address
+// (TestRelated_PrimaryIPNeedsItsCanonicalText).
 func TestQuery_ExactAddressFilterOnAnExpandedNameMatchesByHost(t *testing.T) {
 	f := newFakeService()
+	f.schema = withPluginDevices(f.schema)
 	f.addAddressEntity(true)
 	f.entities["ipam/ip-addresses"] = []map[string]interface{}{{"id": 1865, "address": "10.0.0.11/21"}}
-	e := f.schema.Entities["/v1/dcim/devices"]
-	e.Columns = append(e.Columns, fakeColumn{Name: "primary_ip4_id", Type: "BIGINT", Nullable: true, Operators: []string{"eq", "gt", "lt", "in", "isnull"}})
-	f.schema.Entities["/v1/dcim/devices"] = e
-	f.addReference("dcim/devices", "primary_ip4_id", "ipam/ip-addresses", "primary_ip4", "address")
-	f.entities["dcim/devices"] = []map[string]interface{}{
+	f.addColumns(pluginDevices, "primary_ip4_id:BIGINT")
+	f.addReference(pluginDevices, "primary_ip4_id", "ipam/ip-addresses", "primary_ip4", "address")
+	f.entities[pluginDevices] = []map[string]interface{}{
 		{"id": 1, "name": "a", "primary_ip4_id": 1865, "custom_field_data": `{}`},
 		{"id": 2, "name": "b", "primary_ip4_id": nil, "custom_field_data": `{}`},
 	}
 	p := newTestProvider(t, f)
-	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "primary_ip4"},
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: pluginDevices, Fields: []string{"name", "primary_ip4"},
 		Filters: []provider.Filter{{Field: "primary_ip4", Value: "10.0.0.11"}}})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	req, ok := f.requestWith("dcim/devices", "filter[primary_ip4]__host")
+	req, ok := f.requestWith(pluginDevices, "filter[primary_ip4]__host")
 	if !ok {
 		t.Fatal("the expanded address name should be matched by host")
 	}

@@ -158,6 +158,22 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "endpoint not found")
 		return
 	}
+	// The service reads a request's operators before it looks at the table:
+	// measured on v1.40.1 against a table that never received data,
+	// filter[id]__eq is its 404 and filter[id]__bogus its 400, "invalid filter
+	// operator: bogus". An operator the handler has no implementation of is that
+	// 400 whatever the catalogue lists on the column (a schema-less fake lists
+	// none), never a filter that matches every row: matches would answer true for
+	// it, and a test sending one the service refuses would pass for the wrong
+	// reason. An operator the BUILD lacks is the same 400 (see buildKnows).
+	for k := range q {
+		if strings.HasPrefix(k, "filter[") {
+			if op := k[strings.Index(k, "]")+3:]; !f.buildKnows(op) {
+				writeErr(w, 400, "invalid filter operator: "+op)
+				return
+			}
+		}
+	}
 	if se != nil && !se.Ingested {
 		writeErr(w, 404, "no data received for this entity")
 		return
@@ -279,14 +295,6 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		col := k[len("filter["):strings.Index(k, "]")]
 		op := k[strings.Index(k, "]")+3:]
-		// An operator the handler has no implementation of is a 400 whatever the
-		// catalogue lists on the column (a schema-less fake lists none), never a
-		// filter that matches every row: matches would answer true for it, and a
-		// test sending one the service refuses would pass for the wrong reason.
-		if !slices.Contains(implementedOperators, op) {
-			writeErr(w, 400, "invalid filter operator: "+op)
-			return
-		}
 		if !nameOK(col) {
 			writeErr(w, 400, "unknown column: "+col)
 			return
@@ -582,6 +590,25 @@ const fakeContainsMaxValues = 1000
 // implementedOperators are the filter operators the fake answers, as the
 // catalogue of v1.40.1 lists them across its columns.
 var implementedOperators = []string{"eq", "gt", "lt", "in", "isnull", "ilike", "istartswith", "iendswith", "iexact", "host", "contains"}
+
+// buildKnows reports whether the replica-cache build the fake stands for has an
+// operator: one the fake answers, and contains only where the schema route
+// states its limit, as v1.39 and later do and a build before it does not.
+func (f *fakeService) buildKnows(op string) bool {
+	if !slices.Contains(implementedOperators, op) {
+		return false
+	}
+	if op != "contains" {
+		return true
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.schema == nil {
+		return false
+	}
+	_, states := f.schema.FilterLimits["contains"]
+	return states
+}
 
 // containsTerm is one element of a contains list, as the replica reads it
 // (internal/api/filter.go containsCandidates): a bare address is contained

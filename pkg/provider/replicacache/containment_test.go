@@ -307,6 +307,35 @@ func TestPythonStrip(t *testing.T) {
 	}
 }
 
+// NetBox's form refuses a null character in a text value, and answers the
+// request with its 400 rather than with no rows (NetBox 4.4.10:
+// ?contains=10.10.10.5%00 is HTTP 400 {"contains": ["Null characters are not
+// allowed."]}; the check follows the strip, so a null between spaces is refused
+// too). It is no address, which would match nothing, but NetBox does not say
+// that, and so a dashboard or an alert rule gets the error NetBox mode gets,
+// with NetBox's words.
+func TestContains_NullCharacterIsRefusedAsNetBoxRefusesIt(t *testing.T) {
+	f, p := containmentProvider(t)
+	want := "Null characters are not allowed. NetBox mode answers the same; remove the null character from the value"
+	for _, in := range []string{"10.0.0.1\x00", "\x00", "10.0.\x000.1", "10.0.0.5/24\x00", " \x00 ", "\x00/24", "abc\x00", "\x1c\x00\x1f"} {
+		for _, op := range []string{"", "exact"} {
+			for _, countOnly := range []bool{false, true} {
+				_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "ipam/prefixes", CountOnly: countOnly,
+					Filters: []provider.Filter{{Field: "contains", Operator: op, Value: in}}})
+				var u *UnsupportedFilterError
+				if !errors.As(err, &u) {
+					t.Errorf("contains=%q %q CountOnly %v: %v, want an UnsupportedFilterError", in, op, countOnly, err)
+					continue
+				}
+				if u.Reason != want || u.Field != "contains" || u.Operator != op {
+					t.Errorf("contains=%q: refusal %s %q: %q,\nwant %q", in, u.Field, u.Operator, u.Reason, want)
+				}
+			}
+		}
+	}
+	noRequestsFor(t, f, "ipam/prefixes")
+}
+
 // NetBox has no contains filter on an aggregate, so a dashboard filtering on it
 // would return every aggregate in NetBox mode: refused as every filter NetBox
 // lacks is (Task 1b's translation), before anything is sent.
@@ -473,6 +502,10 @@ func TestContains_PluginTypeHasNoSuchColumn(t *testing.T) {
 	noRequestsFor(t, f, pluginDevices)
 }
 
+// unsupportedBuildReason is the refusal of NetBox's contains on a build without
+// the operator, as its users read it.
+const unsupportedBuildReason = "this replica-cache build has no containment search (v1.39 added it), so it cannot answer NetBox's contains filter; ask NetBox Labs to upgrade the replica, or use a datasource in NetBox mode for this filter"
+
 // A replica-cache build before v1.39 has no containment search, and its schema
 // route states no limit for it. NetBox's contains is then refused with what to
 // do, not sent as an operator the build answers with a 400, and not offered.
@@ -493,7 +526,7 @@ func TestContains_UnsupportedBuildIsRefused(t *testing.T) {
 		if name == "no such column" {
 			want = "this replica does not store prefix, the column NetBox reads for contains, so it cannot answer the filter; remove it, or choose a filter the editor offers"
 		} else {
-			want = "this replica-cache build has no containment search (v1.39 added it), so it cannot answer NetBox's contains filter; ask NetBox Labs to upgrade the replica, or use a datasource in NetBox mode for this filter"
+			want = unsupportedBuildReason
 		}
 		if u.Reason != want || u.Field != "contains" || u.Operator != "" {
 			t.Errorf("%s: refusal %s %q: %q,\nwant %q", name, u.Field, u.Operator, u.Reason, want)
@@ -504,6 +537,46 @@ func TestContains_UnsupportedBuildIsRefused(t *testing.T) {
 		if reqs := f.sentWith("ipam/prefixes", "filter[prefix]__contains"); len(reqs) != 0 {
 			t.Errorf("%s: contains was sent: %v", name, reqs[0].query)
 		}
+	}
+}
+
+// An entity the replica has received nothing for has no columns to judge a
+// filter against, but whether the build has the operator needs none: a build
+// before v1.39 is refused there as it is for a table with data. Sent, the
+// operator would get a bare 400, since the service reads a request's operators
+// before it looks at the table (TestFake_AnOperatorTheBuildLacksIs400BeforeTheTable),
+// where every other filter gets the table's own not-replicated answer. A count,
+// which the alert path sends with the rule's filters, is refused alike.
+func TestContains_UnsupportedBuildIsRefusedOnAnUnfedTable(t *testing.T) {
+	f := newFakeService()
+	f.addPrefixes(containmentRows()...)
+	f.setIngested("ipam/prefixes", false)
+	f.schema.FilterLimits = nil
+	p := newTestProvider(t, f)
+	for _, countOnly := range []bool{false, true} {
+		_, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "ipam/prefixes", CountOnly: countOnly,
+			Filters: []provider.Filter{{Field: "contains", Value: "10.0.0.1"}}})
+		var u *UnsupportedFilterError
+		if !errors.As(err, &u) {
+			t.Errorf("CountOnly %v: %v, want an UnsupportedFilterError", countOnly, err)
+			continue
+		}
+		if u.Reason != unsupportedBuildReason || u.Field != "contains" || u.Operator != "" {
+			t.Errorf("CountOnly %v: refusal %s %q: %q,\nwant %q", countOnly, u.Field, u.Operator, u.Reason, unsupportedBuildReason)
+		}
+	}
+	noRequestsFor(t, f, "ipam/prefixes")
+
+	// What needs no operator still goes: a value that is none is answered without
+	// a request, and any other filter is the table's to answer.
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "ipam/prefixes",
+		Filters: []provider.Filter{{Field: "contains", Value: "garbage"}}})
+	if err != nil || len(res.Rows) != 0 {
+		t.Errorf("a value that is no address: %v, %v; want no rows", res, err)
+	}
+	if _, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "ipam/prefixes",
+		Filters: []provider.Filter{{Field: "prefix", Value: "10.0.0.0/8"}}}); provider.Classify(err) == nil || provider.Classify(err).Kind != provider.ErrorKindNotReplicated {
+		t.Errorf("another filter on the unfed table: %v, want the table's not-replicated answer", err)
 	}
 }
 
@@ -628,6 +701,24 @@ func TestRewriteContains_NoRowsDropsTheRow(t *testing.T) {
 	wantFilters(t, out, provider.Filter{Field: "status", Value: "active"})
 }
 
+// A null character is NetBox's error, not a value that matches nothing: the
+// refusal names the filter as written, and the rows it was given are left as
+// they were.
+func TestRewriteContains_NullCharacter(t *testing.T) {
+	prefixes := vocabPrefixes()
+	given := []provider.Filter{{Field: "status", Value: "active"}, {Field: "contains", Operator: "exact", Value: "10.0.0.1\x00"}}
+	before := slices.Clone(given)
+	out, none, err := rewriteContains(given, prefixes.objectType, prefixes.e)
+	var u *UnsupportedFilterError
+	if !errors.As(err, &u) || none || out != nil || u.Field != "contains" || u.Operator != "exact" ||
+		u.Reason != "Null characters are not allowed. NetBox mode answers the same; remove the null character from the value" {
+		t.Errorf("rewriteContains = %+v, none %v, %v; want NetBox's null-character refusal on contains \"exact\"", out, none, err)
+	}
+	if !slices.Equal(given, before) {
+		t.Errorf("the filters it was given are now %+v, want %+v", given, before)
+	}
+}
+
 // Several values are one refusal, naming the filter as the first row wrote it.
 func TestRewriteContains_SeveralValues(t *testing.T) {
 	prefixes := vocabPrefixes()
@@ -694,20 +785,7 @@ func TestFake_UnknownOperatorIs400(t *testing.T) {
 
 	get := func(param, value string) (int, string) {
 		t.Helper()
-		resp, err := http.Get(srv.URL + "/v1/ipam/prefixes?" + url.Values{param: {value}}.Encode())
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-		var body struct {
-			Error string `json:"error"`
-			Count *int   `json:"count"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&body)
-		if resp.StatusCode == http.StatusOK && body.Count != nil {
-			return resp.StatusCode, fmt.Sprint(*body.Count)
-		}
-		return resp.StatusCode, body.Error
+		return fakeGet(t, srv.URL, "ipam/prefixes", param, value)
 	}
 	for _, c := range []struct {
 		param, value string
@@ -744,5 +822,76 @@ func TestFake_UnknownOperatorIs400(t *testing.T) {
 		if status, got := get("filter[prefix]__contains", value); status != 200 || got != want {
 			t.Errorf("contains=%s: HTTP %d, count %s, want %s", value, status, got, want)
 		}
+	}
+}
+
+// fakeGet is one filter against a list route of the fake: the status, and the
+// service's error, or the count of a 200.
+func fakeGet(t *testing.T, baseURL, entity, param, value string) (int, string) {
+	t.Helper()
+	resp, err := http.Get(baseURL + "/v1/" + entity + "?" + url.Values{param: {value}}.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var body struct {
+		Error string `json:"error"`
+		Count *int   `json:"count"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if resp.StatusCode == http.StatusOK && body.Count != nil {
+		return resp.StatusCode, fmt.Sprint(*body.Count)
+	}
+	return resp.StatusCode, body.Error
+}
+
+// The service reads a request's operators before it looks at the table:
+// measured on v1.40.1 against a table that never received data, filter[id]__eq
+// is its 404 "no data received for this entity" and filter[id]__bogus its 400
+// "invalid filter operator: bogus". An operator the build lacks is that 400
+// too, whatever the table: a build before v1.39 states no contains limit and has
+// no such operator, so a request that sent it to an unfed table would get a bare
+// 400 where the table's own 404 is what the other operators get.
+func TestFake_AnOperatorTheBuildLacksIs400BeforeTheTable(t *testing.T) {
+	f := newFakeService()
+	f.addPrefixes(containmentRows()...)
+	f.setIngested("ipam/prefixes", false)
+	srv := f.start(t)
+	for _, c := range []struct {
+		param, value, msg string
+		status            int
+	}{
+		{"filter[id]__eq", "1", "no data received for this entity", 404},
+		{"filter[id]__bogus", "1", "invalid filter operator: bogus", 400},
+		{"filter[prefix]__contains", "10.0.0.1", "no data received for this entity", 404}, // this build has it: the table decides
+	} {
+		if status, msg := fakeGet(t, srv.URL, "ipam/prefixes", c.param, c.value); status != c.status || msg != c.msg {
+			t.Errorf("an unfed table, %s: HTTP %d %q, want %d %q", c.param, status, msg, c.status, c.msg)
+		}
+	}
+
+	// A build before v1.39 states no limit for contains.
+	f.mu.Lock()
+	f.schema.FilterLimits = nil
+	f.mu.Unlock()
+	for _, c := range []struct {
+		param, value, msg string
+		status            int
+	}{
+		{"filter[prefix]__contains", "10.0.0.1", "invalid filter operator: contains", 400},
+		{"filter[id]__eq", "1", "no data received for this entity", 404},
+	} {
+		if status, msg := fakeGet(t, srv.URL, "ipam/prefixes", c.param, c.value); status != c.status || msg != c.msg {
+			t.Errorf("an unfed table, a build without contains, %s: HTTP %d %q, want %d %q", c.param, status, msg, c.status, c.msg)
+		}
+	}
+
+	// The same on a table that has data, whose column lists the operator.
+	fed := newFakeService()
+	fed.addPrefixes(containmentRows()...)
+	fed.schema.FilterLimits = nil
+	fedSrv := fed.start(t)
+	if status, msg := fakeGet(t, fedSrv.URL, "ipam/prefixes", "filter[prefix]__contains", "10.0.0.1"); status != 400 || msg != "invalid filter operator: contains" {
+		t.Errorf("a fed table, a build without contains: HTTP %d %q, want 400 invalid filter operator: contains", status, msg)
 	}
 }

@@ -18,25 +18,46 @@ needs, what it returns, and what it does not do.
   is. Against an older build **Save & test** fails with a message saying so;
   there is no fallback.
 
+## What it answers
+
+| Query or feature                                                        | In replica-cache mode                                                                                                          |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **Objects**: tables, **Count**, **Alert table**, dashboard variables    | Answered, with NetBox's own filters ([below](#what-a-query-returns)).                                                          |
+| **Topology** and **Topology edges**                                     | Answered from the replica's cable tables: the same graph NetBox mode builds ([Topology](#topology)).                           |
+| **IP enrichment**, from an IP list or a NetBox scope                    | Answered: the same rows and columns ([IP enrichment](#ip-enrichment)). A scope cannot use `parent`, `mask_length` or `family`. |
+| **Annotations**                                                         | Not available: the replica has no change log.                                                                                  |
+| **Tags**: the `tags` column, the `tag` filter                           | Not available: as of v1.40 the replica does not publish tags.                                                                  |
+| **Contacts**: `tenancy/contact-assignments` and the other contact types | Not available: the replica does not serve them.                                                                                |
+| **Branches**                                                            | Not available: the replica mirrors the main dataset only, and the **Branch** field is disabled.                                |
+| **Utilization** and NetBox's other computed columns                     | Not available: NetBox computes them, and the replica stores rows ([Columns](#what-a-query-returns)).                           |
+
+What is not available says so, with an error or a warning, rather than
+returning an empty result. A few things answer differently
+([Known divergences](#known-divergences)), and some stay with NetBox mode
+([What stays NetBox-only](#what-stays-netbox-only)); the
+[alerting recipes](ALERTING.md#which-recipes-run-in-replica-cache-mode) say which
+of them need it.
+
 ## Configuration
 
 Set **Mode** to _replica-cache_. The connection fields are the same as in
 NetBox mode — they name whichever service the mode reads from — plus the
 instance ID:
 
-| Field                            | Description                                                                                                                                                                            |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **URL**                          | Base URL of the replica-cache deployment.                                                                                                                                              |
-| **Browser URL**                  | Optional. Where users' browsers reach NetBox. _View in NetBox_ links are built from it when the replica reports no NetBox URL, and rewritten to it otherwise.                          |
-| **NetBox instance ID**           | The NetBox instance the replica holds (`nb-…`), sent as the `NBC-Netbox-ID` header.                                                                                                    |
-| **API token**                    | Bearer token for the replica-cache deployment. Stored encrypted.                                                                                                                       |
-| **Max data age for alert rules** | Advanced, optional, e.g. `15m`. When set, alert rules and expression-fed queries refuse a result older than this, or whose age the replica cannot report. See [Freshness](#freshness). |
+| Field                            | Description                                                                                                                                                                                                                          |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **URL**                          | Base URL of the replica-cache deployment.                                                                                                                                                                                            |
+| **Browser URL**                  | Where users' browsers reach NetBox, as an `http://` or `https://` address. _View in NetBox_ links are built from it when the replica reports no NetBox URL, so set it then; otherwise it is optional, and links are rewritten to it. |
+| **NetBox instance ID**           | The NetBox instance the replica holds (`nb-…`), sent as the `NBC-Netbox-ID` header.                                                                                                                                                  |
+| **API token**                    | Bearer token for the replica-cache deployment. Stored encrypted.                                                                                                                                                                     |
+| **Max data age for alert rules** | Advanced, optional, e.g. `15m`. When set, alert rules and expression-fed queries refuse a result older than this, or whose age the replica cannot report. See [Freshness](#freshness).                                               |
 
 _View in NetBox_ links are built from the NetBox URL the replica itself reports
 (`netbox_url` on its schema route), and rewritten to the **Browser URL** when
 that is set. A replica that reports none builds them from the Browser URL
-instead, so set it there, as an `http://` or `https://` address; with neither,
-rows come without a link column.
+instead, so set it there, as an `http://` or `https://` address (another shape
+is no link base); with neither, rows come without a link column, and a query that
+selects `display_url` warns that it needs the Browser URL.
 
 **Save & test** reports how many object types the replica is configured for
 and how many of them have received data.
@@ -94,6 +115,17 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
 - `display_url`, when there is a NetBox URL to build it on: the one the replica
   reports, else the Browser URL (see above).
 
+**Columns NetBox computes** are not in the replica, which stores rows:
+`utilization`, `used`, `available`, `family`, `display`, `url`, `tags`, and the
+counts ending in `_count` that it does not store. A query that selects one finds
+the column missing from the result, with a warning that NetBox computes it and a
+data source in NetBox mode serves it. A count the replica does store (a device's
+`interface_count`) is served like any column, and a custom field's
+`cf_<name>_count` is not NetBox's. An **alert table** whose **Value field** is a
+computed column fails with that warning, whether **Return fields** lists it or
+the table returns all columns; a value field that is no column at all fails
+naming it. See [the alert table recipe](alerting/alert-table.md).
+
 Values read as they do in NetBox mode. A **choice** column shows NetBox's
 label (`Active`, `19 inches`, `1000BASE-T (1GE)`) and `<field>_value` holds the
 stored value (`active`, `19`): pick it in **Return fields**, or get it from an
@@ -122,10 +154,10 @@ A refusal names NetBox's filter where it has one: a device has `rack_id`, not
 `rack`; NetBox's `site` already compares the slug, so there is no `site_slug`;
 a prefix's `children` is the count the replica stores as `_children`.
 
-_Changed from earlier builds of this mode:_ the filters only this mode took are
-withdrawn — text matches on related names (`site contains ams`), and filters on
-columns NetBox has no filter for. A saved query using one fails with the
-message rather than filtering.
+A filter only this mode could take — a text match on a related name (`site
+contains ams`), or a filter on a column NetBox has no filter for — is not
+offered, and a saved query that uses one fails with that message rather than
+filtering.
 
 NetBox's meaning is kept:
 
@@ -159,6 +191,17 @@ NetBox's meaning is kept:
 - _is empty_ / _has any value_ on a number (`mtu`) is NetBox's own `IS NULL`.
   It is not offered where NetBox answers it with an error (`speed`, a prefix's
   `children` and `depth`: their `__empty` keeps the number filter's form);
+- _is empty_ / _has any value_ on a text column (`serial`, `description`,
+  `dns_name`) is NetBox's `empty` lookup: NetBox stores a blank as `""`, so _is
+  empty_ finds the rows whose value is null or blank and _has any value_ the
+  rest — not the replica's `IS NULL`, which finds none of the blanks. _Has any
+  value_ is one comparison the replica answers, and _is empty_ is answered as
+  the negation of it (below): the total from row counts, the rows from the first
+  10,000 the other filters match, with a warning when the read stops short. On an
+  object type that has received no data, _is empty_ is refused, saying so. It is
+  offered only where NetBox has an `__empty` filter for the column (a site's
+  `time_zone` has none), and not on a related name such as `site`: `site = null`
+  asks for the rows with none (see below);
 - a prefix's `prefix` reads each value as NetBox does (netmask and hostmask
   notation, `10.1.2.0/024`, a bare address as `/32`) and compares the network
   as given: one with host bits set matches nothing — alone, beside itself in
@@ -243,6 +286,16 @@ NetBox checks it: a value on it is refused, naming the table, and the editor
 does not offer it. `null` still works on it. The result columns are unchanged:
 `site` is still the site's name.
 
+**Variables** that feed such a filter must supply what it compares. The `site`,
+`role` and `tenant` filters compare slugs, so take the variable's values from the
+slug column — `slug` on the sites, roles or tenants table, `site_slug`,
+`role_slug` or `tenant_slug` on one that references them — not from the name a
+value list offers for `site` (NetBox mode offers names there too, and its `site`
+filter takes the slug as well). The `vrf` filter compares the route
+distinguisher, which a table that references a VRF does not show (the reference
+is the VRF's `name`), and a VRF may have none: filter by `vrf_id`, with the ids
+from the VRFs table's `id`.
+
 Within that, the operators the replica takes decide: equality (multi-value →
 `in`), a case-insensitive **contains** on text, and, on a replica-cache build
 that lists them (`istartswith`, `iendswith`, `iexact` in the schema route),
@@ -304,10 +357,6 @@ These are deliberately not offered:
   a message rather than matching more rows than it asked for. One device or VM
   `name` (or `serial`) is refused there too, NetBox matching it without regard
   to case; several still match exactly.
-- _is empty_ on a **text** column. NetBox stores a blank text field as `""`,
-  the replica tests `IS NULL`, and the two answer opposite questions — a rule
-  that switched modes would silently invert. Use a datasource in NetBox mode
-  for that filter.
 - a negation on a column the replica converts before comparing (a timestamp
   or UUID type), since the rows read here could not be tested the same way.
 - _not equal_ on an IP address. NetBox matches an address by its host
@@ -354,8 +403,8 @@ as empty.
 
 Devices are listed in NetBox's order — by name as NetBox's natural sort
 compares names (`leaf2` before `leaf10`, `parity-…` before `SIN1-…`), then by
-id — and each edge is drawn from the device NetBox mode reads first. Known
-divergences:
+id — and each logical link is drawn from the device NetBox mode reads first.
+Known divergences:
 
 - with a row limit below the number of matching devices, the replica keeps the
   first by their bytes (`SIN1-…` before `parity-…`), so the devices kept can
@@ -428,15 +477,63 @@ meaning "off".
 The setting is read in replica-cache mode only; a data source in NetBox mode
 ignores it, its data being live.
 
-## Not available in this mode
+## Known divergences
 
-These query types fail with an explicit message rather than returning an empty
-result:
+Where a datasource in replica-cache mode answers differently from one in NetBox
+mode on the same data:
 
-- **Annotations** — the replica does not carry NetBox's change log.
-- **Tags** — not replicated; a `tag` filter is refused as a column the replica
-  does not have.
-- **Branches** — the replica mirrors the main dataset only.
+- **Choice labels** are NetBox's built-in ones. An instance's own
+  `FIELD_CHOICES` overrides are not in its database, so such a value is shown as
+  stored.
+- **Several values on a case-insensitive filter** (a device's or virtual
+  machine's `name`, and `serial`) match exactly: the replica has no
+  case-insensitive _in_, and refusing would break every multi-select name
+  variable, whose values come from the data in its own case.
+- **A filter only a newer NetBox has** is honoured whichever NetBox the replica
+  mirrors, the filters being the union of the NetBox versions they were read
+  from. NetBox 4.4 ignores 4.6-only filters such as `face` _not_, or _is empty_
+  on `airflow` and `face`, and returns every row.
+- **A text search on a choice filter** (`status` _contains_ `act`) is a text
+  match on the stored value. NetBox checks each value against the field's
+  choices first and answers 400 for one that is not a choice; the replica cannot
+  know an instance's own choices.
+- **Topology**: with a row limit below the number of matching devices the first
+  ones kept can differ, and a name with a zero-valued digit run followed by text,
+  or a non-ASCII name, can sort differently ([Topology](#topology)). The result
+  is refused in alert rules as truncated, as in NetBox mode.
+- **A NetBox scope cut off by its limit** keeps different first rows than NetBox
+  mode; the total agrees, and alert rules refuse it as truncated.
+- **An address assigned to an object that does not exist** (NetBox does not
+  check the target of a generic assignment) can, on a tenant with no VM
+  interfaces and when that object's id equals an FHRP group's id, lead the data
+  source to learn the VM-interface content type as the FHRP group's. Those
+  addresses then show the FHRP group type, and the first VM addresses the tenant
+  gets can carry it for one cache period (10 minutes).
 
-Point those queries at a data source in NetBox mode; both can coexist on one
-Grafana.
+## What stays NetBox-only
+
+These fail, warn or are not offered, with a message saying why. Point them at a
+data source in NetBox mode; both can coexist on one Grafana.
+
+- **Annotations** (no change log), **tags** (the replica does not publish them as
+  of v1.40), **contacts** (not served) and **branches** (the main dataset only).
+- **Utilization** and NetBox's other computed columns.
+- **Filters on custom fields**: a custom field is a column to read, not one to
+  filter on.
+- **Names for generic relations** beyond what topology and IP enrichment learn: a
+  column that points through a content type shows ids.
+- **Regular expressions**, and **OR between text matches**: a text match takes
+  one value and appears once per field and operator, since NetBox ORs several and
+  the replica cannot; equality takes several.
+- **Decimal and date/time filters**, which the replica stores as text.
+- **A prefix's `contains` with several values**, an IP range's `contains`, and
+  `parent`, `mask_length` and `family` in an IP enrichment scope.
+- **Filters NetBox applies through more than one relation or a reverse one**
+  (a device's `region`, `site_group` and `manufacturer`, `tenant_group`, an
+  interface's `mac_address`), **filters NetBox computes with a query of its own**
+  (other than `address`, `prefix`, `contains` and `local_context_data`), and
+  **content-type filters**.
+
+[Refused by name](#what-a-query-returns) above lists the filters by name. The
+alerting recipes that depend on any of this are marked in
+[Alerting](ALERTING.md#which-recipes-run-in-replica-cache-mode).

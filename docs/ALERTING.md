@@ -37,16 +37,16 @@ motivation for the planned high-volume enrichment backend (zero load on NetBox).
 
 Grafana treats the two very differently:
 
-- **Labels** define alert *identity*: routing, grouping, silencing, and
+- **Labels** define alert _identity_: routing, grouping, silencing, and
   notification policies key on them. Put only **stable routing keys** in
   labels: `site`, `role`, `tenant`, `team`, the device name. A label whose
-  value changes (an owner, a contact email) spawns a *new* alert instance and
+  value changes (an owner, a contact email) spawns a _new_ alert instance and
   breaks existing silences.
 - **Annotations** carry responder context: the NetBox URL, contact name/email,
   rack, platform, runbook link. They can be templated from labels
   (`{{ $labels.site }}`) and don't affect identity.
 
-Rule of thumb: *route on labels, read annotations.*
+Rule of thumb: _route on labels, read annotations._
 
 ## Pending period and flap damping
 
@@ -56,7 +56,7 @@ on the fire side (`for`), two on the resolve side (keep-firing and
 missing-series):
 
 - **Pending period** (`for`) — the condition must hold on every evaluation for
-  this long before the instance fires. Until then it is *Pending*, which is
+  this long before the instance fires. Until then it is _Pending_, which is
   visible in the rule's state view and notifies no one. Count it in
   evaluations: the first matching evaluation starts the clock, so `for` equal
   to the interval fires on the **second** consecutive match and `for` of two
@@ -68,14 +68,14 @@ missing-series):
   does not resolve and page again. It applies only to an instance that is
   still **evaluated** — one whose row comes back with the condition false.
 - **Missing series** (`missing_series_evals_to_resolve` in a provisioning
-  file, `missingSeriesEvalsToResolve` on the HTTP API — the *reverse*
+  file, `missingSeriesEvalsToResolve` on the HTTP API — the _reverse_
   asymmetry, and again the wrong one is dropped silently) — how many
   consecutive evaluations an instance may be **absent** from the result before
   Grafana resolves it; the default is 2. It is a **count, not a duration**:
   because a recovery can fall just before an evaluation, `N` guarantees only
   `(N-1)` intervals of hold, so a five-minute floor at a 1m interval needs
   `6`, not `5`. This is the hold for any rule whose
-  shape *removes* the row when the condition clears: an alert table filtered
+  shape _removes_ the row when the condition clears: an alert table filtered
   on `status = offline` has no row for a device that came back, so
   keep-firing never sees it. Measured on the demo with three copies of the
   offline-devices rule at a 10s interval and the device toggled back for five
@@ -117,7 +117,7 @@ whoever copies the example.
 
 **Rate-based damping needs history, which the NetBox side does not have.**
 Counting state transitions over a window and suppressing a source above some
-rate — true flap damping — needs the *history* of the signal, not just its
+rate — true flap damping — needs the _history_ of the signal, not just its
 current value. Where the condition comes from a metric backend that retains
 history, the rule can do it: a Prometheus condition can count transitions over
 a range with `changes(...)` and gate on that inside the expression. Where the
@@ -141,7 +141,7 @@ condition as a 0/1 value, so the row is still there when the condition clears
 and **keep-firing** holds it. So does a **count**: a count-only query always
 returns its one number, zero included, so the instance is evaluated to false
 rather than lost, and keep-firing holds it too. An **alert table** is the
-odd one out — a *filter*, so the device's row is simply gone when its status
+odd one out — a _filter_, so the device's row is simply gone when its status
 clears, and only the **missing-series** setting holds it.
 
 Two things specific to the recipes here:
@@ -183,14 +183,43 @@ build on the rule-time join, which is where the join's own discipline lives —
 `LEFT JOIN`, `NULLIF`, the Limit, the cell limit — and is worth reading first.
 The last is the fallback for when the join does not fit.
 
-| Recipe | Reach for it when |
-|---|---|
-| [NetBox-native alerts with context labels](alerting/alert-table.md) | the condition is NetBox state itself — offline devices, hot prefixes — and the alert should carry site, role and tenant |
-| [Who do I page?](alerting/who-do-i-page.md) | the alert should name the contact NetBox holds for the object |
-| [NetBox context on metric alerts](alerting/rule-time-join.md) | a metric alert should route on NetBox labels |
-| [Don't page for the leaves when the spine is down](alerting/topology-suppression.md) | devices behind a failed upstream should not page while the upstream is the incident |
-| [Thresholds that differ by device role](alerting/thresholds-by-role.md) | the number the rule compares against lives in NetBox, per role, with per-device overrides |
-| [Don't alert on devices that are being retired](alerting/lifecycle-suppression.md) | NetBox `status` should decide what is worth paging for |
-| [Alerts on IP-only metrics](alerting/ip-only-metrics.md) | the metric carries only an IP, and the rule should know whose it is |
+| Recipe                                                                                                 | Reach for it when                                                                                                                                                                               |
+| ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [NetBox-native alerts with context labels](alerting/alert-table.md)                                    | the condition is NetBox state itself — offline devices, hot prefixes — and the alert should carry site, role and tenant                                                                         |
+| [Who do I page?](alerting/who-do-i-page.md)                                                            | the alert should name the contact NetBox holds for the object                                                                                                                                   |
+| [NetBox context on metric alerts](alerting/rule-time-join.md)                                          | a metric alert should route on NetBox labels                                                                                                                                                    |
+| [Don't page for the leaves when the spine is down](alerting/topology-suppression.md)                   | devices behind a failed upstream should not page while the upstream is the incident                                                                                                             |
+| [Thresholds that differ by device role](alerting/thresholds-by-role.md)                                | the number the rule compares against lives in NetBox, per role, with per-device overrides                                                                                                       |
+| [Don't alert on devices that are being retired](alerting/lifecycle-suppression.md)                     | NetBox `status` should decide what is worth paging for                                                                                                                                          |
+| [Alerts on IP-only metrics](alerting/ip-only-metrics.md)                                               | the metric carries only an IP, and the rule should know whose it is                                                                                                                             |
 | [Record the NetBox side once](alerting/rule-time-join.md#cutting-the-cost-record-the-netbox-side-once) | many rules need NetBox context and should not each query NetBox on every evaluation — a recording rule writes `netbox_device_info` and everything joins in PromQL (fleets up to 10,000 devices) |
-| [Post-alert enrichment](alerting/post-alert-enrichment.md) | the context belongs in annotations rather than labels, or the join is too large to run on every evaluation |
+| [Post-alert enrichment](alerting/post-alert-enrichment.md)                                             | the context belongs in annotations rather than labels, or the join is too large to run on every evaluation                                                                                      |
+
+### Which recipes run in replica-cache mode
+
+A data source in [replica-cache mode](REPLICA-CACHE.md) answers Objects,
+Topology and IP enrichment queries as NetBox mode does, and those are the
+queries the recipes use, so most of them run there unchanged. These differ:
+
+- **[Who do I page?](alerting/who-do-i-page.md)** needs contacts, which the
+  replica does not serve: NetBox mode only.
+- **[NetBox-native alerts](alerting/alert-table.md)** run, except on
+  `utilization`, `used` or `available`, which NetBox computes: the hot-prefix
+  example needs NetBox mode. The offline-devices example runs.
+- **[Don't alert on devices that are being retired](alerting/lifecycle-suppression.md)**
+  runs; its `has_primary_ip = false` example does not, NetBox computing that
+  filter with a query of its own.
+- **[Thresholds that differ by device role](alerting/thresholds-by-role.md)**
+  runs. The replica holds no custom-field definitions, so the data source types
+  a custom field from the values it sees: a field set on no row reads as a text
+  column of `''`, the first state in that recipe's table, which its wrapped
+  expression is written for.
+- **[Alerts on IP-only metrics](alerting/ip-only-metrics.md)** run; scope the
+  addresses by `vrf_id` or `tenant`, not `parent`.
+- **[Post-alert enrichment](alerting/post-alert-enrichment.md)** queries NetBox
+  from its own service, so the data source's mode does not matter to it.
+
+The other recipes (the [rule-time join](alerting/rule-time-join.md) and
+recording the NetBox side once, and
+[topology suppression](alerting/topology-suppression.md)) need nothing the
+replica lacks.

@@ -89,8 +89,8 @@ func WithFallbackNetBoxURL(raw string) Option {
 // New builds a replica-cache provider. netboxID is the tenant identifier sent
 // as NBC-Netbox-ID; the service rejects requests without it. The NetBox the
 // replica mirrors — the base of every "View in NetBox" link — is the one its
-// catalogue reports (see linkBase). Production's replicas report none until
-// DATA-383, so WithFallbackNetBoxURL names the base for one that does not.
+// catalogue reports, and WithFallbackNetBoxURL names the base for a replica
+// that reports none (see linkBase).
 func New(base, token, netboxID string, httpClient *http.Client, opts ...Option) *Provider {
 	p := &Provider{
 		client:    NewClient(base, token, netboxID, httpClient),
@@ -367,6 +367,11 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 // where browsers reach a NetBox; the plugin's rewrite carries a link from the
 // one to the other. With neither, rows come without a link column rather than
 // with links built from a guess.
+//
+// A replica reports none until its deployment sets one: DATA-216 added netbox_url
+// to the schema route and DATA-320 set it for staging tenants, while production
+// waits on DATA-383. This is the one place that states it; the rest of the code
+// and its tests say only "a replica that reports no NetBox URL".
 func (p *Provider) linkBase(c *catalog) string {
 	if c != nil && c.NetBoxURL != "" {
 		return c.NetBoxURL

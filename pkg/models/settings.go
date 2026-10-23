@@ -38,8 +38,10 @@ type PluginSettings struct {
 	// base to PublicURL's. Empty = no rewrite.
 	//
 	// In replica-cache mode it is also the base the links are built on when the
-	// replica reports no NetBox URL (production's, until DATA-383), so there it
-	// is what makes links exist at all, not only where they point.
+	// replica reports no NetBox URL (see replicacache's linkBase), so there it is
+	// what makes links exist at all, not only where they point. It must be an
+	// http(s) address with a host: anything else is no base, and rows come without
+	// a link column.
 	PublicURL string `json:"publicUrl"`
 	// Mode selects the enrichment backend. Defaults to "netbox".
 	Mode ProviderMode `json:"mode"`

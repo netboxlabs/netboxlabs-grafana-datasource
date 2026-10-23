@@ -700,11 +700,10 @@ func replicaStub(t *testing.T, netboxURL string) *httptest.Server {
 }
 
 // In replica-cache mode the Browser URL reaches the provider as the link base
-// of a replica that reports no NetBox URL (production's, until DATA-383):
-// without it every such datasource's rows come back with no "View in NetBox"
-// link. The plugin then rewrites links from the provider's base to the Browser
-// URL, which for links built on it changes nothing; a reported URL still wins,
-// and is what that rewrite moves.
+// of a replica that reports no NetBox URL: without it every such datasource's
+// rows come back with no "View in NetBox" link. The plugin then rewrites links
+// from the provider's base to the Browser URL, which for links built on it
+// changes nothing; a reported URL still wins, and is what that rewrite moves.
 func TestNewProvider_ReplicaCachePassesBrowserURL(t *testing.T) {
 	for _, tc := range []struct {
 		name, reported, browserURL string

@@ -887,10 +887,11 @@ func TestFields_NoAliasForUnstoredLabelledColumn(t *testing.T) {
 
 // An object custom field flattens in NetBox mode to cf_<name> plus
 // cf_<name>_id. The replica reads the blob as raw JSON, where an object field
-// is a bare number like an integer one, so cf_<name>_id beside every number
-// would offer a column most of them cannot fill. A query that selects it still
-// gets the id where the value is one (TestObjectCustomFieldExposesItsID); it is
-// only not listed.
+// is a bare number like an integer one, so it cannot tell which fields to list
+// an _id for: beside every number it would list one for an integer field too,
+// which would fill (as a copy of the number) but which NetBox mode has no
+// column for. A query that selects it still gets the id where the value is one
+// (TestObjectCustomFieldExposesItsID); it is only not listed.
 func TestFields_NoCustomFieldIDAliases(t *testing.T) {
 	f := newFakeService()
 	f.entities["dcim/devices"] = []map[string]interface{}{{
@@ -919,7 +920,7 @@ func TestFields_NoCustomFieldIDAliases(t *testing.T) {
 	}
 	for _, name := range custom {
 		if listed[name+"_id"] {
-			t.Errorf("%s_id is listed: the replica cannot tell an object custom field from an integer one", name)
+			t.Errorf("%s_id is listed: the replica cannot tell an object custom field from an integer one, and NetBox mode has no _id column for an integer field", name)
 		}
 	}
 }
@@ -1369,12 +1370,12 @@ func TestLinks_ComeFromTheCatalogueNetBoxURL(t *testing.T) {
 	}
 }
 
-// A replica that reports no netbox_url (production's, until DATA-383) can still
-// link: the datasource's Browser URL is where its users' browsers reach NetBox,
-// which makes it the one NetBox address this datasource has been given. Links
-// are built on it as on a reported URL, the editor offers the column they live
-// in, and BaseURL is that base, so the plugin's rewrite of links to the Browser
-// URL finds nothing to change.
+// A replica that reports no netbox_url can still link: the datasource's Browser
+// URL is where its users' browsers reach NetBox, which makes it the one NetBox
+// address this datasource has been given. Links are built on it as on a
+// reported URL, the editor offers the column they live in, and BaseURL is that
+// base, so the plugin's rewrite of links to the Browser URL finds nothing to
+// change.
 func TestDeepLinks_FallBackToBrowserURL(t *testing.T) {
 	f := newFakeService() // reports no netbox_url
 	f.entities["dcim/devices"] = []map[string]interface{}{{"id": 7, "name": "a", "custom_field_data": `{}`}}

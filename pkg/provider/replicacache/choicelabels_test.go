@@ -109,7 +109,8 @@ func TestChoiceLabels_EmbeddedMapCoversCommonChoices(t *testing.T) {
 
 // The columns that can offer a <field>_value are the ones the map labels AND
 // the replica stores, in an order that does not depend on the table's or on Go's
-// map iteration, so the editor's list does not reshuffle between loads.
+// map iteration, so labelledColumns answers the same every time. (Fields' own
+// order comes from its walk of the table's columns, not from this list.)
 func TestLabelledColumns_AreTheLabelledColumnsTheReplicaStores(t *testing.T) {
 	storing := func(names ...string) entity {
 		e := entity{Ingested: true}

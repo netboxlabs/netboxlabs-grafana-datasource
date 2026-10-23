@@ -112,10 +112,11 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
   provider account as `account (name)`, a cable or wireless link without a
   label or SSID as `#<id>`, a device with an asset tag as `name (asset tag)`
   and an unnamed one as NetBox names it (`<virtual chassis>:<position>`, or
-  `<manufacturer> <model> (<id>)`). The parts the replica's own join does not
-  return are read from the related table, one request more per such column
-  shown (`site_slug` and the other `<name>_<column>` columns are the related
-  object's own columns, as they are);
+  `<manufacturer> <model> (<id>)`), in rows and in the value list, whose search
+  matches the name. The parts the replica's own join does not return are read
+  from the related table, one request more per such column shown (`site_slug`
+  and the other `<name>_<column>` columns are the related object's own
+  columns, as they are);
 - **custom fields** as `cf_<name>` columns, expanded the same way as in NetBox
   mode (a list field also gets its `cf_<name>_count`). Their names are read from
   a small sample of rows, because the replica's schema cannot list them. For the

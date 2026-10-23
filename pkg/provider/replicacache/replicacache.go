@@ -541,9 +541,11 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	var (
 		params url.Values
 		// display is the related column, when its values are its objects'
-		// NetBox displays (displays.go), which only the rows can compose: the
-		// search is then matched here, on what is offered, and the id it is
-		// composed for is read beside the key.
+		// NetBox displays (displays.go), which only the rows can compose: the id
+		// it is composed for is read beside the key. The search still goes to
+		// the replica on the name it joins in, which every display holds, so a
+		// large table is searched whole; text found only in the rest of a
+		// display (a VRF's rd) is not searched.
 		display []expansion
 	)
 	if !stored {
@@ -573,7 +575,7 @@ func (p *Provider) FieldValues(ctx context.Context, objectType, field, q string,
 	// buildFilterValues splits on commas as a multi-value dashboard filter,
 	// which is not what someone typing "a,b" means. That text is matched
 	// locally, the same answer as for a column that cannot be searched upstream.
-	pushDown := q != "" && slices.Contains(col.Operators, "ilike") && literalPushable(q) && display == nil
+	pushDown := q != "" && slices.Contains(col.Operators, "ilike") && literalPushable(q)
 	if pushDown {
 		fv, err := buildFilterValues([]provider.Filter{{Field: column, Operator: opIContns, Value: q}}, nil)
 		if err != nil {

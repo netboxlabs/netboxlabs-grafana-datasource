@@ -84,6 +84,15 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 	// resolve is a blank column here too); its age is restated below for the
 	// whole graph.
 	warnings := withoutFreshness(res.Warnings)
+	// The capped warnings fire, as NetBox mode's do, when one device has more
+	// than MaxLimit rows in a read by device — but the rows are not quite the
+	// ones NetBox mode counts. Physical counts the device's cable terminations,
+	// not its cables: a breakout with two ends on one device counts twice, and
+	// console and power terminations count as their cables do there. Logical
+	// counts its interfaces with any path, inactive ones too, where NetBox mode
+	// reads the active ones. Near 10,000 a cap can therefore fire a little
+	// earlier than in NetBox mode, never later: it errs on the side of refusing
+	// a rule.
 	seen := map[string]bool{}
 	edges, wirelessIncomplete := p.wirelessEdges(ctx, inSet, nodeIDs, seen, spec.IncludeBoundaryPeers, st)
 	if wirelessIncomplete {

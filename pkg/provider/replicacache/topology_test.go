@@ -1010,3 +1010,103 @@ func TestTopology_RejectsBranch(t *testing.T) {
 		t.Errorf("%d requests sent for a refused query", n)
 	}
 }
+
+// A wireless read that fails leaves the wired topology standing, as in NetBox
+// mode, and says the wireless links are incomplete: a warning, which refuses
+// an alert rule, rather than a graph that looks whole without them.
+func TestTopology_WirelessReadFailureIsAWarning(t *testing.T) {
+	for _, connections := range []string{"physical", "logical"} {
+		f := demoModel().fake()
+		f.failing = map[string]int{"wireless/wireless-links": 503}
+		g := cacheTopology(t, f, provider.TopologySpec{Connections: connections})
+		if !slices.Equal(g.Warnings, []string{provider.WirelessIncompleteWarning}) {
+			t.Errorf("%s: warnings %q, want the wireless warning alone", connections, g.Warnings)
+		}
+		if _, ok := findEdge(g, "w1"); ok {
+			t.Errorf("%s: a wireless edge from a read that failed", connections)
+		}
+		if len(g.Edges) < 10 {
+			t.Errorf("%s: %d edges; the wired links still draw", connections, len(g.Edges))
+		}
+	}
+}
+
+// Any other table a view is built from failing fails the topology, with the
+// replica's own status: a graph missing its cables or paths would look like
+// a fabric with fewer links.
+func TestTopology_FailedLinkReadIsAnError(t *testing.T) {
+	for _, c := range []struct{ connections, table string }{
+		{"physical", "dcim/cable-terminations"},
+		{"physical", "dcim/interfaces"},
+		{"physical", "dcim/front-ports"},
+		{"physical", "dcim/rear-ports"},
+		{"logical", "dcim/interfaces"},
+		{"logical", "dcim/cable-paths"},
+	} {
+		f := demoModel().fake()
+		f.failing = map[string]int{c.table: 503}
+		_, err := newTestProvider(t, f).Topology(context.Background(), provider.TopologySpec{Connections: c.connections})
+		if u := provider.Classify(err); u == nil || u.Status != 503 {
+			t.Errorf("%s, %s failing: err = %v, want the replica's 503", c.connections, c.table, err)
+		}
+	}
+}
+
+// One device with more rows than one read returns: each view says which of
+// its link sets is incomplete, in NetBox mode's words — the warning an alert
+// rule is refused on. Only the read by device is past the ceiling here, so
+// the warning cannot come from another.
+func TestTopology_CappedReadsWarn(t *testing.T) {
+	over := MaxLimit + 1
+	t.Run("cables", func(t *testing.T) {
+		f := demoModel().fake()
+		for i := range over {
+			f.entities["dcim/cable-terminations"] = append(f.entities["dcim/cable-terminations"], map[string]interface{}{
+				"id": float64(100_000 + i), "cable_id": float64(100_000 + i), "cable_end": "A",
+				"termination_type_id": float64(43), "termination_id": float64(100_000 + i), "_device_id": float64(1)})
+		}
+		g := cacheTopology(t, f, provider.TopologySpec{Connections: "physical"})
+		if !slices.Equal(g.Warnings, []string{provider.CablesCappedWarning}) {
+			t.Errorf("warnings %q, want the cables warning alone", g.Warnings)
+		}
+	})
+	t.Run("paths", func(t *testing.T) {
+		f := demoModel().fake()
+		for i := range over {
+			f.entities["dcim/interfaces"] = append(f.entities["dcim/interfaces"], map[string]interface{}{
+				"id": float64(100_000 + i), "name": fmt.Sprintf("x%05d", i), "_name": fmt.Sprintf("x%05d", i),
+				"device_id": float64(1), "cable_id": nil, "cable_end": nil, "_path_id": float64(900_000)})
+		}
+		g := cacheTopology(t, f, provider.TopologySpec{})
+		if !slices.Equal(g.Warnings, []string{provider.PathsCappedWarning}) {
+			t.Errorf("warnings %q, want the links warning alone", g.Warnings)
+		}
+	})
+	t.Run("wireless", func(t *testing.T) {
+		f := demoModel().fake()
+		for i := range over {
+			f.entities["wireless/wireless-links"] = append(f.entities["wireless/wireless-links"], map[string]interface{}{
+				"id": float64(100 + i), "interface_a_id": float64(100_000 + i), "interface_b_id": float64(200_000 + i),
+				"_interface_a_device_id": float64(14), "_interface_b_device_id": float64(15)})
+		}
+		g := cacheTopology(t, f, provider.TopologySpec{Connections: "physical"})
+		if !slices.Equal(g.Warnings, []string{provider.WirelessIncompleteWarning}) {
+			t.Errorf("warnings %q, want the wireless warning alone", g.Warnings)
+		}
+	})
+}
+
+// Component ids are per table, so one cable can end on interface 60 at one
+// end and front port 60 at the other. The end is what tells the two apart in
+// the join: without it both terminations find the same row.
+func TestTopology_PhysicalSameIDAtBothEnds(t *testing.T) {
+	m := demoModel()
+	m.comps = append(m.comps,
+		iface(60, 2, "Ethernet9", 30, "A", 0),
+		topoComp{k: kFront, id: 60, device: 13, name: "FP60", cable: 30, end: "B"})
+	nb, rc := bothModes(t, m, provider.TopologySpec{Connections: "physical"})
+	sameGraph(t, "same id at both ends", nb, rc)
+	if e, ok := findEdge(rc, "30"); !ok || e.Source != "2" || e.Target != "13" {
+		t.Errorf("cable 30: %+v %v, want AMS1-leaf-01 to the panel", e, ok)
+	}
+}

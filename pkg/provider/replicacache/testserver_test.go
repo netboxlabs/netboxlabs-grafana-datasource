@@ -39,6 +39,10 @@ type fakeService struct {
 	status int
 	// errBody is the message sent with status.
 	errBody string
+	// failing, when it names an entity, is the status that entity's row route
+	// answers instead of rows — one table failing while the rest answer, which
+	// status cannot model: it fails the catalogue and every table at once.
+	failing map[string]int
 	// requests records every list request's query string, for asserting pushdown.
 	requests []recordedRequest
 	// gate, when non-nil, parks every request after recording it until the
@@ -136,6 +140,9 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, ok := f.entities[entity]
 	status, errBody, pageCap, cursorOnLastPage := f.status, f.errBody, f.pageCap, f.cursorOnLastPage
+	if s := f.failing[entity]; s != 0 {
+		status, errBody = s, "service unavailable"
+	}
 	var se *fakeEntity
 	if f.schema != nil {
 		if e, known := f.schema.Entities["/v1/"+entity]; known {

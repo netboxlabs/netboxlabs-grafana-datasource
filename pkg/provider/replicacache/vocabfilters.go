@@ -3,13 +3,10 @@ package replicacache
 import (
 	"fmt"
 	"maps"
-	"math"
 	"net/netip"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -166,12 +163,9 @@ type translation struct {
 // filter translates the rows of one NetBox name.
 func (tr translation) filter(name string, rows []provider.Filter) ([]provider.Filter, bool, error) {
 	first := rows[0]
-	refuse := func(reason string) ([]provider.Filter, bool, error) {
-		return nil, false, &UnsupportedFilterError{Field: first.Field, Operator: first.Operator, Reason: reason}
-	}
 	alts, ok := tr.vocab[name]
 	if !ok {
-		return refuse(tr.lacks(name, first.Field))
+		return refused(first, tr.lacks(name, first.Field))
 	}
 	entry := pickVocab(alts, tr.e)
 	var values []string
@@ -198,7 +192,7 @@ func (tr translation) filter(name string, rows []provider.Filter) ([]provider.Fi
 		last := values[len(values)-1]
 		b, ok := netboxBool(last)
 		if !ok {
-			return refuse(fmt.Sprintf("NetBox ignores %q for %s and returns every row; use true or false", last, name))
+			return refused(first, fmt.Sprintf("NetBox ignores %q for %s and returns every row; use true or false", last, name))
 		}
 		return []provider.Filter{booleanFilter(entry, b, first.Field)}, false, nil
 	case kindAddress:
@@ -207,11 +201,16 @@ func (tr translation) filter(name string, rows []provider.Filter) ([]provider.Fi
 	case kindPrefix:
 		return tr.prefix(entry, first, values)
 	case kindPath:
-		return refuse(fmt.Sprintf("NetBox filters %s through %s, which this replica cannot join; %s", first.Field, entry.Path, netboxModeAdvice))
+		return refused(first, fmt.Sprintf("NetBox filters %s through %s, which this replica cannot join; %s", first.Field, entry.Path, netboxModeAdvice))
 	case kindMethod:
-		return refuse(fmt.Sprintf("NetBox computes %s with a query of its own (%s), which this replica cannot run; %s", first.Field, entry.Method, netboxModeAdvice))
+		return refused(first, fmt.Sprintf("NetBox computes %s with a query of its own (%s), which this replica cannot run; %s", first.Field, entry.Method, netboxModeAdvice))
 	}
-	return refuse(refusedReason(entry.Reason, name, first.Field))
+	return refused(first, refusedReason(entry.Reason, name, first.Field))
+}
+
+// refused refuses a NetBox name's filter, naming it as the user wrote it.
+func refused(f provider.Filter, reason string) ([]provider.Filter, bool, error) {
+	return nil, false, &UnsupportedFilterError{Field: f.Field, Operator: f.Operator, Reason: reason}
 }
 
 // lacks is the refusal of a name NetBox does not have on the model, saying
@@ -311,13 +310,10 @@ func (tr translation) timeZoneNull(entry vocabEntry) bool {
 // lookup.
 func (tr translation) values(name string, entry vocabEntry, rows []provider.Filter, values []string) ([]provider.Filter, bool, error) {
 	first := rows[0]
-	refuse := func(reason string) ([]provider.Filter, bool, error) {
-		return nil, false, &UnsupportedFilterError{Field: first.Field, Operator: first.Operator, Reason: reason}
-	}
 	// NetBox's regex and iregex are PostgreSQL's ~ and ~*; the replica has no
 	// regular-expression match to send them as.
 	if entry.Lookup == "regex" || entry.Lookup == "iregex" {
-		return refuse(fmt.Sprintf("the replica has no regular-expression match, so it cannot answer %s; %s", name, netboxModeAdvice))
+		return refused(first, fmt.Sprintf("the replica has no regular-expression match, so it cannot answer %s; %s", name, netboxModeAdvice))
 	}
 	ops, known := lookupOperators[entry.Lookup]
 	op := ops.match
@@ -325,7 +321,7 @@ func (tr translation) values(name string, entry vocabEntry, rows []provider.Filt
 		op = ops.negated
 	}
 	if !known || (entry.Exclude && ops.negated == "") {
-		return refuse(fmt.Sprintf("NetBox compares %s by %s, which the replica cannot reproduce; %s", first.Field, entry.Lookup, netboxModeAdvice))
+		return refused(first, fmt.Sprintf("NetBox compares %s by %s, which the replica cannot reproduce; %s", first.Field, entry.Lookup, netboxModeAdvice))
 	}
 	on := func(op string, values []string, label string) provider.Filter {
 		return provider.Filter{Field: entry.Column, Operator: op, Value: strings.Join(values, ","), Label: label}
@@ -355,9 +351,9 @@ func (tr translation) values(name string, entry vocabEntry, rows []provider.Filt
 	if slices.Contains(values, nullValue) {
 		switch {
 		case textSearch(entry.Lookup):
-			return refuse(fmt.Sprintf("NetBox answers null on %s with an error; remove the filter", name))
+			return refused(first, fmt.Sprintf("NetBox answers null on %s with an error; remove the filter", name))
 		case tr.timeZoneNull(entry):
-			return refuse(fmt.Sprintf("NetBox reads null on %s as an empty time zone, which this replica cannot send yet; %s", first.Field, netboxModeAdvice))
+			return refused(first, fmt.Sprintf("NetBox reads null on %s as an empty time zone, which this replica cannot send yet; %s", first.Field, netboxModeAdvice))
 		case entry.NullValue:
 			// NetBox's form reads null as None, and Django's exact and iexact
 			// read None as IS NULL (NetBox 4.4.10: asset_tag=null → the 18
@@ -367,13 +363,13 @@ func (tr translation) values(name string, entry vocabEntry, rows []provider.Filt
 				return []provider.Filter{{Field: entry.Column, Operator: nullOperator(!entry.Exclude), Label: first.Field}}, false, nil
 			}
 			if !entry.Exclude {
-				return refuse("NetBox returns rows matching either null or the values, and this replica cannot combine the two; filter on null and on the values in separate queries, or " + netboxModeAdvice)
+				return refused(first, "NetBox returns rows matching either null or the values, and this replica cannot combine the two; filter on null and on the values in separate queries, or "+netboxModeAdvice)
 			}
 			return []provider.Filter{{Field: entry.Column, Operator: opNotNull, Label: first.Field}, on(op, rest, first.Field)}, false, nil
 		case tr.isChoice(entry.Column):
 			// A choice whose form has no null choice (status): NetBox's 400,
 			// in its words.
-			return refuse(fmt.Sprintf("Select a valid choice. null is not one of the available choices. NetBox mode answers the same; filter on one of the stored values instead, which %s_value shows", entry.Column))
+			return refused(first, fmt.Sprintf("Select a valid choice. null is not one of the available choices. NetBox mode answers the same; filter on one of the stored values instead, which %s_value shows", entry.Column))
 		}
 		// Anywhere else null is a value like any other; a number filter's form
 		// refuses it, as validateFilters does here.
@@ -394,7 +390,7 @@ func (tr translation) values(name string, entry vocabEntry, rows []provider.Filt
 			return []provider.Filter{on(opExact, values, first.Field)}, false, nil
 		}
 		if !tr.takes(entry.Column, wireTextOperator[opIExact]) {
-			return refuse(fmt.Sprintf("this replica cannot compare %s case-insensitively as NetBox does (a newer replica-cache build can); filter on id, or use a datasource in NetBox mode", first.Field))
+			return refused(first, fmt.Sprintf("this replica cannot compare %s case-insensitively as NetBox does (a newer replica-cache build can); filter on id, or use a datasource in NetBox mode", first.Field))
 		}
 		return []provider.Filter{on(opIExact, values[:1], first.Field)}, false, nil
 	}
@@ -538,8 +534,7 @@ func (tr translation) prefix(entry vocabEntry, first provider.Filter, values []s
 			if len(networks) == 1 {
 				return nil, true, nil
 			}
-			return nil, false, &UnsupportedFilterError{Field: first.Field, Operator: first.Operator,
-				Reason: fmt.Sprintf("NetBox answers this with an error, because %s has bits set past its mask; write it as %s", p, p.Masked())}
+			return refused(first, fmt.Sprintf("NetBox answers this with an error, because %s has bits set past its mask; write it as %s", p, p.Masked()))
 		}
 		texts = append(texts, cidrText(p))
 	}
@@ -581,176 +576,6 @@ func refusedReason(reason, name, field string) string {
 		return fmt.Sprintf("NetBox compares %s by %s, which the replica cannot reproduce; %s", field, lookup, netboxModeAdvice)
 	}
 	return fmt.Sprintf("NetBox's %s filter is not one the replica can reproduce; %s", name, netboxModeAdvice)
-}
-
-// euiFormats are netaddr 1.3's EUI-48 spellings (netaddr.strategy.eui48's
-// RE_MAC_FORMATS, case-insensitive), which NetBox's MACAddressField reads after
-// removing spaces, each with the width its groups are zero-padded to: six
-// groups of one or two hex digits, all colons or all hyphens; three of one to
-// four, joined by colons, hyphens or dots; two of five or six, joined by colons
-// or hyphens; twelve or eleven bare digits. Nothing else parses, an EUI-64
-// address included, which is why net.ParseMAC is no stand-in.
-var euiFormats = func() []struct {
-	re    *regexp.Regexp
-	width int
-} {
-	groups := func(n int, sep, digits string) *regexp.Regexp {
-		g := "([0-9a-fA-F]{" + digits + "})"
-		return regexp.MustCompile("^" + g + strings.Repeat(regexp.QuoteMeta(sep)+g, n-1) + "$")
-	}
-	type format = struct {
-		re    *regexp.Regexp
-		width int
-	}
-	return []format{
-		{groups(6, ":", "1,2"), 2}, {groups(6, "-", "1,2"), 2},
-		{groups(3, ":", "1,4"), 4}, {groups(3, "-", "1,4"), 4}, {groups(3, ".", "1,4"), 4},
-		{groups(2, "-", "5,6"), 6}, {groups(2, ":", "5,6"), 6},
-		{groups(1, "", "12"), 12}, {groups(1, "", "11"), 12},
-	}
-}()
-
-// netaddrEUI48 reads a MAC address as NetBox does — spaces removed, then one of
-// netaddr's EUI-48 spellings (euiFormats) — and writes it as the replica
-// stores PostgreSQL's macaddr: lowercase, six colon-separated pairs. Python's $
-// also matches before one trailing newline, so that is let through too.
-func netaddrEUI48(s string) (string, bool) {
-	s = strings.TrimSuffix(strings.ReplaceAll(s, " ", ""), "\n")
-	for _, f := range euiFormats {
-		m := f.re.FindStringSubmatch(s)
-		if m == nil {
-			continue
-		}
-		var hex strings.Builder
-		for _, g := range m[1:] {
-			hex.WriteString(strings.Repeat("0", f.width-len(g)))
-			hex.WriteString(strings.ToLower(g))
-		}
-		h := hex.String()
-		return h[0:2] + ":" + h[2:4] + ":" + h[4:6] + ":" + h[6:8] + ":" + h[8:10] + ":" + h[10:12], true
-	}
-	return "", false
-}
-
-// netaddrNetwork reads a network as netaddr 1.3's IPNetwork does, host bits
-// kept: the address strictly (inet_pton: no leading zeros, no short forms, no
-// zone), then optionally / and either a length as Python's int() reads it
-// (/024, /+24, / 24 are /24) within the family's width, or a netmask or
-// hostmask of the same family (/255.255.255.0 and /0.0.0.255 are /24). A bare
-// address is the single host, /32 or /128. NetBox reads a prefix filter's
-// values with it (filter_prefix), and those of its contains filter and of a
-// related filter on an address too.
-func netaddrNetwork(s string) (netip.Prefix, bool) {
-	addrText, maskText, masked := strings.Cut(s, "/")
-	addr, ok := strictAddr(addrText)
-	if !ok {
-		return netip.Prefix{}, false
-	}
-	bits := addr.BitLen()
-	if masked {
-		if n, isInt := pythonInt(maskText); isInt {
-			if n < 0 || n > int64(addr.BitLen()) {
-				return netip.Prefix{}, false
-			}
-			bits = int(n)
-		} else if mask, ok := strictAddr(maskText); ok && mask.BitLen() == addr.BitLen() {
-			if bits, ok = maskBits(mask); !ok {
-				return netip.Prefix{}, false
-			}
-		} else {
-			return netip.Prefix{}, false
-		}
-	}
-	return netip.PrefixFrom(addr, bits), true
-}
-
-// strictAddr reads an address as inet_pton does, which netaddr asks of an
-// IPNetwork's address and mask (flags=INET_PTON): IPv4 as four decimal parts
-// with no leading zeros, IPv6 without a zone. netip's parser is that.
-func strictAddr(s string) (netip.Addr, bool) {
-	a, err := netip.ParseAddr(s)
-	return a, err == nil && a.Zone() == ""
-}
-
-// maskBits is the prefix length a netmask (ones, then zeros) or a hostmask
-// (zeros, then ones) stands for, the netmask tried first as netaddr tries it:
-// so 0.0.0.0 is /0 and 255.255.255.255 is /32.
-func maskBits(mask netip.Addr) (int, bool) {
-	b := mask.AsSlice()
-	run := func(lead byte) (int, bool) {
-		n := 0
-		for n < len(b)*8 && (b[n/8]>>(7-n%8))&1 == lead {
-			n++
-		}
-		for i := n; i < len(b)*8; i++ {
-			if (b[i/8]>>(7-i%8))&1 == lead {
-				return 0, false
-			}
-		}
-		return n, true
-	}
-	if n, ok := run(1); ok {
-		return n, true
-	}
-	return run(0)
-}
-
-// pythonInt reads an integer as Python's int() reads text, which netaddr uses
-// for a prefix length and NetBox's forms for an id: whitespace around it (int()
-// strips ASCII \t\n\v\f\r and space and Unicode's White_Space, not \x1c-\x1f,
-// which is unicode.IsSpace's set), one sign, digits of any script with single
-// underscores between them, leading zeros. A value past what an int64 holds
-// saturates; no id or prefix length is near it.
-func pythonInt(s string) (int64, bool) {
-	s = strings.TrimFunc(s, unicode.IsSpace)
-	negative := false
-	if s != "" && (s[0] == '+' || s[0] == '-') {
-		negative, s = s[0] == '-', s[1:]
-	}
-	var n int64
-	digit := false
-	for _, r := range s {
-		if r == '_' && digit {
-			digit = false
-			continue
-		}
-		d, ok := decimalDigit(r)
-		if !ok {
-			return 0, false
-		}
-		if n > (math.MaxInt64-int64(d))/10 {
-			n = math.MaxInt64
-		} else {
-			n = n*10 + int64(d)
-		}
-		digit = true
-	}
-	if !digit {
-		return 0, false
-	}
-	if negative {
-		n = -n
-	}
-	return n, true
-}
-
-// decimalDigit is the value of a decimal digit of any script, as Python's int()
-// reads one. Unicode encodes each script's digits as runs of ten from zero, so
-// the value is the distance from the start of the digits around it, modulo ten
-// (where runs abut, as the mathematical digits do). All 680 agree with Python
-// 3.12's unicodedata.decimal, Unicode 15.0.0 on both sides.
-func decimalDigit(r rune) (int, bool) {
-	if r >= '0' && r <= '9' {
-		return int(r - '0'), true
-	}
-	if r < 0x80 || !unicode.IsDigit(r) {
-		return 0, false
-	}
-	start := r
-	for unicode.IsDigit(start - 1) {
-		start--
-	}
-	return int(r-start) % 10, true
 }
 
 // networkColumns are the columns NetBox's prefix filters read on the entity's

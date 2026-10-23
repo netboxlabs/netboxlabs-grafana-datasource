@@ -826,7 +826,14 @@ func TestFake_UnknownOperatorIs400(t *testing.T) {
 // service's error, or the count of a 200.
 func fakeGet(t *testing.T, baseURL, entity, param, value string) (int, string) {
 	t.Helper()
-	resp, err := http.Get(baseURL + "/v1/" + entity + "?" + url.Values{param: {value}}.Encode())
+	return fakeGetQuery(t, baseURL, entity, url.Values{param: {value}}.Encode())
+}
+
+// fakeGetQuery is a raw query string against a list route of the fake, which
+// can carry a key twice where fakeGet's one parameter cannot.
+func fakeGetQuery(t *testing.T, baseURL, entity, rawQuery string) (int, string) {
+	t.Helper()
+	resp, err := http.Get(baseURL + "/v1/" + entity + "?" + rawQuery)
 	if err != nil {
 		t.Fatal(err)
 	}

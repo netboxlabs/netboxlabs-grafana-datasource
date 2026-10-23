@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -592,6 +593,8 @@ func TestRewriteEmptiness(t *testing.T) {
 		{"the search", covered.e, []provider.Filter{{Field: "q", Operator: opEmpty}}, nil},
 		{"a name joined in from another table", plugin.e, []provider.Filter{{Field: "site", Operator: opEmpty}}, nil},
 		{"a column a plugin's model lacks", plugin.e, []provider.Filter{{Field: "colour", Operator: opEmpty}}, nil},
+		// The limit of the guard for an entity with no data yet: nothing says a
+		// plugin's column is text, so the row is left as it is (asksTextEmptiness).
 		{"an entity of a plugin with no data yet", entity{Table: fakeTable(pluginWidgets)}, []provider.Filter{{Field: "name", Operator: opEmpty}}, nil},
 		{"a row with no field", covered.e, []provider.Filter{{Operator: opEmpty}}, nil},
 		{"another operator", covered.e, []provider.Filter{{Field: "name", Operator: "ic", Value: "x"}}, nil},
@@ -641,11 +644,13 @@ func TestEmptiness_OnAPluginsTextColumn(t *testing.T) {
 }
 
 // An unfed entity has no columns to judge a filter against, and its row route
-// answers 404 for it. NetBox's empty lookup is on text whatever the replica
-// stores, so "has any value" is the comparison it would be, sent; and "is
-// empty", which needs the rows to be answered, is refused, as a negation is: the
-// request is never the IS NULL, which on a replica whose catalogue is ten
-// minutes stale would answer the opposite question.
+// answers 404 for it. On a table NetBox's vocabulary covers, its empty lookup is
+// on text whatever the replica stores, so "has any value" is the comparison it
+// would be, sent; and "is empty", which needs the rows to be answered, is
+// refused, as a negation is: the request is never the IS NULL, which on a replica
+// whose catalogue is ten minutes stale would answer the opposite question. (A
+// plugin's table has only its columns to say a filter is on text: see the row of
+// TestRewriteEmptiness for one with no data yet.)
 func TestEmptiness_OnAnUnfedEntity(t *testing.T) {
 	f := newFakeService()
 	p := newTestProvider(t, f)
@@ -678,9 +683,10 @@ func TestEmptiness_OnAnUnfedEntity(t *testing.T) {
 	noRequestsFor(t, f, "dcim/platforms")
 }
 
-// A comparison on the same column has the same name on the wire: "has any
-// value" must not overwrite it, whichever comes first. A value greater than any
-// non-empty one implies a value, so it is the whole of both. (A plugin's text
+// A greater-than the panel wrote on the column has the same key on the wire as
+// "has any value": the blank must neither overwrite it nor be written beside it,
+// whichever comes first. Whatever is greater than a non-empty value is not the
+// empty string, so the panel's comparison is the whole of both. (A plugin's text
 // column: NetBox has no greater-than on a name.)
 func TestEmptiness_BesideAComparisonOnTheSameColumn(t *testing.T) {
 	for _, c := range []struct {
@@ -822,11 +828,18 @@ func TestValidateFilters_RawEmptinessOnTextIsNeverSent(t *testing.T) {
 		if strings.Contains(u.Reason, "equality with an empty value") || !strings.Contains(u.Reason, netboxModeAdvice) {
 			t.Errorf("%q on text: reason %q, want it to point at NetBox mode and not at an equality that sends nothing", op, u.Reason)
 		}
+		// Either row is sent as an isnull, so the sentence is about both.
+		for _, say := range []string{"is empty", "has any value", "IS NULL", "IS NOT NULL"} {
+			if !strings.Contains(u.Reason, say) {
+				t.Errorf("%q on text: reason %q does not say %q", op, u.Reason, say)
+			}
+		}
 	}
 	if err := validateFilters([]provider.Filter{{Field: "name", Operator: opWireGTBlank}}, e, c); err != nil {
 		t.Errorf("has any value on text, as rewritten: %v", err)
 	}
-	// A blank value does not make it a row that sends nothing: it has none.
+	// It has no value to send, and is not skipped as a row that sends nothing: on
+	// a column the replica does not store it is refused.
 	if err := validateFilters([]provider.Filter{{Field: "colour", Operator: opWireGTBlank}}, e, c); err == nil {
 		t.Error("has any value on a column the replica does not store was accepted")
 	}
@@ -847,7 +860,9 @@ func TestEqualityWithAnEmptyValueSendsNothing(t *testing.T) {
 
 // buildFilterValues writes has any value as the comparison with the empty
 // string, which has no value to read, and a comparison on the column beside it
-// wins whichever comes first.
+// wins whichever comes first. Each key is written once: the replica answers a
+// filter key it is given twice with a 400 (TestFake_RepeatedFilterKeyIs400), so
+// a second gt beside the first, which Add would write, is a request it refuses.
 func TestBuildFilterValues_HasAnyValueOnText(t *testing.T) {
 	for _, c := range []struct {
 		name    string
@@ -874,6 +889,11 @@ func TestBuildFilterValues_HasAnyValueOnText(t *testing.T) {
 		for k, v := range c.want {
 			if !q.Has(k) || q.Get(k) != v {
 				t.Errorf("%s: %s = %q (sent %v), want %q", c.name, k, q.Get(k), q.Has(k), v)
+			}
+		}
+		for k, vs := range q {
+			if len(vs) != 1 {
+				t.Errorf("%s: %s is written %d times (%q), want once", c.name, k, len(vs), vs)
 			}
 		}
 	}
@@ -910,6 +930,54 @@ func TestFake_EmptyValueOnText(t *testing.T) {
 		}
 		if status, answer := fakeGet(t, srv.URL, "dcim/devices", c.param, value); status != c.status || answer != c.answer {
 			t.Errorf("%s=%q: HTTP %d %q, want %d %q", c.param, value, status, answer, c.status, c.answer)
+		}
+	}
+}
+
+// The replica answers a filter key it is given twice with a 400 that names it,
+// whatever the values (measured on v1.40.1, ipam/ip-addresses: filter[dns_name]__gt=
+// beside filter[dns_name]__gt=x in either order, and __eq and __in twice, are each
+// 400 "duplicate filter: filter[dns_name]__gt"; on a table that never received data
+// it comes before the table's own 404), and takes one column under two operators
+// (gt with lt), or one operator on two columns, which are different keys. The fake
+// has to say so: it reads the first value of a key, so a request that repeats one
+// — a has any value written beside the gt the panel wrote on the column — would
+// pass every test while the replica refuses it.
+func TestFake_RepeatedFilterKeyIs400(t *testing.T) {
+	f := newFakeService()
+	f.schema = withAnchoredText(devicesSchema())
+	f.entities["dcim/devices"] = textRows("name")
+	srv := f.start(t)
+	query := func(pairs ...string) string {
+		q := url.Values{}
+		for i := 0; i < len(pairs); i += 2 {
+			q.Add(pairs[i], pairs[i+1])
+		}
+		return q.Encode()
+	}
+	for _, c := range []struct {
+		name   string
+		entity string
+		query  string
+		status int
+		answer string
+	}{
+		{"gt twice, an empty value first", "dcim/devices", query("filter[name]__gt", "", "filter[name]__gt", "x"), 400, "duplicate filter: filter[name]__gt"},
+		{"gt twice, an empty value last", "dcim/devices", query("filter[name]__gt", "x", "filter[name]__gt", ""), 400, "duplicate filter: filter[name]__gt"},
+		{"gt twice, the same value", "dcim/devices", query("filter[name]__gt", "x", "filter[name]__gt", "x"), 400, "duplicate filter: filter[name]__gt"},
+		{"eq twice", "dcim/devices", query("filter[name]__eq", "a", "filter[name]__eq", "b"), 400, "duplicate filter: filter[name]__eq"},
+		{"in twice", "dcim/devices", query("filter[id]__in", "1", "filter[id]__in", "2"), 400, "duplicate filter: filter[id]__in"},
+		{"a repeat among other filters", "dcim/devices", query("filter[id]__gt", "0", "filter[name]__gt", "", "filter[name]__gt", "x", "filter[name]__lt", "z"), 400, "duplicate filter: filter[name]__gt"},
+		{"before the table's own 404", "dcim/platforms", query("filter[name]__gt", "", "filter[name]__gt", "x"), 400, "duplicate filter: filter[name]__gt"},
+
+		// What is not a repeat.
+		{"gt once", "dcim/devices", query("filter[name]__gt", ""), 200, "2"},
+		{"gt and lt on one column", "dcim/devices", query("filter[name]__gt", "", "filter[name]__lt", "z"), 200, "2"},
+		{"gt on two columns", "dcim/devices", query("filter[name]__gt", "", "filter[serial]__gt", ""), 200, "0"},
+		{"an unfed table answers its own 404", "dcim/platforms", query("filter[name]__gt", ""), 404, "no data received for this entity"},
+	} {
+		if status, answer := fakeGetQuery(t, srv.URL, c.entity, c.query); status != c.status || answer != c.answer {
+			t.Errorf("%s: HTTP %d %q, want %d %q", c.name, status, answer, c.status, c.answer)
 		}
 	}
 }

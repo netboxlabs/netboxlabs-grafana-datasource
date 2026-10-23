@@ -167,7 +167,7 @@ export const JOIN_KEY_TRANSFORMS: Array<{ label: string; value: string; descript
 ];
 
 /** Context fields for the IP enrichment query, grouped by source object.
- *  Mirrors IPEnrichColumns() in pkg/provider/netbox/ipenrich.go exactly — the
+ *  Mirrors IPEnrichColumns() in pkg/provider/ipenrich.go exactly — the
  *  picker is a closed vocabulary, so any name offered here that the backend
  *  cannot produce renders a permanently blank column. Keep the two in sync.
  *  `ip`, `match_count` and `is_primary_ip` are not namespaced: `ip` is the

@@ -75,7 +75,7 @@ type queryModel struct {
 	// metric's IP against this table in a SQL expression.
 	IPSource string `json:"ipSource"`
 	// ContextFields (for ip-enrichment) selects which context columns to
-	// return (see IPEnrichColumns).
+	// return (see provider.IPEnrichColumns).
 	ContextFields []string `json:"contextFields"`
 	// ConnectedOnly (for topology) drops devices with no inter-device cable.
 	ConnectedOnly bool `json:"connectedOnly"`
@@ -143,10 +143,12 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			// meant, and the editor holds such a query back. A provisioned rule or
 			// an API caller has no editor, so it is refused here too, and the list
 			// path's "nothing to resolve" empty response would be the wrong answer:
-			// silence is how a rule over an unscoped table would fail.
+			// silence is how a rule over an unscoped table would fail. The examples
+			// it gives are filters either mode answers: a prefix (parent) is NetBox
+			// mode's alone, since a replica has no address-within-prefix filter.
 			if !netbox.FiltersNarrow(qm.Filters) {
 				return backend.ErrDataResponse(backend.StatusBadRequest,
-					"A NetBox scope needs at least one filter with a value — a prefix (parent), VRF or tenant — or it is the whole address table. A filter set to All ($__all) narrows nothing.")
+					"A NetBox scope needs at least one filter with a value — a VRF or a tenant, say — or it is the whole address table. A filter set to All ($__all) narrows nothing.")
 			}
 			noun = nounScope
 			res, err = d.provider.ResolveScope(ctx, qm.Filters, fields, qm.Limit)

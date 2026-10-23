@@ -312,12 +312,12 @@ describe('IP context field groups', () => {
   });
 
   // The mechanical half of this guard — asserting the picker's vocabulary is
-  // exactly IPEnrichColumns() — lives in Go, in
-  // TestIPContextFieldsMatchFrontend (pkg/provider/netbox/ipenrich_test.go),
-  // which reads this file. It is on that side because reading a file from a
-  // Jest test needs Node's fs typings, and this project's tsconfig does not
-  // include @types/node; a build-config change would be a steep price for a
-  // guard Go can run for free.
+  // exactly IPEnrichColumns() (pkg/provider/ipenrich.go), which both modes
+  // answer — lives in Go, in TestIPContextFieldsMatchFrontend
+  // (pkg/provider/netbox/ipenrich_test.go), which reads this file. It is on
+  // that side because reading a file from a Jest test needs Node's fs typings,
+  // and this project's tsconfig does not include @types/node; a build-config
+  // change would be a steep price for a guard Go can run for free.
 
   it('defaults to a useful handful including match_count', () => {
     const all = IP_CONTEXT_FIELD_GROUPS.flatMap((g) => g.options);

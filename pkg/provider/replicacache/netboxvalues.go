@@ -11,9 +11,10 @@ import (
 // How NetBox reads a filter's values, for the filters whose values it parses
 // before comparing: an address or a network as netaddr 1.3's IPNetwork reads
 // it, a MAC address as netaddr's EUI-48 parser does, an id or a prefix length
-// as Python's int(). Each is modelled on what NetBox 4.4.10's own netaddr and
-// Python 3.12 answered (netboxvalues_test.go), so that a value is read here as
-// NetBox reads it, wherever a filter needs it (vocabfilters.go).
+// as Python's int(), the edges of a text value as Python's strip(). Each is
+// modelled on what NetBox 4.4.10's own netaddr and Python 3.12 answered
+// (netboxvalues_test.go), so that a value is read here as NetBox reads it,
+// wherever a filter needs it (vocabfilters.go, containment.go).
 
 // euiFormats are netaddr 1.3's EUI-48 spellings (netaddr.strategy.eui48's
 // RE_MAC_FORMATS, case-insensitive), which NetBox's MACAddressField reads after
@@ -125,6 +126,16 @@ func maskBits(mask netip.Addr) (int, bool) {
 		return n, true
 	}
 	return run(0)
+}
+
+// pythonStrip is Python's str.strip(), which Django's CharField applies to what
+// a text filter reads (NetBox's contains is one): it removes what str.isspace()
+// holds — Unicode's White_Space and, beside it, the ASCII separators \x1c-\x1f,
+// which unicode.IsSpace leaves (NetBox 4.4.10: ?contains=%1c10.10.10.5 finds
+// what 10.10.10.5 finds). Over every code point it removes the 29 that Python
+// 3.12 does.
+func pythonStrip(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r >= 0x1c && r <= 0x1f })
 }
 
 // pythonInt reads an integer as Python's int() reads text, which netaddr uses

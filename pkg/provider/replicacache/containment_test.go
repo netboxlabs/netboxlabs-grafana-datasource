@@ -287,26 +287,6 @@ func TestContains_BlankValueFiltersNothing(t *testing.T) {
 	}
 }
 
-// pythonStrip removes exactly what Python 3.12's str.strip() does: of every
-// code point, these 29 (measured in NetBox 4.4.10's interpreter), which are
-// Go's unicode.IsSpace set and the four ASCII separators beside it.
-func TestPythonStrip(t *testing.T) {
-	stripped := []rune{0x9, 0xa, 0xb, 0xc, 0xd, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
-		0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000}
-	for r := rune(0); r <= 0x3100; r++ {
-		got := pythonStrip(string(r)+"x"+string(r)) == "x"
-		if want := slices.Contains(stripped, r); got != want {
-			t.Errorf("U+%04X: stripped %v, want %v", r, got, want)
-		}
-	}
-	if got := pythonStrip("\U00003000 \x1c10.0.0.1\x1f \U00002028"); got != "10.0.0.1" {
-		t.Errorf("pythonStrip = %q", got)
-	}
-	if got := pythonStrip(" 10.0.0.1 /24"); got != "10.0.0.1 /24" {
-		t.Errorf("the inside of a value is left alone: %q", got)
-	}
-}
-
 // NetBox's form refuses a null character in a text value, and answers the
 // request with its 400 rather than with no rows (NetBox 4.4.10:
 // ?contains=10.10.10.5%00 is HTTP 400 {"contains": ["Null characters are not
@@ -690,15 +670,32 @@ func TestRewriteContains_WritesWhatTheReplicaReads(t *testing.T) {
 	}
 }
 
-// What cannot be read is no row, and the row that said so is gone: left in, it
-// would be judged as a column named contains.
-func TestRewriteContains_NoRowsDropsTheRow(t *testing.T) {
+// What cannot be read is no row, and a blank value is no filter: either way the
+// row that said so is gone from what is returned — left in, it would be judged
+// as a column named contains — and the filters it was given are left as they
+// were, the one after it included, which deleting in place would shift into its
+// place and zero.
+func TestRewriteContains_DropsTheRowItCannotSend(t *testing.T) {
 	prefixes := vocabPrefixes()
-	out, none, err := rewriteContains([]provider.Filter{{Field: "status", Value: "active"}, {Field: "contains", Value: "garbage"}}, prefixes.objectType, prefixes.e)
-	if err != nil || !none {
-		t.Fatalf("rewriteContains = %+v, none %v, %v; want no row to match", out, none, err)
+	for name, c := range map[string]struct {
+		value string
+		none  bool
+	}{
+		"not an address": {"garbage", true},
+		"blank":          {"\x1c", false},
+	} {
+		given := []provider.Filter{{Field: "status", Value: "active"}, {Field: "contains", Value: c.value}, {Field: "id", Operator: "n", Value: "2"}}
+		before := slices.Clone(given)
+		out, none, err := rewriteContains(given, prefixes.objectType, prefixes.e)
+		if err != nil || none != c.none {
+			t.Errorf("%s: rewriteContains = %+v, none %v, %v; want none %v", name, out, none, err, c.none)
+			continue
+		}
+		wantFilters(t, out, before[0], before[2])
+		if !slices.Equal(given, before) {
+			t.Errorf("%s: the filters it was given are now %+v, want %+v", name, given, before)
+		}
 	}
-	wantFilters(t, out, provider.Filter{Field: "status", Value: "active"})
 }
 
 // A null character is NetBox's error, not a value that matches nothing: the

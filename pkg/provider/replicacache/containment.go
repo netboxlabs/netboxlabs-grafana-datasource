@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"unicode"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -42,20 +41,13 @@ const containsName = "contains"
 // reason: no NetBox lookup does, so no saved query carries it.
 const opContains = "contains net"
 
-// offersContains reports whether this replica-cache build has the containment
-// operator, by its schema route: v1.39 and later state its limit, and an older
-// build, whose answer to the operator is a 400, states none.
-func (c *catalog) offersContains() bool {
-	return c != nil && c.ContainsMaxValues > 0
-}
-
 // nullCharacterReason is Django's refusal of a null character in a text value,
 // which NetBox's contains answers with, and what to do.
 const nullCharacterReason = "Null characters are not allowed. NetBox mode answers the same; remove the null character from the value"
 
 // containsUnsupportedReason is the refusal of NetBox's contains filter on a
 // build that cannot answer it.
-const containsUnsupportedReason = "this replica-cache build has no containment search (v1.39 added it), so it cannot answer NetBox's contains filter; ask NetBox Labs to upgrade the replica, or use a datasource in NetBox mode for this filter"
+const containsUnsupportedReason = "this replica-cache build has no containment search (v1.39 added it), so it cannot answer NetBox's contains filter; ask NetBox Labs to upgrade the replica, or " + netboxModeAdvice
 
 // rewriteContains puts a prefix's contains filter on the replica's containment
 // operator: one value, read as NetBox reads it, written as the replica reads it,
@@ -66,13 +58,13 @@ const containsUnsupportedReason = "this replica-cache build has no containment s
 // and leaves every other as it is: NetBox's filtersets refused contains on the
 // models that have none (translateFilters), and on one they do not describe, a
 // plugin's, the name is a column's or no column, which the checks that follow
-// say. The entity's table is what identifies NetBox's model, so objectType, the
-// type the filters are for, is not read.
+// say. The entity's table is what identifies NetBox's model, so the object type
+// the caller names is not read.
 //
 // none is a value that is no address or prefix, which no row can match; the row
 // is dropped, since left in it would be judged as a column named contains. A
 // value blank after NetBox's strip filters nothing, as it does there.
-func rewriteContains(filters []provider.Filter, objectType string, e entity) (out []provider.Filter, none bool, err error) {
+func rewriteContains(filters []provider.Filter, _ string, e entity) (out []provider.Filter, none bool, err error) {
 	entry, ok := containsFilter(e)
 	if !ok {
 		return filters, false, nil
@@ -162,12 +154,4 @@ func containsFilter(e entity) (vocabEntry, bool) {
 	}
 	entry := pickVocab(alts, e)
 	return entry, entry.Kind == kindContains
-}
-
-// pythonStrip is Python's str.strip(), which NetBox applies to the value: it
-// removes what str.isspace() holds — Unicode's White_Space and, beside it, the
-// ASCII separators \x1c-\x1f, which unicode.IsSpace leaves (NetBox 4.4.10:
-// ?contains=%1c10.10.10.5 finds what 10.10.10.5 finds).
-func pythonStrip(s string) string {
-	return strings.TrimFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r >= 0x1c && r <= 0x1f })
 }

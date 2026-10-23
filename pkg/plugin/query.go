@@ -143,12 +143,9 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			// meant, and the editor holds such a query back. A provisioned rule or
 			// an API caller has no editor, so it is refused here too, and the list
 			// path's "nothing to resolve" empty response would be the wrong answer:
-			// silence is how a rule over an unscoped table would fail. The examples
-			// it gives are filters either mode answers: a prefix (parent) is NetBox
-			// mode's alone, since a replica has no address-within-prefix filter.
+			// silence is how a rule over an unscoped table would fail.
 			if !netbox.FiltersNarrow(qm.Filters) {
-				return backend.ErrDataResponse(backend.StatusBadRequest,
-					"A NetBox scope needs at least one filter with a value — a VRF or a tenant, say — or it is the whole address table. A filter set to All ($__all) narrows nothing.")
+				return backend.ErrDataResponse(backend.StatusBadRequest, scopeNeedsAFilter(d.cfg.Mode))
 			}
 			noun = nounScope
 			res, err = d.provider.ResolveScope(ctx, qm.Filters, fields, qm.Limit)
@@ -514,6 +511,19 @@ func (d *Datasource) stalenessRefusal(c consumer, res *provider.Result) string {
 		return fmt.Sprintf("This datasource's Max data age (%q) is not a duration; fix it or clear it before this query can be evaluated.", d.cfg.MaxDataAge)
 	}
 	return stalenessError(c, res, maxAge, time.Now())
+}
+
+// scopeNeedsAFilter is the refusal of a NetBox scope with no effective filter.
+// Its examples are filters the datasource's mode answers: a prefix (parent),
+// the usual scope, in NetBox mode, and not in replica-cache mode, whose replica
+// has no address-within-prefix filter and refuses it.
+func scopeNeedsAFilter(mode models.ProviderMode) string {
+	examples := "a prefix (parent), VRF or tenant"
+	if mode == models.ModeReplicaCache {
+		examples = "a VRF or a tenant"
+	}
+	return "A NetBox scope needs at least one filter with a value — " + examples +
+		" — or it is the whole address table. A filter set to All ($__all) narrows nothing."
 }
 
 // allFilterValue is Grafana's own token for a variable's "All" option. A filter

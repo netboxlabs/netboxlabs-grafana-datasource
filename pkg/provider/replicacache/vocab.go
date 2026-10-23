@@ -64,17 +64,20 @@ const (
 //	path          a filter NetBox applies through other relations: tenant → group [Path]
 //	refuse        a filter whose meaning a replica cannot reproduce [Reason]
 //
-// The fields that apply to every kind but refuse: Exclude, because NetBox
-// negates the filter (site__n; cabled is an isnull that excludes), and Single.
+// Two fields do not depend on the kind. Exclude is set on every kind but refuse,
+// when NetBox negates the filter (site__n; cabled is an isnull that excludes).
+// Single is set on every kind, refusals included (ipam.prefix family is refused
+// and single-valued): it follows the filter's class, not what the filter does.
 type vocabEntry struct {
 	Kind string `json:"k"`
 	// Column is the column the filter reads on this model, as Django names it
 	// (_site_id for a component's _site, never the filter's name with _id put on
 	// the end). It is empty on a path, a method and a refusal.
 	Column string `json:"c,omitempty"`
-	// Lookup is NetBox's lookup on a value or mac filter: exact, or iexact on
-	// devices' and VMs' name and serial, which NetBox matches without regard to
-	// case, or icontains, gt, ...
+	// Lookup is NetBox's lookup on a value or mac filter: exact, or iexact on the
+	// filters NetBox matches without regard to case (devices' name and serial,
+	// VMs' name, and the serial of racks, modules and inventory items; a VM's
+	// serial is exact), or icontains, gt, ...
 	Lookup  string `json:"l,omitempty"`
 	Exclude bool   `json:"x,omitempty"`
 	// ToField is the field of the target a related, tree or modelchoice filter
@@ -88,8 +91,9 @@ type vocabEntry struct {
 	// NullValue (nv) is true when a value or mac filter reads the literal null
 	// as IS NULL, measured by compiling <name>=null inside NetBox: text and MAC
 	// filters and the choices that have a null choice do; number filters (a 400),
-	// the other choices (a 400), the text searches and sites' time_zone (compared
-	// as the empty string) do not.
+	// the other choices (a 400) and the text searches do not. Sites' time_zone and
+	// time_zone__n compare it as the empty string and do not either, while
+	// time_zone__ie and time_zone__nie compile to IS NULL and carry it.
 	NullValue bool `json:"nv,omitempty"`
 	// Single is true when NetBox reads one value, the last of a repeated
 	// parameter, where its multi-valued filters take them all.

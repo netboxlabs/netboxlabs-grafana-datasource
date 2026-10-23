@@ -122,26 +122,30 @@ def method_name(method):
 def null_label(filter_):
     """The form field's null_label: None when the field has no null choice
     (cable-terminations' cable) and 'None' on every declared related filter."""
-    try:
-        return getattr(filter_.field, 'null_label', None)
-    except Exception:
-        return None
+    return getattr(filter_.field, 'null_label', None)
 
 
 def null_probe(filterset_class, model, name):
     """Whether <name>=null is a valid filter that compiles to SQL with IS NULL.
     The query is compiled and never run. Sites' time_zone compares null as '' and
     compiles to no IS NULL (nor does its negation: that one holds IS NOT NULL)."""
-    try:
-        filterset = filterset_class(QueryDict(name + '=null'), queryset=model.objects.all())
-        if not filterset.is_valid():
-            return False
-        return 'IS NULL' in str(filterset.qs.query)
-    except Exception:
+    filterset = filterset_class(QueryDict(name + '=null'), queryset=model.objects.all())
+    if not filterset.is_valid():
         return False
+    return 'IS NULL' in str(filterset.qs.query)
 
 
 def describe(filterset_class, model, name, filter_):
+    # An exception here is a NetBox this walk does not understand. It stops the
+    # run and names the filter, instead of being read as "no null choice" or "no
+    # null" and written into a vocabulary that is wrong without saying so.
+    try:
+        return describe_filter(filterset_class, model, name, filter_)
+    except Exception as exc:
+        raise RuntimeError('%s %s: %s: %s' % (model._meta.label_lower, name, type(exc).__name__, exc)) from exc
+
+
+def describe_filter(filterset_class, model, name, filter_):
     method = method_name(getattr(filter_, 'method', None))
     null_value = getattr(filter_, 'null_value', None)
     entry = {
@@ -174,10 +178,16 @@ for app in APPS:
     for prefix, viewset, basename in router.registry:
         queryset = getattr(viewset, 'queryset', None)
         filterset_class = getattr(viewset, 'filterset_class', None)
-        if queryset is None or filterset_class is None:
-            print('skipped %s/%s: no %s' % (app, prefix, 'queryset' if queryset is None else 'filterset_class'), file=sys.stderr)
+        # A viewset that builds its queryset in get_queryset has none to read, and
+        # core/object-changes on NetBox 4.4 is one; its filterset still says which
+        # model it filters.
+        if queryset is not None:
+            model = queryset.model
+        else:
+            model = getattr(getattr(filterset_class, '_meta', None), 'model', None)
+        if filterset_class is None or model is None:
+            print('skipped %s/%s: no %s' % (app, prefix, 'filterset_class' if filterset_class is None else 'model'), file=sys.stderr)
             continue
-        model = queryset.model
         label = model._meta.label_lower
         if label in models:
             # core/object-types is also routed as extras/object-types, for old

@@ -63,6 +63,15 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	}
 	none = none || unmatched
 	spec.Filters = filters
+	// A prefix's contains is read as NetBox reads its value and sent on the
+	// replica's containment operator (containment.go), the same on an unfed
+	// entity: what NetBox reads it as does not depend on the replica's columns.
+	var unreadable bool
+	if filters, unreadable, err = rewriteContains(filters, spec.ObjectType, e); err != nil {
+		return nil, err
+	}
+	none = none || unreadable
+	spec.Filters = filters
 	// An entity the catalogue has as unfed is NOT refused here: the row route
 	// answers 404 for it, classified as not-replicated by the client, and it
 	// is current where the catalogue can be ten minutes stale. Nor is the

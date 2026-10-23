@@ -2,6 +2,7 @@ package replicacache
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
 	"net/url"
@@ -31,6 +32,12 @@ type catalog struct {
 	// it: DATA-320 added it to the route, but production's replicas report none
 	// until DATA-383. linkBase then falls back to the datasource's Browser URL.
 	NetBoxURL string
+	// ContainsMaxValues is the most values one contains filter takes, which the
+	// schema route states under filter_limits (v1.39, the build that added the
+	// operator: 1000). 0 when it states none — a build before containment, whose
+	// prefix column lists no contains — and NetBox's contains filter is then
+	// refused rather than sent as an operator the build answers with a 400.
+	ContainsMaxValues int
 	// Entities is keyed by object type ("dcim/devices"), the route path minus
 	// its "/v1/" prefix — the same value a saved query names in NetBox mode.
 	Entities map[string]entity
@@ -202,6 +209,9 @@ type schemaDoc struct {
 	SnapshotComplete bool                    `json:"snapshot_complete"`
 	NetBoxURL        string                  `json:"netbox_url"`
 	Entities         map[string]schemaEntity `json:"entities"`
+	// FilterLimits is read by containsLimit, not decoded here: the block is
+	// optional, and one that cannot be read must not cost the whole catalogue.
+	FilterLimits json.RawMessage `json:"filter_limits"`
 }
 
 type schemaEntity struct {
@@ -236,9 +246,10 @@ func (doc schemaDoc) toCatalog() (*catalog, error) {
 		}
 	}
 	out := &catalog{
-		SnapshotComplete: doc.SnapshotComplete,
-		NetBoxURL:        linkBaseOf(doc.NetBoxURL),
-		Entities:         make(map[string]entity, len(doc.Entities)),
+		SnapshotComplete:  doc.SnapshotComplete,
+		NetBoxURL:         linkBaseOf(doc.NetBoxURL),
+		ContainsMaxValues: containsLimit(doc.FilterLimits),
+		Entities:          make(map[string]entity, len(doc.Entities)),
 	}
 	for path, se := range doc.Entities {
 		out.Entities[strings.TrimPrefix(path, "/v1/")] = se.toEntity()
@@ -262,6 +273,22 @@ func linkBaseOf(raw string) string {
 	u.RawQuery, u.Fragment, u.RawFragment, u.User = "", "", "", nil
 	base := strings.TrimRight(u.String(), "/")
 	return strings.TrimSuffix(base, "/api")
+}
+
+// containsLimit reads filter_limits.contains.max_values: 1000 on every build
+// since v1.39, absent before it. Anything but a positive whole number there —
+// a block of another shape, a limit of none — is no limit, which reads as a
+// build without containment, instead of a catalogue that cannot be decoded.
+func containsLimit(raw json.RawMessage) int {
+	var limits struct {
+		Contains struct {
+			MaxValues int `json:"max_values"`
+		} `json:"contains"`
+	}
+	if json.Unmarshal(raw, &limits) != nil || limits.Contains.MaxValues < 1 {
+		return 0
+	}
+	return limits.Contains.MaxValues
 }
 
 // dataAsOfLayouts is what the route sends (RFC3339) first, then the common

@@ -34,6 +34,11 @@ type catalog struct {
 }
 
 type entity struct {
+	// Table is the replica table the entity reads: NetBox's own name for it
+	// (dcim_device) on a NetBox model, whatever the replica calls a plugin's. It
+	// is what ties an object type to the model NetBox's filtersets were read
+	// from, so the filter vocabulary is looked up by it (see vocabFor).
+	Table      string
 	PrimaryKey string
 	Ingested   bool
 	DataAsOf   *time.Time
@@ -245,7 +250,7 @@ func parseDataAsOf(raw string) (time.Time, bool) {
 }
 
 func (se schemaEntity) toEntity() entity {
-	e := entity{PrimaryKey: se.PrimaryKey, Ingested: se.Ingested}
+	e := entity{Table: se.Table, PrimaryKey: se.PrimaryKey, Ingested: se.Ingested}
 	if se.DataAsOf != nil {
 		if t, ok := parseDataAsOf(*se.DataAsOf); ok {
 			e.DataAsOf = &t

@@ -55,6 +55,29 @@ func TestCatalog_ParsesTheSchemaRoute(t *testing.T) {
 	}
 }
 
+// The filter vocabulary is looked up by the table an entity reads: NetBox's own
+// name for it on the route (dcim_device), the one thing that ties an object type
+// to the model NetBox's filtersets were read from. An entity that has never
+// received data lists its table too, and filters on it are still translated.
+func TestCatalog_KeepsEachEntitysTable(t *testing.T) {
+	f := newFakeService()
+	p := newTestProvider(t, f)
+	c, err := p.catalogue(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for objectType, table := range map[string]string{
+		"dcim/devices":      "dcim_device",
+		"dcim/sites":        "dcim_site",
+		"core/object-types": "core_objecttype",
+		"dcim/platforms":    "dcim_platform",
+	} {
+		if got := c.Entities[objectType].Table; got != table {
+			t.Errorf("%s table = %q, want %q", objectType, got, table)
+		}
+	}
+}
+
 func TestCatalog_IsCachedForTheTTLAndForcedByHealthCheck(t *testing.T) {
 	f := newFakeService()
 	p := newTestProvider(t, f)

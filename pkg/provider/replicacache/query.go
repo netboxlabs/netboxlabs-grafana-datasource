@@ -74,10 +74,14 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	spec.Filters = filters
 	// NetBox's empty lookup on text is put on the comparison the replica takes
 	// (emptiness.go): has any value is sent, is empty is a negation answered
-	// below with the others. It is NetBox's vocabulary that says a filter is on
-	// text there, not the replica's columns, so an entity with no data yet is
-	// rewritten too, and a catalogue ten minutes stale cannot send the replica's
-	// isnull, which answers the opposite question, to one that has the rows.
+	// below with the others. On a table the vocabulary covers it is the
+	// vocabulary that says a filter is on text, not the replica's columns, so
+	// such a table is rewritten even with no data yet, and a catalogue ten
+	// minutes stale cannot send the replica's isnull, which answers the opposite
+	// question, to one that has rows by now. A plugin's table, which the
+	// vocabulary does not cover, has only its columns to say so: until the
+	// catalogue lists it as having data its filter goes as it is, which is the
+	// limit of that guard (asksTextEmptiness).
 	filters = rewriteEmptiness(filters, e, c)
 	spec.Filters = filters
 	// An entity the catalogue has as unfed is NOT refused here: the row route

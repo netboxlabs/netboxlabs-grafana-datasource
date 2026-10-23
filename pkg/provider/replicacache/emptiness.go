@@ -22,8 +22,8 @@ import (
 // text filter takes a non-empty value"). So:
 //
 //   - has any value is gt "", sent as it is: every non-empty string is greater
-//     than "", and NULL is greater than nothing, so it is NetBox's empty=false
-//     exactly (opWireGTBlank);
+//     than "", and NULL is not greater than "" (it compares as unknown), so it
+//     is NetBox's empty=false exactly (opWireGTBlank);
 //   - is empty is everything else, NULL included: the negation of that same
 //     comparison (opNotGTBlank), which negations.go answers as it answers every
 //     negation, with Django's exclude() meaning — a row is dropped when its
@@ -52,9 +52,11 @@ const emptyNeedsDataReason = "is empty on a text column is answered from the row
 
 // rawEmptinessReason refuses an is-empty or has-any-value row that reached
 // validateFilters on a text column. rewriteEmptiness answers every one before,
-// so none arrives; were one to, the replica's isnull would answer the opposite
-// question (see above), so it is refused rather than sent.
-const rawEmptinessReason = "this backend would answer is empty on a text column with IS NULL, which is not what NetBox's empty lookup means, since NetBox keeps a blank as \"\" and not as NULL, so it cannot answer the filter; " + netboxModeAdvice
+// so none arrives; were one to, it would be sent as the replica's isnull (IS
+// NULL for is empty, IS NOT NULL for has any value), which answers the opposite
+// question (see above), so it is refused rather than sent. One sentence says it
+// of either operator.
+const rawEmptinessReason = "this backend would send is empty and has any value on a text column as IS NULL and IS NOT NULL, which is not what NetBox's empty lookup means, since NetBox keeps a blank as \"\" and not as NULL, so it cannot answer the filter; " + netboxModeAdvice
 
 // rewriteEmptiness puts NetBox's empty lookup on a text column on the
 // operators above: has any value becomes opWireGTBlank, is empty opNotGTBlank.
@@ -72,7 +74,8 @@ const rawEmptinessReason = "this backend would answer is empty on a text column 
 //
 // It runs on the filters as translated, before negations are split off, and
 // leaves a column that is not text its rows for validateFilters: IS NULL is
-// exact there. An entity with no data yet is rewritten too (asksTextEmptiness).
+// exact there. A table the vocabulary covers is rewritten even with no data yet;
+// a plugin's is not (asksTextEmptiness).
 func rewriteEmptiness(filters []provider.Filter, e entity, _ *catalog) []provider.Filter {
 	var (
 		rewritten map[int]provider.Filter
@@ -124,6 +127,11 @@ func rewriteEmptiness(filters []provider.Filter, e entity, _ *catalog) []provide
 //
 // On a table it does not cover — a plugin's — the catalogue's rules hold: it is
 // a text column the replica stores. A name joined in from another table is not.
+// Nothing but the columns says a plugin's filter is on text, so until the
+// catalogue lists the table as having data the row is left as it is and goes out
+// as isnull: the opposite question, if the table has rows by now and the
+// catalogue, up to ten minutes old, still lists it as having none. That is the
+// limit of the guard above.
 func asksTextEmptiness(f provider.Filter, e entity) bool {
 	if f.Field == "" || (f.Operator != opEmpty && f.Operator != opNEmpty) {
 		return false
@@ -160,19 +168,20 @@ func joinedEmptinessReason(label string, via column) string {
 }
 
 // noGTReason refuses has any value on a text column whose schema lists no gt,
-// the comparison it is asked with. named is the column, with the filter the
-// user wrote when it is another (see namedColumn).
+// the comparison it is asked with. named is the column, as namedColumn says it.
 func noGTReason(named string) string {
-	return fmt.Sprintf("this replica cannot tell whether %s has a value (its schema lists no gt there, which is how the replica is asked what NetBox's empty lookup means), so it cannot answer the filter; %s",
+	return fmt.Sprintf("this replica cannot tell whether there is a value in %s (its schema lists no gt there, which is how the replica is asked what NetBox's empty lookup means), so it cannot answer the filter; %s",
 		named, netboxModeAdvice)
 }
 
-// namedColumn is the column a refusal is about, in the middle of a sentence:
-// the replica's, and for a filter the user wrote under another name, the one
-// they wrote ("_children, the column NetBox reads for children,").
+// namedColumn is the column a refusal is about: the replica's, and for a filter
+// the user wrote under another name, with the column NetBox reads for it —
+// "_children, the column NetBox reads for children". Every refusal of a filter on
+// a column the replica lacks or cannot test names it so, in whatever sentence,
+// which puts a comma or a parenthesis after it.
 func namedColumn(column, label string) string {
 	if column == label {
 		return column
 	}
-	return column + ", the column NetBox reads for " + label + ","
+	return column + ", the column NetBox reads for " + label
 }

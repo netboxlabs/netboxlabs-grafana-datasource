@@ -166,8 +166,21 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	// none), never a filter that matches every row: matches would answer true for
 	// it, and a test sending one the service refuses would pass for the wrong
 	// reason. An operator the BUILD lacks is the same 400 (see buildKnows).
-	for k := range q {
+	//
+	// So is a filter key given twice, whatever its values (measured on v1.40.1,
+	// ipam/ip-addresses: filter[dns_name]__gt= beside filter[dns_name]__gt=x in
+	// either order, and __eq and __in twice, are each 400 "duplicate filter:
+	// filter[dns_name]__gt", on a table that never received data as on one that
+	// has: it comes before the table's own 404). The fake would otherwise read the
+	// first value and never notice the second, and a request the replica refuses
+	// would pass. One column under two operators, or one operator on two columns,
+	// is two keys.
+	for k, vs := range q {
 		if strings.HasPrefix(k, "filter[") {
+			if len(vs) > 1 {
+				writeErr(w, 400, "duplicate filter: "+k)
+				return
+			}
 			if op := k[strings.Index(k, "]")+3:]; !f.buildKnows(op) {
 				writeErr(w, 400, "invalid filter operator: "+op)
 				return

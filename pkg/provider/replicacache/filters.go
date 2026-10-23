@@ -217,9 +217,10 @@ func buildFilterValues(filters []provider.Filter, isAddress func(field string) b
 		}
 		setEquality(q, field, values)
 	}
-	// The same name on the wire as a greater-than the panel wrote on the column,
-	// which implies it — a value greater than any other is a value — so that one
-	// stands, whichever came first.
+	// The same key on the wire as a greater-than the panel wrote on the column,
+	// which implies it — whatever is greater than a non-empty value is not the
+	// empty string — so that one stands, whichever came first, and the key is
+	// written once: the replica answers one it is given twice with a 400.
 	for field := range blank {
 		if !q.Has(param(field, "gt")) {
 			q.Set(param(field, "gt"), "")
@@ -530,13 +531,9 @@ func validateFilters(filters []provider.Filter, e entity, c *catalog) error {
 			col, stored := e.column(f.Field)
 			switch {
 			case !stored:
-				reason := "this replica does not store " + f.Field
-				if f.Field != label {
-					reason += ", the column NetBox reads for " + label
-				}
-				return refuse(reason + ", so it cannot answer the filter; remove it, or choose a filter the editor offers")
+				return refuse("this replica does not store " + namedColumn(f.Field, label) + ", so it cannot answer the filter; remove it, or choose a filter the editor offers")
 			case nullTest && !slices.Contains(col.Operators, "isnull"):
-				return refuse(fmt.Sprintf("this replica cannot test %s for a value (its schema lists no isnull there), so it cannot answer the filter; %s", namedColumn(f.Field, label), netboxModeAdvice))
+				return refuse(fmt.Sprintf("this replica cannot test for a value in %s (its schema lists no isnull there), so it cannot answer the filter; %s", namedColumn(f.Field, label), netboxModeAdvice))
 			case anyValue && !slices.Contains(col.Operators, "gt"):
 				return refuse(noGTReason(namedColumn(f.Field, label)))
 			case op == opContains && (!c.offersContains() || !slices.Contains(col.Operators, "contains")):

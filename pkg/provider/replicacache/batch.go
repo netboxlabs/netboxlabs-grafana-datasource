@@ -43,6 +43,15 @@ func (s *readStats) dataAsOf() *time.Time {
 	return s.asOf
 }
 
+// merge notes what another's reads reflect, for a result that waited on reads
+// made on its behalf by a flight it shared.
+func (s *readStats) merge(o readStats) {
+	s.unknown = s.unknown || o.unknown
+	if o.asOf != nil {
+		s.note(o.asOf)
+	}
+}
+
 // listBatched reads every row of objectType whose filterParam column holds one
 // of values, in as many requests as the values need: comma-joined in the one
 // key the replica takes (a repeated key is its 400), each request within the
@@ -103,8 +112,7 @@ func (p *Provider) listBatched(ctx context.Context, objectType, filterParam stri
 			got, err = p.client.walkOn(ctx, objectType, q, scan{want: ceiling}, w)
 		}
 		if err != nil {
-			var apiErr *APIError
-			if errors.As(err, &apiErr) && apiErr.Classification().Kind == provider.ErrorKindNotReplicated {
+			if isNotReplicated(err) {
 				return nil, false, nil
 			}
 			return nil, false, err
@@ -138,6 +146,13 @@ func (p *Provider) listBatched(ctx context.Context, objectType, filterParam stri
 		}
 	}
 	return rows, capped, nil
+}
+
+// isNotReplicated reports the replica's 404 for a table that has never
+// received data: no rows, to a read that treats an unfed table so.
+func isNotReplicated(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Classification().Kind == provider.ErrorKindNotReplicated
 }
 
 // listByIDs reads every row whose column holds one of ids. Each id names few

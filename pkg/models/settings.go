@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
@@ -69,6 +70,9 @@ func LoadPluginSettings(source backend.DataSourceInstanceSettings) (*PluginSetti
 		if err := json.Unmarshal(source.JSONData, &settings); err != nil {
 			return nil, fmt.Errorf("could not unmarshal PluginSettings json: %w", err)
 		}
+		if err := checkSecureSocksProxyFields(source.JSONData); err != nil {
+			return nil, err
+		}
 	}
 
 	if settings.Mode == "" {
@@ -81,6 +85,83 @@ func LoadPluginSettings(source backend.DataSourceInstanceSettings) (*PluginSetti
 	settings.Secrets = loadSecretPluginSettings(source.DecryptedSecureJSONData)
 
 	return &settings, nil
+}
+
+// checkSecureSocksProxyFields refuses the secure socks proxy settings in the
+// two shapes that break something. The SDK reads them itself when it builds
+// the HTTP client, by exact key, and trusts their JSON types:
+//
+//   - with the proxy on, a secureSocksProxyUsername that is not a string panics
+//     inside the SDK on every request (an unchecked type assertion) — typically
+//     a placeholder left blank in YAML, which is null;
+//   - an enableSecureSocksProxy that is not a JSON boolean is read as off, so
+//     one written to mean on ("true", 1) sends every request direct.
+//
+// A flag that reads as off ("false", 0) is accepted as off, which is what the
+// SDK and Grafana's server make of it: refusing it would break a datasource
+// that works. (The settings page shows the SDK's reading too — see the
+// ConfigEditor.) The error is the datasource's settings, not the plugin, so it
+// is classified downstream: Grafana then shows the message on panels too, not
+// "An error occurred within the plugin". It describes the value rather than
+// echoing it, since panels show it to every viewer.
+func checkSecureSocksProxyFields(jsonData json.RawMessage) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(jsonData, &fields); err != nil {
+		return fmt.Errorf("could not unmarshal PluginSettings json: %w", err)
+	}
+	flag, enabled := fields["enableSecureSocksProxy"], false
+	if len(flag) > 0 && string(flag) != "null" && json.Unmarshal(flag, &enabled) != nil && readsAsOn(flag) {
+		return backend.DownstreamError(fmt.Errorf(
+			"enableSecureSocksProxy must be the JSON boolean true or false, not %s: any other value is read as off, so this datasource would not use the proxy", jsonKind(flag)))
+	}
+	username, present := fields["secureSocksProxyUsername"]
+	if !enabled || !present {
+		return nil
+	}
+	var s string
+	if string(username) == "null" || json.Unmarshal(username, &s) != nil {
+		return backend.DownstreamError(fmt.Errorf("secureSocksProxyUsername must be a string (on Grafana Cloud, the PDC network's ID), not %s", jsonKind(username)))
+	}
+	return nil
+}
+
+// jsonKind names the JSON type of a value, for a message that must not echo
+// the value itself.
+func jsonKind(raw json.RawMessage) string {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return "malformed JSON"
+	}
+	switch v.(type) {
+	case nil:
+		return "null"
+	case bool:
+		return "a boolean"
+	case float64:
+		return "a number"
+	case string:
+		return "a string"
+	case []any:
+		return "an array"
+	}
+	return "an object"
+}
+
+// readsAsOn reports whether a flag that is not a JSON boolean was written to
+// mean on: a non-zero number, or a string that strconv.ParseBool or YAML 1.1
+// reads as true, in any case. Grafana reads provisioning files with yaml/v3,
+// which keeps YAML 1.1's yes, on and y as strings in jsonData.
+func readsAsOn(raw json.RawMessage) bool {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "true", "t", "1", "yes", "y", "on":
+			return true
+		}
+		return false
+	}
+	var n float64
+	return json.Unmarshal(raw, &n) == nil && n != 0
 }
 
 func loadSecretPluginSettings(source map[string]string) *SecretPluginSettings {

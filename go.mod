@@ -1,6 +1,6 @@
 module github.com/netboxlabs/netboxlabs-grafana-datasource
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/grafana/grafana-plugin-sdk-go v0.296.4

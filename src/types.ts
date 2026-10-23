@@ -112,11 +112,23 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
    * hundred thousand objects it buys nothing and the costs apply at every size.
    * Alerting is unaffected: count and alert-table queries never use it. */
   fastPagingNoTotals?: boolean;
+  /** Route this datasource through Grafana's secure socks proxy: Private Data
+   * Source Connect on Grafana Cloud, an admin-run SOCKS proxy when self-hosted.
+   * The plugin SDK reads it when it builds the HTTP client and routes only for
+   * the JSON boolean true; the backend checks its shape (pkg/models). */
+  enableSecureSocksProxy?: boolean;
+  /** The proxy username. On Grafana Cloud it names the PDC network (its ID, a
+   * UUID), written by Grafana's network selector or set through the API. When
+   * unset the SDK sends the datasource UID instead, which is not a network ID. */
+  secureSocksProxyUsername?: string;
 }
 
 /** Secret values — never returned to the frontend after being set. */
 export interface NetBoxSecureJsonData {
   apiToken?: string;
+  /** The proxy password. Grafana's PDC network selector writes it for a network
+   * that has one; this editor never does. */
+  secureSocksProxyPassword?: string;
 }
 
 export interface ObjectTypeOption {

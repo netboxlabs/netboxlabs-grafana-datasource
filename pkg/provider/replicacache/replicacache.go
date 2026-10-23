@@ -36,6 +36,11 @@ import (
 // Provider is the replica-cache implementation of provider.Provider.
 type Provider struct {
 	client *Client
+	// fallbackBase is the link base for a replica whose catalogue reports no
+	// NetBox URL: the datasource's Browser URL as WithFallbackNetBoxURL
+	// validated it, "" when none was given. Written by New alone, so read
+	// without a lock. See linkBase.
+	fallbackBase string
 	// Custom-field names per object type, from one bounded row read each,
 	// kept for catalogTTL. See customFieldNames.
 	cfMu      sync.Mutex
@@ -61,16 +66,34 @@ const customFieldDataColumn = "custom_field_data"
 // row whose blob is empty or unreadable.
 const customFieldSampleRows = 20
 
+// Option configures a Provider at construction.
+type Option func(*Provider)
+
+// WithFallbackNetBoxURL names the NetBox that "View in NetBox" links are built
+// on when the replica's catalogue reports none: the datasource's Browser URL,
+// which is where its users' browsers reach NetBox. It becomes the target of
+// every link, so it is held to what a reported URL is (see linkBaseOf) — an
+// http(s) URL with a host, normalised the same way — and anything else is no
+// fallback.
+func WithFallbackNetBoxURL(raw string) Option {
+	return func(p *Provider) { p.fallbackBase = linkBaseOf(raw) }
+}
+
 // New builds a replica-cache provider. netboxID is the tenant identifier sent
 // as NBC-Netbox-ID; the service rejects requests without it. The NetBox the
-// replica mirrors — the base of every "View in NetBox" link — is not
-// configured here: the catalogue reports it (see linkBase).
-func New(base, token, netboxID string, httpClient *http.Client) *Provider {
-	return &Provider{
+// replica mirrors — the base of every "View in NetBox" link — is the one its
+// catalogue reports (see linkBase). Production's replicas report none until
+// DATA-383, so WithFallbackNetBoxURL names the base for one that does not.
+func New(base, token, netboxID string, httpClient *http.Client, opts ...Option) *Provider {
+	p := &Provider{
 		client:    NewClient(base, token, netboxID, httpClient),
 		cfNames:   map[string]cfEntry{},
 		cfFlights: map[string]*flight[cfEntry]{},
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 func (p *Provider) Name() string { return "replica-cache" }
@@ -85,10 +108,11 @@ func (p *Provider) Name() string { return "replica-cache" }
 // user an internal, unreachable NetBox URL.
 //
 // It is the same base the links were built from (linkBase): the NetBox the
-// catalogue says the replica mirrors. Read from the cached catalogue only —
-// this must stay cheap — and the cache root when none is known: nothing is
-// linkable then, so there is nothing to rewrite, and the value is only ever
-// used as a prefix to match.
+// catalogue says the replica mirrors, else the datasource's Browser URL — which
+// leaves the rewrite to that URL nothing to change. Read from the cached
+// catalogue only — this must stay cheap — and the cache root when neither is
+// known: nothing is linkable then, so there is nothing to rewrite, and the
+// value is only ever used as a prefix to match.
 func (p *Provider) BaseURL() string {
 	p.catMu.Lock()
 	c := p.cat
@@ -315,13 +339,17 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 }
 
 // linkBase is the NetBox instance deep links point at: the one the catalogue
-// reports, and nothing else. A replica that reports none yields rows without a
-// link column rather than links built from a guess.
+// reports, else the fallback the datasource gave (its Browser URL, see
+// WithFallbackNetBoxURL), else none. The reported one comes first because it
+// is the NetBox the replica actually mirrors, where the Browser URL only says
+// where browsers reach a NetBox; the plugin's rewrite carries a link from the
+// one to the other. With neither, rows come without a link column rather than
+// with links built from a guess.
 func (p *Provider) linkBase(c *catalog) string {
-	if c == nil {
-		return ""
+	if c != nil && c.NetBoxURL != "" {
+		return c.NetBoxURL
 	}
-	return c.NetBoxURL
+	return p.fallbackBase
 }
 
 // customFieldNames reads one bounded page projected to the blob and flattens

@@ -36,6 +36,10 @@ type PluginSettings struct {
 	// (compose/k8s service DNS), the NetBox URL the replica reports in
 	// replica-cache mode. Deep-link URLs in results are rewritten from that
 	// base to PublicURL's. Empty = no rewrite.
+	//
+	// In replica-cache mode it is also the base the links are built on when the
+	// replica reports no NetBox URL (production's, until DATA-383), so there it
+	// is what makes links exist at all, not only where they point.
 	PublicURL string `json:"publicUrl"`
 	// Mode selects the enrichment backend. Defaults to "netbox".
 	Mode ProviderMode `json:"mode"`

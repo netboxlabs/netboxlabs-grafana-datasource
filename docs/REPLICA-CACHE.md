@@ -27,14 +27,16 @@ instance ID:
 | Field                            | Description                                                                                                                                                                            |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **URL**                          | Base URL of the replica-cache deployment.                                                                                                                                              |
-| **Browser URL**                  | Optional. Rewrites _View in NetBox_ links when users' browsers reach NetBox at a different address than the one the replica reports.                                                   |
+| **Browser URL**                  | Optional. Where users' browsers reach NetBox. _View in NetBox_ links are built from it when the replica reports no NetBox URL, and rewritten to it otherwise.                          |
 | **NetBox instance ID**           | The NetBox instance the replica holds (`nb-…`), sent as the `NBC-Netbox-ID` header.                                                                                                    |
 | **API token**                    | Bearer token for the replica-cache deployment. Stored encrypted.                                                                                                                       |
 | **Max data age for alert rules** | Advanced, optional, e.g. `15m`. When set, alert rules and expression-fed queries refuse a result older than this, or whose age the replica cannot report. See [Freshness](#freshness). |
 
-There is no NetBox URL to configure: _View in NetBox_ links are built from the
-NetBox URL the replica itself reports. A replica that reports none yields rows
-without a link column.
+_View in NetBox_ links are built from the NetBox URL the replica itself reports
+(`netbox_url` on its schema route), and rewritten to the **Browser URL** when
+that is set. A replica that reports none builds them from the Browser URL
+instead, so set it there, as an `http://` or `https://` address; with neither,
+rows come without a link column.
 
 **Save & test** reports how many object types the replica is configured for
 and how many of them have received data.
@@ -51,6 +53,9 @@ datasources:
       mode: replica-cache
       url: ${REPLICA_CACHE_URL}
       netboxId: ${NETBOX_ID}
+      # Where users' browsers reach NetBox: links are built from it when the
+      # replica reports no NetBox URL, and rewritten to it otherwise.
+      publicUrl: ${NETBOX_PUBLIC_URL}
       # Optional: refuse stale data in alert rules and expressions.
       # maxDataAge: 15m
     secureJsonData:
@@ -81,7 +86,8 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
 - **custom fields** as `cf_<name>` columns, expanded the same way as in NetBox
   mode (a list field also gets its `cf_<name>_count`). Their names are read from
   a small sample of rows, because the replica's schema cannot list them;
-- `display_url`, when the replica reports the NetBox it mirrors (see above).
+- `display_url`, when there is a NetBox URL to build it on: the one the replica
+  reports, else the Browser URL (see above).
 
 Values read as they do in NetBox mode. A **choice** column shows NetBox's
 label (`Active`, `IPv4`, `1000BASE-T (1GE)`) and `<field>_value` holds the

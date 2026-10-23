@@ -90,6 +90,28 @@ func applyChoiceLabels(objectType string, rows []map[string]interface{}, withVal
 	return added
 }
 
+// labelledColumns lists the columns of an object type that the map labels and
+// the replica stores, sorted: the ones with a <field>_value to offer, and the
+// ones an All columns query adds it for (see applyChoiceLabels).
+//
+// It takes both because the map is NetBox's, generated from its API schemas,
+// and the catalogue is the replica's tables, which hold fewer columns. On
+// replica-cache v1.40.1 loaded from a NetBox 4.4.10 database, 33 of the 38
+// columns the map labels on the tables that held data are stored. The family of
+// a prefix, an address or a range is worked out from the value, so no table has
+// it; cables' profile and virtual machines' start_on_boot are not in that
+// database at all, since the map spans NetBox 4.2 to 4.6 and a replica mirrors
+// one NetBox. An alias for any of them would be listed and never fill.
+func labelledColumns(objectType string, e entity) []string {
+	var out []string
+	for _, col := range slices.Sorted(maps.Keys(loadChoiceLabels()[objectType])) {
+		if e.has(col) {
+			out = append(out, col)
+		}
+	}
+	return out
+}
+
 // validateChoiceValues refuses an equality filter (or its negation) on a choice column that
 // names a LABEL rather than a stored value. Rows show labels, so a value
 // picked from a table cell or a variable built on the column is one; NetBox

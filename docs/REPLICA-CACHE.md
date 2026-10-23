@@ -74,7 +74,8 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
 **Columns.** For each type:
 
 - the stored columns, in table order, typed by the replica (`site_id`,
-  `status`, `serial`, …);
+  `status`, `serial`, …), with `<field>_value` after each choice column the
+  replica stores (`status`, `status_value`; see below);
 - **related names**, resolved by the replica itself: for every reference whose
   target type has data, the target's name and slug (`site`, `site_slug`,
   `role`, `role_slug`, `tenant`, …) are offered as columns and resolved when a
@@ -85,15 +86,20 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
   naming the cause instead of a blank column;
 - **custom fields** as `cf_<name>` columns, expanded the same way as in NetBox
   mode (a list field also gets its `cf_<name>_count`). Their names are read from
-  a small sample of rows, because the replica's schema cannot list them;
+  a small sample of rows, because the replica's schema cannot list them. For the
+  same reason `cf_<name>_id` is not offered for an object field: the replica
+  holds the id as a number and cannot tell it from an integer field. A saved
+  panel that selects it still gets the id, where the value is a whole number;
 - `display_url`, when there is a NetBox URL to build it on: the one the replica
   reports, else the Browser URL (see above).
 
 Values read as they do in NetBox mode. A **choice** column shows NetBox's
-label (`Active`, `IPv4`, `1000BASE-T (1GE)`) and `<field>_value` holds the
-stored value (`active`, `4`), selected by name or returned by an All columns
-query. The labels are NetBox's built-in ones, taken from its API schema for
-NetBox 4.2 to 4.6; a value outside that list (an instance's own
+label (`Active`, `19 inches`, `1000BASE-T (1GE)`) and `<field>_value` holds the
+stored value (`active`, `19`): pick it in **Return fields**, or get it from an
+All columns query. A choice NetBox works out rather than stores has no
+`<field>_value`: a prefix's `family` is read off the prefix, so no table has a
+column for it. The labels are NetBox's built-in ones, taken from its API schema
+for NetBox 4.2 to 4.6; a value outside that list (an instance's own
 `FIELD_CHOICES`) is shown as stored. Filters, sorting and the value list use
 the stored value, as NetBox's own filters do, so a filter on a choice takes
 `active`: a label as the value (`status = Active`) fails with a message naming

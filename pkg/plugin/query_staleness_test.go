@@ -214,3 +214,73 @@ func TestQuery_CountRefusesOnLoadingAndStaleness(t *testing.T) {
 		})
 	}
 }
+
+// topology-edges is a rule's input like any objects query, and a replica's
+// graph is as old as its oldest table: Max data age refuses it for a strict
+// consumer exactly as it refuses rows, a dashboard only sees the age, and a
+// producer without freshness (NetBox mode) is never stale.
+func TestTopologyEdges_MaxDataAge(t *testing.T) {
+	old := time.Now().Add(-2 * time.Hour)
+	fresh := time.Now().Add(-1 * time.Minute)
+	yes := true
+	q := backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"topology-edges","limit":100}`)}
+	for _, tc := range []struct {
+		name     string
+		asOf     *time.Time
+		complete *bool
+		mode     models.ProviderMode
+		refused  bool
+		msgHas   string
+	}{
+		{"fresh", &fresh, &yes, models.ModeReplicaCache, false, ""},
+		{"old", &old, &yes, models.ModeReplicaCache, true, "2h old"},
+		{"unknown age", nil, &yes, models.ModeReplicaCache, true, "reports no commit time"},
+		{"NetBox mode", nil, nil, "", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := fabric()
+			g.Total, g.Fetched = len(g.Nodes), len(g.Nodes)
+			g.DataAsOf, g.SnapshotComplete = tc.asOf, tc.complete
+			d := newTestDatasource(&fakeProvider{graph: g})
+			d.cfg.Mode, d.cfg.MaxDataAge = tc.mode, "15m"
+			for _, c := range []consumer{consumerAlert, consumerExpression} {
+				resp := d.query(context.Background(), q, c)
+				if (resp.Error != nil) != tc.refused {
+					t.Errorf("consumer %v: err=%v, want refused=%v", c, resp.Error, tc.refused)
+				}
+				if tc.refused && resp.Error != nil && !strings.Contains(resp.Error.Error(), tc.msgHas) {
+					t.Errorf("consumer %v: %v lacks %q", c, resp.Error, tc.msgHas)
+				}
+			}
+			if resp := d.query(context.Background(), q, consumerDashboard); resp.Error != nil {
+				t.Errorf("dashboard refused: %v", resp.Error)
+			}
+		})
+	}
+}
+
+// A replica still loading reports it as a warning on the graph, which refuses
+// a rule (it would otherwise read a partial fabric as the whole) and shows on
+// a dashboard's frame.
+func TestTopologyEdges_LoadingWarningRefusesRules(t *testing.T) {
+	no := false
+	loading := "This replica is still loading its initial snapshot; results may be incomplete and their age is unknown."
+	g := fabric()
+	g.Total, g.Fetched = len(g.Nodes), len(g.Nodes)
+	g.SnapshotComplete, g.Warnings = &no, []string{loading}
+	d := newTestDatasource(&fakeProvider{graph: g})
+	d.cfg.Mode = models.ModeReplicaCache
+	q := backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"topology-edges","limit":100}`)}
+	for _, c := range []consumer{consumerAlert, consumerExpression} {
+		if resp := d.query(context.Background(), q, c); resp.Error == nil || !strings.Contains(resp.Error.Error(), "still loading") {
+			t.Errorf("consumer %v: err=%v, want the loading warning", c, resp.Error)
+		}
+	}
+	resp := d.query(context.Background(), q, consumerDashboard)
+	if resp.Error != nil {
+		t.Fatalf("dashboard refused: %v", resp.Error)
+	}
+	if n := resp.Frames[0].Meta.Notices; len(n) == 0 || n[0].Severity != data.NoticeSeverityWarning || n[0].Text != loading {
+		t.Errorf("notices %+v, want the loading warning", n)
+	}
+}

@@ -407,6 +407,14 @@ type Graph struct {
 	// device has no healthy upstream", which silences a page. Each entry is a
 	// complete, user-facing sentence.
 	Warnings []string `json:"warnings,omitempty"`
+	// Notes, DataAsOf and SnapshotComplete have Result's contracts, for the
+	// graph as a whole. A graph is built from several reads, so DataAsOf is
+	// the OLDEST instant among them — a link read from a table one hour behind
+	// is one hour old, however fresh the devices are — and nil when any read's
+	// age is unknown. The NetBox API is live and leaves all three unset.
+	Notes            []string   `json:"notes,omitempty"`
+	DataAsOf         *time.Time `json:"dataAsOf,omitempty"`
+	SnapshotComplete *bool      `json:"snapshotComplete,omitempty"`
 }
 
 // Provider is the enrichment backend the datasource depends on.

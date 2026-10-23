@@ -707,15 +707,3 @@ func (p *Provider) ResolveScope(_ context.Context, _ []provider.Filter, _ []stri
 		Detail:  "This datasource is configured to read from replica-cache, which cannot say what an IP address is assigned to because it does not expose NetBox's content-type table. Use a datasource in NetBox mode for IP enrichment.",
 	}
 }
-
-// Topology is not supported.
-//
-// It needs the cable path walk — cables, terminations and the content types
-// that say what each termination points at — and rests on the same missing
-// content-type table as ResolveIPs.
-func (p *Provider) Topology(_ context.Context, _ provider.TopologySpec) (*provider.Graph, error) {
-	return nil, &UnsupportedError{
-		Feature: "topology",
-		Detail:  "This datasource is configured to read from replica-cache, which cannot resolve cable terminations to their endpoints. Use a datasource in NetBox mode for the topology view.",
-	}
-}

@@ -228,11 +228,19 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 				if msg := graphDegradationError(c, graph); msg != "" {
 					return backend.ErrDataResponse(backend.StatusBadRequest, msg)
 				}
+				// And Max data age, as the objects path applies it: a replica's
+				// graph is as old as its oldest table, and a rule reading a
+				// fabric hours behind as current suppresses on links that may
+				// no longer exist.
+				if msg := d.stalenessRefusal(c, &provider.Result{DataAsOf: graph.DataAsOf, SnapshotComplete: graph.SnapshotComplete}); msg != "" {
+					return backend.ErrDataResponse(backend.StatusBadRequest, msg)
+				}
 			}
 			// No link rewriting: the edges table carries no URLs. It is data for a
 			// join, not something a user clicks.
 			frame := buildTopologyEdgesFrame(graph)
 			frame.RefID = q.RefID
+			frame.Meta.Notices = append(frame.Meta.Notices, noteNotices(graph.Notes)...)
 			return backend.DataResponse{Frames: data.Frames{frame}}
 		}
 		rewriteGraphLinks(graph, d.provider.BaseURL(), d.cfg.PublicURL)
@@ -240,6 +248,9 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		for _, f := range frames {
 			f.RefID = q.RefID
 		}
+		// The nodes frame carries the graph's notes (a replica's "Data as of"),
+		// as a table carries a result's.
+		frames[0].Meta.Notices = append(frames[0].Meta.Notices, noteNotices(graph.Notes)...)
 		return backend.DataResponse{Frames: frames}
 	}
 

@@ -6,7 +6,7 @@ import { getTemplateSrv } from '@grafana/runtime';
 import {
   useBranchingInstalled,
   BRANCH_FIELD_TOOLTIP,
-  BRANCH_FIELD_DISABLED_TOOLTIP,
+  branchUnavailableTooltip,
   BRANCH_FIELD_RETAINED_TOOLTIP,
 } from '../hooks/useBranchingInstalled';
 import {
@@ -36,9 +36,11 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
   const [objectTypes, setObjectTypes] = useState<ObjectTypeOption[]>([]);
   const [fields, setFields] = useState<string[]>([]);
   // Filterable columns are a DIFFERENT set from selectable ones, and the
-  // difference is not cosmetic: Fields includes what the backend synthesizes —
-  // site, site_slug, cf_* — which replica-cache answers with HTTP 400 when one
-  // arrives as filter[site]__eq, because it filters physical columns only.
+  // difference is not cosmetic: Fields lists every column a row can show —
+  // site_slug, cf_*, the <field>_value aliases — while the filters are the ones
+  // NetBox has on the object type, and a device has `site` (which compares the
+  // slug) but no `site_slug`. Filtering on a column that is not a filter fails
+  // in replica-cache mode, and in NetBox mode is ignored and returns every row.
   // QueryEditor has always used /filter-fields for its filter picker; this
   // editor reused the value list for both, so its filter picker offered
   // columns that cannot be filtered.
@@ -93,7 +95,7 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
         disabled={branchDisabled}
         tooltip={
           branchDisabled
-            ? BRANCH_FIELD_DISABLED_TOOLTIP
+            ? branchUnavailableTooltip(datasource)
             : branchingInstalled === false
               ? BRANCH_FIELD_RETAINED_TOOLTIP
               : BRANCH_FIELD_TOOLTIP

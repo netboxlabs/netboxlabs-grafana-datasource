@@ -172,6 +172,37 @@ describe('QueryEditor — Branch field gating', () => {
   });
 });
 
+describe('QueryEditor — Branch field in replica-cache mode', () => {
+  // replica-cache mirrors the main dataset only, so there is nothing to pick. The
+  // mode decides, not the probe: this stub answers "installed" and the field is
+  // disabled all the same, and the probe is never made. The tooltip's wording
+  // (BRANCH_FIELD_CACHE_TOOLTIP) is asserted in useBranchingInstalled.test.ts:
+  // Grafana mounts tooltip text only on hover, which jsdom does not reproduce.
+  it('disables the Branch field without asking the backend', async () => {
+    const ds = {
+      ...datasource,
+      uid: 'ds-cache-branch',
+      getBranchingInstalled: jest.fn().mockResolvedValue(true),
+      datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+    };
+    setup({}, ds);
+    const input = await screen.findByLabelText('Branch');
+    expect(input).toBeDisabled();
+    expect(ds.getBranchingInstalled).not.toHaveBeenCalled();
+  });
+
+  it('keeps the field editable when the query still carries a branch, so it can be cleared', async () => {
+    const ds = {
+      ...datasource,
+      uid: 'ds-cache-branch-retained',
+      datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+    };
+    setup({ branch: 'schema_abc' }, ds);
+    const input = await screen.findByDisplayValue('schema_abc');
+    expect(input).not.toBeDisabled();
+  });
+});
+
 describe('QueryEditor — schema filters', () => {
   it('loads filter fields for the object type and shows them', async () => {
     setup({

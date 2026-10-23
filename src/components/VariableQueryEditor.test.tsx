@@ -55,6 +55,20 @@ it('disables the Branch field when branching is not installed', async () => {
   await waitFor(() => expect(input).toBeDisabled());
 });
 
+// replica-cache mirrors the main dataset only: the mode decides, not the probe.
+it('disables the Branch field in replica-cache mode without asking the backend', async () => {
+  const ds = {
+    ...dsMock,
+    uid: 'ds-var-cache',
+    getBranchingInstalled: jest.fn().mockResolvedValue(true),
+    datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+  };
+  render(<VariableQueryEditor query={{ refId: 'A' } as any} onChange={jest.fn()} datasource={ds} />);
+  const input = await screen.findByLabelText('Branch');
+  expect(input).toBeDisabled();
+  expect(ds.getBranchingInstalled).not.toHaveBeenCalled();
+});
+
 it('warns when a variable filter row has a field but no value', async () => {
   render(
     <VariableQueryEditor
@@ -143,16 +157,20 @@ it('keeps the Branch field editable when the variable still carries one', async 
 });
 
 // The filter picker must offer FILTERABLE columns, not selectable ones. Fields
-// includes what the backend synthesizes — site, cf_* — which replica-cache
-// answers with HTTP 400 when one arrives as filter[site]__eq.
-it('offers the filterable columns in the filter picker, not the synthesized ones', async () => {
+// lists every column a row can show — site_slug, cf_*, the <field>_value
+// aliases — but a device has no `site_slug` filter (its `site` filter compares
+// the slug), and filtering on one fails or is ignored.
+it('offers the filterable columns in the filter picker, not the selectable-only ones', async () => {
   const ds = {
     ...dsMock,
     uid: 'ds-var-filterfields',
-    // "site" is synthesized by the backend, so it is selectable but NOT
-    // filterable: replica-cache answers filter[site]__eq with HTTP 400.
-    getFields: jest.fn().mockResolvedValue([{ name: 'name' }, { name: 'site' }]),
-    getFilterFields: jest.fn().mockResolvedValue([{ name: 'name', operators: [''] }]),
+    // "site_slug" is a column a row shows, so it is selectable, but it is not a
+    // filter on a device: `site` is, and takes the slug.
+    getFields: jest.fn().mockResolvedValue([{ name: 'name' }, { name: 'site' }, { name: 'site_slug' }]),
+    getFilterFields: jest.fn().mockResolvedValue([
+      { name: 'name', operators: [''] },
+      { name: 'site', operators: ['', 'n'] },
+    ]),
   } as any;
   render(
     <VariableQueryEditor
@@ -170,5 +188,6 @@ it('offers the filterable columns in the filter picker, not the synthesized ones
   fireEvent.keyDown(boxes[boxes.length - 1], { key: 'ArrowDown' });
 
   await waitFor(() => expect(screen.queryAllByText('name').length).toBeGreaterThan(0));
-  expect(screen.queryAllByText('site')).toHaveLength(0);
+  expect(screen.queryAllByText('site').length).toBeGreaterThan(0);
+  expect(screen.queryAllByText('site_slug')).toHaveLength(0);
 });

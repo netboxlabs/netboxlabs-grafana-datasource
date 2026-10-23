@@ -20,7 +20,7 @@ import { DataSource } from '../datasource';
 import {
   useBranchingInstalled,
   BRANCH_FIELD_TOOLTIP,
-  BRANCH_FIELD_DISABLED_TOOLTIP,
+  branchUnavailableTooltip,
   BRANCH_FIELD_RETAINED_TOOLTIP,
 } from '../hooks/useBranchingInstalled';
 import {
@@ -305,7 +305,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
         disabled={branchDisabled}
         tooltip={
           branchDisabled
-            ? BRANCH_FIELD_DISABLED_TOOLTIP
+            ? branchUnavailableTooltip(datasource)
             : branchingInstalled === false
               ? BRANCH_FIELD_RETAINED_TOOLTIP
               : BRANCH_FIELD_TOOLTIP

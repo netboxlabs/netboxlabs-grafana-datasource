@@ -788,9 +788,9 @@ func TestEmptiness_RefusalsNameWhatTheUserWrote(t *testing.T) {
 		{"the same, in NetBox's spelling", "dcim/devices", provider.Filter{Field: "description__empty", Value: "false"},
 			"description__empty", "nempty", "this replica does not store description, the column NetBox reads for description__empty, so it cannot answer the filter"},
 		{"a custom field", "dcim/devices", provider.Filter{Field: "cf_tier", Operator: "empty"},
-			"cf_tier", "empty", "this replica has no such column to filter on"},
+			"cf_tier", "empty", "filters on a custom field, which NetBox matches in its own custom-field data and this replica cannot"},
 		{"tags", "dcim/devices", provider.Filter{Field: "tag", Operator: "nempty"},
-			"tag", "nempty", "this replica has no such column to filter on"},
+			"tag", "nempty", "filters on tags, which this replica does not publish"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f.forget()

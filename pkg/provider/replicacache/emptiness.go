@@ -116,9 +116,9 @@ func rewriteEmptiness(filters []provider.Filter, e entity, _ *catalog) []provide
 //
 // On a table the vocabulary covers, translateFilters has already made NetBox's
 // IS NULL on a number or a date into the null operators, so what it leaves as
-// one of the two is NetBox's own __empty on text — but for the rows it passes
-// through as written (q, tag and tag_id, a custom field), which are no lookup
-// at all. The vocabulary is what says the filter is on text, so the column need
+// one of the two is NetBox's own __empty on text; q, the tags and a custom field,
+// which are no lookup at all, it refuses (netboxOnly), and they are kept out
+// here too. The vocabulary is what says the filter is on text, so the column need
 // not be stored for that, nor the entity fed: a column the replica lacks is the
 // refusal that says so, further on, and a catalogue ten minutes stale, which
 // still lists an entity as having no data, cannot send the replica's isnull to
@@ -138,7 +138,7 @@ func asksTextEmptiness(f provider.Filter, e entity) bool {
 	}
 	col, stored := e.column(f.Field)
 	if _, covered := vocabFor(e.Table); covered {
-		return !leftAsWritten(f) && (!stored || isTextType(col.Type))
+		return netboxOnly(f) == "" && (!stored || isTextType(col.Type))
 	}
 	return stored && isTextType(col.Type)
 }

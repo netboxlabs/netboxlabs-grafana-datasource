@@ -233,8 +233,12 @@ NetBox's meaning is kept:
   `manufacturer`, an interface's `mac_address`;
 - filters NetBox computes with a query of its own: an IP address's `device` and
   `virtual_machine`, a prefix's `within`, an IP range's `contains`;
-- NetBox's search, `q`, and the tag filters (`tag`, `tag_id`): the replica runs
-  no search and publishes no tags;
+- NetBox's search, `q`, which NetBox runs itself: filter on the fields
+  themselves instead;
+- the tag filters (`tag`, `tag_id`): the replica does not publish tags (as of
+  replica-cache v1.40);
+- custom-field filters (`cf_<name>`): NetBox matches them in its own
+  custom-field data, which the replica cannot filter on;
 - content-type filters: the replica has no content-type names;
 - decimal and date/time filters — a rack's `weight`, a device's `position` and
   `latitude`, a device type's `u_height`, `created` — which the replica does not

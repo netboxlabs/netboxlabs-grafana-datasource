@@ -245,7 +245,9 @@ func rowID(raw json.RawMessage, pk string) (int, error) {
 	if obj == nil {
 		return 0, errMalformedRow
 	}
-	var v interface{}
+	// A float64, as the id decodes everywhere else: a string, a boolean or a
+	// missing key fails to decode, and null leaves 0, which toInt refuses.
+	var v float64
 	if err := json.Unmarshal(obj[pk], &v); err != nil {
 		return 0, errRowWithoutID
 	}

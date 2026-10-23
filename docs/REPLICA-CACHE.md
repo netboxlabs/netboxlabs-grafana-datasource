@@ -20,16 +20,16 @@ needs, what it returns, and what it does not do.
 
 ## What it answers
 
-| Query or feature                                                        | In replica-cache mode                                                                                                          |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| **Objects**: tables, **Count**, **Alert table**, dashboard variables    | Answered, with NetBox's own filters ([below](#what-a-query-returns)).                                                          |
-| **Topology** and **Topology edges**                                     | Answered from the replica's cable tables: the same graph NetBox mode builds ([Topology](#topology)).                           |
-| **IP enrichment**, from an IP list or a NetBox scope                    | Answered: the same rows and columns ([IP enrichment](#ip-enrichment)). A scope cannot use `parent`, `mask_length` or `family`. |
-| **Annotations**                                                         | Not available: the replica has no change log.                                                                                  |
-| **Tags**: the `tags` column, the `tag` filter                           | Not available: as of v1.40 the replica does not publish tags.                                                                  |
-| **Contacts**: `tenancy/contact-assignments` and the other contact types | Not available: the replica does not serve them.                                                                                |
-| **Branches**                                                            | Not available: the replica mirrors the main dataset only, and the **Branch** field is disabled.                                |
-| **Utilization** and NetBox's other computed columns                     | Not available: NetBox computes them, and the replica stores rows ([Columns](#what-a-query-returns)).                           |
+| Query or feature                                                        | In replica-cache mode                                                                                                                                                               |
+| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Objects**: tables, **Count**, **Alert table**, dashboard variables    | Answered, with NetBox's own filters ([below](#what-a-query-returns)).                                                                                                               |
+| **Topology** and **Topology edges**                                     | Answered from the replica's cable tables: the same graph NetBox mode builds ([Topology](#topology)).                                                                                |
+| **IP enrichment**, from an IP list or a NetBox scope                    | Answered: the same rows and columns ([IP enrichment](#ip-enrichment)). A scope cannot use `parent`, `mask_length` or `family`.                                                      |
+| **Annotations**                                                         | Not available: the replica has no change log.                                                                                                                                       |
+| **Tags**: the `tags` column, the `tag` filter                           | Not available: as of v1.40 the replica does not publish tags.                                                                                                                       |
+| **Contacts**: `tenancy/contact-assignments` and the other contact types | Not available: the replica does not serve them, so a query for one fails with "Replica cache has no object type …".                                                                 |
+| **Branches**                                                            | Not available: the replica mirrors the main dataset only. The **Branch** field is disabled, unless a saved query still carries a branch, which stays editable so it can be cleared. |
+| **Utilization** and NetBox's other computed columns                     | Not available: NetBox computes them, and the replica stores rows ([Columns](#what-a-query-returns)).                                                                                |
 
 What is not available says so, with an error or a warning, rather than
 returning an empty result. A few things answer differently
@@ -233,6 +233,8 @@ NetBox's meaning is kept:
   `manufacturer`, an interface's `mac_address`;
 - filters NetBox computes with a query of its own: an IP address's `device` and
   `virtual_machine`, a prefix's `within`, an IP range's `contains`;
+- NetBox's search, `q`, and the tag filters (`tag`, `tag_id`): the replica runs
+  no search and publishes no tags;
 - content-type filters: the replica has no content-type names;
 - decimal and date/time filters — a rack's `weight`, a device's `position` and
   `latitude`, a device type's `u_height`, `created` — which the replica does not
@@ -285,16 +287,6 @@ replica does not serve (a device's `config_template_id`), cannot be checked as
 NetBox checks it: a value on it is refused, naming the table, and the editor
 does not offer it. `null` still works on it. The result columns are unchanged:
 `site` is still the site's name.
-
-**Variables** that feed such a filter must supply what it compares. The `site`,
-`role` and `tenant` filters compare slugs, so take the variable's values from the
-slug column — `slug` on the sites, roles or tenants table, `site_slug`,
-`role_slug` or `tenant_slug` on one that references them — not from the name a
-value list offers for `site` (NetBox mode offers names there too, and its `site`
-filter takes the slug as well). The `vrf` filter compares the route
-distinguisher, which a table that references a VRF does not show (the reference
-is the VRF's `name`), and a VRF may have none: filter by `vrf_id`, with the ids
-from the VRFs table's `id`.
 
 Within that, the operators the replica takes decide: equality (multi-value →
 `in`), a case-insensitive **contains** on text, and, on a replica-cache build
@@ -365,7 +357,18 @@ These are deliberately not offered:
 - _regex_ and the other NetBox lookups the replica has no equivalent for. A
   saved query using one fails with a message rather than being approximated.
 
-**Sorting** works on stored columns and on related names (`site`, `-role`).
+**Variables** that feed a filter on a related object must supply what it
+compares. The `site`, `role` and `tenant` filters compare slugs, so take the
+variable's values from the slug column — `slug` on the sites, roles or tenants
+table, `site_slug`, `role_slug` or `tenant_slug` on one that references them —
+not from the name a value list offers for `site` (NetBox mode offers names there
+too, and its `site` filter takes the slug as well). The `vrf` filter compares the
+route distinguisher, which a table that references a VRF does not show (the
+reference is the VRF's `name`), and a VRF may have none: filter by `vrf_id`, with
+the ids from the VRFs table's `id`.
+
+**Sorting** works on stored columns and on related names (`site`, `-role`), and
+the **Sort by** list offers exactly those.
 Sorting on a related name whose target has no data is dropped and stated in a
 panel note.
 
@@ -516,7 +519,8 @@ These fail, warn or are not offered, with a message saying why. Point them at a
 data source in NetBox mode; both can coexist on one Grafana.
 
 - **Annotations** (no change log), **tags** (the replica does not publish them as
-  of v1.40), **contacts** (not served) and **branches** (the main dataset only).
+  of v1.40), **contacts** (not served: a query for one fails with the replica's
+  "no object type" error) and **branches** (the main dataset only).
 - **Utilization** and NetBox's other computed columns.
 - **Filters on custom fields**: a custom field is a column to read, not one to
   filter on.

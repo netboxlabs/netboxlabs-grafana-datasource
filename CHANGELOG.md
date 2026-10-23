@@ -36,31 +36,25 @@
   devices and a full inventory read on every run, past which the metrics should
   carry NetBox labels from collection instead.
 
-- **IP enrichment's prefix fallback asks about the host.** A masked input
-  (`10.1.2.5/24`) missed the more specific prefixes holding the address, and an
-  IPv4-mapped one matched no IPv4 prefix; both now ask about the host's own `/32`
-  (`/128`), over every page of containing prefixes.
+- **IP enrichment's prefix fallback asks about the host.** A masked
+  (`10.1.2.5/24`) or IPv4-mapped input missed the prefixes holding the address;
+  both now ask about the host's own `/32` (`/128`), over every page of results.
 
-- **An alert table that matches nothing evaluates empty, in both modes.** A rule
-  with a value field and no rows failed with `value field … not found`, so
-  "prefixes over 80%" errored whenever there were none.
+- **An alert table that matches nothing evaluates empty, in both modes.** With a
+  value field it failed with `value field … not found` whenever nothing matched
+  (a utilization column named in Return fields excepted).
 
 - **Replica-cache mode.** A data source can read a NetBox replica-cache
-  deployment instead of the REST API, for instances too large for the API to
-  serve tables interactively. Objects, topology and IP enrichment answer from
-  it; annotations, tags, contacts and branches say they are not available.
-  Guide: `docs/REPLICA-CACHE.md`.
+  deployment (v1.35+, with the schema route) instead of the REST API, for
+  instances too large for it to serve tables; annotations, tags, contacts and
+  branches are not available. Guide: `docs/REPLICA-CACHE.md`.
 - **Replica-cache filters are NetBox's.** Names, lookups and meaning follow
-  NetBox's own, and a value or filter NetBox would refuse is refused with its
-  message (a device's `rack` names `rack_id`), so a dashboard reads the same in
-  both modes; text matches on related names are not offered. Documented
-  differences: several values on a case-insensitive name match exactly, a filter
-  only a newer NetBox has is honoured, and a text search on a choice is a text
-  match.
+  NetBox's own, and a value NetBox would refuse is refused with its message. A
+  filter NetBox does not have (a device's `rack`) is refused naming the real one
+  (`rack_id`) instead of being ignored; divergences are in the guide.
 - **Replica-cache rows read as NetBox's do.** Choices show NetBox's labels with
   the stored value in `<field>_value` (Return fields lists the aliases),
-  single-host addresses show their mask, related names are resolved and
-  sortable, and custom fields expand.
+  single-host addresses show their mask, and related names are resolved.
 - **Replica-cache text matches have negations**, answered exactly as NetBox does
   although the replica has none, and _is empty_ on text finds null or blank
   values, as NetBox's `empty` lookup does.
@@ -70,16 +64,12 @@
   age** setting makes alert rules and expression-fed queries refuse stale or
   unknown-age data.
 - **Replica-cache links come from the replica's NetBox URL, or the Browser URL
-  when it reports none.** Set the Browser URL to an `http://` or `https://`
-  address then.
-- **A column only NetBox computes is named as such.** In replica-cache mode
-  `utilization`, `family`, `tags` and the like warn that NetBox computes them
-  instead of coming back blank, an alert table on one fails saying so, and a
-  missing `display_url` says to set the Browser URL.
-- **Topology, Topology edges and IP enrichment work in replica-cache mode,** with
-  the same graph, rows and columns as NetBox mode. An address assigned to a type
-  the data source cannot learn blanks its columns with a warning, which fails
-  alert rules.
+  when it reports none** (an `http://` or `https://` address).
+- **Replica-cache names a column only NetBox computes.** `utilization`, `tags`
+  and the like warn that NetBox computes them (an alert table on one fails
+  saying so), and a missing `display_url` says to set the Browser URL.
+- **Topology, Topology edges and IP enrichment work in replica-cache mode,**
+  built from the replica's own tables, with the divergences listed in the guide.
 
 ## 1.0.3 (2026-10-06)
 

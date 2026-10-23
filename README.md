@@ -92,8 +92,9 @@ the URL and API token at the replica and add the NetBox instance ID; the
 same panels, variables and alert rules then run against the replica, with
 NetBox's own filters, related names (site, role, tenant…) resolved and sortable,
 custom fields expanded, and every result stating how fresh it is. Objects,
-topology and IP enrichment answer as in NetBox mode; annotations, tags, contacts
-and branches are not available in this mode and say so. Details, the
+topology and IP enrichment answer as in NetBox mode; annotations, tags and
+branches say they are not available, and contacts are not served (a query for
+one fails with "Replica cache has no object type …"). Details, the
 provisioning shape and the **Max data age** setting for alert rules:
 [docs/REPLICA-CACHE.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/REPLICA-CACHE.md).
 

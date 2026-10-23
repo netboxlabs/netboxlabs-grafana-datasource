@@ -55,11 +55,12 @@ Tips:
 - **In replica-cache mode** NetBox's computed columns (`utilization`, `used`,
   `available`) are not available: a rule on one fails saying NetBox computes it,
   whether Return fields lists it or the table returns all columns. Alert on a
-  stored number instead (a count such as `interface_count`) or use a data source
-  in NetBox mode. A value field that is no column at all fails naming it
-  (`"serail" is not a column…`), and a `_count` the replica does not store reads
-  as NetBox's. The value field is read the same under all columns as under
-  Return fields, `status_value` and `cf_<name>_id` included. See
+  stored number instead (a count such as a device's `interface_count`) or use a
+  data source in NetBox mode. A value field that is no column at all fails
+  naming it (`"serail" is not a column…`), and a `_count` the replica does not
+  store reads as NetBox's. The value field is read the same under all columns as
+  under Return fields, `status_value`, `cf_<name>_id` and `cf_<name>_count` (of a
+  list field left unset too) included. See
   [replica-cache mode](../REPLICA-CACHE.md#what-a-query-returns).
 - Add a **join key** (e.g. `site → netbox_site`) to rename a label; note the
   original column also remains a label.

@@ -49,3 +49,34 @@ reason = "braces <= 3.0.3 has no patched release; dev-only via eslint-webpack-pl
 id = "GHSA-hp3w-g68c-fv3c"
 ignoreUntil = 2026-11-06
 reason = "sprintf-js <= 1.1.3 has no patched release; dev-only via jest coverage config (js-yaml@3 -> argparse@1), format strings are argparse's own, not shipped. Re-review when a fix ships."
+
+# DOMPurify < 3.4.17: three advisories published 2026-10-22 (the href guard
+# skipped under application/xhtml+xml, a SAFE_FOR_TEMPLATES bypass in attached
+# shadow roots, an IN_PLACE hook leaving a detached subtree's handlers armed).
+# The fix, 3.4.17, was published the same day, inside .npmrc's
+# min-release-age=7 cooldown, so the dompurify override cannot move to it before
+# 2026-10-29. DOMPurify comes in through @grafana/data, which Grafana provides
+# at runtime: the shipped module.js contains none of it. On 2026-10-29, pin
+# 3.4.17 in package.json's overrides and drop these three entries.
+[[IgnoredVulns]]
+id = "GHSA-c6gr-qvv4-5v3f"
+ignoreUntil = 2026-10-29
+reason = "dompurify 3.4.17 (the fix) was published 2026-10-22, inside .npmrc min-release-age=7; via @grafana/data, externalized at runtime, not in module.js. Pin 3.4.17 in overrides on 2026-10-29."
+[[IgnoredVulns]]
+id = "GHSA-cg2g-xh64-v4q7"
+ignoreUntil = 2026-10-29
+reason = "dompurify 3.4.17 (the fix) was published 2026-10-22, inside .npmrc min-release-age=7; via @grafana/data, externalized at runtime, not in module.js. Pin 3.4.17 in overrides on 2026-10-29."
+[[IgnoredVulns]]
+id = "GHSA-mrv2-3pqr-j5jr"
+ignoreUntil = 2026-10-29
+reason = "dompurify 3.4.17 (the fix) was published 2026-10-22, inside .npmrc min-release-age=7; via @grafana/data, externalized at runtime, not in module.js. Pin 3.4.17 in overrides on 2026-10-29."
+
+# ip-address < 10.7.4: Address6 matches a zone identifier in quadratic time
+# before its length limit (published 2026-10-22; fixed the same day in 10.7.4,
+# inside the cooldown). It is a development dependency only (proxy-agent ->
+# socks-proxy-agent -> socks -> ip-address) and is not in the shipped plugin. On
+# 2026-10-29, pin 10.7.4 in package.json's overrides and drop this entry.
+[[IgnoredVulns]]
+id = "GHSA-rxp7-6hxx-x8q5"
+ignoreUntil = 2026-10-29
+reason = "ip-address 10.7.4 (the fix) was published 2026-10-22, inside .npmrc min-release-age=7; dev-only via proxy-agent -> socks, not shipped. Pin 10.7.4 in overrides on 2026-10-29."

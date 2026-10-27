@@ -48,7 +48,7 @@ func TestQueryErrorMessage(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := queryErrorMessage(tc.err)
+			got := queryErrorMessage(tc.err, false)
 			if !strings.Contains(got, tc.want) {
 				t.Errorf("message %q does not contain %q", got, tc.want)
 			}
@@ -65,7 +65,7 @@ func TestQueryErrorMessage(t *testing.T) {
 // do. Everything else keeps StatusInternal — a NetBox 500 or an unreachable host
 // really is not the query's fault.
 func TestQueryErrorResponse_ClassifiesAnUnknownObjectType(t *testing.T) {
-	resp := queryErrorResponse(&netbox.UnknownObjectTypeError{Type: "dcim.devices", Known: 154})
+	resp := (&Datasource{}).queryErrorResponse(&netbox.UnknownObjectTypeError{Type: "dcim.devices", Known: 154})
 	if resp.Status != backend.StatusBadRequest {
 		t.Errorf("status = %v, want %v (a typo in the editor is not an internal failure)", resp.Status, backend.StatusBadRequest)
 	}
@@ -74,7 +74,7 @@ func TestQueryErrorResponse_ClassifiesAnUnknownObjectType(t *testing.T) {
 	}
 
 	t.Run("an upstream failure stays internal", func(t *testing.T) {
-		resp := queryErrorResponse(&netbox.APIError{Status: 500, Body: "boom"})
+		resp := (&Datasource{}).queryErrorResponse(&netbox.APIError{Status: 500, Body: "boom"})
 		if resp.Status != backend.StatusInternal {
 			t.Errorf("status = %v, want %v", resp.Status, backend.StatusInternal)
 		}
@@ -112,7 +112,7 @@ func TestQueryErrorMessage_BatchedTransportFailureIsBounded(t *testing.T) {
 	cause := errors.New("dial tcp 172.20.0.6:9999: connect: connection refused")
 	err := fmt.Errorf("request failed: %w", &url.Error{Op: "Get", URL: rawURL, Err: cause})
 
-	got := queryErrorMessage(err)
+	got := queryErrorMessage(err, false)
 
 	const bound = 512
 	if len(got) > bound {
@@ -131,7 +131,7 @@ func TestQueryErrorMessage_BatchedTransportFailureIsBounded(t *testing.T) {
 	}
 
 	t.Run("health check is bounded and sanitized the same way", func(t *testing.T) {
-		msg := healthErrorMessage(err)
+		msg := healthErrorMessage(err, false)
 		if len(msg) > bound || !strings.Contains(msg, "refused") {
 			t.Errorf("healthErrorMessage = %q (%d chars)", msg, len(msg))
 		}
@@ -143,7 +143,7 @@ func TestQueryErrorMessage_BatchedTransportFailureIsBounded(t *testing.T) {
 	})
 
 	t.Run("a decode failure names the shape, not the request", func(t *testing.T) {
-		msg := queryErrorMessage(fmt.Errorf("decode %s: unexpected end of JSON input", rawURL))
+		msg := queryErrorMessage(fmt.Errorf("decode %s: unexpected end of JSON input", rawURL), false)
 		if len(msg) > bound || !strings.Contains(msg, "JSON") || strings.Contains(msg, "netbox:9999") {
 			t.Errorf("message = %q (%d chars)", msg, len(msg))
 		}
@@ -263,7 +263,7 @@ func TestIsAlertRequest(t *testing.T) {
 // as a bad request with the provider's own sentence.
 func TestNotReplicatedIsABadRequestWithTheProviderSentence(t *testing.T) {
 	err := &replicacache.APIError{Status: 404, URL: "https://rc.example/v1/dcim/platforms?limit=1", Message: "no data received for this entity"}
-	if got := queryErrorMessage(err); !strings.Contains(got, "dcim/platforms") || !strings.Contains(got, "has received no data") {
+	if got := queryErrorMessage(err, false); !strings.Contains(got, "dcim/platforms") || !strings.Contains(got, "has received no data") {
 		t.Errorf("message = %q", got)
 	}
 	if got := queryErrorStatus(err); got != backend.StatusBadRequest {

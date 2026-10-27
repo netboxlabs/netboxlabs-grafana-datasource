@@ -913,10 +913,10 @@ func TestUnknownObjectTypeUsesTheProvidersOwnWording(t *testing.T) {
 		KnownTypes: 74,
 		Detail:     "Replica cache has no object type \"dcim/widgets\". Object types here are plural paths, e.g. dcim/devices.",
 	}}
-	if got := queryErrorMessage(withDetail); !strings.Contains(got, "plural paths") {
+	if got := queryErrorMessage(withDetail, false); !strings.Contains(got, "plural paths") {
 		t.Errorf("provider detail should win, got %q", got)
 	}
-	if got := queryErrorMessage(withDetail); strings.Contains(got, "app_label.model") {
+	if got := queryErrorMessage(withDetail, false); strings.Contains(got, "app_label.model") {
 		t.Errorf("NetBox's annotation format is wrong for this backend, got %q", got)
 	}
 
@@ -927,7 +927,7 @@ func TestUnknownObjectTypeUsesTheProvidersOwnWording(t *testing.T) {
 		ObjectType: "dcim.widget",
 		KnownTypes: 90,
 	}}
-	if got := queryErrorMessage(noDetail); !strings.Contains(got, "app_label.model") {
+	if got := queryErrorMessage(noDetail, false); !strings.Contains(got, "app_label.model") {
 		t.Errorf("want the NetBox wording as the fallback, got %q", got)
 	}
 }

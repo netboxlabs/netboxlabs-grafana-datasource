@@ -1,6 +1,7 @@
 import React, { ChangeEvent, useEffect } from 'react';
-import { InlineField, Input, SecretInput, InlineSwitch, FieldSet, Select } from '@grafana/ui';
+import { InlineField, Input, SecretInput, InlineSwitch, FieldSet, Select, SecureSocksProxySettings } from '@grafana/ui';
 import { DataSourcePluginOptionsEditorProps } from '@grafana/data';
+import { config } from '@grafana/runtime';
 import { NetBoxDataSourceOptions, NetBoxSecureJsonData, ProviderMode } from '../types';
 
 interface Props extends DataSourcePluginOptionsEditorProps<NetBoxDataSourceOptions, NetBoxSecureJsonData> {}
@@ -117,6 +118,11 @@ export function ConfigEditor(props: Props) {
   // names. A mode switch clears both (see the Mode picker), so the address and
   // the credential are re-entered for the new service rather than carried
   // across.
+  //
+  // secureJsonData carries every secret not saved yet, including ones other
+  // controls on this page write (Grafana Cloud's PDC network selector sets
+  // secureSocksProxyPassword for a network that has one), so the token is merged
+  // in rather than replacing it.
   const onTokenChange = (event: ChangeEvent<HTMLInputElement>) => {
     onOptionsChange({ ...options, secureJsonData: { ...secureJsonData, apiToken: event.target.value } });
   };
@@ -290,6 +296,33 @@ export function ConfigEditor(props: Props) {
           </InlineField>
         )}
       </FieldSet>
+
+      {/* How a NetBox on a private network is reached. The switch sets
+          jsonData.enableSecureSocksProxy, which the plugin SDK honours when it
+          builds the HTTP client (newHTTPClient in pkg/plugin/datasource.go), so
+          the routing needs nothing of the backend's own.
+
+          Gated the way Grafana's own data sources gate it. Grafana sets
+          secureSocksDSProxyEnabled when [secure_socks_datasource_proxy] is
+          enabled with show_ui on. The plugin-tools guide checks a feature toggle
+          instead, which Grafana 10 removed, so following it hides the switch
+          everywhere. On Grafana Cloud the flag is false: Grafana's PDC app adds a
+          network selector to this page itself, for plugins Grafana lists as
+          supporting PDC.
+
+          The switch is handed the SDK's reading of the flag: only the JSON
+          boolean true routes through the proxy, so a "true" or 1 written by the
+          API or a provisioning file shows as off — which it is — instead of the
+          on Grafana's switch would show for any truthy value. */}
+      {config.secureSocksDSProxyEnabled && (
+        <SecureSocksProxySettings
+          options={{
+            ...options,
+            jsonData: { ...jsonData, enableSecureSocksProxy: jsonData.enableSecureSocksProxy === true },
+          }}
+          onOptionsChange={onOptionsChange}
+        />
+      )}
     </>
   );
 }

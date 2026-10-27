@@ -86,6 +86,14 @@ type UpstreamError struct {
 	// response body here would undo that in one line. Providers must keep it
 	// short; the plugin layer bounds it before display regardless.
 	Detail string
+	// Unreachable names the backend as the reader knows it ("replica-cache")
+	// when the request never got an answer from it: the connection failed, or
+	// the answer stopped partway. Empty when the backend answered. The provider
+	// cannot see the route its requests take, and Detail can only assume they
+	// go straight from Grafana; the plugin layer, which knows when they go
+	// through Grafana's secure socks proxy, words the failure by that route
+	// instead.
+	Unreachable string
 }
 
 func (e *UpstreamError) Error() string {

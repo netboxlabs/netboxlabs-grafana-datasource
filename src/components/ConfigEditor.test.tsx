@@ -1,5 +1,6 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
+import { config } from '@grafana/runtime';
 import { ConfigEditor, FAST_PAGING_TOOLTIP } from './ConfigEditor';
 import { NetBoxDataSourceOptions } from '../types';
 
@@ -151,5 +152,98 @@ describe('fast paging setting', () => {
   it('reflects an enabled setting', () => {
     setup({ fastPagingNoTotals: true });
     expect(screen.getByRole('switch', { name: /fast paging/i })).toBeChecked();
+  });
+});
+
+// The secure socks proxy is how a NetBox on a private network is reached:
+// Private Data Source Connect on Grafana Cloud, a SOCKS proxy the admin runs on
+// self-hosted Grafana. The backend already routes through it whenever
+// jsonData.enableSecureSocksProxy is true, so without this switch the only way
+// to turn it on is the API or a provisioning file.
+describe('secure socks proxy', () => {
+  // The real runtime config: the flag defaults to false, and is set per test.
+  afterEach(() => {
+    config.secureSocksDSProxyEnabled = false;
+  });
+
+  function proxySwitch() {
+    return within(screen.getByText('Secure Socks Proxy').parentElement as HTMLElement).getByRole('switch');
+  }
+
+  // Grafana's own components read the same flag. It is false when the server
+  // has no proxy configured, and on Grafana Cloud, where the PDC app renders
+  // its own network selector instead (show_ui = false).
+  it('is not offered when the Grafana server has no proxy to offer', () => {
+    setup();
+    expect(screen.queryByText('Secure Socks Proxy')).not.toBeInTheDocument();
+  });
+
+  it('is offered, and off, when the server has one', () => {
+    config.secureSocksDSProxyEnabled = true;
+    setup();
+    expect(proxySwitch()).not.toBeChecked();
+  });
+
+  it('routes this datasource through the proxy when switched on', () => {
+    config.secureSocksDSProxyEnabled = true;
+    const { onOptionsChange } = setup({ url: 'https://netbox.internal' });
+    fireEvent.click(proxySwitch());
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jsonData: expect.objectContaining({ enableSecureSocksProxy: true, url: 'https://netbox.internal' }),
+      })
+    );
+  });
+
+  it('reflects a datasource that already routes through it', () => {
+    config.secureSocksDSProxyEnabled = true;
+    setup({ enableSecureSocksProxy: true });
+    expect(proxySwitch()).toBeChecked();
+  });
+
+  // The plugin SDK routes through the proxy only for the JSON boolean true. A
+  // flag written another way by the API or a provisioning file ("true", 1) is
+  // off for every request, so the switch shows it off rather than on.
+  it('shows a flag the SDK reads as off as off', () => {
+    config.secureSocksDSProxyEnabled = true;
+    setup({ enableSecureSocksProxy: 'true' as unknown as boolean });
+    expect(proxySwitch()).not.toBeChecked();
+  });
+});
+
+// secureJsonData holds every secret not saved yet, not only ours. On Grafana
+// Cloud the PDC network selector can write secureSocksProxyPassword into it on
+// the same page, so typing a token must not discard what another control set.
+describe('API token', () => {
+  // The earlier unsaved token is in the fixture so the order of the merge is
+  // pinned: were the old value spread after the new one, every keystroke would
+  // be overwritten by the previous one.
+  it('keeps the other unsaved secrets when the token is edited, and the new token wins', () => {
+    const { onOptionsChange } = setup(
+      {},
+      { secureJsonData: { secureSocksProxyPassword: 'from-pdc', apiToken: 'nbt_old' } }
+    );
+    fireEvent.change(screen.getByPlaceholderText('nbt_… or a 40-character token'), {
+      target: { value: 'nbt_abc.def' },
+    });
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        secureJsonData: { secureSocksProxyPassword: 'from-pdc', apiToken: 'nbt_abc.def' },
+      })
+    );
+  });
+
+  it('keeps the other unsaved secrets when the token is reset', () => {
+    const { onOptionsChange } = setup(
+      {},
+      { secureJsonFields: { apiToken: true }, secureJsonData: { secureSocksProxyPassword: 'from-pdc' } }
+    );
+    fireEvent.click(screen.getByRole('button', { name: /reset/i }));
+    expect(onOptionsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        secureJsonFields: expect.objectContaining({ apiToken: false }),
+        secureJsonData: { secureSocksProxyPassword: 'from-pdc', apiToken: '' },
+      })
+    );
   });
 });

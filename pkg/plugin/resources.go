@@ -55,7 +55,7 @@ func (d *Datasource) handleBranching(w http.ResponseWriter, r *http.Request) {
 func (d *Datasource) handleObjectTypes(w http.ResponseWriter, r *http.Request) {
 	types, err := d.provider.ObjectTypes(r.Context())
 	if err != nil {
-		writeProviderError(w, err)
+		d.writeProviderError(w, err)
 		return
 	}
 	writeJSON(w, types)
@@ -71,7 +71,7 @@ func (d *Datasource) handleFields(w http.ResponseWriter, r *http.Request) {
 	ctx := provider.WithBranch(r.Context(), r.URL.Query().Get("branch"))
 	fields, err := d.provider.Fields(ctx, objectType)
 	if err != nil {
-		writeProviderError(w, err)
+		d.writeProviderError(w, err)
 		return
 	}
 	writeJSON(w, fields)
@@ -90,7 +90,7 @@ func (d *Datasource) handleFieldValues(w http.ResponseWriter, r *http.Request) {
 	ctx := provider.WithBranch(r.Context(), q.Get("branch"))
 	values, err := d.provider.FieldValues(ctx, objectType, field, q.Get("q"), limit)
 	if err != nil {
-		writeProviderError(w, err)
+		d.writeProviderError(w, err)
 		return
 	}
 	writeJSON(w, values)
@@ -151,7 +151,7 @@ func (d *Datasource) handleQuery(w http.ResponseWriter, r *http.Request) {
 		Limit:      req.Limit,
 	})
 	if err != nil {
-		writeProviderError(w, err)
+		d.writeProviderError(w, err)
 		return
 	}
 	rewriteLinks(res, d.provider.BaseURL(), d.cfg.PublicURL)
@@ -173,9 +173,9 @@ func writeError(w http.ResponseWriter, status int, err error) {
 
 // writeProviderError logs the raw provider error (sanitized) and writes the
 // user-facing mapped message, so raw NetBox API errors aren't surfaced.
-func writeProviderError(w http.ResponseWriter, err error) {
+func (d *Datasource) writeProviderError(w http.ResponseWriter, err error) {
 	log.DefaultLogger.Warn("netbox resource error", "detail", sanitizeLog(err.Error()))
-	writeError(w, http.StatusBadGateway, errMsg(queryErrorMessage(err)))
+	writeError(w, http.StatusBadGateway, errMsg(queryErrorMessage(err, d.viaProxy)))
 }
 
 type errMsg string

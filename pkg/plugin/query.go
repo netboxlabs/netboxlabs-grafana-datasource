@@ -114,7 +114,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			Limit:       qm.Limit,
 		})
 		if err != nil {
-			return queryErrorResponse(err)
+			return d.queryErrorResponse(err)
 		}
 		frame := buildAnnotationsFrame(changes)
 		frame.RefID = q.RefID
@@ -159,7 +159,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			res, err = d.provider.ResolveIPs(ctx, ips, fields, qm.Limit)
 		}
 		if err != nil {
-			return queryErrorResponse(err)
+			return d.queryErrorResponse(err)
 		}
 		// Alert evaluation converts this frame to numeric-multi and drops
 		// meta.notices, so the truncation and degradation notices appended below
@@ -205,7 +205,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			IncludeBoundaryPeers: qm.QueryType == queryTypeTopologyEdges,
 		})
 		if err != nil {
-			return queryErrorResponse(err)
+			return d.queryErrorResponse(err)
 		}
 		if qm.QueryType == queryTypeTopologyEdges {
 			// A truncated traversal is not a smaller answer to this question, it is
@@ -260,7 +260,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			CountOnly:  true,
 		})
 		if err != nil {
-			return queryErrorResponse(err)
+			return d.queryErrorResponse(err)
 		}
 		frame := buildCountFrame(qm.ObjectType, res.Total)
 		frame.RefID = q.RefID
@@ -281,7 +281,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			Limit:      qm.Limit,
 		})
 		if err != nil {
-			return queryErrorResponse(err)
+			return d.queryErrorResponse(err)
 		}
 		if qm.ValueField != "" && !slices.Contains(res.Columns, qm.ValueField) {
 			return backend.ErrDataResponse(backend.StatusBadRequest,
@@ -342,7 +342,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		AllowUncounted: !c.strict(),
 	})
 	if err != nil {
-		return queryErrorResponse(err)
+		return d.queryErrorResponse(err)
 	}
 
 	// The same argument that gates the paging above applies to the RESULT: an
@@ -462,7 +462,12 @@ func splitList(s string) []string {
 }
 
 // healthErrorMessage maps an upstream error to a concise, user-facing message.
-func healthErrorMessage(err error) string {
+// viaProxy is whether the datasource goes through Grafana's secure socks proxy
+// (see Datasource.viaProxy): a failure the proxy can cause then names it as the
+// hop to check (see proxiedCause), because told only "the connection was
+// refused" a reader checks NetBox and its URL, and on Grafana Cloud they cannot
+// open the server log the message points to.
+func healthErrorMessage(err error, viaProxy bool) string {
 	// Status 0 means the provider classified something that was not an HTTP
 	// refusal; there is no code to report, so fall through to the transport
 	// message rather than printing "HTTP 0".
@@ -475,7 +480,104 @@ func healthErrorMessage(err error) string {
 		}
 		return fmt.Sprintf("NetBox returned HTTP %d", u.Status)
 	}
-	return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
+	if !viaProxy {
+		return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
+	}
+	cause, proxyAtFault := proxiedCause(err)
+	switch {
+	case proxyAtFault && proxyNeverTried(cause):
+		return "Cannot reach NetBox through the secure socks proxy: " + cause + ". The Grafana server log has the full error."
+	case proxyAtFault:
+		return "Cannot reach NetBox through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach the NetBox URL (on Grafana Cloud, the PDC agent of the selected network); the Grafana server log has the full error."
+	}
+	// Grafana never connects to NetBox on this route: the proxy resolves and
+	// dials the URL, so whether Grafana could reach it is beside the point.
+	return "Cannot reach NetBox: " + cause + ". Check the NetBox URL, which the proxy (on Grafana Cloud, the PDC agent) connects to; the Grafana server log has the full error."
+}
+
+// proxyNeverTried reports whether a cause stopped the request before the proxy
+// tried to reach NetBox: its own TLS, or the credentials exchange. Their
+// sentences say what to check; asking whether the proxy reaches the NetBox URL
+// would send the reader to a hop it never tried.
+func proxyNeverTried(cause string) bool {
+	return cause == causeProxyTLS || cause == causeProxyAuth
+}
+
+// proxiedCause names why a request through the secure socks proxy failed, and
+// whether the proxy is the hop to check. The SOCKS dialer wraps whatever fails
+// before the tunnel to NetBox is up — reaching the proxy, its TLS, its
+// replies, its credentials exchange — in a *net.OpError whose Op is
+// "socks connect" (see proxyHop); past that, the proxy only relays bytes.
+//
+//   - A body that is not JSON, a redirect, NetBox's certificate and a plain
+//     HTTP answer to https came back through a route that works, and a URL
+//     with no scheme or a cancelled request never depended on it: naming the
+//     proxy would send the reader to the one hop that did its job.
+//   - TLS that fails on the proxy's own hop is the proxy's, and Skip TLS
+//     verify does not govern it, so it gets a sentence of its own.
+//   - A request that failed for no named reason is the proxy's only on its
+//     hop, where a refused credentials exchange gets a sentence of its own.
+//   - The rest name the proxy: a refusal or an unreachable host is the proxy's
+//     reply, and net/http's timeout error no longer carries the dialer's, so
+//     for a timeout, a reset or a closed connection the datasource's route
+//     decides.
+func proxiedCause(err error) (cause string, proxyAtFault bool) {
+	cause = transportCause(err)
+	switch cause {
+	case causeNotJSON, causeRedirected, causeNoScheme, causeCancelled:
+		return cause, false
+	case causeCertificate, causeNoTLS:
+		if proxyHop(err) {
+			return causeProxyTLS, true
+		}
+		return cause, false
+	case causeFailed:
+		switch {
+		case !proxyHop(err):
+			return cause, false
+		case socksCredentialsRefused(err):
+			return causeProxyAuth, true
+		}
+		return cause, true
+	}
+	return cause, true
+}
+
+// socksCredentialsRefused reports whether a failure on the proxy's hop is the
+// SOCKS client's word that the credentials exchange failed
+// (golang.org/x/net/internal/socks): the proxy refused them, accepts no method
+// Grafana offers, or the username is empty, which the client refuses to send.
+// It is asked only on the secure socks proxy's route: net/http's own SOCKS5
+// client, for a socks5:// proxy in Grafana's environment, says the same words
+// about credentials the datasource's settings do not hold.
+func socksCredentialsRefused(err error) bool {
+	words := strings.ToLower(innermost(err).Error())
+	return strings.Contains(words, "username/password") || strings.Contains(words, "authentication method")
+}
+
+// innermost is the error at the end of err's chain: the cause itself, without
+// the wrappers on the way in, which name the request.
+func innermost(err error) error {
+	for {
+		next := errors.Unwrap(err)
+		if next == nil {
+			return err
+		}
+		err = next
+	}
+}
+
+// proxyHop reports whether err failed on the hop to the secure socks proxy,
+// wherever its *net.OpError sits in the chain: an HTTP proxy from Grafana's
+// environment wraps the dial in an OpError of its own, outside it.
+func proxyHop(err error) bool {
+	var op *net.OpError
+	for e := err; errors.As(e, &op); e = op.Err {
+		if strings.HasPrefix(op.Op, "socks ") {
+			return true
+		}
+	}
+	return false
 }
 
 // maxUpstreamDetail bounds a user-supplied string echoed in a user-facing
@@ -529,7 +631,7 @@ func transportCause(err error) string {
 	case errors.As(err, &hdrErr):
 		return causeNoTLS
 	case errors.Is(err, context.Canceled):
-		return "the request was cancelled"
+		return causeCancelled
 	case errors.Is(err, syscall.ECONNREFUSED):
 		return causeRefused
 	case errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH):
@@ -549,15 +651,7 @@ func transportCause(err error) string {
 	// on the way in (a url.Error's request line, the client's "read body
 	// <url>: …") names the request, and a filter value in it would pick the
 	// category. Same order as above, for the same reason.
-	cause := err
-	for {
-		next := errors.Unwrap(cause)
-		if next == nil {
-			break
-		}
-		cause = next
-	}
-	words := strings.ToLower(cause.Error())
+	words := strings.ToLower(innermost(err).Error())
 	has := func(subs ...string) bool {
 		for _, sub := range subs {
 			if strings.Contains(words, sub) {
@@ -592,7 +686,7 @@ func transportCause(err error) string {
 	case has("json"):
 		return causeNotJSON
 	}
-	return "the request failed"
+	return causeFailed
 }
 
 // The sentences transportCause emits, each saying what the reader can act on.
@@ -608,12 +702,21 @@ const (
 	causeNotJSON     = "the response could not be read as JSON (is this the NetBox base URL, not a proxy or login page?)"
 	causeRedirected  = "NetBox redirected to an address other than the configured URL, which the API token is not sent to (check the URL's scheme and host)"
 	causeNoScheme    = "the URL has no scheme (start it with https or http)"
+	causeCancelled   = "the request was cancelled"
+	causeFailed      = "the request failed"
+	// The two causes only the hop to the secure socks proxy has. Grafana's
+	// configuration sets that hop's TLS, not the datasource's; the
+	// datasource's settings carry its credentials.
+	causeProxyTLS  = "the TLS connection to the proxy failed (its certificates are set in Grafana's secure_socks_datasource_proxy configuration, not in the datasource)"
+	causeProxyAuth = "the proxy did not accept the datasource's credentials (check secureSocksProxyUsername and secureSocksProxyPassword; on Grafana Cloud, the username is the PDC network's ID)"
 )
 
 // queryErrorMessage maps an upstream error to a concise, user-facing message so
 // raw NetBox API errors (500/405/etc.) and exception bodies aren't surfaced to
 // the user. The raw error is logged separately (sanitized) for operators.
-func queryErrorMessage(err error) string {
+// viaProxy names the secure socks proxy in a transport failure, as
+// healthErrorMessage does.
+func queryErrorMessage(err error, viaProxy bool) string {
 	if u := provider.Classify(err); u != nil {
 		switch u.Kind {
 		// An object type the upstream does not know is the USER's input, not an
@@ -648,14 +751,24 @@ func queryErrorMessage(err error) string {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
 		}
 	}
-	return "Couldn't reach NetBox: " + transportCause(err) + ". The Grafana server log has the full error."
+	if !viaProxy {
+		return "Couldn't reach NetBox: " + transportCause(err) + ". The Grafana server log has the full error."
+	}
+	cause, proxyAtFault := proxiedCause(err)
+	switch {
+	case proxyAtFault && proxyNeverTried(cause):
+		return "Couldn't reach NetBox through the secure socks proxy: " + cause + ". The Grafana server log has the full error."
+	case proxyAtFault:
+		return "Couldn't reach NetBox through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach NetBox (on Grafana Cloud, the PDC agent); the Grafana server log has the full error."
+	}
+	return "Couldn't reach NetBox: " + cause + ". The Grafana server log has the full error."
 }
 
 // queryErrorResponse logs the raw upstream error (sanitized) and returns a data
 // response carrying only the user-facing mapped message.
-func queryErrorResponse(err error) backend.DataResponse {
+func (d *Datasource) queryErrorResponse(err error) backend.DataResponse {
 	log.DefaultLogger.Warn("netbox query error", "detail", sanitizeLog(err.Error()))
-	return backend.ErrDataResponse(queryErrorStatus(err), queryErrorMessage(err))
+	return backend.ErrDataResponse(queryErrorStatus(err), queryErrorMessage(err, d.viaProxy))
 }
 
 // queryErrorStatus says whose fault the failure is. Everything upstream —

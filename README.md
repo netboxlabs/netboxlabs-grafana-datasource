@@ -76,6 +76,7 @@ Add the data source (**Connections → Data sources → NetBox**) and set:
 | **Skip TLS verify** | Accept self-signed certificates.                                                                                                                                                                                |
 | **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                      |
 | **Fast paging**     | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                |
+| **Secure Socks Proxy** | Shown only on self-hosted Grafana with a [secure SOCKS5 data source proxy](https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/proxy/) configured. **Enabled** routes this datasource through it. On Grafana Cloud, see [Grafana Cloud](#grafana-cloud). |
 
 Click **Save & test**. A healthy data source reports the connected NetBox version.
 
@@ -241,10 +242,43 @@ This is a **backend** datasource, so it runs on Grafana Cloud once published to 
 plugin catalog and signed by Grafana (Cloud cannot load private/unsigned plugins).
 
 - **Public NetBox** (internet-reachable URL): the Cloud-hosted backend calls it directly.
-- **Private NetBox** (VPC / on-prem): use **[Private Data Source Connect (PDC)](https://grafana.com/docs/grafana-cloud/connect-externally-hosted/private-data-source-connect/)**.
-  PDC supports backend datasource plugins, and this plugin builds its HTTP client from the
-  Grafana SDK (`backend/httpclient`) so PDC's secure tunnel, proxy and TLS settings are
-  honored automatically. No plugin changes are needed by the customer.
+- **Private NetBox** (VPC / on-prem): use **[Private Data Source Connect (PDC)](https://grafana.com/docs/grafana-cloud/observe-and-act/connect-externally-hosted/private-data-source-connect/)**.
+  Run Grafana's [PDC agent](https://grafana.com/docs/grafana-cloud/observe-and-act/connect-externally-hosted/private-data-source-connect/configure-pdc/)
+  inside that network; it needs outbound access to Grafana Cloud's PDC endpoints on ports 22
+  and 443. Set **NetBox URL** to the address the agent's host reaches NetBox at, and
+  **Browser URL** to where browsers reach it if that differs, so deep links work. Then route
+  the datasource through the PDC network:
+  - **On the settings page:** Grafana Cloud adds a **Private data source connection** section,
+    with a network selector, to the data sources Grafana lists as
+    [supporting PDC](https://grafana.com/docs/grafana-cloud/observe-and-act/connect-externally-hosted/private-data-source-connect/#supported-data-sources).
+    If the page has no such section, Grafana has not listed this plugin yet: use the API.
+  - **Through the API:** add two fields to the datasource's `jsonData`. An update replaces
+    `jsonData` whole, so send them together with the fields it already has.
+
+    ```json
+    "jsonData": {
+      "url": "https://netbox.internal.example.com",
+      "enableSecureSocksProxy": true,
+      "secureSocksProxyUsername": "<PDC network ID>"
+    }
+    ```
+
+    `secureSocksProxyUsername` takes the network's ID: its name, the stack ID and `default` do
+    not route. To find the ID, select the network under **Connections → Private data source
+    connections**; Grafana's Terraform provider exposes it as `pdc_network_id`.
+
+  A datasource routed through the proxy names it when the proxy is the hop to check: **Save &
+  test** and panels report the failure "through the secure socks proxy". When the proxy cannot
+  reach NetBox, they name the PDC agent; credentials the proxy refuses, or an empty
+  `secureSocksProxyUsername`, read "the proxy did not accept the datasource's credentials". A
+  failure Grafana can tell is NetBox's, such as its TLS certificate or a page that is not the
+  API, does not name the proxy: check the NetBox URL as the agent reaches it. A timeout or a
+  dropped connection names the proxy either way, since Grafana cannot tell which side caused
+  it. If a refused or timed-out connection is reported without "through the secure socks
+  proxy", the request was not routed through PDC: check that `enableSecureSocksProxy` is the
+  JSON boolean `true`. An answer from NetBox itself, such as "Authentication failed" or an HTTP
+  status, means the route through PDC works. Nothing else in the plugin needs configuring: the
+  backend builds its HTTP client from the Grafana SDK, which applies the proxy.
 
 The backend ships binaries for `linux/amd64` and `linux/arm64` (Cloud) plus the full
 catalog target matrix (darwin/windows/arm).

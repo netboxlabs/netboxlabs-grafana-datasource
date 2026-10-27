@@ -591,6 +591,11 @@ func healthErrorMessage(err error, viaProxy bool) string {
 	// the generic fallback below names NetBox, which is the wrong service when
 	// a different backend is what could not be reached.
 	if u := provider.Classify(err); u != nil {
+		// Except a backend that could not be reached through the proxy: its
+		// sentence assumes the request went straight from Grafana.
+		if viaProxy && u.Unreachable != "" {
+			return proxiedHealthMessage(err, u.Unreachable)
+		}
 		if d := boundedDetail(u); d != "" {
 			return d
 		}
@@ -607,16 +612,33 @@ func healthErrorMessage(err error, viaProxy bool) string {
 	if !viaProxy {
 		return "Cannot reach NetBox: " + transportCause(err) + ". Check the NetBox URL and that NetBox is reachable from Grafana; the Grafana server log has the full error."
 	}
-	cause, proxyAtFault := proxiedCause(err)
+	return proxiedHealthMessage(err, "NetBox")
+}
+
+// proxiedHealthMessage is healthErrorMessage's sentence for a request to
+// service, NetBox or the backend the provider named, that failed on the secure
+// socks proxy's route.
+func proxiedHealthMessage(err error, service string) string {
+	cause, proxyAtFault := proxiedCauseFor(err, service)
 	switch {
 	case proxyAtFault && proxyNeverTried(cause):
-		return "Cannot reach NetBox through the secure socks proxy: " + cause + ". The Grafana server log has the full error."
+		return "Cannot reach " + service + " through the secure socks proxy: " + cause + ". The Grafana server log has the full error."
 	case proxyAtFault:
-		return "Cannot reach NetBox through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach the NetBox URL (on Grafana Cloud, the PDC agent of the selected network); the Grafana server log has the full error."
+		return "Cannot reach " + service + " through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach the " + service + " URL (on Grafana Cloud, the PDC agent of the selected network); the Grafana server log has the full error."
 	}
-	// Grafana never connects to NetBox on this route: the proxy resolves and
-	// dials the URL, so whether Grafana could reach it is beside the point.
-	return "Cannot reach NetBox: " + cause + ". Check the NetBox URL, which the proxy (on Grafana Cloud, the PDC agent) connects to; the Grafana server log has the full error."
+	// Grafana never connects to the service on this route: the proxy resolves
+	// and dials the URL, so whether Grafana could reach it is beside the point.
+	return "Cannot reach " + service + ": " + cause + ". Check the " + service + " URL, which the proxy (on Grafana Cloud, the PDC agent) connects to; the Grafana server log has the full error."
+}
+
+// proxiedCauseFor is proxiedCause for a request to service: the timeout's
+// advice names the service that was slow.
+func proxiedCauseFor(err error, service string) (cause string, proxyAtFault bool) {
+	cause, proxyAtFault = proxiedCause(err)
+	if cause == causeTimeout {
+		cause = strings.Replace(cause, "NetBox", service, 1)
+	}
+	return cause, proxyAtFault
 }
 
 // proxyNeverTried reports whether a cause stopped the request before the proxy
@@ -867,6 +889,12 @@ func queryErrorMessage(err error, viaProxy bool) string {
 		// to a correction that fails again. The exception is gone; the NetBox
 		// provider sets no Detail for this kind, so it still gets the wording
 		// below.
+		//
+		// Except a backend that could not be reached through the proxy: its
+		// sentence assumes the request went straight from Grafana.
+		if viaProxy && u.Unreachable != "" {
+			return proxiedQueryMessage(err, u.Unreachable)
+		}
 		if d := boundedDetail(u); d != "" {
 			return d
 		}
@@ -915,14 +943,21 @@ func queryErrorMessage(err error, viaProxy bool) string {
 	if !viaProxy {
 		return "Couldn't reach NetBox: " + transportCause(err) + ". The Grafana server log has the full error."
 	}
-	cause, proxyAtFault := proxiedCause(err)
+	return proxiedQueryMessage(err, "NetBox")
+}
+
+// proxiedQueryMessage is queryErrorMessage's sentence for a request to
+// service, NetBox or the backend the provider named, that failed on the secure
+// socks proxy's route.
+func proxiedQueryMessage(err error, service string) string {
+	cause, proxyAtFault := proxiedCauseFor(err, service)
 	switch {
 	case proxyAtFault && proxyNeverTried(cause):
-		return "Couldn't reach NetBox through the secure socks proxy: " + cause + ". The Grafana server log has the full error."
+		return "Couldn't reach " + service + " through the secure socks proxy: " + cause + ". The Grafana server log has the full error."
 	case proxyAtFault:
-		return "Couldn't reach NetBox through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach NetBox (on Grafana Cloud, the PDC agent); the Grafana server log has the full error."
+		return "Couldn't reach " + service + " through the secure socks proxy: " + cause + ". Check that the proxy is running and can reach " + service + " (on Grafana Cloud, the PDC agent); the Grafana server log has the full error."
 	}
-	return "Couldn't reach NetBox: " + cause + ". The Grafana server log has the full error."
+	return "Couldn't reach " + service + ": " + cause + ". The Grafana server log has the full error."
 }
 
 // queryErrorResponse logs the raw upstream error (sanitized) and returns a data

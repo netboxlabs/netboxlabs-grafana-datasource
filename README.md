@@ -301,7 +301,8 @@ plugin catalog and signed by Grafana (Cloud cannot load private/unsigned plugins
   it. If a refused or timed-out connection is reported without "through the secure socks
   proxy", the request was not routed through PDC: check that `enableSecureSocksProxy` is the
   JSON boolean `true`. An answer from NetBox itself, such as "Authentication failed" or an HTTP
-  status, means the route through PDC works. Nothing else in the plugin needs configuring: the
+  status, means the route through PDC works. In replica-cache mode the same messages name
+  replica-cache and its URL instead. Nothing else in the plugin needs configuring: the
   backend builds its HTTP client from the Grafana SDK, which applies the proxy.
 
 The backend ships binaries for `linux/amd64` and `linux/arm64` (Cloud) plus the full

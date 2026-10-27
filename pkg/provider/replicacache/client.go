@@ -190,11 +190,14 @@ func (e *TransportError) Unwrap() error { return e.Err }
 // Classification reports an unreachable cache, naming the setting to check.
 // Status stays 0: nothing answered, so there is no code to report.
 func (e *TransportError) Classification() *provider.UpstreamError {
-	detail := e.Message
-	if detail == "" {
-		detail = "Cannot reach replica-cache. Check the replica-cache URL and that the service is reachable from Grafana."
+	if e.Message != "" {
+		return &provider.UpstreamError{Kind: provider.ErrorKindUpstream, Detail: e.Message}
 	}
-	return &provider.UpstreamError{Kind: provider.ErrorKindUpstream, Detail: detail}
+	return &provider.UpstreamError{
+		Kind:        provider.ErrorKindUpstream,
+		Detail:      "Cannot reach replica-cache. Check the replica-cache URL and that the service is reachable from Grafana.",
+		Unreachable: "replica-cache",
+	}
 }
 
 // maxBodyBytes caps a single response. The same 64 MiB the NetBox client uses.

@@ -8,7 +8,7 @@
   Grafana lists the plugin; until then, route it over the API (see the README).
 - **Proxy failures say so.** When a request fails at the proxy or the PDC agent,
   Save & test and panels say "through the secure socks proxy" instead of
-  blaming the NetBox URL, and refused credentials name
+  blaming the NetBox or replica-cache URL, and refused credentials name
   `secureSocksProxyUsername`.
 - **Proxy settings that break routing are refused.** A non-string
   `secureSocksProxyUsername` made every request fail, and an

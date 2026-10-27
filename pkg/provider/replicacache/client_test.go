@@ -657,3 +657,21 @@ func TestClient_RefusesQueriesOverTheBudget(t *testing.T) {
 		}
 	}
 }
+
+// Only a request that got no answer names the cache as unreachable: the plugin
+// layer rewords that one by the datasource's route, and a sentence about an
+// answer the cache sent has to reach the reader as written here.
+func TestTransportError_NamesTheCacheOnlyWhenNothingAnswered(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close()
+	p := New(srv.URL, "t", "nb", srv.Client())
+	_, err := p.HealthCheck(context.Background())
+	if u := provider.Classify(err); u == nil || u.Unreachable != "replica-cache" {
+		t.Errorf("a closed server's classification = %+v, want the cache named unreachable", u)
+	}
+
+	answered := &TransportError{Op: "decoding response", Err: errors.New("invalid character"), Message: "Replica cache returned a response that could not be read."}
+	if u := answered.Classification(); u.Unreachable != "" || u.Detail != answered.Message {
+		t.Errorf("an unreadable answer's classification = %+v, want its own sentence and no unreachable service", u)
+	}
+}

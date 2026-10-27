@@ -61,6 +61,9 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
   and auto-detected.
 - **Grafana 12.3 or later** (the plugin's `grafanaDependency`; e2e-tested against
   12.3 → 13.1 and nightly in CI).
+- **Replica-cache mode** (optional) needs a replica-cache build that serves the
+  schema route (v1.35 or later). See
+  [docs/REPLICA-CACHE.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/REPLICA-CACHE.md).
 
 Re-verify any NetBox version locally with [`demo/compat-check.sh`](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/demo/compat-check.sh).
 
@@ -68,17 +71,33 @@ Re-verify any NetBox version locally with [`demo/compat-check.sh`](https://githu
 
 Add the data source (**Connections → Data sources → NetBox**) and set:
 
-| Field               | Description                                                                                                                                                                                                     |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **NetBox URL**      | Base URL of your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`).                                                                                                                       |
-| **Browser URL**     | Optional. Where users' browsers reach NetBox when Grafana connects over an internal address (Docker/k8s service DNS). Deep links are rewritten to this base; leave empty if the URL above is browser-reachable. |
-| **API Token**       | A NetBox API token. Both classic 40-character (v1) tokens and `nbt_…` (v2) tokens are auto-detected. Stored encrypted.                                                                                          |
-| **Skip TLS verify** | Accept self-signed certificates.                                                                                                                                                                                |
-| **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                      |
-| **Fast paging**     | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                |
-| **Secure Socks Proxy** | Shown only on self-hosted Grafana with a [secure SOCKS5 data source proxy](https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/proxy/) configured. **Enabled** routes this datasource through it. On Grafana Cloud, see [Grafana Cloud](#grafana-cloud). |
+| Field                  | Description                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Mode**               | _NetBox_ (default) reads the NetBox REST API. _replica-cache_ reads a NetBox replica-cache deployment instead, for instances too large for the API to serve interactively — see [Replica-cache mode](#replica-cache-mode).                                                                                                                                                                  |
+| **URL**                | Base URL of the service the mode reads from: your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`), or the replica-cache deployment.                                                                                                                                                                                                                                 |
+| **Browser URL**        | Where users' browsers reach NetBox when that differs from the address the links are built from (the URL above in NetBox mode, the address the replica reports in replica-cache mode); deep links are rewritten to it. Optional in NetBox mode. In replica-cache mode a replica that reports no NetBox URL builds its links from it, so set it there, as an `http://` or `https://` address. |
+| **API token**          | The credential for that service: a NetBox API token (classic 40-character v1 or `nbt_…` v2, auto-detected) or the replica-cache bearer token. Stored encrypted.                                                                                                                                                                                                                             |
+| **Skip TLS verify**    | Accept self-signed certificates.                                                                                                                                                                                                                                                                                                                                                            |
+| **Timeout (s)**        | Per-request upstream timeout (default 30).                                                                                                                                                                                                                                                                                                                                                  |
+| **Fast paging**        | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                                                                                                                                                                                                      |
+| **Secure Socks Proxy** | Shown only on self-hosted Grafana with a [secure SOCKS5 data source proxy](https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/proxy/) configured. **Enabled** routes this datasource through it. On Grafana Cloud, see [Grafana Cloud](#grafana-cloud).                                                                                                                |
 
 Click **Save & test**. A healthy data source reports the connected NetBox version.
+
+### Replica-cache mode
+
+For NetBox instances too large for the REST API to answer table queries
+interactively, the data source can read from **NetBox replica-cache**, a
+read-only columnar mirror of the instance. Set **Mode** to _replica-cache_, point
+the URL and API token at the replica and add the NetBox instance ID; the
+same panels, variables and alert rules then run against the replica, with
+NetBox's own filters, related names (site, role, tenant…) resolved and sortable,
+custom fields expanded, and every result stating how fresh it is. Objects,
+topology and IP enrichment answer as in NetBox mode; annotations, tags and
+branches say they are not available, and contacts are not served (a query for
+one fails with "Replica cache has no object type …"). Details, the
+provisioning shape and the **Max data age** setting for alert rules:
+[docs/REPLICA-CACHE.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/REPLICA-CACHE.md).
 
 ### Large NetBox instances
 
@@ -103,7 +122,7 @@ and is the simplest way to get predictable query performance at that scale.
    objects returns an informational notice saying as much, because the largest
    page this data source returns is 10,000 rows: at that size a panel can only
    ever show a corner of the table.
-2. **Select only the fields you use.** *Return fields* is not just presentation
+2. **Select only the fields you use.** _Return fields_ is not just presentation
    — the plugin asks NetBox to serialize only those properties, so a narrow
    selection moves considerably less data.
 3. **Keep limits realistic.** A panel nobody scrolls past the first screen of
@@ -159,14 +178,19 @@ datasources:
       apiToken: ${NETBOX_API_TOKEN}
 ```
 
+A data source in replica-cache mode is provisioned with `mode: replica-cache`,
+`url` and `apiToken` pointing at the replica, `netboxId`, and `publicUrl` for the
+_View in NetBox_ links of a replica that reports no NetBox URL — see
+[docs/REPLICA-CACHE.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/REPLICA-CACHE.md#configuration).
+
 ## Query types
 
-| Type              | Returns                                                        | Use with                          |
-| ----------------- | -------------------------------------------------------------- | --------------------------------- |
-| **Objects**       | A joinable table for any object type (with optional join keys) | Table, or Outer-join onto metrics |
+| Type              | Returns                                                                                                                                                                                                                                | Use with                          |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| **Objects**       | A joinable table for any object type (with optional join keys)                                                                                                                                                                         | Table, or Outer-join onto metrics |
 | **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`. Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
-| **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)     | Node Graph panel                  |
-| **Annotations**   | Change-log events (`time/title/text/tags`)                     | Dashboard annotations             |
+| **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)                                                                                                                                                                             | Node Graph panel                  |
+| **Annotations**   | Change-log events (`time/title/text/tags`)                                                                                                                                                                                             | Dashboard annotations             |
 
 See [Demo](#demo) below for a one-command runnable stack (synthetic Prometheus + Loki
 labeled to match NetBox + a rich dashboard).
@@ -178,7 +202,7 @@ labeled to match NetBox + a rich dashboard).
 > if the schema can't be read, the editor falls back to the discovered columns with all
 > operators available.
 
-> Filter rows stack with **AND**, but NetBox combines *repeated* parameters with **OR**, so
+> Filter rows stack with **AND**, but NetBox combines _repeated_ parameters with **OR**, so
 > two rows that resolve to the same NetBox parameter (two `name contains` rows, say) are
 > OR-ed instead, and the editor warns on both. Two cases are not flagged, because there the
 > stacked AND is already what NetBox does: `tag`/`tag_id` rows (NetBox requires every listed
@@ -277,7 +301,8 @@ plugin catalog and signed by Grafana (Cloud cannot load private/unsigned plugins
   it. If a refused or timed-out connection is reported without "through the secure socks
   proxy", the request was not routed through PDC: check that `enableSecureSocksProxy` is the
   JSON boolean `true`. An answer from NetBox itself, such as "Authentication failed" or an HTTP
-  status, means the route through PDC works. Nothing else in the plugin needs configuring: the
+  status, means the route through PDC works. In replica-cache mode the same messages name
+  replica-cache and its URL instead. Nothing else in the plugin needs configuring: the
   backend builds its HTTP client from the Grafana SDK, which applies the proxy.
 
 The backend ships binaries for `linux/amd64` and `linux/arm64` (Cloud) plus the full
@@ -325,6 +350,7 @@ in a `golang:1.26` container instead.
   `admin` / `admin`), and Grafana is at `http://localhost:3001`
   (anonymous admin, no login). The demo's pre-provisioned API token is
   `0123456789abcdef0123456789abcdef01234567`.
+
 - **Fast / bring-your-own-NetBox mode**: point the stack at your own NetBox instead of the
   bundled one (same script, so the plugin gets built too):
   ```bash

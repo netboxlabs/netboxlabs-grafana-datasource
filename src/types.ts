@@ -1,10 +1,13 @@
 import { DataSourceJsonData, SelectableValue } from '@grafana/data';
 import { DataQuery } from '@grafana/schema';
 
-/** Enrichment backend. Only 'netbox' exists today; the type and the `mode`
- * option are kept as the seam for a planned second, high-volume backend
- * (no UI selector until then). */
-export type ProviderMode = 'netbox';
+/** Which backend the datasource reads from.
+ *
+ * 'netbox' queries the NetBox REST API directly and is the default.
+ * 'replica-cache' reads a columnar mirror built for instances the REST API
+ * cannot serve interactively; it cannot do annotations, IP enrichment or
+ * topology, and says so rather than returning empty results. */
+export type ProviderMode = 'netbox' | 'replica-cache';
 
 /** A single field/operator/value constraint applied to a query. */
 export interface FilterRow {
@@ -98,11 +101,18 @@ export interface NetBoxVariableQuery extends DataQuery {
 }
 
 export interface NetBoxDataSourceOptions extends DataSourceJsonData {
+  /** Base URL of the service this datasource reads from: NetBox, or the
+   * replica-cache deployment when mode is 'replica-cache'. */
   url?: string;
   /** Browser-facing NetBox base URL, if different from url (e.g. Grafana
-   * reaches NetBox via internal service DNS). Used to rewrite deep links. */
+   * reaches NetBox via internal service DNS). Used to rewrite deep links; in
+   * replica-cache mode also the base they are built on when the replica
+   * reports no NetBox URL. */
   publicUrl?: string;
   mode?: ProviderMode;
+  /** Identifies the NetBox instance the cache mirrors, sent as NBC-Netbox-ID.
+   * Required when mode is 'replica-cache'. */
+  netboxId?: string;
   tlsSkipVerify?: boolean;
   timeoutSeconds?: number;
   /** Opt-in for very large NetBox instances: table queries page by ID and skip
@@ -112,6 +122,12 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
    * hundred thousand objects it buys nothing and the costs apply at every size.
    * Alerting is unaffected: count and alert-table queries never use it. */
   fastPagingNoTotals?: boolean;
+  /** replica-cache mode only. A Go duration such as 15m or 2h. When set, alert
+   * rules and expression-fed queries refuse a result older than this, or whose
+   * age the replica cannot report, instead of evaluating a stale inventory.
+   * Dashboards only show the age. Empty = never refuse on age (a replica still
+   * loading its initial snapshot is refused regardless). */
+  maxDataAge?: string;
   /** Route this datasource through Grafana's secure socks proxy: Private Data
    * Source Connect on Grafana Cloud, an admin-run SOCKS proxy when self-hosted.
    * The plugin SDK reads it when it builds the HTTP client and routes only for
@@ -125,6 +141,8 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
 
 /** Secret values — never returned to the frontend after being set. */
 export interface NetBoxSecureJsonData {
+  /** Credential for the service `url` names: a NetBox API token, or the
+   * replica-cache bearer token when mode is 'replica-cache'. */
   apiToken?: string;
   /** The proxy password. Grafana's PDC network selector writes it for a network
    * that has one; this editor never does. */
@@ -141,6 +159,9 @@ export interface ObjectTypeOption {
 export interface FieldOption {
   name: string;
   type: string;
+  /** replica-cache mode only: the backend can order a query by this column (a
+   * stored column or a related name). The Sort by picker offers these. */
+  sortable?: boolean;
 }
 
 /** A valid filter parameter for an object type and the operators NetBox supports on it. */
@@ -161,7 +182,7 @@ export const JOIN_KEY_TRANSFORMS: Array<{ label: string; value: string; descript
 ];
 
 /** Context fields for the IP enrichment query, grouped by source object.
- *  Mirrors IPEnrichColumns() in pkg/provider/netbox/ipenrich.go exactly — the
+ *  Mirrors IPEnrichColumns() in pkg/provider/ipenrich.go exactly — the
  *  picker is a closed vocabulary, so any name offered here that the backend
  *  cannot produce renders a permanently blank column. Keep the two in sync.
  *  `ip`, `match_count` and `is_primary_ip` are not namespaced: `ip` is the

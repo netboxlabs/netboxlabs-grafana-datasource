@@ -7,10 +7,21 @@ jest.mock('@grafana/runtime', () => ({
   getTemplateSrv: () => ({ replace: (s: string) => (s === '$branch' ? 'td5smq0f' : s) }),
 }));
 
+// @grafana/ui's Select menu (via ScrollIndicators) uses IntersectionObserver to
+// decide when to show scroll shadows; jsdom doesn't implement it, so opening a
+// Select's dropdown throws without this stub. Same reason as QueryEditor.test.
+class IntersectionObserverStub {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+(globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver = IntersectionObserverStub;
+
 const dsMock = {
   uid: 'ds-variable-editor',
   getObjectTypes: jest.fn().mockResolvedValue([]),
   getFields: jest.fn().mockResolvedValue([]),
+  getFilterFields: jest.fn().mockResolvedValue([]),
   getBranchingInstalled: jest.fn().mockResolvedValue(true),
 } as any;
 
@@ -42,6 +53,20 @@ it('disables the Branch field when branching is not installed', async () => {
   render(<VariableQueryEditor query={{ refId: 'A' } as any} onChange={jest.fn()} datasource={ds} />);
   const input = await screen.findByLabelText('Branch');
   await waitFor(() => expect(input).toBeDisabled());
+});
+
+// replica-cache mirrors the main dataset only: the mode decides, not the probe.
+it('disables the Branch field in replica-cache mode without asking the backend', async () => {
+  const ds = {
+    ...dsMock,
+    uid: 'ds-var-cache',
+    getBranchingInstalled: jest.fn().mockResolvedValue(true),
+    datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+  };
+  render(<VariableQueryEditor query={{ refId: 'A' } as any} onChange={jest.fn()} datasource={ds} />);
+  const input = await screen.findByLabelText('Branch');
+  expect(input).toBeDisabled();
+  expect(ds.getBranchingInstalled).not.toHaveBeenCalled();
 });
 
 it('warns when a variable filter row has a field but no value', async () => {
@@ -116,4 +141,53 @@ it('attributes a variable filter row message to that row only, not to every row'
 
   expect(within(row0).getByText(/isn't applied/i)).toBeInTheDocument();
   expect(within(row1).queryByText(/isn't applied/i)).not.toBeInTheDocument();
+});
+
+// A saved variable keeps its branch when its datasource is switched to a
+// backend that has none. The backend then rejects every refresh and says to
+// clear it — advice that needs the only control able to do so to be live. This
+// exception reached QueryEditor first and missed its sibling here.
+it('keeps the Branch field editable when the variable still carries one', async () => {
+  const ds = { ...dsMock, uid: 'ds-var-retained', getBranchingInstalled: jest.fn().mockResolvedValue(false) };
+  render(
+    <VariableQueryEditor query={{ refId: 'A', branch: 'schema_abc' } as any} onChange={jest.fn()} datasource={ds} />
+  );
+  const input = await screen.findByDisplayValue('schema_abc');
+  await waitFor(() => expect(input).not.toBeDisabled());
+});
+
+// The filter picker must offer FILTERABLE columns, not selectable ones. Fields
+// lists every column a row can show — site_slug, cf_*, the <field>_value
+// aliases — but a device has no `site_slug` filter (its `site` filter compares
+// the slug), and filtering on one fails or is ignored.
+it('offers the filterable columns in the filter picker, not the selectable-only ones', async () => {
+  const ds = {
+    ...dsMock,
+    uid: 'ds-var-filterfields',
+    // "site_slug" is a column a row shows, so it is selectable, but it is not a
+    // filter on a device: `site` is, and takes the slug.
+    getFields: jest.fn().mockResolvedValue([{ name: 'name' }, { name: 'site' }, { name: 'site_slug' }]),
+    getFilterFields: jest.fn().mockResolvedValue([
+      { name: 'name', operators: [''] },
+      { name: 'site', operators: ['', 'n'] },
+    ]),
+  } as any;
+  render(
+    <VariableQueryEditor
+      query={{ refId: 'A', objectType: 'dcim/devices', filters: [{ field: '', operator: '', value: '' }] } as any}
+      onChange={jest.fn()}
+      datasource={ds}
+    />
+  );
+  await waitFor(() => expect(ds.getFilterFields).toHaveBeenCalledWith('dcim/devices', undefined));
+
+  // The filter row's picker is the last combobox on the form, and its menu
+  // renders in a portal, so the options are asserted at screen level. Nothing
+  // else is open, so what appears is this picker's list.
+  const boxes = screen.getAllByRole('combobox');
+  fireEvent.keyDown(boxes[boxes.length - 1], { key: 'ArrowDown' });
+
+  await waitFor(() => expect(screen.queryAllByText('name').length).toBeGreaterThan(0));
+  expect(screen.queryAllByText('site').length).toBeGreaterThan(0);
+  expect(screen.queryAllByText('site_slug')).toHaveLength(0);
 });

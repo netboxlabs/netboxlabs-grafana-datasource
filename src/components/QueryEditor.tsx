@@ -20,10 +20,12 @@ import { DataSource } from '../datasource';
 import {
   useBranchingInstalled,
   BRANCH_FIELD_TOOLTIP,
-  BRANCH_FIELD_DISABLED_TOOLTIP,
+  branchUnavailableTooltip,
+  BRANCH_FIELD_RETAINED_TOOLTIP,
 } from '../hooks/useBranchingInstalled';
 import {
   EMPTY_FAMILY_OPERATORS,
+  FieldOption,
   FilterField,
   filterFieldOptionsFrom,
   filterOperatorsFor,
@@ -62,6 +64,16 @@ export const ORDERING_TOOLTIP = [
   'Ask NetBox to sort before the row limit applies, so a limited panel shows the first rows by this field',
   'rather than an arbitrary set. Only the fields NetBox is known to sort are offered.',
   'Not free at scale: on 6.8M devices this measured 2.3s to 27.6s depending on the field, against 0.9s unsorted.',
+].join(' ');
+
+/** Copy for the Sort by picker in replica-cache mode. ORDERING_TOOLTIP is
+ *  NetBox's — its allow-list, and a cost measured on a NetBox of 6.8M devices —
+ *  so neither claim is made here: the list is the replica's stored columns and
+ *  the related names it resolves, and a sort it cannot apply says so in a panel
+ *  note instead of failing. */
+export const ORDERING_CACHE_TOOLTIP = [
+  'Ask the replica to sort before the row limit applies, so a limited panel shows the first rows by this field',
+  'rather than an arbitrary set. Offered: its stored columns and the related names it resolves.',
 ].join(' ');
 
 /** Copy for the Sort by picker while it is disabled. Names the setting to
@@ -119,9 +131,19 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   const styles = useStyles2(getStyles);
   const queryType: QueryType = query.queryType ?? 'objects';
   const branchingInstalled = useBranchingInstalled(datasource);
-  const branchDisabled = branchingInstalled === false;
+  // Disabled when branching is unavailable — EXCEPT when the query already
+  // carries a branch. A saved query keeps its branch when its datasource is
+  // switched to a backend that has none, and the backend then refuses every
+  // execution and says to clear it. Disabling the only control that can do that
+  // left the reader with no way to follow the advice short of editing the query
+  // JSON or switching the datasource back.
+  const branchRetained = (query.branch ?? '') !== '';
+  const branchDisabled = branchingInstalled === false && !branchRetained;
   const [objectTypes, setObjectTypes] = useState<ObjectTypeOption[]>([]);
-  const [fields, setFields] = useState<string[]>([]);
+  // Kept as the backend described them, not reduced to names: in replica-cache
+  // mode the Sort by list is the ones it marks sortable.
+  const [fieldInfo, setFieldInfo] = useState<FieldOption[]>([]);
+  const fields = useMemo(() => fieldInfo.map((f) => f.name), [fieldInfo]);
   const [filterFields, setFilterFields] = useState<FilterField[]>([]);
   const [loadingTypes, setLoadingTypes] = useState(true);
 
@@ -157,8 +179,8 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   useEffect(() => {
     let active = true;
     const branch = query.branch ? getTemplateSrv().replace(query.branch) : undefined;
-    const p = fieldType ? datasource.getFields(fieldType, branch) : Promise.resolve<Array<{ name: string }>>([]);
-    p.then((f) => active && setFields(f.map((x) => x.name))).catch(() => active && setFields([]));
+    const p = fieldType ? datasource.getFields(fieldType, branch) : Promise.resolve<FieldOption[]>([]);
+    p.then((f) => active && setFieldInfo(f)).catch(() => active && setFieldInfo([]));
     return () => {
       active = false;
     };
@@ -186,21 +208,51 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   const filterFieldOptions = filterFieldOptionsFrom(filterFields, fieldOptions);
   const schemaMode = filterFields.length > 0;
 
-  // Sorting is a closed vocabulary, unlike every other picker on this form. The
-  // rest are built from the object type's schema; this one CANNOT be, because
-  // an unknown ordering field is not harmlessly ignored by NetBox — some raise a
-  // 500 that ends the query, and dcim/sites' `device_count` is a schema column
-  // that does exactly that once the `?fields=` projection is in play. So the
-  // options are the measured allow-list for THIS object type and nothing else,
-  // and a type with no entry gets no control rather than an empty dropdown.
-  const orderingOptions: Array<SelectableValue<string>> = useMemo(
-    () => orderingFieldsFor(query.objectType).map((f) => ({ label: f, value: f })),
-    [query.objectType]
-  );
+  const settings = datasource.datasourceInstanceSettings?.jsonData;
+  const cacheMode = settings?.mode === 'replica-cache';
+
   // Read back through the same helpers the writer uses, so a stored '-name'
   // (or a provisioned ' -name ') shows as its field plus a direction.
   const sortField = orderingField(query.ordering);
   const sortDescending = orderingIsDescending(query.ordering);
+
+  // Sorting is a closed vocabulary in NetBox mode, unlike every other picker on
+  // this form. The rest are built from the object type's schema; that one
+  // CANNOT be, because an unknown ordering field is not harmlessly ignored by
+  // NetBox — some raise a 500 that ends the query, and dcim/sites'
+  // `device_count` is a schema column that does exactly that once the
+  // `?fields=` projection is in play. So the options are the measured
+  // allow-list for THIS object type and nothing else, and a type with no entry
+  // gets no control rather than an empty dropdown.
+  //
+  // None of that reasoning is about replica-cache. There the sortable set is
+  // the STORED columns plus the related names the backend resolves server-side
+  // (site, site_slug…), and the backend says which entries of /fields those are
+  // (`sortable`) — so the options come from the schema like every other picker.
+  // It is not the filter list: NetBox's filters are not the columns sort= takes
+  // (`children` and `depth` are filters on `_children` and `_depth`, which the
+  // replica refuses by their filter names), and the stored columns NetBox has no
+  // filter for (`created`, `last_updated`…) sort fine. Nor is it all of /fields:
+  // the `<field>_value` aliases, custom fields and the link are built from rows
+  // and cannot be sorted on. A measured allow-list was wrong for it in both
+  // directions: dcim/racks and every plugin model have no entry and so got no
+  // sort control at all, while a dcim/devices entry could not know which related
+  // names THIS replica can resolve (a target that has received no data cannot be
+  // sorted on, and the backend leaves it out of the set).
+  //
+  // A sort already stored is kept in the list even when the schema has not
+  // arrived yet, or no longer has that column, so the control does not vanish
+  // from under a saved panel.
+  const orderingOptions: Array<SelectableValue<string>> = useMemo(() => {
+    const names = cacheMode
+      ? fieldInfo.filter((f) => f.sortable).map((f) => f.name)
+      : orderingFieldsFor(query.objectType);
+    if (cacheMode && sortField && !names.includes(sortField)) {
+      names.push(sortField);
+      names.sort();
+    }
+    return names.map((f) => ({ label: f, value: f }));
+  }, [cacheMode, fieldInfo, query.objectType, sortField]);
   // Fast paging walks by cursor, and NetBox refuses ?ordering= together with
   // ?start= ("Ordering cannot be specified in conjunction with cursor
   // pagination"), so a sort cannot reach a query that takes that walk.
@@ -208,7 +260,14 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
   // the data source, so a panel author has no other way to learn why sorting is
   // unavailable here. Optional chaining because a saved query is edited by
   // whatever object Grafana hands us.
-  const fastPaging = datasource.datasourceInstanceSettings?.jsonData?.fastPagingNoTotals === true;
+  //
+  // Mode is part of the condition. Fast paging is NetBox's cursor walk; the
+  // replica-cache backend ignores FastPagingNoTotals entirely and honours its
+  // own sort parameter, so reading the flag alone took a working control away
+  // from it — and the value survives a mode switch, so a datasource that had
+  // fast paging on before being pointed at the cache arrived with sorting
+  // disabled for a limit that does not apply.
+  const fastPaging = !cacheMode && settings?.fastPagingNoTotals === true;
   // The setting alone is not the condition — the cursor walk is, and an
   // alert-table query never takes it. pkg/plugin/query.go's alertTable branch
   // leaves AllowUncounted false (only the plain objects branch sets it, and only
@@ -265,7 +324,13 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
         label="Branch"
         labelWidth={20}
         disabled={branchDisabled}
-        tooltip={branchDisabled ? BRANCH_FIELD_DISABLED_TOOLTIP : BRANCH_FIELD_TOOLTIP}
+        tooltip={
+          branchDisabled
+            ? branchUnavailableTooltip(datasource)
+            : branchingInstalled === false
+              ? BRANCH_FIELD_RETAINED_TOOLTIP
+              : BRANCH_FIELD_TOOLTIP
+        }
       >
         <Input
           id="query-branch"
@@ -516,7 +581,9 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             label="Sort by"
             labelWidth={20}
             disabled={orderingDisabled}
-            tooltip={orderingDisabled ? ORDERING_DISABLED_TOOLTIP : ORDERING_TOOLTIP}
+            tooltip={
+              orderingDisabled ? ORDERING_DISABLED_TOOLTIP : cacheMode ? ORDERING_CACHE_TOOLTIP : ORDERING_TOOLTIP
+            }
           >
             <Select
               inputId="query-ordering"

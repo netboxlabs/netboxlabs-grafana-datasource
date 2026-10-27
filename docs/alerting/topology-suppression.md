@@ -118,6 +118,12 @@ reads as "no working path" and silences a page. An alert query whose links are
 incomplete fails rather than returning them; a dashboard renders them with a
 warning.
 
+**In replica-cache mode** the edges are built from the replica's cable tables
+and are the ones NetBox mode returns for the same data (see
+[Topology](../REPLICA-CACHE.md#topology)). There a rule is also refused while the
+replica is still loading its initial snapshot, and, when the data source sets
+**Max data age**, when the tables the edges were read from are older than that.
+
 **An upstream missing from the metric prevents suppression.** It contributes a
 NULL, which is not counted as down, so `SUM(...) = COUNT(*)` fails. A device
 whose neighbour you do not monitor keeps alerting — the safe direction.

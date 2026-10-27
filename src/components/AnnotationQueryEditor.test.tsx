@@ -21,3 +21,17 @@ it('disables the Branch field when branching is not installed', async () => {
   const input = await screen.findByLabelText('Branch');
   await waitFor(() => expect(input).toBeDisabled());
 });
+
+// replica-cache mirrors the main dataset only: the mode decides, not the probe.
+it('disables the Branch field in replica-cache mode without asking the backend', async () => {
+  const ds = {
+    ...dsMock,
+    uid: 'ds-anno-cache',
+    getBranchingInstalled: jest.fn().mockResolvedValue(true),
+    datasourceInstanceSettings: { jsonData: { mode: 'replica-cache' } },
+  };
+  render(<AnnotationQueryEditor query={{ refId: 'A' } as any} onChange={jest.fn()} datasource={ds} />);
+  const input = await screen.findByLabelText('Branch');
+  expect(input).toBeDisabled();
+  expect(ds.getBranchingInstalled).not.toHaveBeenCalled();
+});

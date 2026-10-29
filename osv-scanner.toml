@@ -25,3 +25,15 @@ reason = "react-router 6.x pinned transitively by @grafana/ui (13.1.3 here, 13.2
 id = "GHSA-wrjc-x8rr-h8h6"
 ignoreUntil = 2026-11-02
 reason = "react-router 6.x pinned transitively by @grafana/ui (13.1.3 here, 13.2.3 latest); fix is v7-only (incompatible). Externalized at runtime, not shipped. Re-review when @grafana/ui updates."
+
+# deepmerge <= 4.3.1: mergeObject() lets a source object set properties on the
+# returned object's prototype (GHSA-gcqx-w48m-w2h4, rated low by GitHub). No
+# fixed release exists; 4.3.1 (2023-03-16) is the latest. It is a development
+# dependency only, through fork-ts-checker-webpack-plugin and jest-config, which
+# merge their own options and the repo's jest config, not outside input, and it
+# is not in the shipped plugin. ignoreUntil is a re-review date: drop this entry
+# when deepmerge ships a fix or neither tool uses it.
+[[IgnoredVulns]]
+id = "GHSA-gcqx-w48m-w2h4"
+ignoreUntil = 2026-11-30
+reason = "deepmerge 4.3.1 is the latest release and has no fix; dev-only via fork-ts-checker-webpack-plugin and jest-config merging their own config, not shipped. Re-review 2026-11-30."

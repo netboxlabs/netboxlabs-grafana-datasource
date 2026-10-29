@@ -26,57 +26,14 @@ id = "GHSA-wrjc-x8rr-h8h6"
 ignoreUntil = 2026-11-02
 reason = "react-router 6.x pinned transitively by @grafana/ui (13.1.3 here, 13.2.3 latest); fix is v7-only (incompatible). Externalized at runtime, not shipped. Re-review when @grafana/ui updates."
 
-# braces <= 3.0.3: stack-exhaustion DoS through deeply nested brace patterns.
-# There is no patched version: 3.0.3 is the latest release of braces, and the
-# advisory lists no fix. It is a development dependency only
-# (eslint-webpack-plugin -> micromatch -> braces), which expands the lint
-# plugin's own file globs at build time; it is not in the shipped plugin and
-# never sees user input. Re-review when braces or micromatch ships a fix.
+# deepmerge <= 4.3.1: mergeObject() lets a source object set properties on the
+# returned object's prototype (GHSA-gcqx-w48m-w2h4, rated low by GitHub). No
+# fixed release exists; 4.3.1 (2023-03-16) is the latest. It is a development
+# dependency only, through fork-ts-checker-webpack-plugin and jest-config, which
+# merge their own options and the repo's jest config, not outside input, and it
+# is not in the shipped plugin. ignoreUntil is a re-review date: drop this entry
+# when deepmerge ships a fix or neither tool uses it.
 [[IgnoredVulns]]
-id = "GHSA-vfj7-8cjw-p6xm"
-ignoreUntil = 2026-11-02
-reason = "braces <= 3.0.3 has no patched release; dev-only via eslint-webpack-plugin -> micromatch, build-time globs from this repo, not shipped. Re-review when a fix ships."
-
-# sprintf-js <= 1.1.3: an unbounded precision specifier in a format string
-# throws a RangeError. There is no patched version: 1.1.3 is the latest release,
-# and the advisory lists every version as affected. It is a development
-# dependency only (jest -> babel-plugin-istanbul -> @istanbuljs/load-nyc-config
-# -> js-yaml@3 -> argparse@1 -> sprintf-js), used to format argparse's own
-# messages while jest reads its coverage configuration; no format string comes
-# from input, and it is not in the shipped plugin. Re-review when sprintf-js or
-# argparse ships a fix.
-[[IgnoredVulns]]
-id = "GHSA-hp3w-g68c-fv3c"
-ignoreUntil = 2026-11-06
-reason = "sprintf-js <= 1.1.3 has no patched release; dev-only via jest coverage config (js-yaml@3 -> argparse@1), format strings are argparse's own, not shipped. Re-review when a fix ships."
-
-# DOMPurify < 3.4.17: three advisories published 2026-10-22 (the href guard
-# skipped under application/xhtml+xml, a SAFE_FOR_TEMPLATES bypass in attached
-# shadow roots, an IN_PLACE hook leaving a detached subtree's handlers armed).
-# The fix, 3.4.17, was published the same day, inside .npmrc's
-# min-release-age=7 cooldown, so the dompurify override cannot move to it before
-# 2026-10-29. DOMPurify comes in through @grafana/data, which Grafana provides
-# at runtime: the shipped module.js contains none of it. On 2026-10-29, pin
-# 3.4.17 in package.json's overrides and drop these three entries.
-[[IgnoredVulns]]
-id = "GHSA-c6gr-qvv4-5v3f"
-ignoreUntil = 2026-10-29
-reason = "dompurify 3.4.17 (the fix) was published 2026-10-22, inside .npmrc min-release-age=7; via @grafana/data, externalized at runtime, not in module.js. Pin 3.4.17 in overrides on 2026-10-29."
-[[IgnoredVulns]]
-id = "GHSA-cg2g-xh64-v4q7"
-ignoreUntil = 2026-10-29
-reason = "dompurify 3.4.17 (the fix) was published 2026-10-22, inside .npmrc min-release-age=7; via @grafana/data, externalized at runtime, not in module.js. Pin 3.4.17 in overrides on 2026-10-29."
-[[IgnoredVulns]]
-id = "GHSA-mrv2-3pqr-j5jr"
-ignoreUntil = 2026-10-29
-reason = "dompurify 3.4.17 (the fix) was published 2026-10-22, inside .npmrc min-release-age=7; via @grafana/data, externalized at runtime, not in module.js. Pin 3.4.17 in overrides on 2026-10-29."
-
-# ip-address < 10.7.4: Address6 matches a zone identifier in quadratic time
-# before its length limit (published 2026-10-22; fixed the same day in 10.7.4,
-# inside the cooldown). It is a development dependency only (proxy-agent ->
-# socks-proxy-agent -> socks -> ip-address) and is not in the shipped plugin. On
-# 2026-10-29, pin 10.7.4 in package.json's overrides and drop this entry.
-[[IgnoredVulns]]
-id = "GHSA-rxp7-6hxx-x8q5"
-ignoreUntil = 2026-10-29
-reason = "ip-address 10.7.4 (the fix) was published 2026-10-22, inside .npmrc min-release-age=7; dev-only via proxy-agent -> socks, not shipped. Pin 10.7.4 in overrides on 2026-10-29."
+id = "GHSA-gcqx-w48m-w2h4"
+ignoreUntil = 2026-11-30
+reason = "deepmerge 4.3.1 is the latest release and has no fix; dev-only via fork-ts-checker-webpack-plugin and jest-config merging their own config, not shipped. Re-review 2026-11-30."

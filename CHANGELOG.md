@@ -28,7 +28,8 @@
   of 2026-10-08 and 2026-10-21 (GO-2026-6599, 6600, 6603, 6605,
   6607, 6608, 6610–6613, 6617, 6809).
 - **npm dependencies updated for new advisories**: zod, dompurify, fast-uri,
-  ip-address and qs. None is in the shipped plugin, which does not change.
+  ip-address, qs and serialize-javascript. None is in the shipped plugin, which
+  does not change.
 
 ## 1.0.3 (2026-10-06)
 

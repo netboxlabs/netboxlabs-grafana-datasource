@@ -21,11 +21,11 @@
   are refused, except http to https on the same host.
 - **Branch caches stay bounded.** Without netbox-branching, a new branch value no
   longer adds a cache entry and downloads the OpenAPI schema again.
+- **Built against Grafana 13.3's packages and React 19.** The shipped plugin is
+  unchanged and still runs on Grafana 12.3 and later.
 - **Recording-rule recipe fixed.** Alerts built on the recipe in
   `docs/alerting/rule-time-join.md` no longer go into error for minutes after a
   device's site, role or tenant changes, and the recipe states its limits.
-- **Built against Grafana 13.3's packages and React 19.** The shipped plugin is
-  unchanged and still runs on Grafana 12.3 and later.
 - **Go 1.26.10 and `golang.org/x/net` 0.60.0**, for the Go security advisories
   of 2026-10-08 and 2026-10-21 (GO-2026-6599, 6600, 6603, 6605,
   6607, 6608, 6610–6613, 6617, 6809).

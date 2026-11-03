@@ -108,12 +108,12 @@ it('attributes a variable filter row message to that row only, not to every row'
   await screen.findByText(/isn't applied/i);
   // Anchor on each row's selected field label (there's no per-index aria-label
   // on this editor's field Select, unlike QueryEditor's `filter-field-{i}`).
-  const row0Anchor = await screen.findByText('site');
-  const row1Anchor = await screen.findByText('tenant');
-
-  const row0 = rowContainerOf(container, row0Anchor);
-  const row1 = rowContainerOf(container, row1Anchor);
-
-  expect(within(row0).getByText(/isn't applied/i)).toBeInTheDocument();
-  expect(within(row1).queryByText(/isn't applied/i)).not.toBeInTheDocument();
+  // Look the anchors up inside waitFor: the Select re-renders its value node
+  // once the options load, so an anchor captured earlier can be detached.
+  await waitFor(() => {
+    const row0 = rowContainerOf(container, screen.getByText('site'));
+    const row1 = rowContainerOf(container, screen.getByText('tenant'));
+    expect(within(row0).getByText(/isn't applied/i)).toBeInTheDocument();
+    expect(within(row1).queryByText(/isn't applied/i)).not.toBeInTheDocument();
+  });
 });

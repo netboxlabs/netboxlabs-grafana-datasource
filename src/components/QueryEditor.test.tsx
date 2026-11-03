@@ -175,7 +175,9 @@ describe('QueryEditor — schema filters', () => {
       filters: [{ field: 'prefix', operator: '', value: '' }],
     });
     await waitFor(() => expect(datasource.getFilterFields).toHaveBeenCalledWith('ipam/prefixes', undefined));
-    expect(await screen.findByText('prefix')).toBeInTheDocument();
+    // Query inside waitFor: the Select re-renders its value node once the
+    // options load, so a node returned by findByText can already be detached.
+    await waitFor(() => expect(screen.getByText('prefix')).toBeInTheDocument());
   });
 });
 
@@ -641,14 +643,16 @@ describe('QueryEditor — Sort by (NetBox-side ordering)', () => {
 // same controls; only the output differs. Gating them on `queryType ===
 // 'topology'` alone would leave the new type with no way to scope its device
 // set — an unfiltered fleet-wide query on an alert path.
+// These tests await their first find* so the editor's mount effects
+// (getObjectTypes, getFields, the branching probe) settle inside act().
 describe('QueryEditor — Topology edges', () => {
-  it('offers the traversal controls, as the node-graph topology query does', () => {
+  it('offers the traversal controls, as the node-graph topology query does', async () => {
     setup({ queryType: 'topology-edges', objectType: undefined });
-    expect(screen.getByText(/Connections/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Connections/i)).toBeInTheDocument();
     expect(screen.getByText(/Connected only/i)).toBeInTheDocument();
   });
 
-  it('labels its filters as device filters and can scope the device set', () => {
+  it('labels its filters as device filters and can scope the device set', async () => {
     setup({
       queryType: 'topology-edges',
       objectType: undefined,
@@ -656,7 +660,7 @@ describe('QueryEditor — Topology edges', () => {
     });
     // "Device filter" rather than plain "Filter": the rows scope the devices the
     // traversal starts from, not an object query.
-    expect(screen.getByText(/Device filter/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Device filter/i)).toBeInTheDocument();
   });
 });
 
@@ -664,15 +668,15 @@ describe('QueryEditor — Topology edges', () => {
 // user to reach for the Node Graph visualisation would send them to one that
 // cannot render it.
 describe('QueryEditor — Topology edges guidance', () => {
-  it('points at a table and the alert recipe, not the node graph', () => {
+  it('points at a table and the alert recipe, not the node graph', async () => {
     setup({ queryType: 'topology-edges', objectType: undefined });
-    expect(screen.getByText(/Table visualization/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Table visualization/i)).toBeInTheDocument();
     expect(screen.queryByText(/Node\s*Graph visualization/i)).not.toBeInTheDocument();
   });
 
-  it('still points the node-graph query at the node graph', () => {
+  it('still points the node-graph query at the node graph', async () => {
     setup({ queryType: 'topology', objectType: undefined });
-    expect(screen.getByText(/Node\s*Graph visualization/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Node\s*Graph visualization/i)).toBeInTheDocument();
   });
 });
 
@@ -680,9 +684,9 @@ describe('QueryEditor — topology hint styling', () => {
   it.each([
     ['topology', /Node\s*Graph visualization/i],
     ['topology-edges', /Table visualization/i],
-  ])('styles the %s hint from the theme, with no inline style', (queryType, text) => {
+  ])('styles the %s hint from the theme, with no inline style', async (queryType, text) => {
     setup({ queryType, objectType: undefined });
-    const hint = screen.getByText(text);
+    const hint = await screen.findByText(text);
     expect(hint).not.toHaveAttribute('style');
     expect(hint.className).toMatch(/\bcss-/);
     // The values themselves come from the theme: a class carrying hard-coded

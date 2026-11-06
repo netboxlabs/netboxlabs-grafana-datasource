@@ -26,12 +26,13 @@
 - **Recording-rule recipe fixed.** Alerts built on the recipe in
   `docs/alerting/rule-time-join.md` no longer go into error for minutes after a
   device's site, role or tenant changes, and the recipe states its limits.
-- **Go 1.26.10 and `golang.org/x/net` 0.62.0**, for the Go security advisories
-  of 2026-10-08, 2026-10-21 and 2026-10-27 (GO-2026-6599, 6600, 6603, 6605,
-  6607, 6608, 6610–6613, 6617, 6809, 6860, 6866).
+- **Go 1.26.10, `golang.org/x/net` 0.62.0 and `klauspost/compress` 1.20.2**,
+  for the Go security advisories of 2026-10-08, 2026-10-21, 2026-10-27 and
+  2026-11-05 (GO-2026-6599, 6600, 6603, 6605, 6607, 6608, 6610–6613, 6617,
+  6809, 6860, 6865, 6866).
 - **npm dependencies updated for new advisories**: zod, dompurify, fast-uri,
-  ip-address, qs and serialize-javascript. None is in the shipped plugin, which
-  does not change.
+  glob, ip-address, minimatch, qs and serialize-javascript. None is in the
+  shipped frontend, which does not change.
 
 ## 1.0.3 (2026-10-06)
 

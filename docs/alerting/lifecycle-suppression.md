@@ -14,14 +14,14 @@ of alert.
 NetBox gives a device one of seven statuses: `active`, `offline`, `planned`,
 `staged`, `failed`, `inventory`, `decommissioning`. This recipe suppresses
 **`decommissioning`, `planned`, `staged` and `inventory`** by default: the
-device is not in service *by declaration*, so a metric from it is not an
+device is not in service _by declaration_, so a metric from it is not an
 incident. It keeps alerting on `active`, `failed` and — the one to think
 about — `offline`.
 
-`offline` in NetBox means *administratively* out of service, and it is a
+`offline` in NetBox means _administratively_ out of service, and it is a
 judgement whether a device that is declared dark yet still reachable is
 something to page for. The demo stack's own seed takes one side of it:
-`AMS1-leaf-01` is `offline` in NetBox *and* down in Prometheus, so with the
+`AMS1-leaf-01` is `offline` in NetBox _and_ down in Prometheus, so with the
 default set it keeps firing. If in your estate `offline` means "expected to be
 dark", add it to the set. Either way, write the set down next to the rule; it
 is the policy, and nothing in NetBox declares it for you.
@@ -36,8 +36,10 @@ devices, `status not offline` matches 14 — and it applies the same way to a
 count-only query and to an alert table. A rule that already filters on a
 status (`status = offline`) does not need it: a device has one status. A rule
 on anything else does. On the demo, `has_primary_ip = false` matches 3
-devices; add the row and a device that lost its IP *because* it is being
-retired stops counting.
+devices; add the row and a device that lost its IP _because_ it is being
+retired stops counting. (In replica-cache mode the `status` row works and
+`has_primary_ip` does not: NetBox computes that filter with a query of its own,
+which the replica cannot run.)
 
 ## Metric alerts
 
@@ -64,11 +66,11 @@ The shorter way to write this is a `WHERE B.status_value NOT IN (…)`. Measured
 against the recipe form, toggling `AMS1-leaf-01` and then hiding it from
 query **B** to stand in for a device NetBox has no record of:
 
-| | `CASE` form above | `WHERE B.status_value NOT IN (…)` |
-|---|---|---|
-| set to `decommissioning` | instance stays, value 0, `netbox_status=decommissioning` | row dropped, instance gone |
-| set back | fires again | fires again |
-| absent from NetBox | fires, `netbox_status=unknown` | row dropped — **silently unmonitored** |
+|                          | `CASE` form above                                        | `WHERE B.status_value NOT IN (…)`      |
+| ------------------------ | -------------------------------------------------------- | -------------------------------------- |
+| set to `decommissioning` | instance stays, value 0, `netbox_status=decommissioning` | row dropped, instance gone             |
+| set back                 | fires again                                              | fires again                            |
+| absent from NetBox       | fires, `netbox_status=unknown`                           | row dropped — **silently unmonitored** |
 
 The last row is the whole reason. A device with no NetBox match has `NULL`
 for `status_value`, `NULL NOT IN (…)` is `NULL`, and `WHERE` drops the row
@@ -91,13 +93,13 @@ and in the rule-time join's [fallback note](rule-time-join.md). If you would rat
 `B.status_value` either way.
 
 This is a rule-time join, so it emits a row per device with the `CASE` as a
-0/1 value — the row is always present and the condition is *evaluated*, not
+0/1 value — the row is always present and the condition is _evaluated_, not
 filtered away — so **keep-firing** is the hold for ordinary recovery, not the
 missing-series setting the alert-table variant needs (see ["Pending period and
 flap damping"](../ALERTING.md#pending-period-and-flap-damping)). Dropping
 `netbox_status` leaves only that: a stable `device` row whose value flips 1→0,
 held by keep-firing. Keeping `netbox_status` adds one more edge — a status
-change ends the old label set's row, so *that* identity resolves by
+change ends the old label set's row, so _that_ identity resolves by
 missing-series while the new one is evaluated fresh: Pending if the device is
 still firing under its new status, Normal if the new status suppresses it (the
 `offline` → `decommissioning` case above). So set keep-firing when you drop the

@@ -27,8 +27,8 @@ One custom field, applied to two object types:
 
 - **Name** `alert_threshold`, **Type: Integer** — not Text, for reasons
   measured below
-- **Object types**: *DCIM → device role* (the default for every device of
-  that role) and *DCIM → device* (an override for one device)
+- **Object types**: _DCIM → device role_ (the default for every device of
+  that role) and _DCIM → device_ (an override for one device)
 
 Set it on the roles that need a non-default value and leave the rest empty.
 The rule supplies the default for anything unset.
@@ -115,7 +115,7 @@ around it.
 frame builder otherwise types a column by scanning its values, and a custom
 field set on no row has nothing to scan — it would fall back to a string
 column, and since strings are non-nullable (the rule-time join's [`NULLIF` note](rule-time-join.md)), a
-string column of `''`. The field's *definition* knows the type on both days,
+string column of `''`. The field's _definition_ knows the type on both days,
 so the data source reads `/api/extras/custom-fields/` and declares an
 Integer or Decimal field as a number and a Boolean field as a boolean. An
 unpopulated Integer field therefore arrives as a **numeric column of
@@ -129,9 +129,12 @@ to the object types alone gets the objects and not the definitions, and the
 column falls back to value inference. Then the type follows the contents:
 
 | Rows with a value | Column type | Unset cells |
-|---|---|---|
-| none | string | `''` |
-| one or more | number | `NULL` |
+| ----------------- | ----------- | ----------- |
+| none              | string      | `''`        |
+| one or more       | number      | `NULL`      |
+
+A data source in replica-cache mode always falls back to value inference: the
+replica holds no custom-field definitions to read.
 
 In that first state `COALESCE(D.cf_alert_threshold, 95)` returns `''`, not
 95, because `''` is not `NULL`; the comparison coerces `''` to **0**; and every

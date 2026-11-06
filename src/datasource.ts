@@ -131,7 +131,7 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
       branch?: string;
     },
     options?: Partial<BackendSrvRequest>
-  ): Promise<{ columns: string[]; rows: Array<Record<string, unknown>> }> {
+  ): Promise<{ columns: string[]; rows: Array<Record<string, unknown>>; warnings?: string[]; total?: number }> {
     return this.postResource('query', body, options);
   }
 
@@ -158,7 +158,17 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
     const isBranches = query.objectType === 'plugins/branching/branches';
     const out: MetricFindValue[] = isBranches ? [{ text: 'main', value: 'main' }] : [];
 
-    let res: { columns: string[]; rows: Array<Record<string, unknown>> };
+    // In replica-cache mode the list stops at "main", and does NOT depend on
+    // the endpoint being absent. The cache mirrors the main dataset only and
+    // refuses a branch-scoped query outright — so if it happens to replicate
+    // the branches table (its discovery accepts plugin paths), every schema it
+    // listed would be an option that breaks every panel selecting it. Offering
+    // only the one that works is the honest list, not a degraded one.
+    if (isBranches && this.datasourceInstanceSettings?.jsonData?.mode === 'replica-cache') {
+      return out;
+    }
+
+    let res: { columns: string[]; rows: Array<Record<string, unknown>>; warnings?: string[]; total?: number };
     try {
       // For the branch probe, suppress Grafana's default error toast: on a NetBox
       // without netbox-branching the branches endpoint 404s, which is expected and
@@ -171,18 +181,59 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
         isBranches ? { showErrorAlert: false } : undefined
       );
     } catch (err) {
-      // Degrade the branch variable to a "main"-only list ONLY when branching
-      // isn't installed (the branches endpoint 404s, surfaced by the backend as
-      // a "not found" message). Any other failure (auth, 5xx, network) is
-      // rethrown so the outage/misconfig surfaces instead of being hidden behind
-      // main. If the message can't be matched, we rethrow — the safe default.
-      const detail = String(
-        (err as { data?: { error?: string }; message?: string })?.data?.error ?? (err as Error)?.message ?? ''
-      );
-      if (isBranches && /not found|404/i.test(detail)) {
+      // Degrade the branch variable to a "main"-only list ONLY when the branches
+      // endpoint isn't there. Any other failure (auth, 5xx, network) is rethrown
+      // so the outage/misconfig surfaces instead of being hidden behind main.
+      //
+      // The backend now sends its classification alongside the message, which is
+      // what this reads first. Matching the prose was a contract nobody
+      // declared: the same condition reads "not found" from NetBox and "Replica
+      // cache has no object type ..." from the cache, so the fallback stopped
+      // working the moment a second provider existed — a dashboard with a branch
+      // variable threw on refresh instead of degrading. The regex stays as a
+      // fallback for a backend that sends no kind.
+      const data = (err as { data?: { error?: string; kind?: string } })?.data;
+      const kind = data?.kind ?? '';
+      const detail = String(data?.error ?? (err as Error)?.message ?? '');
+      const missing = kind === 'not-found' || kind === 'unknown-object-type' || /not found|404/i.test(detail);
+      if (isBranches && missing) {
         return out;
       }
       throw err;
+    }
+
+    // A degraded result is not a shorter list, it is a DIFFERENT one. The
+    // backend already says so — Result.Warnings is in this response body — and
+    // ignoring it here meant a lookup that could not read some of its site
+    // names produced a variable missing those options, which then silently
+    // rescoped every panel that depends on it. There is no warning surface on a
+    // Grafana variable, so the honest rendering is the error: a visible one on
+    // the variable beats an invisible filter on the whole dashboard.
+    if (res.warnings?.length) {
+      throw new Error(
+        `NetBox returned an incomplete list for this variable, so some options would be missing: ${res.warnings.join(' ')}`
+      );
+    }
+
+    // Rows that do not cover the match count mean we did not read every object,
+    // and therefore cannot claim to have seen every distinct value. Measured on
+    // a 6.8M-device instance: a `site` variable over devices reads the first
+    // 1,000 devices and finds ONE distinct site, out of 4,030 that exist —
+    // every panel scoped by it would then show a single site while looking like
+    // the whole estate. Total counts matching objects rather than options, so
+    // it cannot say the list IS short; it can only say we are not entitled to
+    // call it complete, which is the part that matters.
+    //
+    // The message says what to do, because the fix is usually to ask the object
+    // type that owns the field instead of deriving it from a larger one.
+    const total = res.total ?? 0;
+    const rows = res.rows ?? [];
+    if (total > rows.length) {
+      throw new Error(
+        `This variable read ${rows.length.toLocaleString()} of ${total.toLocaleString()} matching ${
+          query.objectType
+        }, so its options may be missing values. Query the object type that owns this field directly, or add filters to bring the match count under the limit.`
+      );
     }
 
     const seen = new Set<string>(isBranches ? ['main'] : []);

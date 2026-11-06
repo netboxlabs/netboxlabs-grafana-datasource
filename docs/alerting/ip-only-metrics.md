@@ -21,7 +21,10 @@ SQL expression, which is the condition.
 - **IPS** — NetBox **IP enrichment**, Source **NetBox scope**, filter
   `parent = 10.0.0.0/8` (or `vrf_id`, `tenant`… — any `ipam/ip-addresses`
   filter; note there is no `site` filter on addresses), context fields `ip, device_name, vm_name, interface_name,
-is_primary_ip`, Limit above the number of addresses in the scope
+is_primary_ip`, Limit above the number of addresses in the scope. A data
+  source in replica-cache mode refuses `parent` (and `mask_length`, `family`):
+  the replica has no address-within-prefix filter, so scope by `vrf_id` or
+  `tenant` there
 - **J** — Expression → **SQL**, Format **Alerting**:
 
   ```sql
@@ -37,6 +40,14 @@ is_primary_ip`, Limit above the number of addresses in the scope
   the "unknown talker" alert. Invert the `WHERE` (`IPS.ip IS NOT NULL AND
 IPS.is_primary_ip = false`, say) for "traffic from a non-management address of
   a managed device".
+
+**In replica-cache mode** the scope table is built from the replica's tables and
+is the one NetBox mode returns for the same data (see
+[IP enrichment](../REPLICA-CACHE.md#ip-enrichment)). There a rule is also
+refused while the replica is still loading its initial snapshot, when an
+address's owner type cannot be learned from the replica's rows, and, when the
+data source sets **Max data age**, when the tables it was read from are older
+than that.
 
 ## Things that will catch you out
 
@@ -63,12 +74,12 @@ in the scope, so it would alert on an incomplete result. Raise the row limit
 - **Cost is per evaluation.** The scope is listed and enriched on every
   evaluation. Select only the context columns the rule uses: the device hop runs
   only when a `device_*` column or `is_primary_ip` is selected, and
-  `is_primary_ip` also costs the VM hop. `vm_name` is free — it rides on the
-  address record.
+  `is_primary_ip` also costs the VM hop. `vm_name` is free in NetBox mode — it
+  rides on the address record — and costs the VM reads in replica-cache mode.
 - **No `prefix_*` columns here.** The containing-prefix lookup is the fallback
   for an IP with no address record, and every row of a scope has one, so the
   editor does not offer the Prefix group on a scope query. Filter the scope by
-  `parent` instead: the prefix is then the scope itself.
+  `parent` instead (NetBox mode): the prefix is then the scope itself.
 - The SQL expression must itself be the condition, its Format must be
   **Alerting**, and the dialect is MySQL-flavoured — see [NetBox context on
   metric alerts](rule-time-join.md) for the full list.

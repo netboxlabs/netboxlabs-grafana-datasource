@@ -405,3 +405,31 @@ func TestTruncationMessageQuotesTheFetchedCount(t *testing.T) {
 		t.Errorf("want the fetched count in the message, got: %s", msg)
 	}
 }
+
+// A graph's notes (a replica's "Data as of …") reach the dashboard as info
+// notices on both shapes; NetBox mode writes none, so its frames are as they
+// were.
+func TestTopology_NotesBecomeFrameNotices(t *testing.T) {
+	note := "Data as of 2026-10-23 15:00:00 UTC (replica-cache)."
+	for _, queryType := range []string{"topology", "topology-edges"} {
+		g := fabric()
+		g.Total, g.Fetched, g.Notes = len(g.Nodes), len(g.Nodes), []string{note}
+		d := newTestDatasource(&fakeProvider{graph: g})
+		resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"` + queryType + `","limit":100}`)}, consumerDashboard)
+		if resp.Error != nil {
+			t.Fatalf("%s: %v", queryType, resp.Error)
+		}
+		f := resp.Frames[0]
+		if f.Meta == nil || len(f.Meta.Notices) != 1 || f.Meta.Notices[0].Text != note || f.Meta.Notices[0].Severity != data.NoticeSeverityInfo {
+			t.Errorf("%s: first frame's notices %+v, want the note as info", queryType, f.Meta)
+		}
+	}
+	g := fabric()
+	d := newTestDatasource(&fakeProvider{graph: g})
+	resp := d.query(context.Background(), backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"topology","limit":100}`)}, consumerDashboard)
+	for _, f := range resp.Frames {
+		if f.Meta != nil && len(f.Meta.Notices) != 0 {
+			t.Errorf("a graph without notes gained notices: %+v", f.Meta.Notices)
+		}
+	}
+}

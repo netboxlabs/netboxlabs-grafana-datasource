@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -146,20 +145,6 @@ func (b queryBatcher) fixedBytes() int {
 	return len(b.fixed.Encode()) + 1
 }
 
-// hostOf strips a CIDR mask so a bare input IP ("10.0.0.5") indexes against a
-// stored record ("10.0.0.5/24"). Verified live: NetBox's ?address= filter
-// matches on the host portion, so bare input is the normal case.
-//
-// It is a pure string operation and therefore NOT sufficient on its own — see
-// canonicalIP, which is what both the request and the index actually use.
-func hostOf(addr string) string {
-	addr = strings.TrimSpace(addr)
-	if i := strings.LastIndex(addr, "/"); i >= 0 {
-		return addr[:i]
-	}
-	return addr
-}
-
 // canonicalIP reduces an address to the ONE spelling that both NetBox's
 // ?address= filter and this package's by-host index agree on: the mask is
 // dropped and the host is re-rendered by netip, so every legal spelling of the
@@ -191,8 +176,9 @@ func hostOf(addr string) string {
 // IPv4 and already-canonical input are unchanged: netip renders them back exactly
 // as given. Unmap folds an IPv4-mapped IPv6 literal ("::ffff:10.20.0.1") onto the
 // IPv4 address it denotes, which is the same record in NetBox; on anything else it
-// is a no-op. Unparseable input (a hostname, a typo, an empty string) falls back
-// to the bare hostOf slice, so it behaves exactly as it did before.
+// is a no-op. Unparseable input (a hostname, a typo, an empty string) and a zoned
+// IPv6 value (see canonicalIPOK) fall back to the input less its mask, a key no
+// record can have.
 func canonicalIP(addr string) string {
 	c, _ := canonicalIPOK(addr)
 	return c
@@ -200,17 +186,22 @@ func canonicalIP(addr string) string {
 
 // canonicalIPOK is canonicalIP plus the one extra bit fetchAddressRecords needs:
 // whether the value was an address at all. It exists so there is exactly ONE
-// notion of validity in this package — "netip parsed it" — shared by the key, the
-// request, and the decision not to send one. A separate validator would be free
-// to disagree with the canonicalisation and reintroduce the class of bug
-// canonicalIP was written to close.
-func canonicalIPOK(addr string) (string, bool) {
-	host := hostOf(addr)
-	if a, err := netip.ParseAddr(host); err == nil {
-		return a.Unmap().String(), true
-	}
-	return host, false
-}
+// notion of validity — "netip parsed it" — shared by the key, the request, and
+// the decision not to send one. A separate validator would be free to disagree
+// with the canonicalisation and reintroduce the class of bug canonicalIP was
+// written to close. It is provider.CanonicalIPOK, which replica-cache mode reads
+// its inputs with too, so the two modes cannot disagree about which input is an
+// address.
+//
+// A zoned IPv6 value ("fe80::1%eth0") parses, but it is not an address NetBox
+// can hold: an inet carries no zone, so no record's canonical form ever has one
+// and the key could never match. It is therefore not an address here either —
+// not sent, and not asked about in the prefix fallback. Sending it cost nothing
+// against NetBox (?address= answers 200 with count 0); a list-valued host lookup
+// refuses the whole list for one such value. The check follows Unmap, so an
+// IPv4-mapped value with a zone ("::ffff:10.0.0.1%eth0") still denotes its IPv4
+// address, which has none, as it always did.
+func canonicalIPOK(addr string) (string, bool) { return provider.CanonicalIPOK(addr) }
 
 // logChunkFailure records one degraded batch. Newlines are stripped for the
 // same reason pkg/plugin's sanitizeLog does it: an upstream error body must not
@@ -404,24 +395,8 @@ func prefixHopWarning(d degradation) string {
 		d.scope("IP with no address record", "IPs with no address record"), causeText(d.cause))
 }
 
-// humanInt formats a count with thousands separators, matching the notices the
-// plugin layer already writes (pkg/plugin/notices.go's thousands) — these
-// strings land side by side in the same panel header, and "1000" next to
-// "1,000" reads as a typo.
-func humanInt(n int) string {
-	s := strconv.Itoa(n)
-	if len(s) <= 3 {
-		return s
-	}
-	var out []byte
-	for i, c := range []byte(s) {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			out = append(out, ',')
-		}
-		out = append(out, c)
-	}
-	return string(out)
-}
+// humanInt is provider.HumanInt, under the name this package's notices use.
+func humanInt(n int) string { return provider.HumanInt(n) }
 
 // addressLookup is everything one address hop learned. It is a struct rather
 // than a list of returns because the hop reports three independent things about
@@ -505,8 +480,9 @@ func (p *Provider) fetchAddressRecords(ctx context.Context, ips []string) (addre
 		deg:    degradation{total: len(ips)},
 	}
 
-	// A value netip cannot parse is never SENT. It is not an error condition and
-	// is not reported as one: the row is built exactly as before, with
+	// A value that is not an address — one netip cannot parse, or a zoned IPv6
+	// value (see canonicalIPOK) — is never SENT. It is not an error condition
+	// and is not reported as one: the row is built exactly as before, with
 	// match_count 0 and blank columns, because that is what the answer would have
 	// been anyway.
 	//
@@ -643,15 +619,6 @@ func (p *Provider) fetchAddressRecords(ctx context.Context, ips []string) (addre
 	return out, nil
 }
 
-// The three tiers pickAddress ranks an address record by. Spread apart so the
-// status tie-break below (+1) can only ever order records WITHIN a tier: an
-// assignment must never be outvoted by a status, because only an assignment can
-// carry identity.
-const (
-	rankInterfaceAssigned = 4
-	rankOtherAssigned     = 2
-)
-
 // pickAddress applies the documented tie-break when one address matches
 // several records (anycast, VRF overlap, or a VIP shared across a pair):
 // interface-assigned first, then any other assignment, then non-deprecated,
@@ -684,6 +651,9 @@ const (
 // deprecated record still yields the device and the interface, with
 // address_status carrying "Deprecated" in plain sight, which is strictly more
 // than an active record that can name neither.
+//
+// The ranking itself is provider.PickAddressRank, the one replica-cache mode
+// picks by too; what is read off the payload to feed it is this package's.
 func pickAddress(cands []json.RawMessage) json.RawMessage {
 	var best json.RawMessage
 	bestRank, bestID := -1, 0
@@ -700,16 +670,7 @@ func pickAddress(cands []json.RawMessage) json.RawMessage {
 		if json.Unmarshal(raw, &o) != nil {
 			continue
 		}
-		rank := 0
-		switch {
-		case isInterfaceAssignment(o.Type):
-			rank += rankInterfaceAssigned
-		case hasAssignment(o.AssignedObject):
-			rank += rankOtherAssigned
-		}
-		if o.Status.Value != "deprecated" {
-			rank++
-		}
+		rank := provider.PickAddressRank(isInterfaceAssignment(o.Type), hasAssignment(o.AssignedObject), o.Status.Value == "deprecated")
 		if rank > bestRank || (rank == bestRank && o.ID < bestID) {
 			best, bestRank, bestID = raw, rank, o.ID
 		}
@@ -732,8 +693,9 @@ func hasAssignment(assigned json.RawMessage) bool {
 // outside the wantsGroup prefix test that switches the device_* and prefix_*
 // groups on, so the gate names this column explicitly — and a typo there would
 // turn the column off for every query while a test asserting on a setter's own
-// output still passed.
-const isPrimaryIPColumn = "is_primary_ip"
+// output still passed. It is provider.IsPrimaryIPColumn, which the shared
+// type declaration names too.
+const isPrimaryIPColumn = provider.IsPrimaryIPColumn
 
 // isPrimaryIP reports whether ipID is the primary address of the object the
 // address is assigned to — a dcim.device or a virtualization.virtualmachine.
@@ -971,131 +933,18 @@ func (p *Provider) fetchVMs(ctx context.Context, ids []int) (map[int]map[string]
 	return out, deg
 }
 
-// IPEnrichColumns lists every column ip-enrichment can emit, in group order.
-// "ip", "match_count" and "is_primary_ip" are deliberately not namespaced: "ip"
-// is the documented Grafana join key, match_count describes the row itself, and
-// is_primary_ip describes the address's relationship to whatever it is assigned
-// to — a device for one row and a virtual machine for the next, so no single
-// namespace could name it honestly (it was device_is_primary_ip until it gained
-// a virtual-machine half).
-// There is no prefix_site — NetBox 4.2 replaced a prefix's `site` with the
-// generic `scope` (site, region or location), which is why 4.2 and not 4.1 is
-// the supported floor (README Requirements); 4.1 has no `scope` at all, so this
-// column would be blank there for every result.
-// Only interface_name and interface_description are present, and the reason
-// differs by assignment kind. For a dcim.interface, assigned_object is the brief
-// interface form and carries nothing else worth surfacing. A
-// virtualization.vminterface carries one thing more — a nested virtual_machine
-// object — and that is where vm_name comes from; it costs nothing, because the
-// address hop already has the payload.
-// vm_name is the ONLY vm_* column. It is deliberately not device_name: a VM id
-// and a device id live in different NetBox models, so reusing the device
-// keyspace would collide, and NetBox permits a device and a VM with the same
-// name, which would make the documented device_name → Prometheus `device` join
-// match the wrong thing. Per row at most one of vm_name and device_name is set,
-// never both — and both are blank whenever the address is assigned to neither
-// (an ipam.fhrpgroup, or nothing at all), as they are on a prefix-fallback row;
-// see deviceIDFromAddress and vmNameFromAddress.
-// address_assigned_object_type carries the raw NetBox relation string
-// (dcim.interface, virtualization.vminterface, ipam.fhrpgroup), never a
-// friendly label: unlike address_status, assigned_object_type is a plain
-// string with no separate label field, so raw is the only representation
-// there is. It is what lets a caller tell an FHRP-assigned address apart from
-// a wholly unassigned one — both otherwise leave interface_* and device_*
-// equally blank.
-// There is no address_nat_inside_dns/address_nat_outside_dns: NetBox 4.4's
-// nested NestedIPAddress serializer (used for both nat_inside and every
-// nat_outside element) has no dns_name property at all — verified against the
-// OpenAPI schema and live, including a patch-and-refetch that ruled out the
-// field being merely omitted when empty. Filling it would need a second API
-// call per referenced NAT partner; ruled: not worth the extra request, same
-// as VM DEVICE-GRADE enrichment (a VM's cluster, site, role, platform or
-// status) and the dropped interface_* columns. The VM's NAME is not in that
-// ruling: it is embedded in the address payload already, so it costs nothing
-// and is shipped as vm_name.
-// is_primary_ip is the one VM attribute that IS worth a request, and the only
-// column here that costs one for a VM-assigned row: it is the SNMP/flow join
-// key ("is this the address the poller talks to"), it is in the default
-// selection, and NetBox's nested virtual_machine object is the brief serializer
-// form — {id,url,display,name,description}, verified live on 4.4.10 — so unlike
-// vm_name it cannot be read off the address payload. Its hop is gated on the
-// column itself (see ResolveIPs), so a query that does not select it pays
-// nothing.
-func IPEnrichColumns() []string {
-	return []string{
-		"ip", "match_count", "is_primary_ip",
-		"prefix_cidr", "prefix_scope", "prefix_tenant", "prefix_role",
-		"prefix_vrf", "prefix_vlan", "prefix_description",
-		"address_dns_name", "address_status", "address_role", "address_vrf",
-		"address_tenant", "address_description", "address_assigned_object_type",
-		"address_nat_inside", "address_nat_outside",
-		"interface_name", "interface_description",
-		"device_name", "device_role", "device_platform", "device_device_type",
-		"device_site", "device_location", "device_rack", "device_tenant",
-		"device_status",
-		"vm_name",
-	}
-}
+// IPEnrichColumns is provider.IPEnrichColumns, the contract both modes answer
+// (its comment says why each column is, or is not, there), kept under this
+// package's name for its tests.
+func IPEnrichColumns() []string { return provider.IPEnrichColumns() }
 
-// defaultIPEnrichFields is what a new query selects. match_count is included
-// on purpose: an ambiguous pick must be visible out of the box.
-var defaultIPEnrichFields = []string{
-	"ip", "match_count", "address_dns_name", "device_name", "vm_name", "interface_name",
-	"is_primary_ip", "device_site", "device_tenant",
-}
+// DefaultIPEnrichFields is provider.DefaultIPEnrichFields, kept under this
+// package's name for its tests.
+func DefaultIPEnrichFields() []string { return provider.DefaultIPEnrichFields() }
 
-// DefaultIPEnrichFields returns the selection ResolveIPs substitutes for an
-// empty field list — which is what the query editor sends until the user first
-// changes the multi-select, so it is the common case rather than an edge one.
-//
-// It is exported for the plugin layer, which has to know the EFFECTIVE selection
-// before the call in order to work out whether a join key's source field is
-// already coming back (pkg/plugin.ipEnrichFields). Reading the same variable
-// ResolveIPs reads is the point: a second copy of this list at the plugin layer
-// could disagree with this one and silently un-request a column. A clone,
-// because a package-level slice handed out by value is a package-level slice the
-// caller can rewrite.
-func DefaultIPEnrichFields() []string { return slices.Clone(defaultIPEnrichFields) }
-
-// ipEnrichColumnTypes declares the two ip-enrichment columns that are not
-// strings. Unlike an object query's columns — discovered from NetBox at runtime,
-// so only the values can say what they are — this schema is fixed here in code,
-// which means the type of a column is known even when the current IP set puts no
-// value in it. The plugin layer would otherwise scan the values and fall back to
-// string for an all-null column, so is_primary_ip alternated between a boolean
-// field and a string one depending on whether any IP in the refresh happened to
-// resolve a device. See provider.Result.ColumnTypes.
-//
-// Answering the flag from either owner made that all-null column ordinary rather
-// than exceptional. The flag is emitted only for a device- or VM-assigned
-// address, so an FHRP-only, an unassigned-only or an external-address refresh
-// puts no value in it at all — the very shape whose type nothing but this
-// declaration can state.
-//
-// Every other column flattens to a string, which is also the inference fallback,
-// so listing them would change nothing and only invite drift.
-var ipEnrichColumnTypes = map[string]provider.FieldType{
-	"match_count":     provider.FieldTypeNumber,
-	isPrimaryIPColumn: provider.FieldTypeBoolean,
-}
-
-// declaredColumnTypes returns the type declarations for the fields this query
-// actually returns, so Result.ColumnTypes never describes a column the frame
-// does not have. nil when none of them are selected.
-func declaredColumnTypes(fields []string) map[string]provider.FieldType {
-	var out map[string]provider.FieldType
-	for _, f := range fields {
-		t, ok := ipEnrichColumnTypes[f]
-		if !ok {
-			continue
-		}
-		if out == nil {
-			out = make(map[string]provider.FieldType, len(ipEnrichColumnTypes))
-		}
-		out[f] = t
-	}
-	return out
-}
+// defaultIPEnrichFields is the default selection as a value, for this
+// package's tests.
+var defaultIPEnrichFields = provider.DefaultIPEnrichFields()
 
 // wantsGroup reports whether any requested field belongs to a namespaced column
 // group ("device_", "prefix_"). Both groups are filled by a lookup hop that
@@ -1422,8 +1271,8 @@ func applyVMColumns(row map[string]interface{}, vm map[string]interface{}, ipID 
 	row[isPrimaryIPColumn] = isPrimaryIP(vm, ipID)
 }
 
-// applyPrefixColumns is the fallback for IPs with no address record: today's
-// longest-containing-prefix lookup, unchanged, on a much smaller set.
+// applyPrefixColumns is the fallback for IPs with no address record: the
+// longest prefix NetBox's ?contains= returns for the value provider.PrefixQuery built.
 //
 // It returns an error ONLY for a failed request, so the caller can report the
 // gap. "No prefix contains this IP" and an unflattenable payload are not
@@ -1431,15 +1280,32 @@ func applyVMColumns(row map[string]interface{}, vm map[string]interface{}, ipID 
 // correctly, and the second cannot be distinguished from it by anything the
 // user could act on. Only the request failure means "we could not ask", which
 // is the case a blank column silently misrepresents.
-func (p *Provider) applyPrefixColumns(ctx context.Context, row map[string]interface{}, ip string) error {
+//
+// Every page is read, up to prefixPageCap. NetBox orders the containing
+// prefixes VRF first (global first), then shortest first, so with a hierarchy
+// held in several VRFs the longest can sit past the first page; reading one
+// page kept whatever fitted. A page that fails fails the lookup — a half-read
+// answer can be a shorter prefix than the one the failed page held. Each page
+// is one attempt, like the request before it: this hop does not retry (see
+// prefixFallbackWorkers).
+func (p *Provider) applyPrefixColumns(ctx context.Context, row map[string]interface{}, contains string) error {
 	q := url.Values{}
-	q.Set("contains", ip)
+	q.Set("contains", contains)
 	q.Set("limit", "100")
-	var page listPage
-	if err := p.client.getJSON(ctx, p.client.apiURL("ipam/prefixes", q), &page); err != nil {
-		return err
+	var results []json.RawMessage
+	next := p.client.apiURL("ipam/prefixes", q)
+	for pages := 0; next != "" && pages < prefixPageCap; pages++ {
+		page, err := p.client.getListPage(ctx, next)
+		if err != nil {
+			return err
+		}
+		results = append(results, page.Results...)
+		next = ""
+		if page.Next != nil {
+			next = *page.Next
+		}
 	}
-	best := pickLongestPrefix(page.Results)
+	best := pickLongestPrefix(results)
 	if best == nil {
 		return nil
 	}
@@ -1477,14 +1343,20 @@ func (p *Provider) applyPrefixColumns(ctx context.Context, row map[string]interf
 // version returned correctly. That is the opposite of the trade being made here.
 const prefixFallbackWorkers = 8
 
-// prefixJob is one IP's prefix fallback: the row to fill, the IP to ask NetBox
-// about, and where the outcome lands. The error is a FIELD rather than a channel
-// send because the caller folds the failures back in INPUT order — see
-// runPrefixFallback.
+// prefixPageCap bounds the pages one containing-prefix lookup reads: 100
+// pages of 100 is 10,000 prefixes, far past any containment chain (at most 33
+// lengths for IPv4 and 129 for IPv6 per VRF), and it stops a next link that
+// never ends from holding the request until the context expires.
+const prefixPageCap = 100
+
+// prefixJob is one IP's prefix fallback: the row to fill, the ?contains= value
+// to ask NetBox (see provider.PrefixQuery), and where the outcome lands. The error is a
+// FIELD rather than a channel send because the caller folds the failures back
+// in INPUT order — see runPrefixFallback.
 type prefixJob struct {
-	row map[string]interface{}
-	ip  string
-	err error
+	row      map[string]interface{}
+	contains string
+	err      error
 }
 
 // runPrefixFallback fills prefix_* on every job's row, up to
@@ -1512,8 +1384,8 @@ type prefixJob struct {
 //     the same error the serial version picked: the earliest failing IP in the
 //     caller's own order, not whichever request happened to lose the race.
 //
-// Cancellation behaves as it did. Each job carries the caller's ctx into
-// getJSON; on a cancelled context the outstanding requests fail immediately and
+// Cancellation behaves as it did. Each job carries the caller's ctx into each
+// page request; on a cancelled context the outstanding requests fail immediately and
 // the queued ones fail without touching the network, exactly as the serial loop
 // did when its ctx expired mid-walk. The pool always drains, so no goroutine
 // outlives the call.
@@ -1545,7 +1417,7 @@ func (p *Provider) runPrefixFallback(ctx context.Context, jobs []prefixJob) {
 		go func(j *prefixJob) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			j.err = p.applyPrefixColumns(ctx, j.row, j.ip)
+			j.err = p.applyPrefixColumns(ctx, j.row, j.contains)
 		}(&jobs[i])
 	}
 	wg.Wait()
@@ -1574,13 +1446,14 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 	ctx, _ = p.client.pinBranch(ctx)
 	// The limit matters more here than for a batched object query: when a
 	// prefix_* column is selected the fallback below issues one ?contains=
-	// request per unmatched IP and cannot be batched (contains takes a single
-	// value), so it is a request-count ceiling. runPrefixFallback runs those
+	// lookup per unmatched IP — one request, more only when a page overflows —
+	// and cannot be batched (contains takes a single value), so it is a
+	// request-count ceiling. runPrefixFallback runs those
 	// requests prefixFallbackWorkers at a time rather than one at a time, which
 	// cuts the wall clock by that factor but leaves the count — and the load
 	// NetBox sees — proportional to the limit. A caller that really wants more
 	// still gets it, up to MaxLimit.
-	fields, limit = normalizeIPEnrichArgs(fields, limit)
+	fields, limit = provider.NormalizeIPEnrichArgs(fields, limit, defaultLimit, MaxLimit)
 
 	// Dedupe preserving input order. requested counts every distinct IP the
 	// caller asked about; wanted is what the limit allows us to answer. Total
@@ -1635,7 +1508,7 @@ func (p *Provider) ResolveIPs(ctx context.Context, ips []string, fields []string
 func (p *Provider) ResolveScope(ctx context.Context, filters []provider.Filter, fields []string, limit int) (*provider.Result, error) {
 	// One branch for every request and cache key this call makes (pinBranch).
 	ctx, _ = p.client.pinBranch(ctx)
-	fields, limit = normalizeIPEnrichArgs(fields, limit)
+	fields, limit = provider.NormalizeIPEnrichArgs(fields, limit, defaultLimit, MaxLimit)
 
 	raws, total, err := p.fetchRows(ctx, "ipam/ip-addresses", buildFilterValues(filters), limit)
 	if err != nil {
@@ -1673,27 +1546,6 @@ func (p *Provider) ResolveScope(ctx context.Context, filters []provider.Filter, 
 	return p.enrichHosts(ctx, hosts, addrs, fields, reported)
 }
 
-// normalizeIPEnrichArgs applies the argument rules ResolveIPs and ResolveScope
-// share: an empty field list means the default set, "ip" is always a column
-// (it is the documented Grafana join key — docs/RECIPES.md joins panels on it —
-// and a frame without it has no join key at all), and the limit falls back to
-// defaultLimit when unset and is clamped to MaxLimit, exactly as Query() does.
-func normalizeIPEnrichArgs(fields []string, limit int) ([]string, int) {
-	if len(fields) == 0 {
-		fields = defaultIPEnrichFields
-	}
-	if !slices.Contains(fields, "ip") {
-		fields = append([]string{"ip"}, fields...)
-	}
-	if limit <= 0 {
-		limit = defaultLimit
-	}
-	if limit > MaxLimit {
-		limit = MaxLimit
-	}
-	return fields, limit
-}
-
 // enrichHosts is the half of an ip-enrichment query that does not care where
 // the address records came from: pick one record per host, run the device, VM
 // and prefix hops the selected columns ask for, build and project the rows,
@@ -1714,7 +1566,7 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 	//
 	// The prefix one is the expensive skip, and remains so after
 	// runPrefixFallback made it concurrent. NetBox's ?contains= takes a single
-	// value, so the hop is one REQUEST per unmatched IP however it is scheduled —
+	// value, so the hop is one lookup per unmatched IP however it is scheduled —
 	// ~20 ms each against the demo NetBox, ~0.35 s each against a large remote NetBox —
 	// and concurrency divides the wall clock without removing a single request.
 	// No prefix_* column is in defaultIPEnrichFields at all, so the default panel
@@ -1881,8 +1733,16 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 			// Queued, not requested: the request itself is made below. The tally
 			// of what was ASKED is still taken here, in input order, because it
 			// counts rows rather than outcomes.
+			//
+			// NetBox is asked about the host the value names (provider.PrefixQuery), not
+			// the caller's spelling. A value that is not an address is not asked
+			// about at all; NetBox answers it with nothing, so its row is the
+			// same. It still counts in the tally, as it does in the address hop:
+			// one row per input.
 			prefixDeg.total++
-			prefixJobs = append(prefixJobs, prefixJob{row: row, ip: ip})
+			if contains, ok := provider.PrefixQuery(ip); ok {
+				prefixJobs = append(prefixJobs, prefixJob{row: row, contains: contains})
+			}
 		default:
 			// This IP has no address record and no prefix_* column was selected,
 			// so there is nothing left to fill. The row is complete: match_count
@@ -1950,27 +1810,15 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 
 	var notes []string
 	if ambiguous > 0 {
-		notes = append(notes, ambiguityNote(ambiguous, len(rows)))
+		notes = append(notes, provider.AmbiguityNote(ambiguous, len(rows)))
 	}
 
 	return &provider.Result{
 		MaxRows: MaxLimit,
 		Columns: fields, Rows: rows, Total: total,
 		Warnings: warnings, Notes: notes,
-		ColumnTypes: declaredColumnTypes(fields),
+		ColumnTypes: provider.DeclaredIPEnrichColumnTypes(fields),
 	}, nil
-}
-
-// ambiguityNote states that some rows were picked out of several candidates.
-// match_count already says so per row, but it is an opt-in column: a user who
-// deselects it gets one arbitrary-looking device for an anycast address with
-// nothing at all to suggest the pick was a pick. Info, not warning — the pick is
-// deterministic and documented, so the row is correct and stable; the reader just
-// needs to know "the device" is not unique for that address.
-func ambiguityNote(ambiguous, rows int) string {
-	return fmt.Sprintf(
-		"%s of %s rows matched more than one NetBox address record (an anycast address, or a VIP shared across a redundant pair). One record was picked deterministically — interface-assigned first, then any other assignment, then non-deprecated, then lowest id — so the row is stable; add the match_count column to see which rows.",
-		humanInt(ambiguous), humanInt(rows))
 }
 
 // pickLongestPrefix returns the raw prefix object with the longest mask.

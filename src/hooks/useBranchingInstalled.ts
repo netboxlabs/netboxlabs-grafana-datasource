@@ -10,6 +10,31 @@ export const BRANCH_FIELD_TOOLTIP =
 export const BRANCH_FIELD_DISABLED_TOOLTIP =
   'The netbox-branching plugin is not installed on the connected NetBox, so branch selection is unavailable.';
 
+/** Tooltip shown while the Branch field is disabled in replica-cache mode, which
+ *  mirrors the main dataset only. */
+export const BRANCH_FIELD_CACHE_TOOLTIP = 'Branches are not available in replica-cache mode.';
+
+/** Tooltip shown when branching is unavailable but the query still carries a
+ *  branch. The field stays editable in that state precisely so the value can be
+ *  removed: the backend refuses such a query and tells the reader to clear it,
+ *  which is only actionable if the control is live. */
+export const BRANCH_FIELD_RETAINED_TOOLTIP =
+  'This backend has no branches, but this query still carries one, so it will fail until the branch is cleared. Empty this field to target the main dataset.';
+
+/** True when the datasource reads from replica-cache rather than the NetBox API.
+ *  The settings are optional because a datasource handed to an editor is
+ *  whatever Grafana built, and a stub in a test. */
+function isReplicaCacheMode(datasource: DataSource): boolean {
+  return datasource.datasourceInstanceSettings?.jsonData?.mode === 'replica-cache';
+}
+
+/** The tooltip for a Branch field that is disabled because the datasource has no
+ *  branches: replica-cache never has them, and says so; a NetBox without the
+ *  netbox-branching plugin is told to install it. */
+export function branchUnavailableTooltip(datasource: DataSource): string {
+  return isReplicaCacheMode(datasource) ? BRANCH_FIELD_CACHE_TOOLTIP : BRANCH_FIELD_DISABLED_TOOLTIP;
+}
+
 /**
  * Probes whether netbox-branching is installed on the datasource's NetBox and
  * returns a tri-state:
@@ -22,6 +47,11 @@ export const BRANCH_FIELD_DISABLED_TOOLTIP =
  * explicit `false` (never on `undefined`), which also avoids a mount-time
  * enable→disable flicker.
  *
+ * replica-cache is the exception to both: it mirrors the main dataset only and
+ * refuses a branch-scoped query, so the mode answers `false` at once, with no
+ * probe. Asking would add nothing the mode does not already say, and a probe
+ * that failed open would leave a field enabled that every query then refuses.
+ *
  * No client-side result cache on purpose: `getBranchingInstalled()` always hits
  * the backend, which caches per datasource instance and rebuilds that instance
  * (fresh probe) whenever the datasource config changes — so re-probing here is
@@ -33,6 +63,7 @@ export const BRANCH_FIELD_DISABLED_TOOLTIP =
  * mount / datasource change, not per keystroke.
  */
 export function useBranchingInstalled(datasource: DataSource): boolean | undefined {
+  const cacheMode = isReplicaCacheMode(datasource);
   const [installed, setInstalled] = useState<boolean | undefined>(undefined);
   const [probed, setProbed] = useState<DataSource | undefined>(undefined);
 
@@ -47,6 +78,9 @@ export function useBranchingInstalled(datasource: DataSource): boolean | undefin
   }
 
   useEffect(() => {
+    if (cacheMode) {
+      return;
+    }
     let active = true;
     datasource
       .getBranchingInstalled()
@@ -63,7 +97,7 @@ export function useBranchingInstalled(datasource: DataSource): boolean | undefin
     return () => {
       active = false;
     };
-  }, [datasource]);
+  }, [datasource, cacheMode]);
 
-  return installed;
+  return cacheMode ? false : installed;
 }

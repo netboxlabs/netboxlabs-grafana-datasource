@@ -54,13 +54,13 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
 
 ## Requirements
 
-- **NetBox 4.2 or later** (validated against 4.2 → 4.6). The plugin depends on
+- **NetBox 4.2 or later.** The plugin depends on
   `display_url` on all serializers (deep links), the `/api/core/object-changes/` endpoint
   (change-log annotations), and a prefix's generic `scope`, returned by IP enrichment as
   `prefix_scope`. Both classic (v1) and `nbt_…` (v2, NetBox 4.5+) API tokens are supported
   and auto-detected.
-- **Grafana 12.3 or later** (the plugin's `grafanaDependency`; e2e-tested against
-  12.3 → 13.1 and nightly in CI).
+- **Grafana 12.3 or later** (the plugin's `grafanaDependency`; CI runs the e2e
+  tests on versions from 12.3 to the latest release, and on nightly).
 
 Re-verify any NetBox version locally with [`demo/compat-check.sh`](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/demo/compat-check.sh).
 

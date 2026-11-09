@@ -209,8 +209,14 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 	// NetBox ignores a filter parameter it doesn't know, so a type without one
 	// would answer with unrelated objects and fail as too many matches or none.
 	// The schema says so up front. One that can't be read skips the check rather
-	// than refusing a type it can't judge.
-	if entry, err := p.schema(ctx); err == nil && !slices.ContainsFunc(entry.filters[endpoint], func(f provider.FilterField) bool {
+	// than refusing a type it can't judge, and so does one not ready within the
+	// namesWait budget: the check only words the error better, and a cold or
+	// hanging schema must not hold the query. The schema read is a detached
+	// flight, so it carries on past the budget and fills the cache.
+	schemaCtx, cancel := context.WithTimeout(ctx, p.namesWait())
+	entry, err := p.schema(schemaCtx)
+	cancel()
+	if err == nil && !slices.ContainsFunc(entry.filters[endpoint], func(f provider.FilterField) bool {
 		return f.Name == field && slices.Contains(f.Operators, "")
 	}) {
 		return &AnnotationError{Reason: provider.AnnotationReasonNoNameFilter}

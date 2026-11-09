@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -28,6 +29,7 @@ type annoScopeServer struct {
 	rootStatus  int                 // non-zero: /api/ answers this status
 	objectTypes []string            // object-type rows, see objectTypeRow
 	schema      string              // /api/schema/; "" answers 403
+	schemaHold  chan struct{}       // non-nil: /api/schema/ answers only once it is closed
 	objects     map[string][]string // list endpoint -> its brief rows
 	unfiltered  map[string]bool     // list endpoints that ignore the lookup parameters
 	branches    string              // branch list body; "" answers 404 (no netbox-branching)
@@ -108,6 +110,13 @@ func (s *annoScopeServer) start(t *testing.T) *Provider {
 			}
 			writePage(w, len(s.objectTypes), s.objectTypes)
 		case path == "schema":
+			if s.schemaHold != nil {
+				select {
+				case <-s.schemaHold:
+				case <-r.Context().Done():
+					return
+				}
+			}
 			if s.schema == "" {
 				refuse(http.StatusForbidden)
 				return
@@ -425,6 +434,36 @@ func TestAnnotationScope_SchemaUnreadableStillLooksUp(t *testing.T) {
 	s.schema = ""
 	p := s.start(t)
 	wantObjects(t, resolveOK(t, p, nameScope("leaf1")), scopeObject{17, "leaf1"})
+}
+
+// A cold or hanging schema doesn't hold the lookup past the names budget: the
+// check is skipped, as for a schema that can't be read.
+func TestAnnotationScope_SlowSchemaSkipsTheNameFilterCheck(t *testing.T) {
+	s := newAnnoScopeServer()
+	s.schemaHold = make(chan struct{})
+	p := s.start(t)
+	// After start's, so it runs first and the held handler returns before the
+	// server closes.
+	t.Cleanup(func() { close(s.schemaHold) })
+	p.namesWaitOverride = 50 * time.Millisecond
+
+	// Without the budget the schema wait would run to this deadline, and the
+	// lookup would then fail on it.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	scope, err := p.resolveAnnotationScope(ctx, nameScope("leaf1"))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("resolveAnnotationScope: %v", err)
+	}
+	wantObjects(t, scope, scopeObject{17, "leaf1"})
+	if elapsed > 2*time.Second {
+		t.Errorf("resolveAnnotationScope took %v behind a held schema, want about the 50ms budget", elapsed)
+	}
+	if qs := s.queries("/api/dcim/devices/"); len(qs) != 1 || qs[0].Get("name") != "leaf1" {
+		t.Errorf("device lookups = %v, want one name lookup", qs)
+	}
 }
 
 func TestAnnotationScope_NoEndpointUnderName(t *testing.T) {

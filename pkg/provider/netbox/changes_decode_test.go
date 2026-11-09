@@ -1,0 +1,147 @@
+package netbox
+
+import (
+	"context"
+	"encoding/json"
+	"reflect"
+	"testing"
+
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+)
+
+func mustDecode(t *testing.T, rec string) decodedChange {
+	t.Helper()
+	d, ok := decodeChange(json.RawMessage(rec))
+	if !ok {
+		t.Fatalf("decodeChange(%s) failed", rec)
+	}
+	return d
+}
+
+func TestChangeTitle_FallbackChain(t *testing.T) {
+	tests := []struct {
+		name string
+		rec  string
+		want string
+	}{
+		{"object_repr wins", `{"object_repr":"leaf1","changed_object":{"display":"other"},"postchange_data":{"name":"x"}}`, "leaf1"},
+		{"string changed_object", `{"changed_object":"plugin-thing","postchange_data":{"name":"x"}}`, "plugin-thing"},
+		{"changed_object display", `{"changed_object":{"display":"leaf2"},"postchange_data":{"name":"x"}}`, "leaf2"},
+		{"postchange name", `{"changed_object_type":"dcim.device","changed_object":null,"postchange_data":{"name":"leaf3"},"prechange_data":{"name":"old"}}`, "leaf3"},
+		{"prechange name on delete", `{"changed_object_type":"dcim.device","postchange_data":null,"prechange_data":{"name":"leaf4"}}`, "leaf4"},
+		{"circuit cid", `{"changed_object_type":"circuits.circuit","postchange_data":{"cid":"CID-1","name":"nope"}}`, "CID-1"},
+		{"type and id", `{"changed_object_type":"dcim.device","changed_object_id":42,"postchange_data":{"serial":"s"}}`, "dcim.device #42"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mustDecode(t, tc.rec).oc.title(); got != tc.want {
+				t.Errorf("title() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecodeChange_StringChangedObject(t *testing.T) {
+	d := mustDecode(t, `{"changed_object_type":"plugin.thing","changed_object":"plugin-thing","action":{"value":"update"}}`)
+	if got := d.oc.title(); got != "plugin-thing" {
+		t.Errorf("title() = %q, want plugin-thing", got)
+	}
+	if got := d.oc.deepLink("http://base"); got != "http://base" {
+		t.Errorf("deepLink = %q, want the base", got)
+	}
+}
+
+func TestChangeDiff_UpdateSkipsBookkeeping(t *testing.T) {
+	d := mustDecode(t, `{"action":{"value":"update"},
+		"prechange_data":{"name":"a","status":"active","_name":"x","created":"1","last_updated":"1","same":5},
+		"postchange_data":{"name":"b","status":"active","_name":"y","created":"2","last_updated":"2","same":5,"site":3}}`)
+	if len(d.diff) != 2 || d.diff[0].Field != "name" || d.diff[1].Field != "site" {
+		t.Fatalf("diff = %+v, want name then site", d.diff)
+	}
+	if string(d.diff[0].Before) != `"a"` || string(d.diff[0].After) != `"b"` {
+		t.Errorf("name diff = %s -> %s", d.diff[0].Before, d.diff[0].After)
+	}
+}
+
+func TestChangeDiff_CustomFieldsPerKey(t *testing.T) {
+	d := mustDecode(t, `{"action":{"value":"update"},
+		"prechange_data":{"custom_fields":{"owner":"a","tier":1,"same":true}},
+		"postchange_data":{"custom_fields":{"owner":"b","tier":1,"same":true,"new":"n"}}}`)
+	var fields []string
+	for _, f := range d.diff {
+		fields = append(fields, f.Field)
+	}
+	if want := []string{"cf_new", "cf_owner"}; !reflect.DeepEqual(fields, want) {
+		t.Errorf("fields = %v, want %v", fields, want)
+	}
+}
+
+func TestChangeDiff_CreateAndDeleteHaveNone(t *testing.T) {
+	for _, rec := range []string{
+		`{"action":{"value":"create"},"prechange_data":null,"postchange_data":{"name":"a"}}`,
+		`{"action":{"value":"delete"},"prechange_data":{"name":"a"},"postchange_data":null}`,
+	} {
+		if d := mustDecode(t, rec); len(d.diff) != 0 {
+			t.Errorf("diff = %+v, want none for %s", d.diff, rec)
+		}
+	}
+}
+
+func TestChangeDiff_NumericCanonicalEquality(t *testing.T) {
+	d := mustDecode(t, `{"action":{"value":"update"},
+		"prechange_data":{"a":1,"b":1.5,"c":{"x":1,"y":2}},
+		"postchange_data":{"a":1.0,"b":1.50,"c":{"y":2,"x":1.0}}}`)
+	if len(d.diff) != 0 {
+		t.Errorf("diff = %+v, want none: values are equal", d.diff)
+	}
+}
+
+func TestFormatValue(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{`null`, ""},
+		{``, ""},
+		{`"abc"`, "abc"},
+		{`true`, "true"},
+		{`false`, "false"},
+		{`42`, "42"},
+		{`42.0`, "42"},
+		{`1.5`, "1.5"},
+		{`[1,"a",true]`, "1, a, true"},
+		{`[]`, ""},
+		{`{"b":1,"a": 2}`, `{"b":1,"a":2}`},
+	}
+	for _, tc := range tests {
+		if got := formatValue(json.RawMessage(tc.in)); got != tc.want {
+			t.Errorf("formatValue(%s) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestChanges_UnscopedUpdateGetsDiff(t *testing.T) {
+	rec := `{"id":7,"time":"2026-08-13T23:00:00Z","user_name":"admin","action":{"value":"update","label":"Updated"},
+		"changed_object_type":"dcim.device","changed_object_id":12,
+		"changed_object":{"display":"leaf1","display_url":"http://nb/dcim/devices/12/"},
+		"message":"rack move",
+		"prechange_data":{"name":"leaf1","status":"active","last_updated":"1"},
+		"postchange_data":{"name":"leaf1","status":"offline","last_updated":"2"}}`
+	s := &changeLogServer{records: []string{rec}}
+	p := s.start(t)
+	changes, err := p.Changes(context.Background(), provider.ChangeSpec{Limit: 10})
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("changes = %d, want 1", len(changes))
+	}
+	c := changes[0]
+	if c.ObjectRepr != "leaf1" || c.Message != "rack move" || c.Kind != provider.ChangeKindChange {
+		t.Errorf("change = %+v", c)
+	}
+	if c.URL != "http://nb/dcim/devices/12/" {
+		t.Errorf("URL = %q", c.URL)
+	}
+	want := []provider.FieldChange{{Field: "status", Before: "active", After: "offline"}}
+	if !reflect.DeepEqual(c.Diff, want) {
+		t.Errorf("Diff = %+v, want %+v", c.Diff, want)
+	}
+}

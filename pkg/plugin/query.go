@@ -84,6 +84,20 @@ type queryModel struct {
 	// upstream request it makes) targets that branch via the X-NetBox-Branch
 	// header. Empty targets the default (main) branch.
 	Branch string `json:"branch"`
+	// ScopeType and Scope (for annotations) scope the query to objects: an
+	// app_label.model, and names or ids, comma-separated, interpolated with the
+	// csv format. ScopeSet says a scope was configured before interpolation, so
+	// an empty variable is an error rather than all of NetBox. ScopeMatch is
+	// "name" (or empty) or "id".
+	ScopeType  string `json:"scopeType"`
+	Scope      string `json:"scope"`
+	ScopeSet   bool   `json:"scopeSet"`
+	ScopeMatch string `json:"scopeMatch"`
+	// Actions, ChangedFields and Journal (for annotations) narrow the change
+	// markers to some actions and changed fields, and add journal entries.
+	Actions       []string `json:"actions"`
+	ChangedFields []string `json:"changedFields"`
+	Journal       bool     `json:"journal"`
 }
 
 // query executes a single query and returns its data response.
@@ -107,11 +121,21 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 
 	switch qm.QueryType {
 	case queryTypeAnnotations:
+		scope, scopeAll := parseScope(qm.Scope)
 		changes, err := d.provider.Changes(ctx, provider.ChangeSpec{
 			From:        q.TimeRange.From,
 			To:          q.TimeRange.To,
 			ObjectTypes: qm.ObjectTypes,
 			Limit:       qm.Limit,
+			ScopeType:   qm.ScopeType,
+			Scope:       scope,
+			// A caller that sends a scope without scopeSet still configured one.
+			ScopeSet:      qm.ScopeSet || strings.TrimSpace(qm.Scope) != "",
+			ScopeAll:      scopeAll,
+			ScopeMatch:    qm.ScopeMatch,
+			Actions:       qm.Actions,
+			ChangedFields: qm.ChangedFields,
+			Journal:       qm.Journal,
 		})
 		if err != nil {
 			// Every error also comes back as a marker at the range's end:
@@ -121,6 +145,12 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			marker.RefID = q.RefID
 			resp.Frames = data.Frames{marker}
 			return resp
+		}
+		if d.cfg.PublicURL != "" {
+			internal, public := trimBase(d.provider.BaseURL()), trimBase(d.cfg.PublicURL)
+			for i := range changes {
+				changes[i].URL = rewriteLinkURL(changes[i].URL, internal, public)
+			}
 		}
 		frame := buildAnnotationsFrame(changes)
 		frame.RefID = q.RefID
@@ -451,6 +481,22 @@ func dropAllFilters(filters []provider.Filter) []provider.Filter {
 		}
 	}
 	return out
+}
+
+// parseScope splits an annotation's interpolated scope on commas. The whole value
+// $__all is unscoped on purpose (all), the token dropAllFilters honours. A list
+// holding $__all beside other values is malformed and stays a list of values:
+// it must not widen the query.
+func parseScope(raw string) (values []string, all bool) {
+	if strings.TrimSpace(raw) == allFilterValue {
+		return nil, true
+	}
+	for _, v := range strings.Split(raw, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			values = append(values, v)
+		}
+	}
+	return values, false
 }
 
 // splitList parses a free-form list separated by commas, whitespace or newlines.

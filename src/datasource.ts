@@ -29,6 +29,12 @@ export function prepareAnnotationQuery(anno: any): NetBoxQuery {
     objectTypes: target.objectTypes ?? [],
     limit: target.limit,
     branch: target.branch,
+    scopeType: target.scopeType,
+    scope: target.scope,
+    scopeMatch: target.scopeMatch,
+    actions: target.actions,
+    changedFields: target.changedFields,
+    journal: target.journal,
   };
 }
 
@@ -83,8 +89,19 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
       // backend expands into repeated NetBox query params.
       value: srv.replace(f.value ?? '', scopedVars, 'csv'),
     }));
+    const scoped =
+      query.scope === undefined
+        ? {}
+        : {
+            // 'csv' so a multi-value variable reaches the backend comma-joined (the
+            // default format is the glob `{a,b}`). scopeSet comes from the RAW value so
+            // an empty variable is distinguishable from no scope at all.
+            scope: srv.replace(query.scope, scopedVars, 'csv'),
+            scopeSet: query.scope.trim() !== '',
+          };
     return {
       ...query,
+      ...scoped,
       filters,
       ips: query.ips === undefined ? undefined : srv.replace(query.ips, scopedVars, 'csv'),
       branch: query.branch === undefined ? undefined : srv.replace(query.branch, scopedVars),

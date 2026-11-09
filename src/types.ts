@@ -33,6 +33,20 @@ export interface NetBoxQuery extends DataQuery {
    * When set, the query targets that branch; empty targets main. Requires the
    * netbox-branching plugin on the NetBox side. */
   branch?: string;
+  /** Annotations: NetBox content type of the scope objects, e.g. 'dcim.device'. */
+  scopeType?: string;
+  /** Annotations: names, ids or a $variable selecting the objects to follow. */
+  scope?: string;
+  /** Annotations: set by applyTemplateVariables from the raw scope, never stored. */
+  scopeSet?: boolean;
+  /** Annotations: whether scope values are names (default) or ids. */
+  scopeMatch?: 'name' | 'id';
+  /** Annotations: restrict to these change actions (create, update, delete). */
+  actions?: string[];
+  /** Annotations: only changes touching one of these fields. */
+  changedFields?: string[];
+  /** Annotations: include journal entries for the scoped objects. */
+  journal?: boolean;
   filters?: FilterRow[];
   /** Optional subset (and order) of columns to return. */
   fields?: string[];

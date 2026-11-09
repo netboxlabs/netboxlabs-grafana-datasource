@@ -248,7 +248,8 @@ func (p *Provider) displayNames(ctx context.Context, rows []decodedChange) diffN
 
 // lookupNames reads the brief form of the objects with these ids from one list
 // endpoint, in one request, and returns id -> display. A failure is logged and
-// returns nil, so the diff shows the ids.
+// returns nil, so the caller shows the objects by id: a diff's related objects,
+// or an annotation scope's.
 func (p *Provider) lookupNames(ctx context.Context, endpoint string, ids []int64) map[int64]string {
 	q := url.Values{"brief": {"true"}}
 	for _, id := range ids {
@@ -256,7 +257,7 @@ func (p *Provider) lookupNames(ctx context.Context, endpoint string, ids []int64
 	}
 	rows, _, err := p.fetchRows(ctx, endpoint, q, len(ids))
 	if err != nil {
-		log.DefaultLogger.Debug("netbox: related-object name lookup failed; the diff shows ids",
+		log.DefaultLogger.Debug("netbox: object name lookup by id failed; the objects show as ids",
 			"endpoint", logSafe(endpoint), "ids", len(ids), "error", logSafe(err.Error()))
 		return nil
 	}

@@ -284,6 +284,20 @@ func cutoffMarker(c provider.Change) (title, text, tag string) {
 		"netbox,cutoff"
 }
 
+// annotationErrorFrame is a failed annotation query's error as one marker at
+// at, in buildAnnotationsFrame's shape. Grafana's scenes dashboards drop an
+// annotation query's error, so without it a failure looks like a quiet window.
+// The message can quote a variable's value, so it is escaped.
+func annotationErrorFrame(msg string, at time.Time) *data.Frame {
+	return data.NewFrame("netbox_changes",
+		data.NewField("time", nil, []time.Time{at}),
+		data.NewField("title", nil, []string{"NetBox annotation error"}),
+		data.NewField("text", nil, []string{html.EscapeString(msg)}),
+		data.NewField("tags", nil, []string{"netbox,error"}),
+		data.NewField("id", nil, []int64{0}),
+	)
+}
+
 // diffValue formats one side of a field change: empty becomes a dash, newlines
 // a space, and long values are cut.
 func diffValue(v string) string {

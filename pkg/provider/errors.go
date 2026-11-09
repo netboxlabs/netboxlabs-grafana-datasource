@@ -44,6 +44,45 @@ const (
 	// ErrorKindUpstream is any other identified upstream refusal. Status carries
 	// the code; there is nothing more specific to say.
 	ErrorKindUpstream ErrorKind = "upstream"
+	// ErrorKindAnnotation is an annotation query that cannot be answered as
+	// configured: its scope names nothing, or too much, or one of its options
+	// needs something the upstream won't give. AnnotationReason says which. It
+	// is answered as a bad request, because the query is what has to change.
+	ErrorKindAnnotation ErrorKind = "annotation"
+)
+
+// The reasons an annotation query is refused (ErrorKindAnnotation). Each has its
+// own user-facing message in the plugin layer.
+const (
+	// AnnotationReasonEmptyScope is a scope that was configured but came out
+	// empty, usually an empty variable. It is never read as unscoped.
+	AnnotationReasonEmptyScope = "empty-scope"
+	// AnnotationReasonNoMatch is a scope name no object has (AnnotationValue).
+	AnnotationReasonNoMatch = "no-match"
+	// AnnotationReasonTooManyMatches is a scope name more than 20 objects share
+	// (AnnotationValue).
+	AnnotationReasonTooManyMatches = "too-many-matches"
+	// AnnotationReasonNotAnID is a scope value matched by ID that isn't a
+	// positive integer (AnnotationValue).
+	AnnotationReasonNotAnID = "not-an-id"
+	// AnnotationReasonNoNameFilter is a scope type whose list endpoint can't be
+	// filtered by its name.
+	AnnotationReasonNoNameFilter = "no-name-filter"
+	// AnnotationReasonNoEndpoint is a scope type matched by name whose list
+	// endpoint the instance doesn't report.
+	AnnotationReasonNoEndpoint = "no-endpoint"
+	// AnnotationReasonTooManyObjects is a scope of more than 100 objects
+	// (AnnotationCount).
+	AnnotationReasonTooManyObjects = "too-many-objects"
+	// AnnotationReasonUnknownField is a Changed-fields name no object type has
+	// (AnnotationValue).
+	AnnotationReasonUnknownField = "unknown-field"
+	// AnnotationReasonJournalForbidden is a journal read the API token isn't
+	// allowed.
+	AnnotationReasonJournalForbidden = "journal-forbidden"
+	// AnnotationReasonObjectTypesUnreadable is an object-type list that couldn't
+	// be read where its ids are needed to find related changes.
+	AnnotationReasonObjectTypesUnreadable = "object-types-unreadable"
 )
 
 // UpstreamError is a provider's own classification of a failure it received.
@@ -64,6 +103,15 @@ type UpstreamError struct {
 	// KnownTypes is set only for ErrorKindUnknownObjectType: how many types the
 	// instance does report, so the message can say how far off the input was.
 	KnownTypes int
+	// AnnotationReason is set only for ErrorKindAnnotation: one of the
+	// AnnotationReason constants.
+	AnnotationReason string
+	// AnnotationValue is the scope value or field name the reason is about, when
+	// it is about one. It is free text from the query editor or a dashboard
+	// variable, so the plugin layer bounds it before display.
+	AnnotationValue string
+	// AnnotationCount is the object count for AnnotationReasonTooManyObjects.
+	AnnotationCount int
 }
 
 func (e *UpstreamError) Error() string {

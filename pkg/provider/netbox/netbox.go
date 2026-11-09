@@ -113,6 +113,8 @@ type Provider struct {
 	customFieldsWaitOverride time.Duration
 	// namesWaitOverride shortens namesWaitBudget; tests only.
 	namesWaitOverride time.Duration
+	// changeScanCapOverride lowers changeScanCapRows; tests only.
+	changeScanCapOverride int
 
 	// branchingInstalled caches whether netbox-branching is installed — an
 	// instance-wide, branch-invariant property, so a single value + expiry
@@ -1691,6 +1693,12 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 }
 
 // Changes returns change-log events within a time window for annotations.
+//
+// Unscoped, it is one read of the change log. Scoped, it is two, run at once:
+// the scope objects' own changes and the changes recorded against them, merged
+// newest first (changeReads). Actions and Changed fields that NetBox can't
+// filter are applied here as rows are read, up to changeScanCap rows a read,
+// and a read that stops there ends the track with a cut-off marker.
 func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]provider.Change, error) {
 	// One branch for every request and cache key this call makes (pinBranch).
 	ctx, _ = p.client.pinBranch(ctx)
@@ -1698,64 +1706,58 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	if limit <= 0 || limit > MaxLimit {
 		limit = defaultLimit
 	}
-	q := url.Values{}
-	q.Set("ordering", "-time")
-	if !spec.From.IsZero() {
-		q.Set("time_after", spec.From.UTC().Format(time.RFC3339))
-	}
-	if !spec.To.IsZero() {
-		q.Set("time_before", spec.To.UTC().Format(time.RFC3339))
-	}
-	// ONE normalised list feeds both the pushdown and the local filter below, so
-	// the two cannot disagree about case, spacing, or what counts as no filter at
+	// ONE normalised list feeds both the pushdown and the local filter, so the
+	// two cannot disagree about case, spacing, or what counts as no filter at
 	// all. They did: a whitespace-only entry was dropped by the pushdown (nothing
 	// went upstream) but kept by the local filter (every row was discarded), which
 	// is a silently empty annotation with no error anywhere.
 	wanted := normalizeObjectTypes(spec.ObjectTypes)
 
-	// An object type the instance does not know is an ERROR here, before any
-	// change-log request is made, and that is the point of the id form: it is a
-	// wrong question, and answering it with an empty annotation track that looks
-	// exactly like a quiet window is the silent-wrong-answer this whole function
-	// is being fixed for.
-	if err := p.pushChangedObjectType(ctx, q, wanted); err != nil {
+	scope, err := p.resolveAnnotationScope(ctx, spec)
+	if err != nil {
 		return nil, err
 	}
-	rows, _, err := p.fetchRows(ctx, "core/object-changes", q, limit)
+	filter := newChangeFilter(spec)
+	maxRows := limit
+	if filter.localScan() {
+		maxRows = p.changeScanCap()
+	}
+	if err := p.checkChangedFields(ctx, filter.fields); err != nil {
+		return nil, err
+	}
+	reads, err := p.changeReads(ctx, spec, scope, wanted, filter)
 	if err != nil {
 		return nil, err
 	}
 
-	// The local filter stays, and is not dead code once the type is pushed
-	// upstream. It is not a correctness net — an unknown type never reaches the
-	// query at all now — it is what makes the pushdown strictly NON-WIDENING:
-	// whatever NetBox does with the parameter (ignores it, ORs it, honours only
-	// the last value, or does not implement it on this version), the frame can
-	// never contain a type the user did not ask for. It is also the only filter
-	// at all on the degraded path, where the id map could not be read and a
-	// multi-type request is pushed nowhere.
-	//
-	// Built from the SAME list the pushdown was given, not from spec.ObjectTypes
-	// again: " DCIM.Device " resolves to an id whose rows NetBox returns, and must
-	// not then be discarded here for its spacing — and a blank entry, which is no
-	// filter upstream, must not become "match nothing" here.
-	typeFilter := make(map[string]bool, len(wanted))
-	for _, t := range wanted {
-		typeFilter[t] = true
+	// Each read owns its result slot, so no lock is needed.
+	results := make([]changeReadResult, len(reads))
+	var wg sync.WaitGroup
+	for i, r := range reads {
+		wg.Go(func() { results[i] = p.runChangeRead(ctx, r, filter, limit, maxRows) })
+	}
+	wg.Wait()
+	for _, r := range results {
+		if r.err != nil {
+			return nil, r.err
+		}
 	}
 
-	var kept []decodedChange
-	for _, raw := range rows {
-		d, ok := decodeChange(raw)
-		if !ok {
-			continue
+	kept := mergeChanges(results, limit)
+	if scope != nil {
+		for i := range kept {
+			if kept[i].fromRelated {
+				kept[i].parent = relatedParent(scope, kept[i].oc)
+			}
 		}
-		if len(typeFilter) > 0 && !typeFilter[normalizeObjectType(d.oc.changedType())] {
-			continue
-		}
-		kept = append(kept, d)
 	}
-	return p.resolveDiffs(ctx, kept, nil), nil
+	changes := p.resolveDiffs(ctx, kept, filter.fields)
+	if filter.localScan() {
+		if cut, ok := cutoffChange(results); ok {
+			changes = append(changes, cut)
+		}
+	}
+	return changes, nil
 }
 
 // changedObjectTypeIDParam selects change-log rows by the numeric object-type id

@@ -74,14 +74,6 @@ func (o objectChange) deepLink(base string) string {
 	return base
 }
 
-// lookupField is the field a type is looked up by. Task 3 moves this to endpoints.go.
-func lookupField(objectType string) string {
-	if objectType == "circuits.circuit" {
-		return "cid"
-	}
-	return "name"
-}
-
 // title names the changed object. NetBox only returns object_repr from 4.5, so
 // older versions fall back through what the record does carry.
 func (o objectChange) title() string {

@@ -1738,23 +1738,14 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 
 	var changes []provider.Change
 	for _, raw := range rows {
-		var oc objectChange
-		if err := json.Unmarshal(raw, &oc); err != nil {
+		d, ok := decodeChange(raw)
+		if !ok {
 			continue
 		}
-		ct := oc.changedType()
-		if len(typeFilter) > 0 && !typeFilter[normalizeObjectType(ct)] {
+		if len(typeFilter) > 0 && !typeFilter[normalizeObjectType(d.oc.changedType())] {
 			continue
 		}
-		t, _ := time.Parse(time.RFC3339, oc.Time)
-		changes = append(changes, provider.Change{
-			Time:       t,
-			Action:     oc.actionLabel(),
-			ObjectType: ct,
-			ObjectRepr: oc.ObjectRepr,
-			User:       oc.userName(),
-			URL:        oc.deepLink(p.client.BaseURL()),
-		})
+		changes = append(changes, d.toChange(p.client.BaseURL(), func(_ string, v json.RawMessage) string { return formatValue(v) }))
 	}
 	return changes, nil
 }

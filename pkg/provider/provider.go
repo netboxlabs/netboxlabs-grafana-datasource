@@ -263,6 +263,18 @@ type Cap struct {
 	Rows int
 }
 
+// ChangeKind distinguishes the sorts of annotation marker a Changes call returns.
+type ChangeKind string
+
+const (
+	ChangeKindChange  ChangeKind = "" // zero value: existing literals stay valid
+	ChangeKindJournal ChangeKind = "journal"
+	ChangeKindCutoff  ChangeKind = "cutoff"
+)
+
+// FieldChange is one changed field, formatted for display ("" = null/empty).
+type FieldChange struct{ Field, Before, After string }
+
 // Change is a single change-log/audit event, used to render annotations.
 type Change struct {
 	Time       time.Time `json:"time"`
@@ -271,6 +283,14 @@ type Change struct {
 	ObjectRepr string    `json:"objectRepr"`
 	User       string    `json:"user"`
 	URL        string    `json:"url"` // deep link to the object/change in the UI
+
+	Kind        ChangeKind
+	Parent      string        // scope object's display name for related changes, else ""
+	Diff        []FieldChange // updates only, in display order; the frame caps it
+	Message     string
+	JournalKind string // journal only
+	Comments    string // journal only
+	Scanned     int    // cutoff only
 }
 
 // ChangeSpec bounds an annotation query.
@@ -279,6 +299,15 @@ type ChangeSpec struct {
 	To          time.Time
 	ObjectTypes []string // content-type filters, e.g. ["dcim.device"]; empty = all
 	Limit       int
+
+	ScopeType     string   // app_label.model; "" = dcim.device when scoped
+	Scope         []string // split values; nil = unscoped
+	ScopeSet      bool     // a scope was configured (even if it interpolated to nothing)
+	ScopeAll      bool     // the scope was exactly $__all: unscoped on purpose
+	ScopeMatch    string   // "name" (default) | "id"
+	Actions       []string // subset of create|update|delete
+	ChangedFields []string
+	Journal       bool
 }
 
 // TopologySpec bounds a topology (node-graph) query.

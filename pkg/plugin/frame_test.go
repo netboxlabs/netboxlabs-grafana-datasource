@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -57,7 +58,7 @@ func TestBuildAnnotationsFrame(t *testing.T) {
 	}
 	frame := buildAnnotationsFrame(changes)
 
-	want := []string{"time", "title", "text", "tags"}
+	want := []string{"time", "title", "text", "tags", "id"}
 	if len(frame.Fields) != len(want) {
 		t.Fatalf("annotation frame has %d fields, want %d", len(frame.Fields), len(want))
 	}
@@ -68,6 +69,131 @@ func TestBuildAnnotationsFrame(t *testing.T) {
 	}
 	if frame.Fields[2].At(0).(string) != "Updated by admin" {
 		t.Errorf("text = %v", frame.Fields[2].At(0))
+	}
+}
+
+func annText(t *testing.T, c provider.Change) string {
+	t.Helper()
+	return buildAnnotationsFrame([]provider.Change{c}).Fields[2].At(0).(string)
+}
+
+func TestBuildAnnotationsFrame_DiffLines(t *testing.T) {
+	c := provider.Change{
+		Action: "Updated", ObjectType: "dcim.device", ObjectRepr: "leaf1", User: "admin",
+		URL: "https://nb/dcim/devices/1/",
+		Diff: []provider.FieldChange{
+			{Field: "platform", Before: "IOS", After: "IOS-XE"},
+			{Field: "role", Before: "Router", After: "Distribution Switch"},
+		},
+	}
+	want := `platform: IOS → IOS-XE<br>role: Router → Distribution Switch<br>Updated by admin · <a href="https://nb/dcim/devices/1/" target="_blank">Open in NetBox</a>`
+	if got := annText(t, c); got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAnnotationsFrame_CapsAtFiveFields(t *testing.T) {
+	var diff []provider.FieldChange
+	for _, f := range []string{"a", "b", "c", "d", "e", "f", "g"} {
+		diff = append(diff, provider.FieldChange{Field: f, Before: "1", After: "2"})
+	}
+	got := annText(t, provider.Change{Action: "Updated", Diff: diff})
+	want := "a: 1 → 2<br>b: 1 → 2<br>c: 1 → 2<br>d: 1 → 2<br>e: 1 → 2<br>+2 more<br>Updated"
+	if got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAnnotationsFrame_EmptyLongAndMultilineValues(t *testing.T) {
+	long := strings.Repeat("x", 61)
+	got := annText(t, provider.Change{Action: "Updated", Diff: []provider.FieldChange{
+		{Field: "a", Before: "", After: "v"},
+		{Field: "b", Before: long, After: "w"},
+		{Field: "c", Before: "line1\nline2", After: "z"},
+	}})
+	want := "a: — → v<br>b: " + strings.Repeat("x", 60) + "… → w<br>c: line1 line2 → z<br>Updated"
+	if got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAnnotationsFrame_ParentAndMessage(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{
+		Action: "Created", ObjectRepr: "eth0", Parent: "leaf1", Message: "CHG-1", User: "bob",
+	}})
+	if got := f.Fields[1].At(0).(string); got != "eth0 on leaf1" {
+		t.Errorf("title = %q", got)
+	}
+	if got, want := f.Fields[2].At(0).(string), `"CHG-1"<br>Created by bob`; got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAnnotationsFrame_EscapesEveryNetBoxValue(t *testing.T) {
+	const raw = `<b>"&`
+	f := buildAnnotationsFrame([]provider.Change{
+		{Action: "Updated", ObjectRepr: raw, Parent: raw, User: raw, Message: raw, URL: raw,
+			Diff: []provider.FieldChange{{Field: raw, Before: raw, After: raw}}},
+		{Kind: provider.ChangeKindJournal, ObjectRepr: raw, Comments: raw, User: raw, URL: raw},
+	})
+	const esc = "&lt;b&gt;&#34;&amp;"
+	for i := 0; i < 2; i++ {
+		for _, col := range []int{1, 2} {
+			s := f.Fields[col].At(i).(string)
+			if strings.Contains(s, "<b>") {
+				t.Errorf("row %d field %d has raw <b>: %q", i, col, s)
+			}
+			if !strings.Contains(s, esc) {
+				t.Errorf("row %d field %d missing escaped value: %q", i, col, s)
+			}
+		}
+		if s := f.Fields[2].At(i).(string); !strings.Contains(s, `href="`+esc+`"`) {
+			t.Errorf("row %d URL not escaped: %q", i, s)
+		}
+	}
+	// Every value in the first row's text: field, before, after, message, user.
+	if s := f.Fields[2].At(0).(string); strings.Count(s, esc) != 6 {
+		t.Errorf("expected 6 escaped values (field, before, after, message, user, url), got %q", s)
+	}
+}
+
+func TestBuildAnnotationsFrame_Journal(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{
+		Kind: provider.ChangeKindJournal, ObjectRepr: "leaf1", JournalKind: "warning",
+		Comments: "line1\nline2", User: "admin",
+	}})
+	if got, want := f.Fields[2].At(0).(string), "line1<br>line2<br>Journal by admin"; got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,journal,warning" {
+		t.Errorf("tags = %q", got)
+	}
+}
+
+func TestBuildAnnotationsFrame_Cutoff(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindCutoff, Scanned: 2500}})
+	if got := f.Fields[1].At(0).(string); got != "NetBox change log" {
+		t.Errorf("title = %q", got)
+	}
+	want := "Older changes not checked: read 2,500 change-log entries without reaching the start of the range."
+	if got := f.Fields[2].At(0).(string); got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,cutoff" {
+		t.Errorf("tags = %q", got)
+	}
+}
+
+func TestBuildAnnotationsFrame_IDFieldIsZero(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{Action: "Created"}, {Action: "Deleted"}})
+	idf := f.Fields[4]
+	if idf.Name != "id" || idf.Type() != data.FieldTypeInt64 {
+		t.Fatalf("id field = %q %v", idf.Name, idf.Type())
+	}
+	for i := 0; i < idf.Len(); i++ {
+		if idf.At(i).(int64) != 0 {
+			t.Errorf("id[%d] = %v", i, idf.At(i))
+		}
 	}
 }
 

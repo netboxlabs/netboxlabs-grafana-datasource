@@ -126,6 +126,11 @@ type Provider struct {
 	// map.
 	objectTypeIDs       map[string]int
 	objectTypeIDsExpiry time.Time
+	// objectTypeEndpoints is app_label.model -> list endpoint ("dcim/devices"),
+	// from rest_api_endpoint on the same read and published with objectTypeIDs
+	// under the same lock and expiry. Empty before NetBox 4.4, which does not
+	// report it (see contentTypeEndpoint).
+	objectTypeEndpoints map[string]string
 
 	// objectTypeErr is the NEGATIVE half of that cache: the failure the last read
 	// ended with, held for the much shorter objectTypeFailureTTL so that a
@@ -151,13 +156,14 @@ type Provider struct {
 // the point: the alternative is each waiter re-attempting a read that has just
 // been shown not to work, one after another.
 //
-// ids and err are written once BEFORE done is closed and read only AFTER, so the
-// close is the happens-before edge that publishes them and no lock is needed on
-// either field.
+// ids, endpoints and err are written once BEFORE done is closed and read only
+// AFTER, so the close is the happens-before edge that publishes them and no lock
+// is needed on any of them.
 type objectTypeFlight struct {
-	done chan struct{}
-	ids  map[string]int
-	err  error
+	done      chan struct{}
+	ids       map[string]int
+	endpoints map[string]string
+	err       error
 }
 
 // schemaCacheEntry holds everything derived from one fetch of /api/schema/.
@@ -1736,7 +1742,7 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		typeFilter[t] = true
 	}
 
-	var changes []provider.Change
+	var kept []decodedChange
 	for _, raw := range rows {
 		d, ok := decodeChange(raw)
 		if !ok {
@@ -1745,9 +1751,9 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		if len(typeFilter) > 0 && !typeFilter[normalizeObjectType(d.oc.changedType())] {
 			continue
 		}
-		changes = append(changes, d.toChange(p.client.BaseURL(), func(_ string, v json.RawMessage) string { return formatValue(v) }))
+		kept = append(kept, d)
 	}
-	return changes, nil
+	return p.resolveDiffs(ctx, kept, nil), nil
 }
 
 // changedObjectTypeIDParam selects change-log rows by the numeric object-type id
@@ -1767,16 +1773,15 @@ const (
 // is exactly why the map is read rather than hardcoded, and why nothing here
 // depends on its size.
 //
-// core/ is the canonical spelling and the only one that works everywhere.
-// extras/object-types is a legacy alias: 4.4.10 answers it with the same rows
-// AND the same canonical self-URL (…/api/core/object-types/33/), but 4.6 no
-// longer registers object-types under extras (verified in both containers:
-// extras/api/urls.py registers it on 4.4, only core/api/urls.py does on 4.6.0)
-// and the legacy path 404s there. Reading the alias would leave the id map
-// unreadable on every newer instance — the whole pushdown degrading to the
-// silently empty annotation it exists to fix, and, since only successful
-// fetches are cached, a fresh doomed request on every refresh. The demo cannot
-// catch that, because there the alias still works.
+// core/ is the canonical spelling and is read first, but it does not work
+// everywhere: it exists from NetBox 4.4.0. 4.4.10 also answers the
+// extras/object-types alias with the same rows AND the same canonical self-URL
+// (…/api/core/object-types/33/), but the alias is gone from 4.5.0 (4.6.0
+// registers object-types only in core/api/urls.py) and 404s there, so reading it
+// first would leave the id map unreadable on every newer instance. NetBox 4.2
+// and 4.3 are the reverse: they serve the list only at extras/object-types and
+// 404 core/, so readObjectTypeIDs falls back to legacyObjectTypesEndpoint on a
+// 404, and on nothing else.
 const objectTypesEndpoint = "core/object-types"
 
 // maxObjectTypes caps the object-type walk. 154 rows today; the cap is set far
@@ -1994,46 +1999,53 @@ func (e *UnknownObjectTypeError) Error() string {
 // it — 93,251 bytes of response with and without — so sending it would be a
 // parameter that does nothing.
 func (p *Provider) objectTypeIDMap(ctx context.Context) (map[string]int, error) {
-	ids, flight, err := p.objectTypeIDsOrFlight(ctx)
+	ids, _, err := p.objectTypeMaps(ctx)
+	return ids, err
+}
+
+// objectTypeMaps is objectTypeIDMap plus the list endpoints the same read
+// returns (see contentTypeEndpoint), with the same cache and single flight.
+func (p *Provider) objectTypeMaps(ctx context.Context) (map[string]int, map[string]string, error) {
+	ids, endpoints, flight, err := p.objectTypeIDsOrFlight(ctx)
 	if flight == nil {
-		return ids, err
+		return ids, endpoints, err
 	}
 	select {
 	case <-ctx.Done():
 		// THIS caller's deadline, not the leader's. The read carries on for
 		// whoever else is waiting, and its result still lands in the cache.
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	case <-flight.done:
-		return flight.ids, flight.err
+		return flight.ids, flight.endpoints, flight.err
 	}
 }
 
-// objectTypeIDsOrFlight answers a caller from the cache when it can — the map,
+// objectTypeIDsOrFlight answers a caller from the cache when it can — the maps,
 // or a recent failure — and otherwise hands back the read to wait on, joining
 // the one already running or starting it.
 //
-// Exactly one of the three results is meaningful, and a non-nil flight is what
-// says "nothing is decided yet". mu is held for the whole decision so that two
-// simultaneous misses cannot both start a read, and released before the read
-// begins: mu guards short map reads all over the provider and must never be held
-// across an HTTP request.
-func (p *Provider) objectTypeIDsOrFlight(ctx context.Context) (map[string]int, *objectTypeFlight, error) {
+// Exactly one of the maps, the flight and the error is meaningful, and a non-nil
+// flight is what says "nothing is decided yet". mu is held for the whole
+// decision so that two simultaneous misses cannot both start a read, and
+// released before the read begins: mu guards short map reads all over the
+// provider and must never be held across an HTTP request.
+func (p *Provider) objectTypeIDsOrFlight(ctx context.Context) (map[string]int, map[string]string, *objectTypeFlight, error) {
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.objectTypeIDs != nil && now.Before(p.objectTypeIDsExpiry) {
-		return p.objectTypeIDs, nil, nil
+		return p.objectTypeIDs, p.objectTypeEndpoints, nil, nil
 	}
 	if p.objectTypeErr != nil && now.Before(p.objectTypeErrExpiry) {
-		return nil, nil, p.objectTypeErr
+		return nil, nil, nil, p.objectTypeErr
 	}
 	if p.objectTypeFlight != nil {
-		return nil, p.objectTypeFlight, nil
+		return nil, nil, p.objectTypeFlight, nil
 	}
 	flight := &objectTypeFlight{done: make(chan struct{})}
 	p.objectTypeFlight = flight
 	go p.runObjectTypeFetch(ctx, flight)
-	return nil, flight, nil
+	return nil, nil, flight, nil
 }
 
 // runObjectTypeFetch performs one read of the object-type map, publishes it to
@@ -2046,11 +2058,11 @@ func (p *Provider) runObjectTypeFetch(ctx context.Context, flight *objectTypeFli
 	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.objectTypeFetchBudget())
 	defer cancel()
 
-	ids, err := p.readObjectTypeIDs(fetchCtx)
+	ids, endpoints, err := p.readObjectTypeIDs(fetchCtx)
 
 	p.mu.Lock()
 	if err == nil {
-		p.objectTypeIDs, p.objectTypeIDsExpiry = ids, time.Now().Add(cacheTTL)
+		p.objectTypeIDs, p.objectTypeEndpoints, p.objectTypeIDsExpiry = ids, endpoints, time.Now().Add(cacheTTL)
 		p.objectTypeErr, p.objectTypeErrExpiry = nil, time.Time{}
 	} else {
 		p.objectTypeErr, p.objectTypeErrExpiry = err, time.Now().Add(objectTypeFailureTTL)
@@ -2060,7 +2072,7 @@ func (p *Provider) runObjectTypeFetch(ctx context.Context, flight *objectTypeFli
 	p.objectTypeFlight = nil
 	p.mu.Unlock()
 
-	flight.ids, flight.err = ids, err
+	flight.ids, flight.endpoints, flight.err = ids, endpoints, err
 	close(flight.done)
 }
 
@@ -2084,31 +2096,51 @@ func (p *Provider) objectTypeFetchBudget() time.Duration {
 	return defaultRequestTimeout
 }
 
-// readObjectTypeIDs walks /api/core/object-types/ and builds app_label.model ->
-// id. Every failure it returns is one the caller may degrade on.
-func (p *Provider) readObjectTypeIDs(ctx context.Context) (map[string]int, error) {
-	rows, _, err := p.fetchRows(ctx, objectTypesEndpoint, url.Values{}, maxObjectTypes)
+// readObjectTypeIDs walks the object-type list and builds app_label.model -> id,
+// and app_label.model -> list endpoint for the types that report
+// rest_api_endpoint (NetBox 4.4 and later). It reads core/object-types, and
+// extras/object-types when that 404s (NetBox 4.2 and 4.3). Every failure it
+// returns is one the caller may degrade on.
+func (p *Provider) readObjectTypeIDs(ctx context.Context) (map[string]int, map[string]string, error) {
+	endpoint := objectTypesEndpoint
+	rows, _, err := p.fetchRows(ctx, endpoint, url.Values{}, maxObjectTypes)
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+		endpoint = legacyObjectTypesEndpoint
+		rows, _, err = p.fetchRows(ctx, endpoint, url.Values{}, maxObjectTypes)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("fetch object types: %w", err)
+		return nil, nil, fmt.Errorf("fetch object types: %w", err)
 	}
 	ids := make(map[string]int, len(rows))
+	endpoints := make(map[string]string, len(rows))
 	for _, raw := range rows {
 		var ot struct {
 			ID       int    `json:"id"`
 			AppLabel string `json:"app_label"`
 			Model    string `json:"model"`
+			// Raw, and read on its own below, so an odd value cannot cost the
+			// row its id.
+			RESTAPIEndpoint json.RawMessage `json:"rest_api_endpoint"`
 		}
 		if err := json.Unmarshal(raw, &ot); err != nil || ot.AppLabel == "" || ot.Model == "" {
 			continue
 		}
-		ids[normalizeObjectType(ot.AppLabel+"."+ot.Model)] = ot.ID
+		key := normalizeObjectType(ot.AppLabel + "." + ot.Model)
+		ids[key] = ot.ID
+		var rest string
+		if json.Unmarshal(ot.RESTAPIEndpoint, &rest) == nil {
+			if e := restAPIPath(rest); e != "" {
+				endpoints[key] = e
+			}
+		}
 	}
 	// An empty map would make every type unknown, so treat it as a failed read and
 	// let the caller degrade instead of reporting the user's correct type as wrong.
 	if len(ids) == 0 {
-		return nil, fmt.Errorf("fetch object types: %s returned no usable rows", objectTypesEndpoint)
+		return nil, nil, fmt.Errorf("fetch object types: %s returned no usable rows", endpoint)
 	}
-	return ids, nil
+	return ids, endpoints, nil
 }
 
 // allNullCustomFieldColumns returns the cf_* columns among columns that hold

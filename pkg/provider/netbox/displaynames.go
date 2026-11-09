@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 
@@ -27,20 +28,43 @@ const (
 	maxNameIDs       = 100
 )
 
+// namesWaitBudget is how long a query waits for the names behind its diffs
+// before answering with ids. The names are a hint, as the custom-field index is
+// (customFieldsWaitBudget, the same size): a cold, slow or failing schema must
+// not hold the annotation query, which already has its rows. The schema and
+// object-type reads are detached flights, so they carry on past the budget and
+// fill their caches for the next refresh.
+const namesWaitBudget = 2 * time.Second
+
+// namesWait is namesWaitBudget unless a test has shortened it.
+func (p *Provider) namesWait() time.Duration {
+	if p.namesWaitOverride > 0 {
+		return p.namesWaitOverride
+	}
+	return namesWaitBudget
+}
+
 // resolveDiffs builds the provider rows, with each diff in display order and the
 // related-object ids in its rendered fields replaced by the objects' names.
 //
 // rows are newest first, as Changes reads them, so when a lookup budget runs out
 // it is the older changes that keep their ids. preferred holds the Changed-fields
 // names: the fields they match (diffFieldMatches) sort first, and the rest
-// follow alphabetically.
+// follow alphabetically. Everything the names wait on shares one namesWait
+// budget, past which the values stay ids.
 func (p *Provider) resolveDiffs(ctx context.Context, rows []decodedChange, preferred []string) []provider.Change {
 	ordered := make([]decodedChange, len(rows))
 	for i, d := range rows {
 		d.diff = orderDiff(d.diff, preferred)
 		ordered[i] = d
 	}
-	names := p.displayNames(ctx, ordered)
+	waitCtx, cancel := context.WithTimeout(ctx, p.namesWait())
+	names := p.displayNames(waitCtx, ordered)
+	if waitCtx.Err() != nil && ctx.Err() == nil {
+		log.DefaultLogger.Debug("netbox: related-object names not resolved within the wait budget; the diffs show ids",
+			"waited", p.namesWait().String())
+	}
+	cancel()
 	base := p.client.BaseURL()
 	var out []provider.Change
 	for _, d := range ordered {

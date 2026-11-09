@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"html"
 	"strconv"
 	"strings"
 	"time"
@@ -186,40 +187,141 @@ func addObjectDataLinks(frame *data.Frame, columns []string) {
 	}
 }
 
+// Annotation rendering limits.
+const (
+	maxDiffLines     = 5
+	maxDiffValueLen  = 60
+	maxJournalLength = 200
+)
+
 // buildAnnotationsFrame builds a frame whose field names follow Grafana's
 // annotation convention (time/title/text/tags), so changelog events render as
-// annotations on any time-series panel.
+// annotations on any time-series panel. Title and text are HTML, so every
+// NetBox-supplied value is escaped. The id field is always 0: a marker with an
+// id makes Grafana's tooltip offer Edit, which would save a copy.
 func buildAnnotationsFrame(changes []provider.Change) *data.Frame {
 	times := make([]time.Time, 0, len(changes))
 	titles := make([]string, 0, len(changes))
 	texts := make([]string, 0, len(changes))
 	tags := make([]string, 0, len(changes))
+	ids := make([]int64, 0, len(changes))
 
 	for _, c := range changes {
 		times = append(times, c.Time)
-		titles = append(titles, c.ObjectRepr)
-		text := c.Action
-		if c.User != "" {
-			text = fmt.Sprintf("%s by %s", c.Action, c.User)
+		ids = append(ids, 0)
+		var title, text, tag string
+		switch c.Kind {
+		case provider.ChangeKindJournal:
+			title, text, tag = journalMarker(c)
+		case provider.ChangeKindCutoff:
+			title, text, tag = cutoffMarker(c)
+		default:
+			title, text, tag = changeMarker(c)
 		}
+		titles = append(titles, title)
 		texts = append(texts, text)
-		tagParts := []string{"netbox"}
-		if c.ObjectType != "" {
-			tagParts = append(tagParts, c.ObjectType)
-		}
-		if c.Action != "" {
-			tagParts = append(tagParts, strings.ToLower(c.Action))
-		}
-		tags = append(tags, strings.Join(tagParts, ","))
+		tags = append(tags, tag)
 	}
 
-	frame := data.NewFrame("netbox_changes",
+	return data.NewFrame("netbox_changes",
 		data.NewField("time", nil, times),
 		data.NewField("title", nil, titles),
 		data.NewField("text", nil, texts),
 		data.NewField("tags", nil, tags),
+		data.NewField("id", nil, ids),
 	)
-	return frame
+}
+
+func changeMarker(c provider.Change) (title, text, tag string) {
+	title = html.EscapeString(c.ObjectRepr)
+	if c.Parent != "" {
+		title += " on " + html.EscapeString(c.Parent)
+	}
+
+	var lines []string
+	for i, d := range c.Diff {
+		if i == maxDiffLines {
+			lines = append(lines, fmt.Sprintf("+%d more", len(c.Diff)-maxDiffLines))
+			break
+		}
+		lines = append(lines, fmt.Sprintf("%s: %s → %s",
+			html.EscapeString(d.Field), diffValue(d.Before), diffValue(d.After)))
+	}
+	if c.Message != "" {
+		lines = append(lines, `"`+html.EscapeString(c.Message)+`"`)
+	}
+	who := html.EscapeString(c.Action)
+	if c.User != "" {
+		who += " by " + html.EscapeString(c.User)
+	}
+	lines = append(lines, who+markerLink(c.URL))
+	text = strings.Join(lines, "<br>")
+
+	tagParts := []string{"netbox"}
+	if c.ObjectType != "" {
+		tagParts = append(tagParts, c.ObjectType)
+	}
+	if c.Action != "" {
+		tagParts = append(tagParts, strings.ToLower(c.Action))
+	}
+	return title, text, strings.Join(tagParts, ",")
+}
+
+func journalMarker(c provider.Change) (title, text, tag string) {
+	who := "Journal"
+	if c.User != "" {
+		who += " by " + html.EscapeString(c.User)
+	}
+	comments := strings.ReplaceAll(html.EscapeString(truncateRunes(c.Comments, maxJournalLength)), "\n", "<br>")
+	return html.EscapeString(c.ObjectRepr),
+		comments + "<br>" + who + markerLink(c.URL),
+		"netbox,journal," + c.JournalKind
+}
+
+func cutoffMarker(c provider.Change) (title, text, tag string) {
+	return "NetBox change log",
+		fmt.Sprintf("Older changes not checked: read %s change-log entries without reaching the start of the range.", withThousands(c.Scanned)),
+		"netbox,cutoff"
+}
+
+// diffValue formats one side of a field change: empty becomes a dash, newlines
+// a space, and long values are cut.
+func diffValue(v string) string {
+	if v == "" {
+		return "—"
+	}
+	v = strings.ReplaceAll(v, "\n", " ")
+	return html.EscapeString(truncateRunes(v, maxDiffValueLen))
+}
+
+func markerLink(url string) string {
+	if url == "" {
+		return ""
+	}
+	return ` · <a href="` + html.EscapeString(url) + `" target="_blank">Open in NetBox</a>`
+}
+
+// truncateRunes cuts s to n runes, marking the cut with an ellipsis.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
+// withThousands formats n with comma thousands separators.
+func withThousands(n int) string {
+	s := strconv.Itoa(n)
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	if neg {
+		s = "-" + s
+	}
+	return s
 }
 
 // buildNodeGraphFrames builds the two frames (nodes + edges) Grafana's node

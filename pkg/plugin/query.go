@@ -114,7 +114,13 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			Limit:       qm.Limit,
 		})
 		if err != nil {
-			return d.queryErrorResponse(err)
+			// Every error also comes back as a marker at the range's end:
+			// scenes dashboards drop an annotation query's error.
+			resp := d.queryErrorResponse(err)
+			marker := annotationErrorFrame(resp.Error.Error(), q.TimeRange.To)
+			marker.RefID = q.RefID
+			resp.Frames = data.Frames{marker}
+			return resp
 		}
 		frame := buildAnnotationsFrame(changes)
 		frame.RefID = q.RefID
@@ -746,6 +752,8 @@ func queryErrorMessage(err error, viaProxy bool) string {
 			return "This object type was not found in NetBox (HTTP 404)."
 		case provider.ErrorKindNotOrderable:
 			return "NetBox couldn't list this object type — the endpoint doesn't support pagination (HTTP 500). This model may not be queryable."
+		case provider.ErrorKindAnnotation:
+			return annotationErrorMessage(u)
 		}
 		if u.Status != 0 {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
@@ -764,6 +772,40 @@ func queryErrorMessage(err error, viaProxy bool) string {
 	return "Couldn't reach NetBox: " + cause + ". The Grafana server log has the full error."
 }
 
+// annotationErrorMessage says what to change in an annotation query the provider
+// refused (provider.ErrorKindAnnotation).
+func annotationErrorMessage(u *provider.UpstreamError) string {
+	// Bounded like the object type above: the value is free text from the
+	// annotation editor or a dashboard variable, and lands in the same toast.
+	value := u.AnnotationValue
+	if len(value) > maxUpstreamDetail {
+		value = value[:maxUpstreamDetail] + "…"
+	}
+	switch u.AnnotationReason {
+	case provider.AnnotationReasonEmptyScope:
+		return "The annotation's scope came out empty. Is its variable empty?"
+	case provider.AnnotationReasonNoMatch:
+		return fmt.Sprintf("No NetBox object named %q for this annotation's scope. Check the name, or match by ID.", value)
+	case provider.AnnotationReasonTooManyMatches:
+		return fmt.Sprintf("%q matches more than 20 NetBox objects. Names like interface names repeat across devices: give the variable ids and set Match by to ID.", value)
+	case provider.AnnotationReasonNotAnID:
+		return fmt.Sprintf("%q isn't a NetBox id. Set Match by to Name, or give the variable ids.", value)
+	case provider.AnnotationReasonNoNameFilter:
+		return "This object type can't be looked up by name. Set Match by to ID."
+	case provider.AnnotationReasonNoEndpoint:
+		return "This NetBox doesn't say where this object type lives, so it can't be looked up by name. Set Match by to ID."
+	case provider.AnnotationReasonTooManyObjects:
+		return fmt.Sprintf("The scope covers %d objects; the limit is 100. Narrow the variable's selection. If All means every object, give the All option the custom value $__all.", u.AnnotationCount)
+	case provider.AnnotationReasonUnknownField:
+		return fmt.Sprintf("%q isn't a field of any NetBox object type. Custom fields are written cf_<name>.", value)
+	case provider.AnnotationReasonJournalForbidden:
+		return "The API token can't read journal entries. Turn off Journal entries, or let the token view them."
+	case provider.AnnotationReasonObjectTypesUnreadable:
+		return "NetBox's object-type list couldn't be read, and this NetBox version needs it to find related changes. Check that the token can read object types."
+	}
+	return "NetBox can't answer this annotation query as configured. Check its scope and filters."
+}
+
 // queryErrorResponse logs the raw upstream error (sanitized) and returns a data
 // response carrying only the user-facing mapped message.
 func (d *Datasource) queryErrorResponse(err error) backend.DataResponse {
@@ -777,8 +819,11 @@ func (d *Datasource) queryErrorResponse(err error) backend.DataResponse {
 // is a bad request, and saying otherwise tells the reader to retry something
 // only they can fix.
 func queryErrorStatus(err error) backend.Status {
-	if u := provider.Classify(err); u != nil && u.Kind == provider.ErrorKindUnknownObjectType {
-		return backend.StatusBadRequest
+	if u := provider.Classify(err); u != nil {
+		switch u.Kind {
+		case provider.ErrorKindUnknownObjectType, provider.ErrorKindAnnotation:
+			return backend.StatusBadRequest
+		}
 	}
 	return backend.StatusInternal
 }

@@ -197,6 +197,41 @@ func TestBuildAnnotationsFrame_IDFieldIsZero(t *testing.T) {
 	}
 }
 
+// The error marker's message can quote a dashboard variable's value, so it is
+// escaped like any NetBox value.
+func TestBuildAnnotationErrorFrame_Escapes(t *testing.T) {
+	at := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	f := annotationErrorFrame(`No NetBox object named "<b>&" for this annotation's scope.`, at)
+
+	want := []string{"time", "title", "text", "tags", "id"}
+	if len(f.Fields) != len(want) {
+		t.Fatalf("error frame has %d fields, want %d", len(f.Fields), len(want))
+	}
+	for i, name := range want {
+		if f.Fields[i].Name != name {
+			t.Errorf("field %d = %q, want %q", i, f.Fields[i].Name, name)
+		}
+	}
+	if n, _ := f.RowLen(); n != 1 {
+		t.Fatalf("rows = %d, want 1", n)
+	}
+	if got := f.Fields[0].At(0).(time.Time); !got.Equal(at) {
+		t.Errorf("time = %v, want %v", got, at)
+	}
+	if got := f.Fields[1].At(0).(string); got != "NetBox annotation error" {
+		t.Errorf("title = %q", got)
+	}
+	if got, want := f.Fields[2].At(0).(string), "No NetBox object named &#34;&lt;b&gt;&amp;&#34; for this annotation&#39;s scope."; got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,error" {
+		t.Errorf("tags = %q", got)
+	}
+	if got := f.Fields[4].At(0).(int64); got != 0 {
+		t.Errorf("id = %d, want 0", got)
+	}
+}
+
 func TestToString(t *testing.T) {
 	cases := map[interface{}]string{
 		float64(48):  "48",

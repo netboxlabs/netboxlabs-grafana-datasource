@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // typeServer is a NetBox shaped for what endpoint and name resolution read: the
@@ -24,6 +25,7 @@ type typeServer struct {
 	rootStatus   int                         // non-zero: /api/ answers this status
 	index        map[string][]string         // API index pages: "dcim" -> ["devices"], "plugins/bgp" -> ["session"]
 	schema       string                      // /api/schema/; "" answers 403
+	schemaDelay  time.Duration               // held before /api/schema/ answers
 	objects      map[string]map[int64]string // list endpoint -> id -> display, served to ?id= lookups
 	failing      map[string]int              // list endpoint -> status it answers with
 	changes      []string                    // core/object-changes rows
@@ -58,6 +60,7 @@ func (s *typeServer) start(t *testing.T) *Provider {
 			}
 			writePage(w, len(s.objectTypes), s.objectTypes)
 		case path == "schema":
+			time.Sleep(s.schemaDelay)
 			if s.schema == "" {
 				refuse(http.StatusForbidden)
 				return

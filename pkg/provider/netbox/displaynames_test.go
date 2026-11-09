@@ -359,6 +359,59 @@ func TestResolveDiffs_OnlyRenderedFieldsAreLookedUp(t *testing.T) {
 	}
 }
 
+// Names are a hint. A schema still generating (or failing) must not hold the
+// annotation query: past the wait budget the rows go out with ids, and the
+// detached schema read carries on to fill the cache for the next refresh.
+func TestChanges_NameResolutionWaitsOnlyItsBudget(t *testing.T) {
+	s := nameServer()
+	s.schemaDelay = 600 * time.Millisecond
+	s.changes = []string{
+		`{"id":1,"time":"2026-08-13T12:00:00Z","user_name":"admin","action":{"value":"update","label":"Updated"},"changed_object_type":"dcim.device","changed_object_id":1,"object_repr":"sw1","prechange_data":{"role":3},"postchange_data":{"role":7}}`,
+	}
+	p := s.start(t)
+	p.namesWaitOverride = 30 * time.Millisecond
+
+	started := time.Now()
+	changes, err := p.Changes(context.Background(), provider.ChangeSpec{Limit: 10})
+	if waited := time.Since(started); waited > 300*time.Millisecond {
+		t.Errorf("Changes took %v behind a %v schema, want about the %v wait budget", waited, s.schemaDelay, p.namesWaitOverride)
+	}
+	if err != nil {
+		t.Fatalf("Changes: %v — running out of the names budget is not an error", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("changes = %d, want 1", len(changes))
+	}
+	if got := diffField(t, changes[0], "role"); got.Before != "3" || got.After != "7" {
+		t.Errorf("role = %q → %q, want the ids 3 → 7", got.Before, got.After)
+	}
+
+	// The schema read was not abandoned: once it lands, the next refresh names.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		p.mu.Lock()
+		_, cached := p.schemaByBranch[""]
+		p.mu.Unlock()
+		if cached {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the schema never reached the cache after the query stopped waiting for it")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	changes, err = p.Changes(context.Background(), provider.ChangeSpec{Limit: 10})
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if got := diffField(t, changes[0], "role"); got.Before != "Router" || got.After != "Distribution Switch" {
+		t.Errorf("role on the next refresh = %q → %q, want Router → Distribution Switch", got.Before, got.After)
+	}
+	if n := s.hits("/api/schema/"); n != 1 {
+		t.Errorf("schema read %d times, want 1: the first read served the cache", n)
+	}
+}
+
 func TestChanges_DiffShowsRelatedNames(t *testing.T) {
 	s := nameServer()
 	s.changes = []string{

@@ -111,6 +111,8 @@ type Provider struct {
 	customFieldsFlightByBranch map[string]*customFieldsFlight
 	// customFieldsWaitOverride shortens customFieldsWaitBudget; tests only.
 	customFieldsWaitOverride time.Duration
+	// namesWaitOverride shortens namesWaitBudget; tests only.
+	namesWaitOverride time.Duration
 
 	// branchingInstalled caches whether netbox-branching is installed — an
 	// instance-wide, branch-invariant property, so a single value + expiry

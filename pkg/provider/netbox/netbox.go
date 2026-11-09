@@ -1736,11 +1736,19 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	for i, r := range reads {
 		wg.Go(func() { results[i] = p.runChangeRead(ctx, r, filter, limit, maxRows) })
 	}
+	var journal []provider.Change
+	var journalErr error
+	if spec.Journal {
+		wg.Go(func() { journal, journalErr = p.journalEntries(ctx, spec, scope, wanted, limit) })
+	}
 	wg.Wait()
 	for _, r := range results {
 		if r.err != nil {
 			return nil, r.err
 		}
+	}
+	if journalErr != nil {
+		return nil, journalErr
 	}
 
 	kept := mergeChanges(results, limit)
@@ -1752,6 +1760,10 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		}
 	}
 	changes := p.resolveDiffs(ctx, kept, filter.fields)
+	if len(journal) > 0 {
+		changes = mergeJournal(changes, journal, limit)
+	}
+	// After the cut, so the limit can't drop it.
 	if filter.localScan() {
 		if cut, ok := cutoffChange(results); ok {
 			changes = append(changes, cut)

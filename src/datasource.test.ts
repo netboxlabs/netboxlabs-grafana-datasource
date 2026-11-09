@@ -1,22 +1,25 @@
 import { DataSource, prepareAnnotationQuery } from './datasource';
 import { NetBoxQuery } from './types';
 
+const mockReplace = jest.fn((s: string, _scopedVars?: unknown, _format?: string) => {
+  if (s === '$empty') {
+    return '';
+  }
+  if (s === '$site') {
+    return 'dc1,dc2';
+  }
+  if (s === '$flow_ips') {
+    return '10.112.128.1,203.0.113.7';
+  }
+  if (s === '$branch') {
+    return 'td5smq0f';
+  }
+  return s;
+});
+
 jest.mock('@grafana/runtime', () => ({
   ...jest.requireActual('@grafana/runtime'),
-  getTemplateSrv: () => ({
-    replace: (s: string) => {
-      if (s === '$site') {
-        return 'dc1,dc2';
-      }
-      if (s === '$flow_ips') {
-        return '10.112.128.1,203.0.113.7';
-      }
-      if (s === '$branch') {
-        return 'td5smq0f';
-      }
-      return s;
-    },
-  }),
+  getTemplateSrv: () => ({ replace: mockReplace }),
 }));
 
 // Build a DataSource without invoking the backend constructor.
@@ -166,7 +169,55 @@ describe('applyTemplateVariables', () => {
   });
 });
 
+describe('applyTemplateVariables scope', () => {
+  it('interpolates the scope with the csv format', () => {
+    const ds = makeDS();
+    const scopedVars = {};
+    ds.applyTemplateVariables({ refId: 'A', queryType: 'annotations', scope: '$device' }, scopedVars);
+    expect(mockReplace).toHaveBeenCalledWith('$device', scopedVars, 'csv');
+  });
+
+  it('sets scopeSet from the raw scope, even when it interpolates to nothing', () => {
+    const ds = makeDS();
+    const out = ds.applyTemplateVariables({ refId: 'A', queryType: 'annotations', scope: '$empty' }, {});
+    expect(out.scope).toBe('');
+    expect(out.scopeSet).toBe(true);
+    const blank = ds.applyTemplateVariables({ refId: 'A', queryType: 'annotations', scope: '  ' }, {});
+    expect(blank.scopeSet).toBe(false);
+  });
+
+  it('leaves scope and scopeSet absent when no scope is configured', () => {
+    const ds = makeDS();
+    const out = ds.applyTemplateVariables({ refId: 'A', queryType: 'annotations' }, {});
+    expect(out.scope).toBeUndefined();
+    expect(out).not.toHaveProperty('scopeSet');
+  });
+});
+
 describe('prepareAnnotationQuery', () => {
+  it('carries the scope, filter and journal fields from the target', () => {
+    const out = prepareAnnotationQuery({
+      target: {
+        scopeType: 'dcim.device',
+        scope: '$device',
+        scopeMatch: 'id',
+        actions: ['update'],
+        changedFields: ['status'],
+        journal: true,
+      },
+    });
+    expect(out).toEqual(
+      expect.objectContaining({
+        scopeType: 'dcim.device',
+        scope: '$device',
+        scopeMatch: 'id',
+        actions: ['update'],
+        changedFields: ['status'],
+        journal: true,
+      })
+    );
+  });
+
   it('carries the branch from the annotation target', () => {
     const out = prepareAnnotationQuery({ target: { objectTypes: ['dcim.device'], branch: 'td5smq0f' } });
     expect(out.branch).toBe('td5smq0f');

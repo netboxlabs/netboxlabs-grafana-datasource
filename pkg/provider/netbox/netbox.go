@@ -1701,7 +1701,8 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 // and a read that stops there ends the track with a cut-off marker.
 func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]provider.Change, error) {
 	// One branch for every request and cache key this call makes (pinBranch).
-	ctx, _ = p.client.pinBranch(ctx)
+	// The resolved value is the schema id, which the marker links carry.
+	ctx, branch := p.client.pinBranch(ctx)
 	limit := spec.Limit
 	if limit <= 0 || limit > MaxLimit {
 		limit = defaultLimit
@@ -1769,7 +1770,29 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 			changes = append(changes, cut)
 		}
 	}
+	for i := range changes {
+		changes[i].URL = withBranchParam(changes[i].URL, branch)
+	}
 	return changes, nil
+}
+
+// withBranchParam adds netbox-branching's _branch=<schema id> query parameter
+// to a marker link, so the NetBox UI activates the branch the change was read
+// from; an object that exists only in a branch is a 404 otherwise. Existing
+// parameters and the fragment are kept and an existing _branch is replaced. An
+// empty URL, main (""), or a URL that does not parse is returned unchanged.
+func withBranchParam(rawURL, schemaID string) string {
+	if rawURL == "" || schemaID == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	q.Set("_branch", schemaID)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // changedObjectTypeIDParam selects change-log rows by the numeric object-type id

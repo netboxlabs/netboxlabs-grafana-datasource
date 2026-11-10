@@ -156,6 +156,11 @@ func changeDiff(o objectChange) []rawFieldChange {
 	}
 	var out []rawFieldChange
 	add := func(field string, before, after json.RawMessage) {
+		// A key missing on one side against ""/null/[] on the other is not a change
+		// anyone can see, and NetBox writes an empty prechange_data on some updates.
+		if formatValue(before) == "" && formatValue(after) == "" {
+			return
+		}
 		if canonicalJSON(before) != canonicalJSON(after) {
 			out = append(out, rawFieldChange{Field: field, Before: before, After: after})
 		}

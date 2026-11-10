@@ -56,6 +56,7 @@ type journalServer struct {
 	usersStatus   int
 	typesStatus   int
 	branches      string
+	usersHandle   func() // non-nil: runs before users/users answers
 
 	mu       sync.Mutex
 	requests []string // path?query
@@ -105,6 +106,9 @@ func (s *journalServer) start(t *testing.T) *Provider {
 			}
 			writePage(w, len(rows), rows)
 		case "users/users":
+			if s.usersHandle != nil {
+				s.usersHandle()
+			}
 			if s.usersStatus != 0 {
 				refuse(s.usersStatus)
 				return
@@ -440,5 +444,84 @@ func TestChanges_JournalMergedUnderLimit(t *testing.T) {
 	wantIDs(t, got, "#1", "j2", "#2", "j5")
 	if got[1].Kind != provider.ChangeKindJournal {
 		t.Errorf("second marker kind = %v", got[1].Kind)
+	}
+}
+
+func TestWithBranchParam(t *testing.T) {
+	tests := []struct{ name, in, id, want string }{
+		{"empty url", "", "4qv48we9", ""},
+		{"plain", "http://nb/core/changelog/455/", "4qv48we9", "http://nb/core/changelog/455/?_branch=4qv48we9"},
+		{"keeps query and fragment", "http://nb/dcim/devices/1/?a=1#frag", "4qv48we9", "http://nb/dcim/devices/1/?_branch=4qv48we9&a=1#frag"},
+		{"replaces an existing param", "http://nb/x/?_branch=old", "4qv48we9", "http://nb/x/?_branch=4qv48we9"},
+		{"main leaves it alone", "http://nb/x/?a=1", "", "http://nb/x/?a=1"},
+		{"unparsable is unchanged", "http://nb/%zz", "4qv48we9", "http://nb/%zz"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := withBranchParam(tc.in, tc.id); got != tc.want {
+				t.Errorf("withBranchParam(%q, %q) = %q, want %q", tc.in, tc.id, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestChanges_BranchLinksCarryBranchParam(t *testing.T) {
+	s := &journalServer{
+		branches: `{"count":1,"next":null,"results":[{"name":"feature","schema_id":"4qv48we9"}]}`,
+		changes:  []loggedChange{ch(455, 2, "dcim.device", 17)},
+		rows:     []journalRow{{typ: "dcim.device", objID: 17, display: "leaf1", minutes: 1}},
+	}
+	p := s.start(t)
+	run := func(branch string) []provider.Change {
+		t.Helper()
+		ctx := provider.WithBranch(context.Background(), branch)
+		got, err := p.Changes(ctx, journalSpec())
+		if err != nil {
+			t.Fatalf("Changes(%q): %v", branch, err)
+		}
+		return got
+	}
+
+	// A branch name resolves to its schema id, which is what the link carries.
+	got := run("feature")
+	kinds := map[provider.ChangeKind]bool{}
+	for _, c := range got {
+		kinds[c.Kind] = true
+		if !strings.Contains(c.URL, "_branch=4qv48we9") {
+			t.Errorf("%s marker URL = %q, want _branch=4qv48we9", c.Kind, c.URL)
+		}
+	}
+	if !kinds[provider.ChangeKindChange] || !kinds[provider.ChangeKindJournal] {
+		t.Fatalf("markers = %+v, want one change and one journal marker", got)
+	}
+
+	for _, branch := range []string{"", "main"} {
+		for _, c := range run(branch) {
+			if strings.Contains(c.URL, "_branch") {
+				t.Errorf("branch %q: %s marker URL = %q, want no _branch", branch, c.Kind, c.URL)
+			}
+		}
+	}
+}
+
+func TestJournal_AuthorLookupIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	s := &journalServer{
+		rows:        []journalRow{{typ: "dcim.site", objID: 1, display: "s1", minutes: 1, by: 5}},
+		usersHandle: func() { <-release },
+	}
+	p := s.start(t)
+	// Registered after start's srv.Close, so it runs first: Close waits for
+	// handlers, and this one only returns once released.
+	t.Cleanup(func() { close(release) })
+	p.namesWaitOverride = 50 * time.Millisecond
+
+	start := time.Now()
+	got := journalOf(t, p, journalSpec(), nil)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("journalEntries took %v behind a blocked users lookup, want about %v", elapsed, p.namesWaitOverride)
+	}
+	if len(got) != 1 || got[0].User != "" {
+		t.Errorf("markers = %+v, want one marker with no author", got)
 	}
 }

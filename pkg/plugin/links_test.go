@@ -24,6 +24,8 @@ func TestRewriteLinkURL(t *testing.T) {
 		{"http://netbox:8080/dcim/sites/1/", "http://netbox:8080/", "http://localhost:8000/", "http://localhost:8000/dcim/sites/1/"},
 		// Public base with a path (NetBox behind a reverse-proxy subpath).
 		{"http://netbox:8080/dcim/devices/1/", "http://netbox:8080", "https://tools.example.com/netbox", "https://tools.example.com/netbox/dcim/devices/1/"},
+		// A branch marker's _branch query parameter survives the swap.
+		{"http://netbox:8080/core/changelog/455/?_branch=4qv48we9", "http://netbox:8080", "http://localhost:8000", "http://localhost:8000/core/changelog/455/?_branch=4qv48we9"},
 		// NOT under the internal base -> untouched. This is load-bearing:
 		// cf_*_url custom-field columns routinely hold third-party URLs
 		// (runbooks, vendor portals) that must never be pointed at NetBox.

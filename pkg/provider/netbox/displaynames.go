@@ -51,10 +51,12 @@ type schemaBudgetKey struct{}
 // it took; once the budget is spent the later waits give up at once and their
 // reads degrade, as past their own wait. Only schema waiting draws on it: not
 // the change-log reads, and not the network name reads, which each wait their
-// own namesWait. The schema waits all run on the Changes goroutine, so it needs
-// no lock.
+// own namesWait. The mutex guards reading and charging left; it is never held
+// across a wait. spentLogged makes the "budget used up" line once per call.
 type schemaBudget struct {
-	left time.Duration
+	mu          sync.Mutex
+	left        time.Duration
+	spentLogged bool
 }
 
 // withSchemaBudget gives a Changes call its schema budget.
@@ -65,18 +67,42 @@ func (p *Provider) withSchemaBudget(ctx context.Context) context.Context {
 // budgetedSchema is p.schema waited on within what the call's schema budget has
 // left (also bounded by ctx), charging the wait to the budget. A cache hit
 // answers at once either way. Changes installs the budget; a caller without
-// one waits on ctx alone.
+// one waits at most one namesWait.
 func (p *Provider) budgetedSchema(ctx context.Context) (schemaCacheEntry, error) {
 	b, _ := ctx.Value(schemaBudgetKey{}).(*schemaBudget)
 	if b == nil {
-		return p.schema(ctx)
+		waitCtx, cancel := context.WithTimeout(ctx, p.namesWait())
+		defer cancel()
+		return p.schema(waitCtx)
+	}
+	b.mu.Lock()
+	left := b.left
+	b.mu.Unlock()
+	if left <= 0 {
+		logSchemaBudgetSpent(b)
 	}
 	start := time.Now()
-	waitCtx, cancel := context.WithTimeout(ctx, b.left)
+	waitCtx, cancel := context.WithTimeout(ctx, left)
 	defer cancel()
 	entry, err := p.schema(waitCtx)
+	b.mu.Lock()
 	b.left -= time.Since(start)
+	b.mu.Unlock()
+	if err != nil && waitCtx.Err() != nil && ctx.Err() == nil {
+		logSchemaBudgetSpent(b)
+	}
 	return entry, err
+}
+
+// logSchemaBudgetSpent says, once per call, why related objects stay ids.
+func logSchemaBudgetSpent(b *schemaBudget) {
+	b.mu.Lock()
+	first := !b.spentLogged
+	b.spentLogged = true
+	b.mu.Unlock()
+	if first {
+		log.DefaultLogger.Debug("netbox: the call's schema wait budget is used up; related objects stay ids")
+	}
 }
 
 // resolveDiffs builds the provider rows, with each diff in display order and the

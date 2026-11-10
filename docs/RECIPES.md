@@ -497,8 +497,8 @@ Cut the noise with the other editor fields:
   Write a custom field as `cf_<name>`. Matching fields are listed first. Creates and
   deletes are governed by Actions alone. This filter scans up to 2,500 change rows
   per read; if the range holds more, a last marker says older changes weren't checked.
-- **Journal entries:** also show journal entries for the scoped objects, tagged
-  `journal`. The token needs permission to read them.
+- **Journal entries:** also show journal entries (for the scoped objects when a
+  scope is set), tagged `journal`. The token needs permission to read them.
 
 For an interface dashboard, names like `Gi0/1` repeat on every device. Set
 **Scope type** to `dcim.interface`, give the variable the value field `id` (text field

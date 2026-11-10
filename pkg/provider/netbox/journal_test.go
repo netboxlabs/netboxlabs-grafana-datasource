@@ -516,12 +516,25 @@ func TestJournal_AuthorLookupIsBounded(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 	p.namesWaitOverride = 50 * time.Millisecond
 
-	done := make(chan []provider.Change, 1)
-	go func() { done <- journalOf(t, p, journalSpec(), nil) }()
+	// The goroutine only reports; every assertion runs here, on the test
+	// goroutine, so a failed read shows as itself and not as a timeout.
+	type result struct {
+		out []provider.Change
+		err error
+	}
+	done := make(chan result, 1)
+	spec := journalSpec()
+	go func() {
+		out, err := p.journalEntries(context.Background(), spec, nil, nil, spec.Limit)
+		done <- result{out, err}
+	}()
 	select {
 	case got := <-done:
-		if len(got) != 1 || got[0].User != "" {
-			t.Errorf("markers = %+v, want one marker with no author", got)
+		if got.err != nil {
+			t.Fatalf("journalEntries: %v", got.err)
+		}
+		if len(got.out) != 1 || got.out[0].User != "" {
+			t.Errorf("markers = %+v, want one marker with no author", got.out)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("journalEntries still blocked after 2s: the author lookup is not bounded by namesWait (%v)", p.namesWaitOverride)

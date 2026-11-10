@@ -1698,7 +1698,15 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 // the scope objects' own changes and the changes recorded against them, merged
 // newest first (changeReads). Actions and Changed fields that NetBox can't
 // filter are applied here as rows are read, up to changeScanCap rows a read,
-// and a read that stops there ends the track with a cut-off marker.
+// and a read that stops there short of a full track ends it with a cut-off
+// marker. With Journal on, the journal entries in range (for the scope objects
+// when scoped) are read alongside the change-log reads and merged in by time,
+// under the same limit.
+//
+// The names the markers carry are best effort: the scope lookup's name-filter
+// check, the by-ID name fill, the Changed-fields check, the diffs' related
+// names and the journal authors share one names budget per call
+// (namesWaitCtx), past which each degrades rather than holding the query.
 func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]provider.Change, error) {
 	// One branch for every request and cache key this call makes (pinBranch).
 	// The resolved value is the schema id, which the marker links carry.

@@ -187,9 +187,8 @@ func addObjectDataLinks(frame *data.Frame, columns []string) {
 	}
 }
 
-// Annotation rendering limits.
+// Annotation rendering limits. A marker shows provider.MaxDiffLines diff lines.
 const (
-	maxDiffLines     = 5
 	maxDiffValueLen  = 60
 	maxJournalLength = 200
 )
@@ -240,8 +239,8 @@ func changeMarker(c provider.Change) (title, text, tag string) {
 
 	var lines []string
 	for i, d := range c.Diff {
-		if i == maxDiffLines {
-			lines = append(lines, fmt.Sprintf("+%d more", len(c.Diff)-maxDiffLines))
+		if i == provider.MaxDiffLines {
+			lines = append(lines, fmt.Sprintf("+%d more", len(c.Diff)-provider.MaxDiffLines))
 			break
 		}
 		lines = append(lines, fmt.Sprintf("%s: %s → %s",
@@ -272,7 +271,9 @@ func journalMarker(c provider.Change) (title, text, tag string) {
 	if c.User != "" {
 		who += " by " + html.EscapeString(c.User)
 	}
-	comments := strings.ReplaceAll(html.EscapeString(truncateRunes(c.Comments, maxJournalLength)), "\n", "<br>")
+	// CRLF (from NetBox's UI) and a lone CR are line ends too.
+	comments := strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(c.Comments)
+	comments = strings.ReplaceAll(html.EscapeString(truncateRunes(comments, maxJournalLength)), "\n", "<br>")
 	return html.EscapeString(c.ObjectRepr),
 		comments + "<br>" + who + markerLink(c.URL),
 		"netbox,journal," + c.JournalKind
@@ -280,7 +281,7 @@ func journalMarker(c provider.Change) (title, text, tag string) {
 
 func cutoffMarker(c provider.Change) (title, text, tag string) {
 	return "NetBox change log",
-		fmt.Sprintf("Older changes not checked: read %s change-log entries without reaching the start of the range.", withThousands(c.Scanned)),
+		fmt.Sprintf("Older changes not checked: read %s change-log entries without reaching the start of the range.", thousands(c.Scanned)),
 		"netbox,cutoff"
 }
 
@@ -322,20 +323,6 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
-}
-
-// withThousands formats n with comma thousands separators.
-func withThousands(n int) string {
-	s := strconv.Itoa(n)
-	neg := strings.HasPrefix(s, "-")
-	s = strings.TrimPrefix(s, "-")
-	for i := len(s) - 3; i > 0; i -= 3 {
-		s = s[:i] + "," + s[i:]
-	}
-	if neg {
-		s = "-" + s
-	}
-	return s
 }
 
 // buildNodeGraphFrames builds the two frames (nodes + edges) Grafana's node

@@ -275,6 +275,10 @@ const (
 // FieldChange is one changed field, formatted for display ("" = null/empty).
 type FieldChange struct{ Field, Before, After string }
 
+// MaxDiffLines is how many of a Change's Diff lines a marker shows; the rest
+// are summed up as "+N more". Only those lines get related names looked up.
+const MaxDiffLines = 5
+
 // Change is a single change-log/audit event, used to render annotations.
 type Change struct {
 	Time       time.Time `json:"time"`

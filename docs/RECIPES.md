@@ -465,6 +465,7 @@ filters so every match fits.
   [Push recipe, no plugin](#push-recipe-no-plugin) for markers stored in Grafana.
 - **Deep links:** include the `display_url` column (hideable); the primary label column
   links each row back to its NetBox object page, and links survive joins.
+
 ## Device dashboard with change markers
 
 An annotation can follow one device: its own changes, plus the changes NetBox records
@@ -479,8 +480,11 @@ changed.
    - **Match by:** Name
 
    Several names, or a multi-value variable, put every matching device in scope.
-   Names match case-insensitively. If one name matches more than 20 objects, or the
-   scope holds more than 100, the query fails and asks you to match by ID.
+   Device and virtual machine names match case-insensitively; other types match
+   exactly. If one name matches more than 20 objects, the query fails: give the
+   variable ids and set **Match by** to ID. A scope of more than 100 objects fails
+   too: narrow the variable's selection, or give its All option the custom value
+   `$__all`.
 3. A marker reads like `Ethernet2 on NYC1-leaf-01`, then one `field: before → after`
    line per changed field (at most 5, then `+N more`), the change message if there is
    one, and `Updated by <user> · Open in NetBox`. Related objects show by name
@@ -496,17 +500,19 @@ Cut the noise with the other editor fields:
 - **Journal entries:** also show journal entries for the scoped objects, tagged
   `journal`. The token needs permission to read them.
 
-For an interface dashboard, names like `Gi0/1` repeat on every device. Give the variable
-the value field `id` (text field `name`) and set **Match by** to ID. IDs are not checked
-against NetBox, so a deleted object's history still shows.
+For an interface dashboard, names like `Gi0/1` repeat on every device. Set
+**Scope type** to `dcim.interface`, give the variable the value field `id` (text field
+`name`) and set **Match by** to ID. IDs are not checked against NetBox, so a deleted
+object's history still shows.
 
 Not included: IP addresses assigned to the device's interfaces, and (on NetBox 4.2) rack
 reservations against a rack.
 
 A bad scope shows up as a **NetBox annotation error** marker at the right edge of the
 time range, and as the error in the annotation editor, since dashboards don't show
-annotation errors themselves. That covers an unknown name, an unknown type, a variable set
-to **All** with no **Custom all value**, and an empty variable. Only `$__all` means
+annotation errors themselves. That covers an unknown name, an unknown type, an empty
+variable, and a variable set to **All** with no **Custom all value** when All covers more
+than 100 objects. Below that, All scopes to every object it covers. Only `$__all` means
 "no scope".
 
 ## Push recipe, no plugin

@@ -461,8 +461,8 @@ func TestAnnotationScope_SchemaUnreadableStillLooksUp(t *testing.T) {
 	wantObjects(t, resolveOK(t, p, nameScope("leaf1")), scopeObject{17, "leaf1"})
 }
 
-// A cold or hanging schema doesn't hold the lookup past the names budget: the
-// check is skipped, as for a schema that can't be read.
+// A cold or hanging schema doesn't hold the lookup past the call's schema
+// budget: the check is skipped, as for a schema that can't be read.
 func TestAnnotationScope_SlowSchemaSkipsTheNameFilterCheck(t *testing.T) {
 	s := newAnnoScopeServer()
 	s.schemaHold = make(chan struct{})
@@ -473,9 +473,10 @@ func TestAnnotationScope_SlowSchemaSkipsTheNameFilterCheck(t *testing.T) {
 	p.namesWaitOverride = 50 * time.Millisecond
 
 	// Without the budget the schema wait would run to this deadline, and the
-	// lookup would then fail on it.
+	// lookup would then fail on it. Changes installs the budget; so does this.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	ctx = p.withSchemaBudget(ctx)
 	start := time.Now()
 	scope, err := p.resolveAnnotationScope(ctx, nameScope("leaf1"))
 	elapsed := time.Since(start)
@@ -569,7 +570,9 @@ func TestAnnotationScope_ByIDDeletedObjectIsFine(t *testing.T) {
 }
 
 // The by-ID names are a hint. A hanging list endpoint doesn't hold the scope past
-// the names budget: the objects are kept, without names.
+// its namesWait: the objects are kept, without names. The handler blocks, so a
+// short wait is safe; the elapsed bound is generous because the object-type
+// read before the lookup isn't part of the wait.
 func TestAnnotationScope_ByIDNameFillIsBounded(t *testing.T) {
 	s := newAnnoScopeServer()
 	s.listHold = make(chan struct{})
@@ -592,11 +595,11 @@ func TestAnnotationScope_ByIDNameFillIsBounded(t *testing.T) {
 	var got result
 	select {
 	case got = <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("resolveAnnotationScope still blocked after 2s: the by-ID name fill is not bounded by namesWait (%v)", p.namesWaitOverride)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("resolveAnnotationScope still blocked after 5s: the by-ID name fill is not bounded by namesWait (%v)", p.namesWaitOverride)
 	}
-	if elapsed := time.Since(start); elapsed > 10*p.namesWaitOverride {
-		t.Errorf("resolveAnnotationScope took %v behind a held list endpoint, want about the %v budget", elapsed, p.namesWaitOverride)
+	if elapsed := time.Since(start); elapsed > 20*p.namesWaitOverride {
+		t.Errorf("resolveAnnotationScope took %v behind a held list endpoint, want about the %v wait", elapsed, p.namesWaitOverride)
 	}
 	if got.err != nil {
 		t.Fatalf("resolveAnnotationScope: %v", got.err)

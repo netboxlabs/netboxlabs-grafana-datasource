@@ -1703,16 +1703,18 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 // when scoped) are read alongside the change-log reads and merged in by time,
 // under the same limit.
 //
-// The names the markers carry are best effort: the scope lookup's name-filter
-// check, the by-ID name fill, the Changed-fields check, the diffs' related
-// names and the journal authors share one names budget per call
-// (namesWaitCtx), past which each degrades rather than holding the query.
+// The names the markers carry are best effort, and none holds the query. The
+// network name reads (the by-ID name fill, the diffs' related names and the
+// journal authors) each wait their own namesWait. The waits on the cached
+// schema (the scope lookup's name-filter check, the Changed-fields check and
+// the diffs' relation lookup) share one schema budget per call
+// (budgetedSchema), so a cold schema costs one wait, not three.
 func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]provider.Change, error) {
 	// One branch for every request and cache key this call makes (pinBranch).
 	// The resolved value is the schema id, which the marker links carry.
 	ctx, branch := p.client.pinBranch(ctx)
-	// One names budget for every best-effort read this call makes.
-	ctx = p.withNamesBudget(ctx)
+	// One schema budget for every schema wait this call makes.
+	ctx = p.withSchemaBudget(ctx)
 	limit := spec.Limit
 	if limit <= 0 || limit > MaxLimit {
 		limit = defaultLimit

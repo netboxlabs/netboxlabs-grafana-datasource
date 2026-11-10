@@ -143,6 +143,12 @@ type scopedChangeServer struct {
 	changeDelay    time.Duration  // held before each change-log page answers
 	branches       string         // "" answers 404 (no netbox-branching)
 	devices        []string       // brief device rows
+	devicesDelay   time.Duration  // held before each dcim/devices answer
+
+	// The journal, for Journal on: its rows, and the users their authors are.
+	journal    []journalRow
+	users      map[int64]string
+	usersDelay time.Duration // held before each users/users answer
 
 	// NetBox 4.2's shape.
 	extrasServes bool                // extras/object-types answers rows without rest_api_endpoint; 404 otherwise
@@ -229,11 +235,28 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 			}
 			_, _ = fmt.Fprint(w, s.schema)
 		case "dcim/devices":
+			time.Sleep(s.devicesDelay)
 			rows := lookupMatches(s.devices, r.URL.Query())
 			writePage(w, len(rows), rows)
 		case "core/object-changes":
 			time.Sleep(s.changeDelay)
 			s.serveChanges(w, r)
+		case "extras/journal-entries":
+			rows := make([]string, len(s.journal))
+			for i, row := range s.journal {
+				rows[i] = row.json()
+			}
+			writePage(w, len(rows), rows)
+		case "users/users":
+			time.Sleep(s.usersDelay)
+			var rows []string
+			for _, v := range r.URL.Query()["id"] {
+				id, _ := strconv.ParseInt(v, 10, 64)
+				if name, ok := s.users[id]; ok {
+					rows = append(rows, fmt.Sprintf(`{"id":%d,"username":%q}`, id, name))
+				}
+			}
+			writePage(w, len(rows), rows)
 		default:
 			refuse(http.StatusNotFound, `{"detail":"Not found."}`)
 		}
@@ -714,10 +737,12 @@ func changesWithin(t *testing.T, p *Provider, spec provider.ChangeSpec, deadline
 	}
 }
 
-// A cold schema costs a call one names budget, not one per best-effort read:
+// A cold schema costs a call one schema budget, not one wait per read of it:
 // the scope lookup's name-filter check, the Changed-fields check and the diffs'
-// names all draw on the same budget, so the later two give up at once.
-func TestChanges_OneNamesBudgetPerCall(t *testing.T) {
+// relation lookup all draw on the same budget, so the later two give up at
+// once. Three waits would take 3× the override; the bound leaves 1.5× for the
+// rest of the call.
+func TestChanges_OneSchemaBudgetPerCall(t *testing.T) {
 	own := ch(1, 1, "dcim.device", 17)
 	own.pre, own.post = `{"status":"active","site":1}`, `{"status":"offline","site":2}`
 	s := newScopedChangeServer(own)
@@ -726,13 +751,13 @@ func TestChanges_OneNamesBudgetPerCall(t *testing.T) {
 	// After start's, so it runs first and the held handler returns before the
 	// server closes.
 	t.Cleanup(func() { close(s.schemaHold) })
-	p.namesWaitOverride = 300 * time.Millisecond
+	p.namesWaitOverride = 400 * time.Millisecond
 
 	spec := scoped(nameScope("leaf1"), 10)
 	spec.ChangedFields = []string{"status"}
-	changes, elapsed := changesWithin(t, p, spec, 5*time.Second)
+	changes, elapsed := changesWithin(t, p, spec, 10*time.Second)
 	if limit := p.namesWaitOverride * 5 / 2; elapsed > limit {
-		t.Errorf("Changes took %v behind a held schema, want under %v: one %v names budget, not one per read",
+		t.Errorf("Changes took %v behind a held schema, want under %v: one %v schema budget, not one wait per read",
 			elapsed, limit, p.namesWaitOverride)
 	}
 	wantIDs(t, changes, "#1")
@@ -758,20 +783,69 @@ func TestChanges_CustomFieldOnlyChangedFieldsSkipTheSchema(t *testing.T) {
 	}
 }
 
-// The names budget is spent by the best-effort reads, not by the change log: a
-// slow but healthy change-log read leaves the diffs' names their budget.
+// A slow but healthy change-log read, longer than a whole names wait, doesn't
+// spend the diffs' names their wait: no wait is a deadline from the start of
+// the call.
 func TestChanges_SlowChangeLogKeepsTheNamesBudget(t *testing.T) {
 	moved := ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 17)
 	moved.pre, moved.post = `{"device":17}`, `{"device":18}`
 	s := newScopedChangeServer(moved)
-	s.changeDelay = 300 * time.Millisecond
+	const wait = 400 * time.Millisecond
+	s.changeDelay = wait * 3 / 2
 	p := s.start(t)
-	p.namesWaitOverride = 150 * time.Millisecond
+	p.namesWaitOverride = wait
 
-	changes, _ := changesWithin(t, p, scoped(nameScope("leaf1"), 10), 5*time.Second)
+	changes, _ := changesWithin(t, p, scoped(nameScope("leaf1"), 10), 10*time.Second)
 	wantIDs(t, changes, "#1")
 	if got := diffField(t, changes[0], "device"); got.Before != "leaf1" || got.After != "leaf2" {
 		t.Errorf("device = %q → %q, want leaf1 → leaf2", got.Before, got.After)
+	}
+}
+
+// Each network name read waits its own namesWait, so slow but healthy name reads
+// don't spend one another's. With the schema and object types warm, the by-ID
+// name fill, the journal authors and the diffs' names each take most of a wait,
+// and every one of them still lands.
+func TestChanges_SlowNameReadsDontStarveDiffNames(t *testing.T) {
+	moved := ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 17)
+	moved.pre, moved.post = `{"device":17}`, `{"device":18}`
+	s := newScopedChangeServer(moved)
+	s.journal = []journalRow{{typ: "dcim.device", objID: 17, display: "leaf1", minutes: 2, by: 5}}
+	s.users = map[int64]string{5: "admin"}
+	const wait = 500 * time.Millisecond
+	s.devicesDelay = wait * 6 / 10 // the by-ID name fill and the diffs' names
+	s.usersDelay = wait * 6 / 10   // the journal authors
+	p := s.start(t)
+	p.namesWaitOverride = wait
+
+	ctx := context.Background()
+	if _, err := p.objectTypeIDMap(ctx); err != nil {
+		t.Fatalf("warming the object types: %v", err)
+	}
+	if _, err := p.schema(ctx); err != nil {
+		t.Fatalf("warming the schema: %v", err)
+	}
+
+	spec := scoped(idScope("17"), 10)
+	spec.Journal = true
+	changes, _ := changesWithin(t, p, spec, 10*time.Second)
+	if len(changes) != 2 {
+		t.Fatalf("changes = %+v, want the interface change and the journal entry", changes)
+	}
+	for _, c := range changes {
+		switch c.Kind {
+		case provider.ChangeKindJournal:
+			if c.User != "admin" {
+				t.Errorf("journal author = %q, want admin", c.User)
+			}
+		default:
+			if c.Parent != "leaf1" {
+				t.Errorf("Parent = %q, want leaf1 from the by-ID name fill", c.Parent)
+			}
+			if got := diffField(t, c, "device"); got.Before != "leaf1" || got.After != "leaf2" {
+				t.Errorf("device = %q → %q, want leaf1 → leaf2", got.Before, got.After)
+			}
+		}
 	}
 }
 

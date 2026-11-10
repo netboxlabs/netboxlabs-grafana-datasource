@@ -170,7 +170,7 @@ func (p *Provider) scopeType(ctx context.Context, raw string) (*resolvedScope, e
 // checked against NetBox: a deleted object's id still has change-log history,
 // and showing it is the point. An id NetBox doesn't return keeps an empty name.
 //
-// The lookup waits the names budget only, as every best-effort name read does:
+// The lookup waits its own namesWait only, as every best-effort name read does:
 // past it the objects go unnamed. Endpoint discovery runs on the query's own
 // context, so on NetBox 4.2 and 4.3 it still warms the ObjectTypes cache.
 func (p *Provider) nameScopeIDs(ctx context.Context, scope *resolvedScope, ids []int64) {
@@ -182,9 +182,9 @@ func (p *Provider) nameScopeIDs(ctx context.Context, scope *resolvedScope, ids [
 	var names map[int64]string
 	if found {
 		scope.Endpoint = endpoint
-		lookupCtx, done := p.namesWaitCtx(ctx)
+		lookupCtx, cancel := context.WithTimeout(ctx, p.namesWait())
 		names = p.lookupNames(lookupCtx, endpoint, ids)
-		done()
+		cancel()
 	}
 	for _, id := range ids {
 		scope.Objects = append(scope.Objects, scopeObject{ID: id, Name: names[id]})
@@ -217,12 +217,11 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 	// would answer with unrelated objects and fail as too many matches or none.
 	// The schema says so up front. One that can't be read skips the check rather
 	// than refusing a type it can't judge, and so does one not ready within the
-	// names budget (namesWaitCtx): the check only words the error better, and a
-	// cold or hanging schema must not hold the query. The schema read is a
-	// detached flight, so it carries on past the budget and fills the cache.
-	schemaCtx, done := p.namesWaitCtx(ctx)
-	entry, err := p.schema(schemaCtx)
-	done()
+	// call's schema budget (budgetedSchema): the check only words the error
+	// better, and a cold or hanging schema must not hold the query. The schema
+	// read is a detached flight, so it carries on past the budget and fills the
+	// cache.
+	entry, err := p.budgetedSchema(ctx)
 	if err == nil && !slices.ContainsFunc(entry.filters[endpoint], func(f provider.FilterField) bool {
 		return f.Name == field && slices.Contains(f.Operators, "")
 	}) {

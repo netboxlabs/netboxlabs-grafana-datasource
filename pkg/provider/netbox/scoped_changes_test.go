@@ -2,6 +2,7 @@ package netbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -812,9 +813,9 @@ func TestChanges_SlowNameReadsDontStarveDiffNames(t *testing.T) {
 	s := newScopedChangeServer(moved)
 	s.journal = []journalRow{{typ: "dcim.device", objID: 17, display: "leaf1", minutes: 2, by: 5}}
 	s.users = map[int64]string{5: "admin"}
-	const wait = 500 * time.Millisecond
-	s.devicesDelay = wait * 6 / 10 // the by-ID name fill and the diffs' names
-	s.usersDelay = wait * 6 / 10   // the journal authors
+	const wait = 600 * time.Millisecond
+	s.devicesDelay = wait * 4 / 10 // the by-ID name fill and the diffs' names
+	s.usersDelay = wait * 4 / 10   // the journal authors
 	p := s.start(t)
 	p.namesWaitOverride = wait
 
@@ -1078,5 +1079,54 @@ func TestChanges_NetBox42ShapedScopedByName(t *testing.T) {
 		if !slices.ContainsFunc(s.requests, func(req string) bool { return strings.HasPrefix(req, want+"?") }) {
 			t.Errorf("no request to %s in %v", want, s.requests)
 		}
+	}
+}
+
+// decodeChange parses the row's time once, so every consumer of a decoded row
+// sees the same instant; a time that does not parse leaves the zero time and
+// the row is still decoded.
+func TestDecodeChange_ParsesTheRowTime(t *testing.T) {
+	d, ok := decodeChange(json.RawMessage(`{"id":1,"time":"2026-11-09T20:47:09.123456Z"}`))
+	if !ok {
+		t.Fatal("row not decoded")
+	}
+	want := time.Date(2026, 11, 9, 20, 47, 9, 123456000, time.UTC)
+	if !d.at.Equal(want) {
+		t.Errorf("at = %v, want %v", d.at, want)
+	}
+	d, ok = decodeChange(json.RawMessage(`{"id":2,"time":"yesterday"}`))
+	if !ok {
+		t.Fatal("row with an unparseable time not decoded")
+	}
+	if !d.at.IsZero() || d.oc.ID != 2 {
+		t.Errorf("at = %v, id = %d, want the zero time and id 2", d.at, d.oc.ID)
+	}
+}
+
+// A caller with no schema budget still waits at most one namesWait on a schema
+// that does not answer, not on its context alone.
+func TestBudgetedSchema_NoBudgetIsBounded(t *testing.T) {
+	s := newScopedChangeServer()
+	s.schemaHold = make(chan struct{})
+	p := s.start(t)
+	t.Cleanup(func() { close(s.schemaHold) })
+	p.namesWaitOverride = 200 * time.Millisecond
+
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		_, err := p.budgetedSchema(context.Background())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("budgetedSchema answered behind a held schema, want a timeout error")
+		}
+		if elapsed, limit := time.Since(started), p.namesWaitOverride*5; elapsed > limit {
+			t.Errorf("took %v, want under %v", elapsed, limit)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("budgetedSchema with no budget was still waiting after 5s")
 	}
 }

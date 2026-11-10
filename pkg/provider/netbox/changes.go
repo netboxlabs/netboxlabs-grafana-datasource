@@ -124,13 +124,18 @@ type decodedChange struct {
 	parent      string
 }
 
-// decodeChange parses one change-log row. A row that is not valid JSON is skipped.
+// decodeChange parses one change-log row, including its time once (zero when it
+// does not parse). A row that is not valid JSON is skipped.
 func decodeChange(raw json.RawMessage) (decodedChange, bool) {
 	var oc objectChange
 	if err := json.Unmarshal(raw, &oc); err != nil {
 		return decodedChange{}, false
 	}
-	return decodedChange{oc: oc, diff: changeDiff(oc)}, true
+	at, err := time.Parse(time.RFC3339, oc.Time)
+	if err != nil {
+		at = time.Time{}
+	}
+	return decodedChange{oc: oc, diff: changeDiff(oc), at: at}, true
 }
 
 // canonicalJSON re-encodes a value with sorted keys and normalised numbers, so
@@ -239,9 +244,8 @@ func formatValue(v json.RawMessage) string {
 
 // toChange builds the provider row. format renders a diff value for display.
 func (d decodedChange) toChange(base string, format func(field string, v json.RawMessage) string) provider.Change {
-	t, _ := time.Parse(time.RFC3339, d.oc.Time)
 	c := provider.Change{
-		Time:       t,
+		Time:       d.at,
 		Action:     d.oc.actionLabel(),
 		ObjectType: d.oc.changedType(),
 		ObjectRepr: d.oc.title(),
@@ -522,9 +526,8 @@ func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Value
 		if !ok {
 			return true
 		}
-		at, err := time.Parse(time.RFC3339, d.oc.Time)
-		if err == nil {
-			res.oldest = at
+		if !d.at.IsZero() {
+			res.oldest = d.at
 		}
 		if d.oc.ID != 0 {
 			if seen[d.oc.ID] {
@@ -535,7 +538,7 @@ func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Value
 		if !r.keep(d.oc) || !f.keep(d) {
 			return true
 		}
-		d.at, d.fromRelated = at, r.fromRelated
+		d.fromRelated = r.fromRelated
 		res.rows = append(res.rows, d)
 		return len(res.rows) < limit
 	})

@@ -56,13 +56,18 @@ func trimBase(base string) string {
 }
 
 // rewriteLinkURL swaps the internal base of one URL for the public one —
-// prefix swap ONLY, matched on a path boundary. Values not under the internal
+// prefix swap ONLY, matched on a path, query or fragment boundary, so the bare
+// base with ?_branch=… or #… is the base too. Values not under the internal
 // base pass through untouched: cf_*_url custom-field columns routinely hold
 // third-party URLs that must never be rewritten. Both bases must already be
 // trimmed of trailing slashes.
 func rewriteLinkURL(s, internalBase, publicBase string) string {
-	if internalBase != "" && (s == internalBase || strings.HasPrefix(s, internalBase+"/")) {
-		return publicBase + strings.TrimPrefix(s, internalBase)
+	if internalBase == "" {
+		return s
+	}
+	rest, ok := strings.CutPrefix(s, internalBase)
+	if ok && (rest == "" || strings.ContainsRune("/?#", rune(rest[0]))) {
+		return publicBase + rest
 	}
 	return s
 }

@@ -30,6 +30,7 @@ type annoScopeServer struct {
 	objectTypes []string            // object-type rows, see objectTypeRow
 	schema      string              // /api/schema/; "" answers 403
 	schemaHold  chan struct{}       // non-nil: /api/schema/ answers only once it is closed
+	listHold    chan struct{}       // non-nil: the list endpoints in objects answer only once it is closed
 	objects     map[string][]string // list endpoint -> its brief rows
 	unfiltered  map[string]bool     // list endpoints that ignore the lookup parameters
 	branches    string              // branch list body; "" answers 404 (no netbox-branching)
@@ -125,6 +126,13 @@ func (s *annoScopeServer) start(t *testing.T) *Provider {
 		case path == "" && s.rootStatus != 0:
 			refuse(s.rootStatus)
 		case s.objects[path] != nil:
+			if s.listHold != nil {
+				select {
+				case <-s.listHold:
+				case <-r.Context().Done():
+					return
+				}
+			}
 			rows := s.objects[path]
 			if !s.unfiltered[path] {
 				rows = lookupMatches(rows, r.URL.Query())
@@ -367,19 +375,36 @@ func TestAnnotationScope_TooManyMatches(t *testing.T) {
 		}
 	})
 
-	// A chunk that fills its limit has a name over twenty somewhere, even when
-	// the rows that filled it match none of the names: NetBox ignored the
-	// filter.
-	t.Run("a chunk at its limit", func(t *testing.T) {
+	// A chunk that fills its limit with no name over twenty was filled by rows
+	// that match none of the names: NetBox ignored the filter. That isn't too
+	// many matches for a name that may have matched nothing; the type can't be
+	// looked up by name.
+	for name, rows := range map[string][]string{
+		"a chunk filled by unrelated rows":  interfaceRows(200, 50, "xe-0/0/0"),
+		"a chunk filled past a few matches": append(interfaceRows(100, 10, "eth0"), interfaceRows(200, 40, "xe-0/0/0")...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newAnnoScopeServer()
+			s.objects["dcim/interfaces"] = rows
+			s.unfiltered = map[string]bool{"dcim/interfaces": true}
+			p := s.start(t)
+			spec := interfaces()
+			spec.Scope = []string{"eth0", "eth1"}
+			_, err := p.resolveAnnotationScope(context.Background(), spec)
+			annotationErr(t, err, provider.AnnotationReasonNoNameFilter)
+		})
+	}
+
+	t.Run("a name over twenty in an unfiltered chunk", func(t *testing.T) {
 		s := newAnnoScopeServer()
-		s.objects["dcim/interfaces"] = append(interfaceRows(100, 10, "eth0"), interfaceRows(200, 40, "xe-0/0/0")...)
+		s.objects["dcim/interfaces"] = append(interfaceRows(100, 21, "eth0"), interfaceRows(200, 40, "xe-0/0/0")...)
 		s.unfiltered = map[string]bool{"dcim/interfaces": true}
 		p := s.start(t)
 		spec := interfaces()
 		spec.Scope = []string{"eth0", "eth1"}
 		_, err := p.resolveAnnotationScope(context.Background(), spec)
 		if ae := annotationErr(t, err, provider.AnnotationReasonTooManyMatches); ae.Value != "eth0" {
-			t.Errorf("value = %q, want eth0 (the name with the most matches)", ae.Value)
+			t.Errorf("value = %q, want eth0", ae.Value)
 		}
 	})
 }
@@ -541,6 +566,45 @@ func TestAnnotationScope_ByIDDeletedObjectIsFine(t *testing.T) {
 	if len(qs) != 1 || !reflect.DeepEqual(qs[0]["id"], []string{"17", "999"}) || qs[0].Get("brief") != "true" {
 		t.Errorf("device lookups = %v, want one brief lookup for ids 17 and 999", qs)
 	}
+}
+
+// The by-ID names are a hint. A hanging list endpoint doesn't hold the scope past
+// the names budget: the objects are kept, without names.
+func TestAnnotationScope_ByIDNameFillIsBounded(t *testing.T) {
+	s := newAnnoScopeServer()
+	s.listHold = make(chan struct{})
+	p := s.start(t)
+	// After start's, so it runs first and the held handler returns before the
+	// server closes.
+	t.Cleanup(func() { close(s.listHold) })
+	p.namesWaitOverride = 50 * time.Millisecond
+
+	type result struct {
+		scope *resolvedScope
+		err   error
+	}
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		scope, err := p.resolveAnnotationScope(context.Background(), idScope("17", "18"))
+		done <- result{scope, err}
+	}()
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("resolveAnnotationScope still blocked after 2s: the by-ID name fill is not bounded by namesWait (%v)", p.namesWaitOverride)
+	}
+	if elapsed := time.Since(start); elapsed > 10*p.namesWaitOverride {
+		t.Errorf("resolveAnnotationScope took %v behind a held list endpoint, want about the %v budget", elapsed, p.namesWaitOverride)
+	}
+	if got.err != nil {
+		t.Fatalf("resolveAnnotationScope: %v", got.err)
+	}
+	if got.scope.Endpoint != "dcim/devices" {
+		t.Errorf("endpoint = %q, want dcim/devices", got.scope.Endpoint)
+	}
+	wantObjects(t, got.scope, scopeObject{17, ""}, scopeObject{18, ""})
 }
 
 func TestAnnotationScope_TooManyObjects(t *testing.T) {

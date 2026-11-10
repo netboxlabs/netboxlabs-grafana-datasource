@@ -3,6 +3,7 @@ package netbox
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -96,7 +97,11 @@ func (c loggedChange) object(raw string) loggedChange {
 	return c
 }
 
-func (c loggedChange) json() string {
+func (c loggedChange) json() string { return c.render(true) }
+
+// render is the row as NetBox serves it. withRepr false leaves out object_repr,
+// which the change log only returns from NetBox 4.5.
+func (c loggedChange) render(withRepr bool) string {
 	label := map[string]string{"create": "Created", "update": "Updated", "delete": "Deleted"}[c.action]
 	null := func(s string) string {
 		if s == "" {
@@ -104,9 +109,13 @@ func (c loggedChange) json() string {
 		}
 		return s
 	}
-	return fmt.Sprintf(`{"id":%d,"time":%q,"user_name":"admin","action":{"value":%q,"label":%q},"changed_object_type":%q,"changed_object_id":%d,"object_repr":"#%d","changed_object":%s,"prechange_data":%s,"postchange_data":%s}`,
+	repr := ""
+	if withRepr {
+		repr = fmt.Sprintf(`"object_repr":"#%d",`, c.id)
+	}
+	return fmt.Sprintf(`{"id":%d,"time":%q,"user_name":"admin","action":{"value":%q,"label":%q},"changed_object_type":%q,"changed_object_id":%d,%s"changed_object":%s,"prechange_data":%s,"postchange_data":%s}`,
 		c.id, scopedNow.Add(-time.Duration(c.minutes)*time.Minute).Format(time.RFC3339), c.action, label,
-		c.ct, c.objID, c.id, null(c.changedObject), null(c.pre), null(c.post))
+		c.ct, c.objID, repr, null(c.changedObject), null(c.pre), null(c.post))
 }
 
 // scopedChangeServer is a NetBox 4.4-shaped instance for scoped change reads:
@@ -119,14 +128,26 @@ func (c loggedChange) json() string {
 // takes app_label.model from 4.4.4, where an id matches nothing, and an id up to
 // 4.4.3, where a name is a 400. It pages by offset, with next links. Every
 // request but the branch list is recorded with its X-NetBox-Branch.
+//
+// Switched to NetBox 4.2's shape (see TestChanges_NetBox42ShapedScopedByName),
+// core/object-types 404s, extras/object-types serves rows without
+// rest_api_endpoint, the API index answers discovery, and change rows have no
+// object_repr.
 type scopedChangeServer struct {
 	changes        []loggedChange // newest first
 	relatedByID    bool           // related_object_type takes an id, as up to NetBox 4.4.3
 	ignoreChangedQ bool           // changed_object_type(_id) and changed_object_id are ignored
 	coreStatus     int            // non-zero: core/object-types answers this status
 	schema         string         // "" answers 403
+	schemaHold     chan struct{}  // non-nil: the schema answers only once it is closed
+	changeDelay    time.Duration  // held before each change-log page answers
 	branches       string         // "" answers 404 (no netbox-branching)
 	devices        []string       // brief device rows
+
+	// NetBox 4.2's shape.
+	extrasServes bool                // extras/object-types answers rows without rest_api_endpoint; 404 otherwise
+	index        map[string][]string // non-nil: the API index for discovery, "dcim" -> ["devices"]
+	noObjectRepr bool                // change rows carry no object_repr, as before NetBox 4.5
 
 	mu       sync.Mutex
 	requests []string // path?query
@@ -162,6 +183,16 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 		s.requests = append(s.requests, r.URL.Path+"?"+r.URL.RawQuery)
 		s.headers = append(s.headers, r.Header.Get("X-NetBox-Branch"))
 		s.mu.Unlock()
+		if s.index != nil {
+			if path == "" {
+				writeIndex(w, r, "", slices.Collect(maps.Keys(s.index)))
+				return
+			}
+			if keys, ok := s.index[path]; ok {
+				writeIndex(w, r, path, keys)
+				return
+			}
+		}
 		switch path {
 		case "core/object-types":
 			if s.coreStatus != 0 {
@@ -174,7 +205,24 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 				rows = append(rows, objectTypeRow(id, ct, "/api/dcim/"+model+"s/"))
 			}
 			writePage(w, len(rows), rows)
+		case "extras/object-types":
+			if !s.extrasServes {
+				refuse(http.StatusNotFound, `{"detail":"Not found."}`)
+				return
+			}
+			var rows []string
+			for ct, id := range scopedTypeIDs {
+				rows = append(rows, objectTypeRow(id, ct, ""))
+			}
+			writePage(w, len(rows), rows)
 		case "schema":
+			if s.schemaHold != nil {
+				select {
+				case <-s.schemaHold:
+				case <-r.Context().Done():
+					return
+				}
+			}
 			if s.schema == "" {
 				refuse(http.StatusForbidden, `{"detail":"nope"}`)
 				return
@@ -184,6 +232,7 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 			rows := lookupMatches(s.devices, r.URL.Query())
 			writePage(w, len(rows), rows)
 		case "core/object-changes":
+			time.Sleep(s.changeDelay)
 			s.serveChanges(w, r)
 		default:
 			refuse(http.StatusNotFound, `{"detail":"Not found."}`)
@@ -251,7 +300,7 @@ func (s *scopedChangeServer) serveChanges(w http.ResponseWriter, r *http.Request
 	page := rows[min(offset, total):min(offset+limit, total)]
 	out := make([]string, len(page))
 	for i, c := range page {
-		out[i] = c.json()
+		out[i] = c.render(!s.noObjectRepr)
 	}
 	next := "null"
 	if offset+limit < total {
@@ -368,6 +417,26 @@ func TestChanges_ScopedReadsOwnAndRelated(t *testing.T) {
 				t.Errorf("related read = %v", got)
 			}
 		})
+	}
+}
+
+// A resolved scope with no objects must never send read 2 with a type and no
+// ids: that would be every change recorded against any object of the type.
+func TestChangeReads_EmptyScopeIsAnError(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	p := s.start(t)
+	scope := &resolvedScope{Type: "dcim.device", TypeID: 12, Endpoint: "dcim/devices"}
+	for _, wanted := range [][]string{nil, {"dcim.interface"}} {
+		reads, err := p.changeReads(context.Background(), scoped(nameScope("leaf1"), 10), scope, wanted, changeFilter{})
+		annotationErr(t, err, provider.AnnotationReasonEmptyScope)
+		if reads != nil {
+			t.Errorf("wanted %v: reads = %+v, want none", wanted, reads)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.requests) != 0 {
+		t.Errorf("requests = %v, want none for an empty scope", s.requests)
 	}
 }
 
@@ -554,6 +623,16 @@ func TestChanges_ChangedFieldsStopsAtLimitMatches(t *testing.T) {
 	}
 }
 
+// An update NetBox logged without a prechange snapshot has no diff, so it can't
+// pass as a status change because its postchange data holds a status.
+func TestChanges_ChangedFieldsSkipUpdateWithoutPrechange(t *testing.T) {
+	noSnapshot := ch(1, 1, "dcim.device", 17)
+	noSnapshot.pre, noSnapshot.post = `{}`, `{"status":"active","description":"edited"}`
+	s := newScopedChangeServer(noSnapshot, ch(2, 2, "dcim.device", 17).changing("status", "active", "offline"))
+	spec := provider.ChangeSpec{Limit: 10, ChangedFields: []string{"status"}}
+	wantIDs(t, changesOK(t, s.start(t), spec), "#2")
+}
+
 // Changed fields applies to updates. Creates and deletes are Actions' to filter.
 func TestChanges_ChangedFieldsCreatesAndDeletesPass(t *testing.T) {
 	s := newScopedChangeServer(
@@ -606,6 +685,94 @@ func TestChanges_UnknownChangedFieldIsAnError(t *testing.T) {
 			t.Errorf("Changes: %v, want the check skipped", err)
 		}
 	})
+}
+
+// changesWithin runs Changes on its own goroutine and fails the test on its own
+// deadline rather than hanging, then reports how long the call took.
+func changesWithin(t *testing.T, p *Provider, spec provider.ChangeSpec, deadline time.Duration) ([]provider.Change, time.Duration) {
+	t.Helper()
+	type result struct {
+		changes []provider.Change
+		err     error
+	}
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		changes, err := p.Changes(context.Background(), spec)
+		done <- result{changes, err}
+	}()
+	select {
+	case got := <-done:
+		elapsed := time.Since(start)
+		if got.err != nil {
+			t.Fatalf("Changes: %v", got.err)
+		}
+		return got.changes, elapsed
+	case <-time.After(deadline):
+		t.Fatalf("Changes still blocked after %v", deadline)
+		return nil, 0
+	}
+}
+
+// A cold schema costs a call one names budget, not one per best-effort read:
+// the scope lookup's name-filter check, the Changed-fields check and the diffs'
+// names all draw on the same budget, so the later two give up at once.
+func TestChanges_OneNamesBudgetPerCall(t *testing.T) {
+	own := ch(1, 1, "dcim.device", 17)
+	own.pre, own.post = `{"status":"active","site":1}`, `{"status":"offline","site":2}`
+	s := newScopedChangeServer(own)
+	s.schemaHold = make(chan struct{})
+	p := s.start(t)
+	// After start's, so it runs first and the held handler returns before the
+	// server closes.
+	t.Cleanup(func() { close(s.schemaHold) })
+	p.namesWaitOverride = 300 * time.Millisecond
+
+	spec := scoped(nameScope("leaf1"), 10)
+	spec.ChangedFields = []string{"status"}
+	changes, elapsed := changesWithin(t, p, spec, 5*time.Second)
+	if limit := p.namesWaitOverride * 5 / 2; elapsed > limit {
+		t.Errorf("Changes took %v behind a held schema, want under %v: one %v names budget, not one per read",
+			elapsed, limit, p.namesWaitOverride)
+	}
+	wantIDs(t, changes, "#1")
+	if got := diffField(t, changes[0], "site"); got.Before != "1" || got.After != "2" {
+		t.Errorf("site = %q → %q, want the ids 1 → 2", got.Before, got.After)
+	}
+}
+
+// Custom-field names aren't checked against the schema, so a list of only those
+// doesn't read it.
+func TestChanges_CustomFieldOnlyChangedFieldsSkipTheSchema(t *testing.T) {
+	cf := ch(1, 1, "dcim.device", 17)
+	cf.pre, cf.post = `{"custom_fields":{"owner":"a"}}`, `{"custom_fields":{"owner":"b"}}`
+	s := newScopedChangeServer(cf)
+	p := s.start(t)
+	wantIDs(t, changesOK(t, p, provider.ChangeSpec{Limit: 10, ChangedFields: []string{"custom_fields", "cf_owner"}}), "#1")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, req := range s.requests {
+		if strings.HasPrefix(req, "/api/schema/") {
+			t.Errorf("request %s: the schema was read for custom-field names only", req)
+		}
+	}
+}
+
+// The names budget is spent by the best-effort reads, not by the change log: a
+// slow but healthy change-log read leaves the diffs' names their budget.
+func TestChanges_SlowChangeLogKeepsTheNamesBudget(t *testing.T) {
+	moved := ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 17)
+	moved.pre, moved.post = `{"device":17}`, `{"device":18}`
+	s := newScopedChangeServer(moved)
+	s.changeDelay = 300 * time.Millisecond
+	p := s.start(t)
+	p.namesWaitOverride = 150 * time.Millisecond
+
+	changes, _ := changesWithin(t, p, scoped(nameScope("leaf1"), 10), 5*time.Second)
+	wantIDs(t, changes, "#1")
+	if got := diffField(t, changes[0], "device"); got.Before != "leaf1" || got.After != "leaf2" {
+		t.Errorf("device = %q → %q, want leaf1 → leaf2", got.Before, got.After)
+	}
 }
 
 // The cut-off marker appears only when a read stopped at the scan cap with rows
@@ -661,6 +828,53 @@ func TestChanges_CutoffOnlyWhenCapReached(t *testing.T) {
 		p.changeScanCapOverride = 50
 		wantIDs(t, changesOK(t, p, spec), "#20")
 	})
+}
+
+// A capped read only misses changes older than the cut-off. When the merged
+// change-log track already holds limit changes, all newer than that, nothing it
+// missed could have made the track, so there is no marker.
+func TestChanges_CutoffOnlyWhenSomethingCouldBeMissing(t *testing.T) {
+	// The own read scans device 17's description edits at minutes 4 to 83, finds
+	// no status change, and stops at the cap of 50 rows: its cut-off is minute 53.
+	// The related read finds status changes at the given minutes.
+	build := func(related ...int) *scopedChangeServer {
+		var rows []loggedChange
+		for _, m := range related {
+			if m < 4 {
+				rows = append(rows, ch(m, m, "dcim.interface", 5).relatedTo("dcim.device", 17).changing("status", "active", "offline"))
+			}
+		}
+		for m := 4; m <= 83; m++ {
+			rows = append(rows, ch(m, m, "dcim.device", 17))
+			if slices.Contains(related, m) {
+				rows = append(rows, ch(1000+m, m, "dcim.interface", 5).relatedTo("dcim.device", 17).changing("status", "active", "offline"))
+			}
+		}
+		for _, m := range related {
+			if m > 83 {
+				rows = append(rows, ch(m, m, "dcim.interface", 5).relatedTo("dcim.device", 17).changing("status", "active", "offline"))
+			}
+		}
+		return newScopedChangeServer(rows...)
+	}
+	spec := scoped(nameScope("leaf1"), 3)
+	spec.ChangedFields = []string{"status"}
+
+	for _, tc := range []struct {
+		name    string
+		related []int
+		want    []string
+	}{
+		{"track full and newer than the cut-off", []int{1, 2, 3}, []string{"#1", "#2", "#3"}},
+		{"oldest kept change older than the cut-off", []int{1, 2, 100}, []string{"#1", "#2", "#100", "cutoff"}},
+		{"oldest kept change at the cut-off", []int{1, 2, 53}, []string{"#1", "#2", "#1053", "cutoff"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := build(tc.related...).start(t)
+			p.changeScanCapOverride = 50
+			wantIDs(t, changesOK(t, p, spec), tc.want...)
+		})
+	}
 }
 
 func TestChanges_ParentSuffix(t *testing.T) {
@@ -730,5 +944,65 @@ func TestChanges_ScopedCarriesBranch(t *testing.T) {
 	}
 	if reads != 2 {
 		t.Errorf("change-log reads = %d, want 2", reads)
+	}
+}
+
+// No NetBox 4.2 run has been made, so the 4.2 paths, each covered by its own
+// fixture, are combined here into one scoped query by name against a 4.2-shaped
+// instance: core/object-types 404s and extras/object-types has no
+// rest_api_endpoint, so the scope's endpoint comes from discovery;
+// related_object_type refuses app_label.model with a 400 and takes the id;
+// changed_object is a string or null, and there is no object_repr or message.
+func TestChanges_NetBox42ShapedScopedByName(t *testing.T) {
+	own := ch(1, 1, "dcim.device", 17)
+	own.pre, own.post = `{"name":"leaf1","status":"active"}`, `{"name":"leaf1","status":"offline"}`
+	related := ch(2, 2, "dcim.interface", 5).relatedTo("dcim.device", 17).object(`"eth0"`)
+	related.pre = `{"name":"eth0","description":"","enabled":true}`
+	related.post = `{"name":"eth0","description":"uplink","enabled":false}`
+	// Device 18's own change, and interface 17 (sharing the scope device's id)
+	// recorded against device 18: neither is in scope.
+	other := ch(3, 3, "dcim.device", 18)
+	other.pre, other.post = `{"name":"leaf2","status":"active"}`, `{"name":"leaf2","status":"offline"}`
+	sharedID := ch(4, 4, "dcim.interface", 17).relatedTo("dcim.device", 18).object(`"eth1"`)
+
+	s := newScopedChangeServer(own, related, other, sharedID)
+	s.coreStatus = http.StatusNotFound
+	s.extrasServes = true
+	s.index = map[string][]string{"dcim": {"devices", "interfaces", "cables", "sites"}}
+	s.relatedByID = true
+	s.noObjectRepr = true
+	changes := changesOK(t, s.start(t), scoped(nameScope("leaf1"), 10))
+
+	if len(changes) != 2 {
+		t.Fatalf("changes = %+v, want the device's own change and one related interface change", changes)
+	}
+	if c := changes[0]; c.ObjectRepr != "leaf1" || c.Parent != "" || c.ObjectType != "dcim.device" ||
+		!reflect.DeepEqual(c.Diff, []provider.FieldChange{{Field: "status", Before: "active", After: "offline"}}) {
+		t.Errorf("own change = %+v, want leaf1's status active → offline", c)
+	}
+	if c := changes[1]; c.ObjectRepr != "eth0" || c.Parent != "leaf1" || c.ObjectType != "dcim.interface" ||
+		!reflect.DeepEqual(c.Diff, []provider.FieldChange{
+			{Field: "description", Before: "", After: "uplink"},
+			{Field: "enabled", Before: "true", After: "false"},
+		}) {
+		t.Errorf("related change = %+v, want eth0 on leaf1 with its description and enabled lines", c)
+	}
+
+	var forms []string
+	for _, q := range s.relatedReads() {
+		forms = append(forms, q.Get("related_object_type"))
+	}
+	if !reflect.DeepEqual(forms, []string{"dcim.device", "12"}) {
+		t.Errorf("related_object_type sent = %v, want [dcim.device 12]", forms)
+	}
+	if own := s.ownReads(); len(own) != 1 || !reflect.DeepEqual(own[0]["changed_object_type_id"], []string{"12"}) {
+		t.Errorf("own reads = %v, want one by the type id from extras/object-types", own)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, want := range []string{"/api/core/object-types/", "/api/extras/object-types/", "/api/", "/api/dcim/", "/api/dcim/devices/"} {
+		if !slices.ContainsFunc(s.requests, func(req string) bool { return strings.HasPrefix(req, want+"?") }) {
+			t.Errorf("no request to %s in %v", want, s.requests)
+		}
 	}
 }

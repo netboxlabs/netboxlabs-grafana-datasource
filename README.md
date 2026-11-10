@@ -42,8 +42,10 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
 - **Template variables.** Drive `site` / `device` / `role` / `tenant` dropdowns from NetBox
   and filter every panel on the dashboard. Multi-value variables become OR filters; a
   Custom all value of `$__all` makes **All** send no filter at all.
-- **Annotations.** Overlay NetBox change-log events (who changed what, when) on any
-  time-series panel using Grafana's `time/title/text/tags` convention.
+- **Annotations.** Overlay NetBox change-log events (who changed what, when), and
+  optionally journal entries, on any time-series panel. Scope them to one object and the
+  changes NetBox records against it (a device's interfaces and cables); each marker says
+  what changed. See [docs/RECIPES.md](docs/RECIPES.md#device-dashboard-with-change-markers).
 - **Deep links.** Every row links straight back to the NetBox object page, and the link
   survives the join, so an enriched metrics table stays clickable through to NetBox.
 - **Correlations (Explore drill-downs).** Provision links from any Prometheus/Loki series
@@ -166,7 +168,7 @@ datasources:
 | **Objects**       | A joinable table for any object type (with optional join keys) | Table, or Outer-join onto metrics |
 | **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`. Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
 | **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)     | Node Graph panel                  |
-| **Annotations**   | Change-log events (`time/title/text/tags`)                     | Dashboard annotations             |
+| **Annotations**   | Change-log events (`time/title/text/tags`, `id` 0, read-only)  | Dashboard annotations             |
 
 See [Demo](#demo) below for a one-command runnable stack (synthetic Prometheus + Loki
 labeled to match NetBox + a rich dashboard).

@@ -169,8 +169,9 @@ func (p *Provider) pushAssignedObjectType(ctx context.Context, q url.Values, wan
 }
 
 // journalAuthors resolves the entries' created_by ids to usernames, in batches.
-// The names are a hint like the diffs' related names: the lookup shares their
-// wait budget, and past it or on any error the entries keep no author.
+// The names are a hint like the diffs' related names: the lookup starts its own
+// wait budget of the same size (namesWait), and past it or on any error the
+// entries keep no author.
 func (p *Provider) journalAuthors(ctx context.Context, entries []journalEntry) map[int64]string {
 	var ids []string
 	seen := map[int64]bool{}

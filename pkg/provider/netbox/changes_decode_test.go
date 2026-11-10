@@ -145,3 +145,21 @@ func TestChanges_UnscopedUpdateGetsDiff(t *testing.T) {
 		t.Errorf("Diff = %+v, want %+v", c.Diff, want)
 	}
 }
+
+func TestChangeDiff_SkipsFieldsEmptyOnBothSides(t *testing.T) {
+	d := mustDecode(t, `{"action":{"value":"update"},
+		"prechange_data":{},
+		"postchange_data":{"label":"MON514-cable","color":"","comments":"","description":null,"tags":[],"custom_fields":{"note":null,"ticket":"T-1"}}}`)
+	var fields []string
+	for _, f := range d.diff {
+		fields = append(fields, f.Field)
+	}
+	if want := []string{"cf_ticket", "label"}; !reflect.DeepEqual(fields, want) {
+		t.Errorf("fields = %v, want %v", fields, want)
+	}
+
+	d = mustDecode(t, `{"action":{"value":"update"},"prechange_data":{"color":null},"postchange_data":{"color":"x"}}`)
+	if len(d.diff) != 1 || d.diff[0].Field != "color" {
+		t.Errorf("diff = %+v, want null -> x kept", d.diff)
+	}
+}

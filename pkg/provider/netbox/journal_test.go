@@ -516,12 +516,14 @@ func TestJournal_AuthorLookupIsBounded(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 	p.namesWaitOverride = 50 * time.Millisecond
 
-	start := time.Now()
-	got := journalOf(t, p, journalSpec(), nil)
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("journalEntries took %v behind a blocked users lookup, want about %v", elapsed, p.namesWaitOverride)
-	}
-	if len(got) != 1 || got[0].User != "" {
-		t.Errorf("markers = %+v, want one marker with no author", got)
+	done := make(chan []provider.Change, 1)
+	go func() { done <- journalOf(t, p, journalSpec(), nil) }()
+	select {
+	case got := <-done:
+		if len(got) != 1 || got[0].User != "" {
+			t.Errorf("markers = %+v, want one marker with no author", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("journalEntries still blocked after 2s: the author lookup is not bounded by namesWait (%v)", p.namesWaitOverride)
 	}
 }

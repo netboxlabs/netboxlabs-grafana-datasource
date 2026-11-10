@@ -4,7 +4,7 @@
 
 - **Change annotations can follow one object.** Scope an annotation to `$device`
   to see that device's changes, including its interfaces and cables, each saying
-  what changed. Journal entries can be added.
+  what changed. Journal entries can show alongside them.
 - **Secure SOCKS proxy switch on the settings page.** On self-hosted Grafana
   with a secure SOCKS5 data source proxy, the datasource can be routed through
   it from the settings page. Grafana Cloud's PDC network selector appears once

@@ -66,7 +66,8 @@ const (
 	// positive integer (AnnotationValue).
 	AnnotationReasonNotAnID = "not-an-id"
 	// AnnotationReasonNoNameFilter is a scope type whose list endpoint can't be
-	// filtered by its name.
+	// filtered by its name: the schema says so, or NetBox answered the lookup
+	// with rows that match none of the names.
 	AnnotationReasonNoNameFilter = "no-name-filter"
 	// AnnotationReasonNoEndpoint is a scope type matched by name whose list
 	// endpoint the instance doesn't report.

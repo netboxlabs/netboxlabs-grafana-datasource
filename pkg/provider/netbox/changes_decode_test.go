@@ -146,9 +146,27 @@ func TestChanges_UnscopedUpdateGetsDiff(t *testing.T) {
 	}
 }
 
+// NetBox writes some updates with no prechange snapshot: an ORM save without
+// snapshot(), and the cable update seen live in the 8a run. Every field would
+// look changed, so such a row has no diff at all.
+func TestChangeDiff_UpdateWithoutPrechangeHasNone(t *testing.T) {
+	post := `{"label":"MON514-cable","a_terminations":[36],"b_terminations":[37],"color":"","status":"connected"}`
+	for _, pre := range []string{`"prechange_data":{},`, `"prechange_data":null,`, ``} {
+		d := mustDecode(t, `{"action":{"value":"update"},`+pre+`"postchange_data":`+post+`}`)
+		if len(d.diff) != 0 {
+			t.Errorf("%s: diff = %+v, want none without a prechange snapshot", pre, d.diff)
+		}
+	}
+
+	d := mustDecode(t, `{"action":{"value":"update"},"prechange_data":{"status":"planned"},"postchange_data":{"status":"active"}}`)
+	if len(d.diff) != 1 || d.diff[0].Field != "status" {
+		t.Errorf("diff = %+v, want an ordinary update's status change", d.diff)
+	}
+}
+
 func TestChangeDiff_SkipsFieldsEmptyOnBothSides(t *testing.T) {
 	d := mustDecode(t, `{"action":{"value":"update"},
-		"prechange_data":{},
+		"prechange_data":{"label":"old"},
 		"postchange_data":{"label":"MON514-cable","color":"","comments":"","description":null,"tags":[],"custom_fields":{"note":null,"ticket":"T-1"}}}`)
 	var fields []string
 	for _, f := range d.diff {

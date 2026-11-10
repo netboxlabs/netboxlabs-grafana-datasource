@@ -26,12 +26,17 @@ func TestRewriteLinkURL(t *testing.T) {
 		{"http://netbox:8080/dcim/devices/1/", "http://netbox:8080", "https://tools.example.com/netbox", "https://tools.example.com/netbox/dcim/devices/1/"},
 		// A branch marker's _branch query parameter survives the swap.
 		{"http://netbox:8080/core/changelog/455/?_branch=4qv48we9", "http://netbox:8080", "http://localhost:8000", "http://localhost:8000/core/changelog/455/?_branch=4qv48we9"},
+		// A link on the bare base that got a query or a fragment (a branch
+		// marker falling back to the instance root) is still the internal base.
+		{"http://netbox:8080?_branch=x", "http://netbox:8080", "http://localhost:8000", "http://localhost:8000?_branch=x"},
+		{"http://netbox:8080#frag", "http://netbox:8080", "http://localhost:8000", "http://localhost:8000#frag"},
 		// NOT under the internal base -> untouched. This is load-bearing:
 		// cf_*_url custom-field columns routinely hold third-party URLs
 		// (runbooks, vendor portals) that must never be pointed at NetBox.
 		{"https://wiki.example.com/runbooks/42", "http://netbox:8080", "http://localhost:8000", "https://wiki.example.com/runbooks/42"},
 		// Prefix must match on a path boundary: netbox:8080 vs netbox:80801.
 		{"http://netbox:80801/dcim/devices/1/", "http://netbox:8080", "http://localhost:8000", "http://netbox:80801/dcim/devices/1/"},
+		{"http://netbox:8080x/", "http://netbox:8080", "http://localhost:8000", "http://netbox:8080x/"},
 		// Relative and non-URL values pass through unchanged.
 		{"/dcim/devices/1/", "http://netbox:8080", "http://localhost:8000", "/dcim/devices/1/"},
 		{"not a url", "http://netbox:8080", "http://localhost:8000", "not a url"},

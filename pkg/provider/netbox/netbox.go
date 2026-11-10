@@ -1703,6 +1703,8 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	// One branch for every request and cache key this call makes (pinBranch).
 	// The resolved value is the schema id, which the marker links carry.
 	ctx, branch := p.client.pinBranch(ctx)
+	// One names budget for every best-effort read this call makes.
+	ctx = p.withNamesBudget(ctx)
 	limit := spec.Limit
 	if limit <= 0 || limit > MaxLimit {
 		limit = defaultLimit
@@ -1753,6 +1755,20 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	}
 
 	kept := mergeChanges(results, limit)
+	// The cut-off is decided on the change-log rows (kept), before the journal
+	// merge. The marker is about the change log: it says how many change-log
+	// rows were read, and a capped read misses only change-log rows, all older
+	// than the cut-off. kept is the newest limit of everything the reads
+	// matched, so it is the set such a row would have had to enter. Journal
+	// entries say nothing about which change-log rows were read, so they don't
+	// decide it.
+	var cut provider.Change
+	showCut := false
+	if filter.localScan() {
+		if c, capped := cutoffChange(results); capped && cutoffMayMiss(kept, limit, c.Time) {
+			cut, showCut = c, true
+		}
+	}
 	if scope != nil {
 		for i := range kept {
 			if kept[i].fromRelated {
@@ -1765,10 +1781,8 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		changes = mergeJournal(changes, journal, limit)
 	}
 	// After the cut, so the limit can't drop it.
-	if filter.localScan() {
-		if cut, ok := cutoffChange(results); ok {
-			changes = append(changes, cut)
-		}
+	if showCut {
+		changes = append(changes, cut)
 	}
 	for i := range changes {
 		changes[i].URL = withBranchParam(changes[i].URL, branch)

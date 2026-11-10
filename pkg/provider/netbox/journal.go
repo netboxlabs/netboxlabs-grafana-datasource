@@ -169,8 +169,8 @@ func (p *Provider) pushAssignedObjectType(ctx context.Context, q url.Values, wan
 }
 
 // journalAuthors resolves the entries' created_by ids to usernames, in batches.
-// The names are a hint like the diffs' related names: the lookup starts its own
-// wait budget of the same size (namesWait), and past it or on any error the
+// The names are a hint like the diffs' related names: the lookup is one
+// best-effort read (namesWaitCtx), and past its wait or on any error the
 // entries keep no author.
 func (p *Provider) journalAuthors(ctx context.Context, entries []journalEntry) map[int64]string {
 	var ids []string
@@ -185,8 +185,8 @@ func (p *Provider) journalAuthors(ctx context.Context, entries []journalEntry) m
 	if len(ids) == 0 {
 		return names
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, p.namesWait())
-	defer cancel()
+	waitCtx, done := p.namesWaitCtx(ctx)
+	defer done()
 	b := newQueryBatcher("id", url.Values{"brief": {"true"}})
 	for _, batch := range b.chunk(ids) {
 		rows, _, err := p.fetchRows(waitCtx, "users/users", b.query(batch), len(batch))

@@ -169,6 +169,10 @@ func (p *Provider) scopeType(ctx context.Context, raw string) (*resolvedScope, e
 // in best effort by one brief lookup on the type's endpoint. An id is not
 // checked against NetBox: a deleted object's id still has change-log history,
 // and showing it is the point. An id NetBox doesn't return keeps an empty name.
+//
+// The lookup waits the names budget only, as every best-effort name read does:
+// past it the objects go unnamed. Endpoint discovery runs on the query's own
+// context, so on NetBox 4.2 and 4.3 it still warms the ObjectTypes cache.
 func (p *Provider) nameScopeIDs(ctx context.Context, scope *resolvedScope, ids []int64) {
 	endpoint, found, err := p.contentTypeEndpoint(ctx, scope.Type)
 	if err != nil {
@@ -178,7 +182,9 @@ func (p *Provider) nameScopeIDs(ctx context.Context, scope *resolvedScope, ids [
 	var names map[int64]string
 	if found {
 		scope.Endpoint = endpoint
-		names = p.lookupNames(ctx, endpoint, ids)
+		lookupCtx, done := p.namesWaitCtx(ctx)
+		names = p.lookupNames(lookupCtx, endpoint, ids)
+		done()
 	}
 	for _, id := range ids {
 		scope.Objects = append(scope.Objects, scopeObject{ID: id, Name: names[id]})
@@ -189,11 +195,12 @@ func (p *Provider) nameScopeIDs(ctx context.Context, scope *resolvedScope, ids [
 // is looked up by the type's lookup field (lookupField), in batches of repeated
 // parameters, and a name several objects share keeps all of them.
 //
-// Each batch reads one row more than its names may match between them, so a
-// batch that fills its limit is too many matches even when no name's own bucket
-// shows it: rows that match no name filled it, which is NetBox ignoring the
-// filter. The rows are bucketed here, ignoring case, so whatever NetBox's filter
-// does, only objects whose field equals a name are in scope.
+// Each batch reads one row more than its names may match between them. A name
+// whose bucket holds more than maxNameMatches is too many matches. A batch that
+// fills its limit with no name over that was filled by rows that match no name,
+// which is NetBox ignoring the filter: the type can't be looked up by name, and
+// no name is to blame. The rows are bucketed here, ignoring case, so whatever
+// NetBox's filter does, only objects whose field equals a name are in scope.
 func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, names []string) error {
 	endpoint, found, err := p.contentTypeEndpoint(ctx, scope.Type)
 	if err != nil {
@@ -210,12 +217,12 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 	// would answer with unrelated objects and fail as too many matches or none.
 	// The schema says so up front. One that can't be read skips the check rather
 	// than refusing a type it can't judge, and so does one not ready within the
-	// namesWait budget: the check only words the error better, and a cold or
-	// hanging schema must not hold the query. The schema read is a detached
-	// flight, so it carries on past the budget and fills the cache.
-	schemaCtx, cancel := context.WithTimeout(ctx, p.namesWait())
+	// names budget (namesWaitCtx): the check only words the error better, and a
+	// cold or hanging schema must not hold the query. The schema read is a
+	// detached flight, so it carries on past the budget and fills the cache.
+	schemaCtx, done := p.namesWaitCtx(ctx)
 	entry, err := p.schema(schemaCtx)
-	cancel()
+	done()
 	if err == nil && !slices.ContainsFunc(entry.filters[endpoint], func(f provider.FilterField) bool {
 		return f.Name == field && slices.Contains(f.Operators, "")
 	}) {
@@ -248,8 +255,11 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 				most = i
 			}
 		}
-		if len(rows) >= limit || len(buckets[most]) > maxNameMatches {
+		if len(buckets[most]) > maxNameMatches {
 			return &AnnotationError{Reason: provider.AnnotationReasonTooManyMatches, Value: logSafe(chunk[most])}
+		}
+		if len(rows) >= limit {
+			return &AnnotationError{Reason: provider.AnnotationReasonNoNameFilter}
 		}
 		for i, bucket := range buckets {
 			if len(bucket) == 0 {

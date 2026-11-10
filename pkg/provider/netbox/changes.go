@@ -150,14 +150,19 @@ func canonicalJSON(raw json.RawMessage) string {
 
 // changeDiff lists the fields an update changed. The change log's pre/post data
 // is already stripped of fields the viewer may not see, server side.
+//
+// An update with no prechange snapshot (absent, null or {}) has no diff: NetBox
+// writes such rows for an ORM save without snapshot(), and against nothing every
+// postchange field would look changed. With no diff, the row matches no Changed
+// fields either.
 func changeDiff(o objectChange) []rawFieldChange {
-	if o.Action.Value != "update" {
+	if o.Action.Value != "update" || (len(o.PrechangeData) == 0 && len(o.PostchangeData) > 0) {
 		return nil
 	}
 	var out []rawFieldChange
 	add := func(field string, before, after json.RawMessage) {
 		// A key missing on one side against ""/null/[] on the other is not a change
-		// anyone can see, and NetBox writes an empty prechange_data on some updates.
+		// anyone can see.
 		if formatValue(before) == "" && formatValue(after) == "" {
 			return
 		}
@@ -326,24 +331,28 @@ func (f changeFilter) keep(d decodedChange) bool {
 
 // checkChangedFields refuses a Changed-fields name that no object type has, so a
 // typo is an error rather than a quiet track. Custom fields (cf_<name>, and
-// custom_fields for any of them) aren't checked. The names come from the cached
-// schema, waited on for the namesWait budget only: one that can't be read in
-// time, or lists no object types, skips the check rather than holding the query
-// or refusing what it can't judge.
+// custom_fields for any of them) aren't checked, so a list of only those doesn't
+// read the schema. The names come from the cached schema, waited on within the
+// names budget only (namesWaitCtx): one that can't be read in time, or lists no
+// object types, skips the check rather than holding the query or refusing what
+// it can't judge.
 func (p *Provider) checkChangedFields(ctx context.Context, fields []string) error {
-	if len(fields) == 0 {
+	var check []string
+	for _, n := range fields {
+		if n != customFieldsKey && !strings.HasPrefix(n, cfPrefix) {
+			check = append(check, n)
+		}
+	}
+	if len(check) == 0 {
 		return nil
 	}
-	schemaCtx, cancel := context.WithTimeout(ctx, p.namesWait())
+	schemaCtx, done := p.namesWaitCtx(ctx)
 	entry, err := p.schema(schemaCtx)
-	cancel()
+	done()
 	if err != nil || len(entry.dims) == 0 {
 		return nil
 	}
-	for _, n := range fields {
-		if n == customFieldsKey || strings.HasPrefix(n, cfPrefix) {
-			continue
-		}
+	for _, n := range check {
 		known := false
 		for _, props := range entry.dims {
 			if _, known = props[n]; known {
@@ -421,6 +430,13 @@ func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, sc
 			return nil, err
 		}
 		return []changeRead{{q: q, keep: wantedType}}, nil
+	}
+	// resolveAnnotationScope never returns a scope without objects. If one got
+	// here, read 2 would go out with related_object_type and no related_object_id,
+	// and its only local check is the type: every change recorded against any
+	// object of the scope type. Refused before any request, as an empty scope is.
+	if len(scope.Objects) == 0 {
+		return nil, &AnnotationError{Reason: provider.AnnotationReasonEmptyScope}
 	}
 
 	inScope := make(map[int64]bool, len(scope.Objects))
@@ -631,4 +647,18 @@ func cutoffChange(results []changeReadResult) (provider.Change, bool) {
 		}
 	}
 	return c, capped
+}
+
+// cutoffMayMiss reports whether a capped read could have missed a change the
+// track would show. A capped read misses only rows older than the cut-off at.
+// When kept, newest first, already holds limit changes all newer than that, a
+// missed row couldn't have made the track, and a marker would claim a miss that
+// didn't happen. A kept change at the cut-off itself counts as older: a missed
+// row can share its time. One whose time doesn't parse counts as older too.
+func cutoffMayMiss(kept []decodedChange, limit int, at time.Time) bool {
+	if len(kept) < limit {
+		return true
+	}
+	oldest, err := time.Parse(time.RFC3339, kept[len(kept)-1].oc.Time)
+	return err != nil || !oldest.After(at)
 }

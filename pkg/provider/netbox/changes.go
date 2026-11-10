@@ -112,12 +112,14 @@ type rawFieldChange struct {
 	Before, After json.RawMessage
 }
 
-// decodedChange is a change-log row plus its field-level diff. fromRelated marks
-// a row read as a change recorded against the scope rather than a change to it,
+// decodedChange is a change-log row plus its field-level diff. at is the row's
+// time as a read parsed it (zero when it doesn't parse). fromRelated marks a
+// row read as a change recorded against the scope rather than a change to it,
 // and parent names the scope object it was recorded against.
 type decodedChange struct {
 	oc          objectChange
 	diff        []rawFieldChange
+	at          time.Time
 	fromRelated bool
 	parent      string
 }
@@ -151,12 +153,12 @@ func canonicalJSON(raw json.RawMessage) string {
 // changeDiff lists the fields an update changed. The change log's pre/post data
 // is already stripped of fields the viewer may not see, server side.
 //
-// An update with no prechange snapshot (absent, null or {}) has no diff: NetBox
-// writes such rows for an ORM save without snapshot(), and against nothing every
-// postchange field would look changed. With no diff, the row matches no Changed
-// fields either.
+// An update missing either snapshot (absent, null or {}) has no diff: NetBox
+// writes rows without a prechange snapshot for an ORM save without snapshot(),
+// and against nothing every field on the other side would look changed. With no
+// diff, the row matches no Changed fields either.
 func changeDiff(o objectChange) []rawFieldChange {
-	if o.Action.Value != "update" || (len(o.PrechangeData) == 0 && len(o.PostchangeData) > 0) {
+	if o.Action.Value != "update" || len(o.PrechangeData) == 0 || len(o.PostchangeData) == 0 {
 		return nil
 	}
 	var out []rawFieldChange
@@ -333,9 +335,9 @@ func (f changeFilter) keep(d decodedChange) bool {
 // typo is an error rather than a quiet track. Custom fields (cf_<name>, and
 // custom_fields for any of them) aren't checked, so a list of only those doesn't
 // read the schema. The names come from the cached schema, waited on within the
-// names budget only (namesWaitCtx): one that can't be read in time, or lists no
-// object types, skips the check rather than holding the query or refusing what
-// it can't judge.
+// call's schema budget only (budgetedSchema): one that can't be read in time,
+// or lists no object types, skips the check rather than holding the query or
+// refusing what it can't judge.
 func (p *Provider) checkChangedFields(ctx context.Context, fields []string) error {
 	var check []string
 	for _, n := range fields {
@@ -346,9 +348,7 @@ func (p *Provider) checkChangedFields(ctx context.Context, fields []string) erro
 	if len(check) == 0 {
 		return nil
 	}
-	schemaCtx, done := p.namesWaitCtx(ctx)
-	entry, err := p.schema(schemaCtx)
-	done()
+	entry, err := p.budgetedSchema(ctx)
 	if err != nil || len(entry.dims) == 0 {
 		return nil
 	}
@@ -477,7 +477,6 @@ func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, sc
 // changeReadResult is what one read found.
 type changeReadResult struct {
 	rows    []decodedChange // newest first
-	times   []time.Time     // each row's time
 	scanned int
 	// capped is a read that stopped at maxRows with rows left, short of limit
 	// matches; oldest is the time of the oldest row it scanned.
@@ -536,9 +535,8 @@ func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Value
 		if !r.keep(d.oc) || !f.keep(d) {
 			return true
 		}
-		d.fromRelated = r.fromRelated
+		d.at, d.fromRelated = at, r.fromRelated
 		res.rows = append(res.rows, d)
-		res.times = append(res.times, at)
 		return len(res.rows) < limit
 	})
 	res.scanned, res.err = scanned, err
@@ -557,7 +555,7 @@ func mergeChanges(results []changeReadResult, limit int) []decodedChange {
 	for len(out) < limit {
 		best := -1
 		for i, r := range results {
-			if next[i] < len(r.rows) && (best < 0 || r.times[next[i]].After(results[best].times[next[best]])) {
+			if next[i] < len(r.rows) && (best < 0 || r.rows[next[i]].at.After(results[best].rows[next[best]].at)) {
 				best = i
 			}
 		}
@@ -654,11 +652,8 @@ func cutoffChange(results []changeReadResult) (provider.Change, bool) {
 // When kept, newest first, already holds limit changes all newer than that, a
 // missed row couldn't have made the track, and a marker would claim a miss that
 // didn't happen. A kept change at the cut-off itself counts as older: a missed
-// row can share its time. One whose time doesn't parse counts as older too.
+// row can share its time. One whose time didn't parse (zero) counts as older
+// too.
 func cutoffMayMiss(kept []decodedChange, limit int, at time.Time) bool {
-	if len(kept) < limit {
-		return true
-	}
-	oldest, err := time.Parse(time.RFC3339, kept[len(kept)-1].oc.Time)
-	return err != nil || !oldest.After(at)
+	return len(kept) < limit || !kept[len(kept)-1].at.After(at)
 }

@@ -40,54 +40,43 @@ func (p *Provider) namesWait() time.Duration {
 	return namesWaitBudget
 }
 
-// namesBudgetKey carries a Changes call's names budget on its context.
-type namesBudgetKey struct{}
+// schemaBudgetKey carries a Changes call's schema budget on its context.
+type schemaBudgetKey struct{}
 
-// namesBudget is the one namesWait a Changes call has for all its best-effort
-// reads together: the scope lookup's name-filter check, the by-ID name fill,
-// the Changed-fields check, the diffs' names and the journal authors. Each read
-// is charged for the time it took, so a cold schema costs the call one
-// namesWait rather than one per read, and once the budget is spent the later
-// reads give up at once and degrade as they would past their own wait.
-//
-// It is a budget rather than a deadline from the start of the call so that the
-// change-log reads, which run between those waits and aren't best effort, don't
-// spend it: a deadline would pass during a slow but healthy scan (up to
-// changeScanCap rows a read), and every diff would then show ids and every
-// journal entry no author, with every cache warm.
-type namesBudget struct {
-	mu   sync.Mutex
+// schemaBudget is the one namesWait a Changes call has for waiting on the
+// cached OpenAPI schema, across every read that consults it: the scope lookup's
+// name-filter check, the Changed-fields check and the diffs' relation lookup.
+// The schema is one shared flight, so on a cold or refetching schema those
+// waits would otherwise stack, one namesWait each. Each wait is charged the time
+// it took; once the budget is spent the later waits give up at once and their
+// reads degrade, as past their own wait. Only schema waiting draws on it: not
+// the change-log reads, and not the network name reads, which each wait their
+// own namesWait. The schema waits all run on the Changes goroutine, so it needs
+// no lock.
+type schemaBudget struct {
 	left time.Duration
 }
 
-// withNamesBudget gives a Changes call its names budget.
-func (p *Provider) withNamesBudget(ctx context.Context) context.Context {
-	return context.WithValue(ctx, namesBudgetKey{}, &namesBudget{left: p.namesWait()})
+// withSchemaBudget gives a Changes call its schema budget.
+func (p *Provider) withSchemaBudget(ctx context.Context) context.Context {
+	return context.WithValue(ctx, schemaBudgetKey{}, &schemaBudget{left: p.namesWait()})
 }
 
-// namesWaitCtx bounds one best-effort read. Inside a Changes call that is what
-// the call's names budget has left (none: it is done at once), and done charges
-// the read's time to the budget. Outside one, the read gets a namesWait of its
-// own. done must be called when the read is over; it may be called again.
-func (p *Provider) namesWaitCtx(ctx context.Context) (waitCtx context.Context, done func()) {
-	b, _ := ctx.Value(namesBudgetKey{}).(*namesBudget)
+// budgetedSchema is p.schema waited on within what the call's schema budget has
+// left (also bounded by ctx), charging the wait to the budget. A cache hit
+// answers at once either way. Changes installs the budget; a caller without
+// one waits on ctx alone.
+func (p *Provider) budgetedSchema(ctx context.Context) (schemaCacheEntry, error) {
+	b, _ := ctx.Value(schemaBudgetKey{}).(*schemaBudget)
 	if b == nil {
-		return context.WithTimeout(ctx, p.namesWait())
+		return p.schema(ctx)
 	}
-	b.mu.Lock()
-	left := b.left
-	b.mu.Unlock()
 	start := time.Now()
-	waitCtx, cancel := context.WithTimeout(ctx, left)
-	var once sync.Once
-	return waitCtx, func() {
-		once.Do(func() {
-			cancel()
-			b.mu.Lock()
-			b.left -= time.Since(start)
-			b.mu.Unlock()
-		})
-	}
+	waitCtx, cancel := context.WithTimeout(ctx, b.left)
+	defer cancel()
+	entry, err := p.schema(waitCtx)
+	b.left -= time.Since(start)
+	return entry, err
 }
 
 // resolveDiffs builds the provider rows, with each diff in display order and the
@@ -96,21 +85,22 @@ func (p *Provider) namesWaitCtx(ctx context.Context) (waitCtx context.Context, d
 // rows are newest first, as Changes reads them, so when a lookup budget runs out
 // it is the older changes that keep their ids. preferred holds the Changed-fields
 // names: the fields they match (diffFieldMatches) sort first, and the rest
-// follow alphabetically. Everything the names wait on is one best-effort read
-// (namesWaitCtx), past which the values stay ids.
+// follow alphabetically. Everything the names wait on shares one namesWait,
+// past which the values stay ids; the schema wait within it is further bounded
+// by the call's schema budget (budgetedSchema).
 func (p *Provider) resolveDiffs(ctx context.Context, rows []decodedChange, preferred []string) []provider.Change {
 	ordered := make([]decodedChange, len(rows))
 	for i, d := range rows {
 		d.diff = orderDiff(d.diff, preferred)
 		ordered[i] = d
 	}
-	waitCtx, done := p.namesWaitCtx(ctx)
+	waitCtx, cancel := context.WithTimeout(ctx, p.namesWait())
 	names := p.displayNames(waitCtx, ordered)
 	if waitCtx.Err() != nil && ctx.Err() == nil {
-		log.DefaultLogger.Debug("netbox: related-object names not resolved within the names budget; the diffs show ids",
-			"budget", p.namesWait().String())
+		log.DefaultLogger.Debug("netbox: related-object names not resolved within the wait budget; the diffs show ids",
+			"waited", p.namesWait().String())
 	}
-	done()
+	cancel()
 	base := p.client.BaseURL()
 	var out []provider.Change
 	for _, d := range ordered {
@@ -228,7 +218,7 @@ func (p *Provider) displayNames(ctx context.Context, rows []decodedChange) diffN
 	if len(endpoints) == 0 {
 		return names
 	}
-	entry, err := p.schema(ctx)
+	entry, err := p.budgetedSchema(ctx)
 	if err != nil || entry.dims == nil {
 		if err != nil {
 			log.DefaultLogger.Debug("netbox: OpenAPI schema unavailable; diffs show related objects as ids",

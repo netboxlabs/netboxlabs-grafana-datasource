@@ -364,16 +364,19 @@ func TestResolveDiffs_OnlyRenderedFieldsAreLookedUp(t *testing.T) {
 // detached schema read carries on to fill the cache for the next refresh.
 func TestChanges_NameResolutionWaitsOnlyItsBudget(t *testing.T) {
 	s := nameServer()
-	s.schemaDelay = 600 * time.Millisecond
+	// The wait is long enough for the second refresh's real name lookup under
+	// -race on a loaded runner, and the schema well past the first call's bound.
+	const wait = 400 * time.Millisecond
+	s.schemaDelay = 5 * wait
 	s.changes = []string{
 		`{"id":1,"time":"2026-08-13T12:00:00Z","user_name":"admin","action":{"value":"update","label":"Updated"},"changed_object_type":"dcim.device","changed_object_id":1,"object_repr":"sw1","prechange_data":{"role":3},"postchange_data":{"role":7}}`,
 	}
 	p := s.start(t)
-	p.namesWaitOverride = 30 * time.Millisecond
+	p.namesWaitOverride = wait
 
 	started := time.Now()
 	changes, err := p.Changes(context.Background(), provider.ChangeSpec{Limit: 10})
-	if waited := time.Since(started); waited > 300*time.Millisecond {
+	if waited := time.Since(started); waited > 3*wait {
 		t.Errorf("Changes took %v behind a %v schema, want about the %v wait budget", waited, s.schemaDelay, p.namesWaitOverride)
 	}
 	if err != nil {
@@ -387,7 +390,7 @@ func TestChanges_NameResolutionWaitsOnlyItsBudget(t *testing.T) {
 	}
 
 	// The schema read was not abandoned: once it lands, the next refresh names.
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(s.schemaDelay + 5*time.Second)
 	for {
 		p.mu.Lock()
 		_, cached := p.schemaByBranch[""]

@@ -164,6 +164,18 @@ func TestChangeDiff_UpdateWithoutPrechangeHasNone(t *testing.T) {
 	}
 }
 
+// The same holds the other way round: against no postchange snapshot every
+// prechange field would look cleared.
+func TestChangeDiff_UpdateWithoutPostchangeHasNone(t *testing.T) {
+	pre := `{"label":"MON514-cable","a_terminations":[36],"color":"","status":"connected"}`
+	for _, post := range []string{`,"postchange_data":{}`, `,"postchange_data":null`, ``} {
+		d := mustDecode(t, `{"action":{"value":"update"},"prechange_data":`+pre+post+`}`)
+		if len(d.diff) != 0 {
+			t.Errorf("%q: diff = %+v, want none without a postchange snapshot", post, d.diff)
+		}
+	}
+}
+
 func TestChangeDiff_SkipsFieldsEmptyOnBothSides(t *testing.T) {
 	d := mustDecode(t, `{"action":{"value":"update"},
 		"prechange_data":{"label":"old"},

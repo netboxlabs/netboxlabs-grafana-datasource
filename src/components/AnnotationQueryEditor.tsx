@@ -85,7 +85,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
       <InlineField
         label="Scope type"
         labelWidth={20}
-        tooltip="NetBox content type of the objects to follow. Leave empty to show all changes."
+        tooltip="NetBox content type of the objects to follow. Defaults to dcim.device when a scope is set. Leave Scope empty to show all changes."
       >
         <Select
           inputId="annotation-scope-type"
@@ -159,7 +159,11 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
           }}
         />
       </InlineField>
-      <InlineField label="Journal entries" labelWidth={20} tooltip="Also show journal entries for the scoped objects.">
+      <InlineField
+        label="Journal entries"
+        labelWidth={20}
+        tooltip="Also show journal entries (for the scoped objects when a scope is set)."
+      >
         <InlineSwitch
           id="annotation-journal"
           value={query.journal ?? false}

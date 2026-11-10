@@ -144,7 +144,7 @@ func canonicalJSON(raw json.RawMessage) string {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return "null"
 	}
-	var v interface{}
+	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return string(raw)
 	}
@@ -212,7 +212,7 @@ func formatValue(v json.RawMessage) string {
 	if len(bytes.TrimSpace(v)) == 0 {
 		return ""
 	}
-	var x interface{}
+	var x any
 	if err := json.Unmarshal(v, &x); err != nil {
 		return string(v)
 	}
@@ -225,7 +225,7 @@ func formatValue(v json.RawMessage) string {
 		return strconv.FormatBool(t)
 	case float64:
 		return strconv.FormatFloat(t, 'f', -1, 64)
-	case []interface{}:
+	case []any:
 		var elems []json.RawMessage
 		_ = json.Unmarshal(v, &elems)
 		parts := make([]string, len(elems))

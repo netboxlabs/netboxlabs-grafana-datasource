@@ -16,10 +16,6 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
-// renderedDiffFields is how many diff lines a marker shows (pkg/plugin's
-// maxDiffLines). Only those fields get names looked up.
-const renderedDiffFields = 5
-
 // maxNameEndpoints and maxNameIDs bound the name lookups behind one query's
 // diffs: one request per related endpoint, at most maxNameEndpoints of them, each
 // for at most maxNameIDs ids. Values past either bound show as ids.
@@ -159,9 +155,10 @@ func orderDiff(diff []rawFieldChange, preferred []string) []rawFieldChange {
 	return out
 }
 
-// renderedDiff is the part of an ordered diff a marker shows.
+// renderedDiff is the part of an ordered diff a marker shows
+// (provider.MaxDiffLines). Only those fields get names looked up.
 func renderedDiff(diff []rawFieldChange) []rawFieldChange {
-	return diff[:min(len(diff), renderedDiffFields)]
+	return diff[:min(len(diff), provider.MaxDiffLines)]
 }
 
 // relatedID reads a diff value as a related object's id. The change log stores a

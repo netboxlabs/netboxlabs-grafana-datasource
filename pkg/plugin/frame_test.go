@@ -170,6 +170,21 @@ func TestBuildAnnotationsFrame_Journal(t *testing.T) {
 	}
 }
 
+// Comments written in NetBox's UI carry CRLF line ends, and an old Mac's lone CR
+// is a line end too: each becomes one <br>, with no stray \r.
+func TestBuildAnnotationsFrame_JournalLineEnds(t *testing.T) {
+	for comments, want := range map[string]string{
+		"a\r\nb":       "a<br>b",
+		"a\rb":         "a<br>b",
+		"a\r\n\r\nb\n": "a<br><br>b<br>",
+	} {
+		f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindJournal, Comments: comments}})
+		if got := f.Fields[2].At(0).(string); got != want+"<br>Journal" {
+			t.Errorf("comments %q: text = %q, want %q", comments, got, want+"<br>Journal")
+		}
+	}
+}
+
 func TestBuildAnnotationsFrame_Cutoff(t *testing.T) {
 	f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindCutoff, Scanned: 2500}})
 	if got := f.Fields[1].At(0).(string); got != "NetBox change log" {

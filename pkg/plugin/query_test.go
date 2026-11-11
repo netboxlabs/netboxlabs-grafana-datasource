@@ -977,7 +977,7 @@ func TestQuery_AnnotationsDescendantsFlag(t *testing.T) {
 		name, body string
 		want       bool
 	}{
-		{"absent", `{"queryType":"annotations"}`, false},
+		{"absent", `{"queryType":"annotations"}`, true},
 		{"false", `{"queryType":"annotations","includeDescendants":false}`, false},
 		{"true", `{"queryType":"annotations","includeDescendants":true}`, true},
 	} {
@@ -993,6 +993,17 @@ func TestQuery_AnnotationsDescendantsFlag(t *testing.T) {
 				t.Errorf("Descendants = %v, want %v", fp.lastChangeSpec.Descendants, tc.want)
 			}
 		})
+	}
+}
+
+func TestQuery_AnnotationsDescendantsErrorNilErr(t *testing.T) {
+	d := newTestDatasource(&fakeProvider{changes: []provider.Change{{Kind: provider.ChangeKindDescendantsError}}})
+	resp := d.query(context.Background(), backend.DataQuery{RefID: "Anno", JSON: []byte(`{"queryType":"annotations"}`)}, consumerDashboard)
+	if resp.Error != nil || len(resp.Frames) != 1 {
+		t.Fatalf("query: %v, frames %d", resp.Error, len(resp.Frames))
+	}
+	if text := resp.Frames[0].Fields[2].At(0).(string); text == "" {
+		t.Error("text is empty")
 	}
 }
 

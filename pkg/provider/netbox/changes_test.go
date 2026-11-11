@@ -883,3 +883,107 @@ func TestChanges_LocalFilterKeepsThePushdownNonWidening(t *testing.T) {
 		t.Errorf("changes = %+v, want only the dcim.device row", changes)
 	}
 }
+
+func TestCutoffChange_OnlyScanningReadsCut(t *testing.T) {
+	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Hour)
+	results := []changeReadResult{
+		{capped: true, oldest: t1},
+		{capped: true, scan: true, oldest: t2, scanned: 5},
+		{scanned: 3},
+	}
+	c, capped := cutoffChange(results)
+	if !capped || !c.Time.Equal(t2) || c.Scanned != 8 || c.DescendantsOnly {
+		t.Fatalf("cutoff = %+v capped=%v, want capped at %v with 8 scanned and not descendants-only", c, capped, t2)
+	}
+
+	results[1].descendant = true
+	if c, _ := cutoffChange(results); !c.DescendantsOnly {
+		t.Errorf("DescendantsOnly = false, want true when every capped read is a descendant read")
+	}
+
+	if _, capped := cutoffChange([]changeReadResult{{capped: true, oldest: t1}, {scanned: 3}}); capped {
+		t.Errorf("a capped read that doesn't scan cut the track")
+	}
+}
+
+func TestWalkChangeRead_DescendantMatcherSetsOwner(t *testing.T) {
+	p := newScopedChangeServer(
+		ch(1, 1, "dcim.interface", 5),
+		ch(2, 2, "dcim.interface", 6),
+	).start(t)
+	r := changeRead{
+		q:    url.Values{},
+		keep: func(objectChange) bool { t.Fatal("keep called on a descendant read"); return false },
+		descendant: func(oc objectChange) (int64, bool) {
+			if oc.ID == 1 {
+				return 17, true
+			}
+			return 0, false
+		},
+	}
+	res := p.walkChangeRead(context.Background(), r, r.q, changeFilter{}, 10, 10)
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if len(res.rows) != 1 || res.rows[0].oc.ID != 1 || !res.rows[0].descendant || res.rows[0].owner != 17 {
+		t.Fatalf("rows = %+v, want row 1 only, descendant, owner 17", res.rows)
+	}
+}
+
+func threeDeviceChanges() *scopedChangeServer {
+	return newScopedChangeServer(ch(1, 1, "dcim.device", 17), ch(2, 2, "dcim.device", 17), ch(3, 3, "dcim.device", 17))
+}
+
+func TestWalkChangeRead_LimitAboveMaxRowsIsCapped(t *testing.T) {
+	p := threeDeviceChanges().start(t)
+	r := changeRead{q: url.Values{}, keep: func(objectChange) bool { return true }}
+	res := p.walkChangeRead(context.Background(), r, r.q, changeFilter{}, 3, 2)
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if !res.capped || res.full || len(res.rows) != 2 {
+		t.Fatalf("capped=%v full=%v rows=%d, want capped, not full, 2 rows", res.capped, res.full, len(res.rows))
+	}
+}
+
+func TestWalkChangeRead_FullAtLimit(t *testing.T) {
+	p := threeDeviceChanges().start(t)
+	r := changeRead{q: url.Values{}, keep: func(objectChange) bool { return true }}
+	res := p.walkChangeRead(context.Background(), r, r.q, changeFilter{}, 2, 10)
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if !res.full || res.capped || len(res.rows) != 2 {
+		t.Fatalf("capped=%v full=%v rows=%d, want full, not capped, 2 rows", res.capped, res.full, len(res.rows))
+	}
+}
+
+func TestLimitReached(t *testing.T) {
+	row := func(id int) decodedChange { return decodedChange{oc: objectChange{ID: id}} }
+	tests := []struct {
+		name    string
+		results []changeReadResult
+		kept    []decodedChange
+		limit   int
+		want    bool
+	}{
+		{"under the limit", []changeReadResult{{rows: []decodedChange{row(1)}, full: true}}, []decodedChange{row(1)}, 2, false},
+		{"at the limit, a result full", []changeReadResult{{rows: []decodedChange{row(1), row(2)}, full: true}}, []decodedChange{row(1), row(2)}, 2, true},
+		{"at the limit, leftover row deduped", []changeReadResult{
+			{rows: []decodedChange{row(1), row(2)}},
+			{rows: []decodedChange{row(2)}},
+		}, []decodedChange{row(1), row(2)}, 2, false},
+		{"at the limit, leftover row not kept", []changeReadResult{
+			{rows: []decodedChange{row(1), row(2)}},
+			{rows: []decodedChange{row(3)}},
+		}, []decodedChange{row(1), row(2)}, 2, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := limitReached(tt.results, tt.kept, tt.limit); got != tt.want {
+				t.Errorf("limitReached = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

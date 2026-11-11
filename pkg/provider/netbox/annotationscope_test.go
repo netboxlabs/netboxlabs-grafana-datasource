@@ -331,6 +331,23 @@ func TestAnnotationScope_NameCaseInsensitiveBucket(t *testing.T) {
 	wantObjects(t, resolveOK(t, p, nameScope("LEAF1")), scopeObject{17, "leaf1"})
 }
 
+// Other types match exactly, as NetBox's own name filters do. The fixture's
+// filter ignores case for every type, as a plugin type's might: a row that
+// differs only in case is not the object asked for.
+func TestAnnotationScope_NameExactBucketOutsideDevicesAndVMs(t *testing.T) {
+	s := newAnnoScopeServer()
+	s.objects["dcim/interfaces"] = []string{briefRow("dcim/interfaces", 5, "name", "Eth0", "Eth0")}
+	p := s.start(t)
+	spec := nameScope("eth0")
+	spec.ScopeType = "dcim.interface"
+	_, err := p.resolveAnnotationScope(context.Background(), spec)
+	if ae := annotationErr(t, err, provider.AnnotationReasonNoMatch); ae.Value != "eth0" {
+		t.Errorf("value = %q, want eth0", ae.Value)
+	}
+	spec.Scope = []string{"Eth0"}
+	wantObjects(t, resolveOK(t, p, spec), scopeObject{5, "Eth0"})
+}
+
 // Devices at different sites can share a name; every one of them is in scope.
 func TestAnnotationScope_SharedNameKeepsAll(t *testing.T) {
 	s := newAnnoScopeServer()

@@ -98,6 +98,9 @@ type queryModel struct {
 	Actions       []string `json:"actions"`
 	ChangedFields []string `json:"changedFields"`
 	Journal       bool     `json:"journal"`
+	// IncludeDescendants (for annotations) adds changes to what is attached to
+	// the scope. A pointer so a query saved before the field existed stays off.
+	IncludeDescendants *bool `json:"includeDescendants"`
 }
 
 // query executes a single query and returns its data response.
@@ -136,6 +139,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			Actions:       qm.Actions,
 			ChangedFields: qm.ChangedFields,
 			Journal:       qm.Journal,
+			Descendants:   qm.IncludeDescendants != nil && *qm.IncludeDescendants,
 		})
 		if err != nil {
 			// Every error also comes back as a marker at the range's end:
@@ -145,6 +149,14 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			marker.RefID = q.RefID
 			resp.Frames = data.Frames{marker}
 			return resp
+		}
+		for i := range changes {
+			if changes[i].Kind != provider.ChangeKindDescendantsError {
+				continue
+			}
+			// The marker is a warning: the scope's own changes are all there.
+			log.DefaultLogger.Warn("netbox descendants error", "detail", sanitizeLog(changes[i].Err.Error()))
+			changes[i].Message = descendantsErrorText(changes[i].Err, d.viaProxy)
 		}
 		if d.cfg.PublicURL != "" {
 			internal, public := trimBase(d.provider.BaseURL()), trimBase(d.cfg.PublicURL)
@@ -848,8 +860,27 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 		return "The API token can't read journal entries. Turn off Journal entries, or let the token view them."
 	case provider.AnnotationReasonObjectTypesUnreadable:
 		return "NetBox's object-type list couldn't be read, and this NetBox version needs it to find related changes. Check that the token can read object types."
+	case provider.AnnotationReasonTooManyChildren:
+		return "This scope has more than 10,000 interfaces or cables to follow. Narrow the scope, or turn off Include descendants."
+	case provider.AnnotationReasonDescendantTypesUnreadable:
+		return "NetBox's object-type list couldn't be read. If this keeps happening, turn off Include descendants."
+	case provider.AnnotationReasonDescendantsForbidden:
+		return "The API token can't read this scope's interfaces or cables. Let the token view them, or turn off Include descendants."
+	case provider.AnnotationReasonDescendantsSlow:
+		return fmt.Sprintf("Reading what's attached took longer than %d s. Narrow the range, or turn off Include descendants on a busy NetBox.", u.AnnotationCount)
 	}
 	return "NetBox can't answer this annotation query as configured. Check its scope and filters."
+}
+
+// descendantsErrorText is the warning marker's text for a failed descendants
+// read. The messages for an annotation refusal already name the switch, so only
+// other failures get the hint appended.
+func descendantsErrorText(err error, viaProxy bool) string {
+	text := "Changes to what's attached weren't read. " + queryErrorMessage(err, viaProxy)
+	if u := provider.Classify(err); u == nil || u.Kind != provider.ErrorKindAnnotation {
+		text += " If this keeps happening, turn off Include descendants."
+	}
+	return text
 }
 
 // queryErrorResponse logs the raw upstream error (sanitized) and returns a data

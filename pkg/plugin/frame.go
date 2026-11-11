@@ -10,6 +10,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 // timeColumns are column names whose RFC3339 string values are rendered as time
@@ -214,6 +215,11 @@ func buildAnnotationsFrame(changes []provider.Change) *data.Frame {
 			title, text, tag = journalMarker(c)
 		case provider.ChangeKindCutoff:
 			title, text, tag = cutoffMarker(c)
+		case provider.ChangeKindLimit:
+			title, text, tag = limitMarker(c)
+		case provider.ChangeKindDescendantsError:
+			// The track around it is intact, so it isn't titled like a failed query.
+			title, text, tag = "NetBox annotation warning", html.EscapeString(c.Message), "netbox,error"
 		default:
 			title, text, tag = changeMarker(c)
 		}
@@ -280,9 +286,22 @@ func journalMarker(c provider.Change) (title, text, tag string) {
 }
 
 func cutoffMarker(c provider.Change) (title, text, tag string) {
-	return "NetBox change log",
-		fmt.Sprintf("Older changes not checked: read %s change-log entries without reaching the start of the range.", thousands(c.Scanned)),
-		"netbox,cutoff"
+	text = fmt.Sprintf("Older changes not checked: read %s change-log entries without reaching the start of the range.", thousands(c.Scanned))
+	if c.DescendantsOnly {
+		text = fmt.Sprintf("Older changes to what's attached not checked: read %s change-log entries without reaching the start of the range. The scope's own changes were all read.", thousands(c.Scanned))
+	}
+	return "NetBox change log", text, "netbox,cutoff"
+}
+
+// limitMarker says the query's Limit hid older changes in the range, and from
+// when. Past the largest Limit there is nothing to raise.
+func limitMarker(c provider.Change) (title, text, tag string) {
+	at := c.Until.UTC().Format("2006-01-02 15:04:05 UTC")
+	text = fmt.Sprintf("Limit reached: changes before %s in this range aren't shown. Raise Limit (now %d), narrow the range, or narrow Object types.", at, c.Limit)
+	if c.Limit >= netbox.MaxLimit {
+		text = fmt.Sprintf("Limit reached: changes before %s in this range aren't shown. Narrow the range or Object types.", at)
+	}
+	return "NetBox change log", text, "netbox,limit"
 }
 
 // annotationErrorFrame is a failed annotation query's error as one marker at

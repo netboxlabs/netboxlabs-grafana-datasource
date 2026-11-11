@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"slices"
 	"strings"
@@ -939,11 +940,12 @@ func TestQuery_AnnotationsMapsScopeFields(t *testing.T) {
 
 	got := run(t, `{"queryType":"annotations","objectTypes":["dcim.interface"],"limit":20,
 		"scopeType":"dcim.device","scope":"leaf1, leaf2","scopeSet":true,"scopeMatch":"id",
-		"actions":["create","update"],"changedFields":["status"],"journal":true}`)
+		"actions":["create","update"],"changedFields":["status"],"journal":true,"includeDescendants":true}`)
 	want := provider.ChangeSpec{
 		From: from, To: to, ObjectTypes: []string{"dcim.interface"}, Limit: 20,
 		ScopeType: "dcim.device", Scope: []string{"leaf1", "leaf2"}, ScopeSet: true, ScopeMatch: "id",
 		Actions: []string{"create", "update"}, ChangedFields: []string{"status"}, Journal: true,
+		Descendants: true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("spec = %+v\nwant  %+v", got, want)
@@ -967,6 +969,58 @@ func TestQuery_AnnotationsMapsScopeFields(t *testing.T) {
 					got.Scope, got.ScopeSet, got.ScopeAll, tc.scope, tc.scopeSet, tc.scopeAll)
 			}
 		})
+	}
+}
+
+func TestQuery_AnnotationsDescendantsFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"absent", `{"queryType":"annotations"}`, false},
+		{"false", `{"queryType":"annotations","includeDescendants":false}`, false},
+		{"true", `{"queryType":"annotations","includeDescendants":true}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProvider{}
+			resp := newTestDatasource(fp).query(context.Background(), backend.DataQuery{
+				RefID: "Anno", JSON: []byte(tc.body),
+			}, consumerDashboard)
+			if resp.Error != nil {
+				t.Fatalf("query: %v", resp.Error)
+			}
+			if fp.lastChangeSpec.Descendants != tc.want {
+				t.Errorf("Descendants = %v, want %v", fp.lastChangeSpec.Descendants, tc.want)
+			}
+		})
+	}
+}
+
+func TestQuery_AnnotationsDescendantsErrorMarker(t *testing.T) {
+	to := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	d := newTestDatasource(&fakeProvider{changes: []provider.Change{
+		{Time: to.Add(-time.Minute), Action: "Updated", ObjectRepr: "leaf1"},
+		{Kind: provider.ChangeKindDescendantsError, Time: to, Err: errors.New("boom")},
+	}})
+	resp := d.query(context.Background(), backend.DataQuery{
+		RefID:     "Anno",
+		TimeRange: backend.TimeRange{From: to.Add(-time.Hour), To: to},
+		JSON:      []byte(`{"queryType":"annotations","includeDescendants":true}`),
+	}, consumerDashboard)
+	if resp.Error != nil || len(resp.Frames) != 1 {
+		t.Fatalf("query: %v, frames %d", resp.Error, len(resp.Frames))
+	}
+	f := resp.Frames[0]
+	if f.Fields[2].Len() != 2 {
+		t.Fatalf("rows = %d, want 2", f.Fields[2].Len())
+	}
+	text := f.Fields[2].At(1).(string)
+	if !strings.HasPrefix(text, "Changes to what&#39;s attached weren&#39;t read. ") ||
+		!strings.HasSuffix(text, "If this keeps happening, turn off Include descendants.") {
+		t.Errorf("text = %q", text)
+	}
+	if got := f.Fields[1].At(1).(string); got != "NetBox annotation warning" {
+		t.Errorf("title = %q", got)
 	}
 }
 

@@ -110,6 +110,14 @@ func TestQueryErrorMessage_Annotation(t *testing.T) {
 			"The API token can't read journal entries. Turn off Journal entries, or let the token view them."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonObjectTypesUnreadable},
 			"NetBox's object-type list couldn't be read, and this NetBox version needs it to find related changes. Check that the token can read object types."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonTooManyChildren},
+			"This scope has more than 10,000 interfaces or cables to follow. Narrow the scope, or turn off Include descendants."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonDescendantTypesUnreadable},
+			"NetBox's object-type list couldn't be read. If this keeps happening, turn off Include descendants."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonDescendantsForbidden},
+			"The API token can't read this scope's interfaces or cables. Let the token view them, or turn off Include descendants."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonDescendantsSlow, Count: 20},
+			"Reading what's attached took longer than 20 s. Narrow the range, or turn off Include descendants on a busy NetBox."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.err.Reason, func(t *testing.T) {

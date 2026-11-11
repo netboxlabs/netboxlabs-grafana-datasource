@@ -28,6 +28,13 @@ func (p *Provider) changeScanCap() int {
 // maxRows rows, or at the end of the list. Each page asks for no more rows than
 // are left to read, so the walk fetches no row it won't visit.
 //
+// Offset pages shift when rows are added mid-walk, so a page can start with rows
+// the page before ended with. A row whose id the walk has already visited is
+// skipped: visit doesn't see it and it doesn't count toward maxRows, so repeats
+// can't cut a walk short. A row without an id is never a repeat. After maxRows
+// repeats the walk ends with more set, so a NetBox that ignores offset and
+// serves the same page forever can't loop it.
+//
 // scanned counts the rows visited. more is true when the walk stopped with rows
 // or pages it hadn't visited.
 //
@@ -44,6 +51,8 @@ func (p *Provider) walkRows(ctx context.Context, endpoint string, q url.Values, 
 	}
 	pq.Set("limit", strconv.Itoa(min(pageSize, maxRows)))
 	next := p.client.apiURL(endpoint, pq)
+	seen := map[int64]bool{}
+	repeats := 0
 	for {
 		page, err := p.getListPageRetry(ctx, next)
 		if err != nil {
@@ -51,6 +60,18 @@ func (p *Provider) walkRows(ctx context.Context, endpoint string, q url.Values, 
 		}
 		hasNext := page.Next != nil && *page.Next != ""
 		for i, raw := range page.Results {
+			var row struct {
+				ID int64 `json:"id"`
+			}
+			if json.Unmarshal(raw, &row) == nil && row.ID != 0 {
+				if seen[row.ID] {
+					if repeats++; repeats == maxRows {
+						return scanned, true, nil
+					}
+					continue
+				}
+				seen[row.ID] = true
+			}
 			scanned++
 			if !visit(raw) || scanned == maxRows {
 				return scanned, i < len(page.Results)-1 || hasNext, nil

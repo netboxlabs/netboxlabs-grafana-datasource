@@ -521,10 +521,10 @@ func relatedTypeRefused(err error) bool {
 
 // walkChangeRead reads q, keeping each row that passes the read's own check and
 // the filter, until limit rows are kept. A row the read already returned (offset
-// pages shift as changes are logged) is skipped; ID 0 is no id.
+// pages shift as changes are logged) is skipped by walkRows, and doesn't count
+// toward maxRows.
 func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Values, f changeFilter, limit, maxRows int) changeReadResult {
 	var res changeReadResult
-	seen := map[int]bool{}
 	scanned, more, err := p.walkRows(ctx, changeLogEndpoint, q, maxRows, func(raw json.RawMessage) bool {
 		d, ok := decodeChange(raw)
 		if !ok {
@@ -532,12 +532,6 @@ func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Value
 		}
 		if !d.at.IsZero() {
 			res.oldest = d.at
-		}
-		if d.oc.ID != 0 {
-			if seen[d.oc.ID] {
-				return true
-			}
-			seen[d.oc.ID] = true
 		}
 		if !r.keep(d.oc) || !f.keep(d) {
 			return true

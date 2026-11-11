@@ -19,6 +19,11 @@ import (
 // the request with the following offset. Each request's query is recorded.
 type pagerServer struct {
 	rows int
+	// shift rows are added at the front once the first page is served, as on a
+	// busy instance logging changes mid-walk, so later pages repeat that many.
+	shift int
+	// ignoreOffset serves every page from the start, with a next link.
+	ignoreOffset bool
 
 	mu       sync.Mutex
 	requests []url.Values
@@ -30,15 +35,27 @@ func (s *pagerServer) start(t *testing.T) *Provider {
 		q := r.URL.Query()
 		s.mu.Lock()
 		s.requests = append(s.requests, q)
+		shift := 0
+		if len(s.requests) > 1 {
+			shift = s.shift
+		}
 		s.mu.Unlock()
 		limit, _ := strconv.Atoi(q.Get("limit"))
 		offset, _ := strconv.Atoi(q.Get("offset"))
+		if s.ignoreOffset {
+			offset = 0
+		}
+		total := s.rows + shift
 		var rows []string
-		for i := offset; i < min(offset+limit, s.rows); i++ {
-			rows = append(rows, fmt.Sprintf(`{"id":%d}`, i+1))
+		for i := offset; i < min(offset+limit, total); i++ {
+			id := i + 1 - shift // the added rows are newest, so first
+			if i < shift {
+				id = 100000 + i
+			}
+			rows = append(rows, fmt.Sprintf(`{"id":%d}`, id))
 		}
 		next := "null"
-		if offset+limit < s.rows {
+		if offset+limit < total {
 			nq := url.Values{}
 			for k, vs := range q {
 				nq[k] = vs
@@ -47,7 +64,7 @@ func (s *pagerServer) start(t *testing.T) *Provider {
 			next = strconv.Quote("http://" + r.Host + r.URL.Path + "?" + nq.Encode())
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"count":%d,"next":%s,"previous":null,"results":[%s]}`, s.rows, next, strings.Join(rows, ","))
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":%s,"previous":null,"results":[%s]}`, total, next, strings.Join(rows, ","))
 	}))
 	t.Cleanup(srv.Close)
 	return New(srv.URL, "token", srv.Client())
@@ -148,5 +165,34 @@ func TestWalkRows_PageLimitShrinksAtTheEnd(t *testing.T) {
 	walk(t, small.start(t), 30, 0)
 	if got := small.param("limit"); !reflect.DeepEqual(got, []string{"30"}) {
 		t.Errorf("limits = %v, want [30]", got)
+	}
+}
+
+// Rows added mid-walk shift the offset pages, so the second page starts with
+// rows the first ended with. They are skipped and don't count toward maxRows:
+// the walk still visits maxRows distinct rows.
+func TestWalkRows_RepeatsDontCountTowardMaxRows(t *testing.T) {
+	s := &pagerServer{rows: 1200, shift: 3}
+	ids, scanned, more := walk(t, s.start(t), 1000, 0)
+	if scanned != 1000 || !more || len(ids) != 1000 {
+		t.Fatalf("scanned = %d, more = %v, visits = %d; want 1000, true, 1000", scanned, more, len(ids))
+	}
+	for i, id := range ids {
+		if id != i+1 {
+			t.Fatalf("visit %d got id %d, want %d: a repeat was visited or a row skipped", i, id, i+1)
+		}
+	}
+}
+
+// A NetBox that ignores offset serves the first page forever. Every row after
+// it is a repeat, and the walk ends once it has skipped maxRows of them.
+func TestWalkRows_EndsWhenOnlyRepeatsArrive(t *testing.T) {
+	s := &pagerServer{rows: 1200, ignoreOffset: true}
+	ids, scanned, more := walk(t, s.start(t), 1000, 0)
+	if scanned != 500 || !more || len(ids) != 500 {
+		t.Errorf("scanned = %d, more = %v, visits = %d; want 500, true, 500", scanned, more, len(ids))
+	}
+	if n := len(s.param("limit")); n > 4 {
+		t.Errorf("requests = %d, want at most 4", n)
 	}
 }

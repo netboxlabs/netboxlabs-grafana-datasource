@@ -191,6 +191,12 @@ func (p *Provider) nameScopeIDs(ctx context.Context, scope *resolvedScope, ids [
 	}
 }
 
+// caseInsensitiveNames are the types whose NetBox name filter ignores case
+// (iexact in DeviceFilterSet and VirtualMachineFilterSet). Every other core
+// type's name filter is exact, and a scope name matches as NetBox's does, so a
+// plugin type whose filter ignores case can't widen a scope.
+var caseInsensitiveNames = map[string]bool{"dcim.device": true, "virtualization.virtualmachine": true}
+
 // lookupScopeNames resolves a scope given as names into scope.Objects. Each name
 // is looked up by the type's lookup field (lookupField), in batches of repeated
 // parameters, and a name several objects share keeps all of them.
@@ -199,8 +205,9 @@ func (p *Provider) nameScopeIDs(ctx context.Context, scope *resolvedScope, ids [
 // whose bucket holds more than maxNameMatches is too many matches. A batch that
 // fills its limit with no name over that was filled by rows that match no name,
 // which is NetBox ignoring the filter: the type can't be looked up by name, and
-// no name is to blame. The rows are bucketed here, ignoring case, so whatever
-// NetBox's filter does, only objects whose field equals a name are in scope.
+// no name is to blame. The rows are bucketed here, ignoring case only for the
+// types in caseInsensitiveNames, so whatever NetBox's filter does, only objects
+// whose field equals a name are in scope.
 func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, names []string) error {
 	endpoint, found, err := p.contentTypeEndpoint(ctx, scope.Type)
 	if err != nil {
@@ -228,6 +235,10 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 		return &AnnotationError{Reason: provider.AnnotationReasonNoNameFilter}
 	}
 
+	same := func(a, b string) bool { return a == b }
+	if caseInsensitiveNames[scope.Type] {
+		same = strings.EqualFold
+	}
 	batcher := newQueryBatcher(field, url.Values{"brief": {"true"}})
 	seen := map[int64]bool{}
 	for _, chunk := range batcher.chunk(names) {
@@ -243,7 +254,7 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 				continue
 			}
 			for i, name := range chunk {
-				if strings.EqualFold(value, name) {
+				if same(value, name) {
 					buckets[i] = append(buckets[i], obj)
 				}
 			}

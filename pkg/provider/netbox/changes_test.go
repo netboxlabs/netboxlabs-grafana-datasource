@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -438,8 +439,8 @@ func TestChanges_MatchesTypeNamesCaseInsensitively(t *testing.T) {
 }
 
 // If the id map cannot be read at all, the annotation still answers: the query
-// degrades to the single-type name parameter (and, for several types, to the
-// local filter alone) rather than failing outright.
+// degrades to the name parameter, one read per type, rather than failing
+// outright.
 func TestChanges_DegradesWhenObjectTypesCannotBeRead(t *testing.T) {
 	records := []string{
 		changeRecord("dcim.device", "leaf1", 0),
@@ -468,28 +469,43 @@ func TestChanges_DegradesWhenObjectTypesCannotBeRead(t *testing.T) {
 		}
 	})
 
-	t.Run("several types fall back to the local filter", func(t *testing.T) {
-		s := &changeLogServer{records: records, objectTypesStatus: http.StatusForbidden}
+	t.Run("several types are read by name, one read each", func(t *testing.T) {
+		// The newest rows are another type's. One read left to the local filter
+		// would fetch only those and come back empty.
+		s := &changeLogServer{records: []string{
+			changeRecord("dcim.site", "AMS1", 0),
+			changeRecord("dcim.site", "AMS2", 1),
+			changeRecord("dcim.device", "leaf1", 2),
+			changeRecord("ipam.ipaddress", "10.0.0.1/24", 3),
+		}, objectTypesStatus: http.StatusForbidden}
 		p := s.start(t)
 
 		changes, err := p.Changes(context.Background(), provider.ChangeSpec{
-			ObjectTypes: []string{"dcim.device", "ipam.ipaddress"}, Limit: 10,
+			ObjectTypes: []string{"dcim.device", "ipam.ipaddress"}, Limit: 2,
 		})
 		if err != nil {
 			t.Fatalf("Changes: %v", err)
 		}
-		if got := s.sentParam(t, "changed_object_type"); len(got) != 0 {
-			t.Errorf("changed_object_type sent = %v, want none: repeated it is LAST WINS on 4.4.10, which would drop a type", got)
+		var sent []string
+		s.mu.Lock()
+		for _, q := range s.requests {
+			// Repeated, the name is LAST WINS on 4.4.10, which would drop a type.
+			if q.Has("changed_object_type_id") || len(q["changed_object_type"]) != 1 {
+				t.Errorf("read %v: want one changed_object_type and no ids", q)
+			}
+			sent = append(sent, q.Get("changed_object_type"))
 		}
-		if got := s.sentParam(t, "changed_object_type_id"); len(got) != 0 {
-			t.Errorf("changed_object_type_id sent = %v, want none", got)
+		s.mu.Unlock()
+		sort.Strings(sent)
+		if want := []string{"dcim.device", "ipam.ipaddress"}; !slices.Equal(sent, want) {
+			t.Errorf("changed_object_type sent = %v, want %v", sent, want)
 		}
-		seen := map[string]bool{}
+		var reprs []string
 		for _, c := range changes {
-			seen[c.ObjectType] = true
+			reprs = append(reprs, c.ObjectRepr)
 		}
-		if !seen["dcim.device"] || !seen["ipam.ipaddress"] || len(changes) != 2 {
-			t.Errorf("changes = %+v, want one dcim.device and one ipam.ipaddress", changes)
+		if want := []string{"leaf1", "10.0.0.1/24"}; !slices.Equal(reprs, want) {
+			t.Errorf("changes = %v, want %v", reprs, want)
 		}
 	})
 

@@ -565,6 +565,34 @@ func TestChanges_RelatedTypeNoIDIsObjectTypesUnreadable(t *testing.T) {
 	}
 }
 
+// Without the object-type map, several Object types can't share one related
+// read: each is read by name on its own. The newest related rows are another
+// type's, and would fill one limit-sized read left to the local filter.
+func TestChanges_RelatedReadsEachTypeByNameWithoutTheMap(t *testing.T) {
+	s := newScopedChangeServer(
+		ch(1, 1, "dcim.consoleport", 3).relatedTo("dcim.device", 17),
+		ch(2, 2, "dcim.consoleport", 4).relatedTo("dcim.device", 17),
+		ch(3, 3, "dcim.interface", 5).relatedTo("dcim.device", 17),
+		ch(4, 4, "dcim.cable", 6).relatedTo("dcim.device", 17),
+	)
+	s.coreStatus = http.StatusForbidden
+	spec := scoped(idScope("17"), 2)
+	spec.ObjectTypes = []string{"dcim.interface", "dcim.cable"}
+	wantIDs(t, changesOK(t, s.start(t), spec), "#3", "#4")
+
+	var sent []string
+	for _, q := range s.relatedReads() {
+		if q.Has("changed_object_type_id") || len(q["changed_object_type"]) != 1 {
+			t.Errorf("related read %v: want one changed_object_type and no ids", q)
+		}
+		sent = append(sent, q.Get("changed_object_type"))
+	}
+	slices.Sort(sent)
+	if want := []string{"dcim.cable", "dcim.interface"}; !reflect.DeepEqual(sent, want) {
+		t.Errorf("changed_object_type sent = %v, want %v", sent, want)
+	}
+}
+
 func TestChanges_OneActionPushed(t *testing.T) {
 	s := newScopedChangeServer(
 		ch(1, 1, "dcim.device", 17),

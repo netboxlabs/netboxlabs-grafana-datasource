@@ -47,7 +47,7 @@ const schemaTTL = 30 * time.Minute
 // degraded annotations, which is the worse bug and the harder one to notice. Ten
 // seconds is longer than a dashboard's opening burst and short enough that a
 // recovered instance is picked up within a refresh or two, and the degraded path
-// it holds open still returns annotations (see pushChangedObjectType).
+// it holds open still returns annotations (see objectTypeReads).
 //
 // A var, not a const, so tests can shorten it (as they do retryBackoff).
 var objectTypeFailureTTL = 10 * time.Second
@@ -124,7 +124,7 @@ type Provider struct {
 	branchingExpiry    time.Time
 
 	// objectTypeIDs caches app_label.model -> object-type id (see
-	// pushChangedObjectType). Object-type ids are instance-wide and identical on
+	// objectTypeReads). Object-type ids are instance-wide and identical on
 	// every branch — a branch changes DATA, not the model registry — so, like
 	// branchingInstalled, one value + expiry suffices rather than a per-branch
 	// map.
@@ -1823,8 +1823,8 @@ func withBranchParam(rawURL, schemaID string) string {
 // of the object that changed. This is the parameter the pushdown uses.
 //
 // changedObjectTypeParam is the same filter keyed by app_label.model. It is only
-// ever used as the single-type fallback when the id map cannot be read; see
-// pushChangedObjectType for why it cannot be the primary form.
+// ever used, one type per read, when the id map cannot be read; see
+// objectTypeReads for why it cannot be the primary form.
 const (
 	changedObjectTypeIDParam = "changed_object_type_id"
 	changedObjectTypeParam   = "changed_object_type"
@@ -1887,8 +1887,8 @@ func normalizeObjectTypes(types []string) []string {
 	return out
 }
 
-// pushChangedObjectType moves the annotation's object-type filter into the
-// NetBox query, one repeated changed_object_type_id= per requested type.
+// objectTypeReads moves the annotation's object-type filter into the NetBox
+// query: one repeated changed_object_type_id= per requested type, in one read.
 //
 // Without it, Changes reads the N newest rows of EVERY type and filters in Go.
 // That is not a slow answer, it is a WRONG one: on a 38.8M-row change log a
@@ -1925,23 +1925,27 @@ func normalizeObjectTypes(types []string) []string {
 //     a wrong type name that renders as "no changes" is the whole defect.
 //
 // If the map cannot be read at all (network blip, or a token whose permissions
-// exclude the endpoint) this DEGRADES to the pre-id behaviour rather than
-// failing the annotation: one type still goes upstream by name, several types
-// are left entirely to Changes's local filter, and an unresolvable name cannot
-// be detected so it is not reported. That is strictly the behaviour of the
-// commit before this one — worse than the id path, better than no annotations.
-// The one failure NOT degraded is the caller's own expired context, which is not
-// a statement about the instance at all.
+// exclude the endpoint) this DEGRADES rather than failing the annotation: each
+// type goes upstream by name, in a read of its own because the name form takes
+// one value, and an unresolvable name cannot be detected so it is not reported.
+// Several types left to the local filter in one read would let the newest rows
+// of other types fill it, and the track would quietly come up short. The one
+// failure NOT degraded is the caller's own expired context, which is not a
+// statement about the instance at all.
 //
 // wanted must already be normalised by normalizeObjectTypes — the caller does
 // that so the local filter can be built from the identical list. An empty list
 // therefore means "no filter", and an empty parameter is IGNORED upstream
 // (measured: it returns the unfiltered count), so an unfiltered annotation query
-// sends nothing at all rather than a parameter that means nothing — and must not
-// buy the object-type map to do it.
-func (p *Provider) pushChangedObjectType(ctx context.Context, q url.Values, wanted []string) error {
+// is one read that sends nothing at all rather than a parameter that means
+// nothing — and must not buy the object-type map to do it.
+//
+// idParam and nameParam are the endpoint's two forms of the filter:
+// changed_object_type_id and changed_object_type for the change log,
+// assigned_object_type_id and assigned_object_type for the journal.
+func (p *Provider) objectTypeReads(ctx context.Context, wanted []string, idParam, nameParam string) ([]typeRead, error) {
 	if len(wanted) == 0 {
-		return nil
+		return []typeRead{{}}, nil
 	}
 
 	ids, err := p.objectTypeIDMap(ctx)
@@ -1949,33 +1953,59 @@ func (p *Provider) pushChangedObjectType(ctx context.Context, q url.Values, want
 		if ctx.Err() != nil {
 			// Not an upstream problem: this caller's own deadline ran out (see
 			// objectTypeIDMap — a waiter never spends more than its own budget).
-			// Degrading here would send a change-log request on a dead context and
-			// report a WARN about an instance that may be perfectly healthy.
-			return err
+			// Degrading here would send a request on a dead context and report a
+			// WARN about an instance that may be perfectly healthy.
+			return nil, err
 		}
-		log.DefaultLogger.Warn("netbox: could not resolve NetBox object-type ids; the annotation's type filter is only partly pushed upstream",
-			"error", logSafe(err.Error()))
-		if len(wanted) == 1 {
-			q.Add(changedObjectTypeParam, wanted[0])
+		log.DefaultLogger.Warn("netbox: could not resolve NetBox object-type ids; each object type is read by name on its own",
+			"filter", nameParam, "error", logSafe(err.Error()))
+		reads := make([]typeRead, len(wanted))
+		for i, t := range wanted {
+			reads[i] = typeRead{params: url.Values{nameParam: {t}}, types: map[string]bool{t: true}}
 		}
-		return nil
+		return reads, nil
 	}
 
+	r := typeRead{params: url.Values{}, types: make(map[string]bool, len(wanted))}
 	for _, t := range wanted {
 		id, ok := ids[t]
 		if !ok {
 			// logSafe because the type is free text from the annotation editor and
 			// this string reaches both a log record and the user's screen.
-			return &UnknownObjectTypeError{Type: logSafe(t), Known: len(ids)}
+			return nil, &UnknownObjectTypeError{Type: logSafe(t), Known: len(ids)}
 		}
 		// Add, not Set: the repeated parameter is the OR, measured on both 4.4.10
 		// and 4.6.4. Collapsing these into one comma-joined value is HTTP 400
 		// ("“6,86” is not a valid value.", measured on 4.4.10), so it would not
 		// merely lose the filter — it would fail the annotation outright.
-		q.Add(changedObjectTypeIDParam, strconv.Itoa(id))
+		r.params.Add(idParam, strconv.Itoa(id))
+		r.types[t] = true
 	}
-	return nil
+	return []typeRead{r}, nil
 }
+
+// typeRead is one read's share of an object-type filter: the parameters that
+// push it upstream, and the types its rows are checked against here. Each read
+// checks only its own types, so a NetBox that ignored the name form can't show
+// a row twice, once from each read.
+type typeRead struct {
+	params url.Values      // nil = no type filter
+	types  map[string]bool // nil = every type
+}
+
+// with adds the read's type parameters to q.
+func (r typeRead) with(q url.Values) url.Values {
+	for k, vs := range r.params {
+		for _, v := range vs {
+			q.Add(k, v)
+		}
+	}
+	return q
+}
+
+// keeps reports whether a row of type t passes the read's type check. t must be
+// normalised.
+func (r typeRead) keeps(t string) bool { return r.types == nil || r.types[t] }
 
 // UnknownObjectTypeError reports an annotation object-type filter that this
 // NetBox instance does not know — a typo in the annotation editor, or a model
@@ -2017,7 +2047,7 @@ func (e *UnknownObjectTypeError) Error() string {
 // upgrade or a plugin install), which would argue for the much longer schemaTTL.
 // It follows the shorter discovery TTL instead because a stale entry here is not
 // merely stale: a model added since the fetch resolves to nothing, and
-// pushChangedObjectType turns that into a hard error rather than a slightly old
+// objectTypeReads turns that into a hard error rather than a slightly old
 // answer. Five minutes bounds that window; the fetch is one request for 154 rows.
 //
 // One request per TTL for SIMULTANEOUS callers too. Checking the cache and then

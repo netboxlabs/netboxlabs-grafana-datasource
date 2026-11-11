@@ -302,7 +302,7 @@ type Change struct {
 	Scanned     int    // cutoff only
 
 	Limit           int       // limit only: the query's limit
-	Until           time.Time // limit only: the oldest shown change's time
+	Until           time.Time // limit only: the oldest shown change's time; always set
 	DescendantsOnly bool      // cutoff only: every cut read was a descendant read
 	Err             error     // descendants-error only; the plugin maps it to Message
 }

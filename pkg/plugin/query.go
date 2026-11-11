@@ -99,7 +99,8 @@ type queryModel struct {
 	ChangedFields []string `json:"changedFields"`
 	Journal       bool     `json:"journal"`
 	// IncludeDescendants (for annotations) adds changes to what is attached to
-	// the scope. A pointer so a query saved before the field existed stays off.
+	// the scope. A pointer so an absent field means on: dashboards saved before the
+	// field existed get descendants.
 	IncludeDescendants *bool `json:"includeDescendants"`
 }
 
@@ -139,7 +140,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			Actions:       qm.Actions,
 			ChangedFields: qm.ChangedFields,
 			Journal:       qm.Journal,
-			Descendants:   qm.IncludeDescendants != nil && *qm.IncludeDescendants,
+			Descendants:   qm.IncludeDescendants == nil || *qm.IncludeDescendants,
 		})
 		if err != nil {
 			// Every error also comes back as a marker at the range's end:
@@ -155,8 +156,12 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 				continue
 			}
 			// The marker is a warning: the scope's own changes are all there.
-			log.DefaultLogger.Warn("netbox descendants error", "detail", sanitizeLog(changes[i].Err.Error()))
-			changes[i].Message = descendantsErrorText(changes[i].Err, d.viaProxy)
+			err := changes[i].Err
+			if err == nil {
+				err = errors.New("unknown error")
+			}
+			log.DefaultLogger.Warn("netbox descendants error", "detail", sanitizeLog(err.Error()))
+			changes[i].Message = descendantsErrorText(err, d.viaProxy)
 		}
 		if d.cfg.PublicURL != "" {
 			internal, public := trimBase(d.provider.BaseURL()), trimBase(d.cfg.PublicURL)

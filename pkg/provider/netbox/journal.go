@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
@@ -50,6 +52,12 @@ func (e journalEntry) title() string {
 	return fmt.Sprintf("%s #%d", e.AssignedType, e.AssignedID)
 }
 
+// createdAt is when the entry was written; zero if NetBox's time doesn't parse.
+func (e journalEntry) createdAt() time.Time {
+	t, _ := time.Parse(time.RFC3339, e.Created)
+	return t
+}
+
 // journalEntries reads the journal entries in the query's range as change
 // markers, newest first, at most limit of them.
 //
@@ -57,10 +65,6 @@ func (e journalEntry) title() string {
 // here, against the same object types and scope, so a filter NetBox ignores or
 // ORs wider can't put an entry on the dashboard that the query didn't ask for.
 func (p *Provider) journalEntries(ctx context.Context, spec provider.ChangeSpec, scope *resolvedScope, wanted []string, limit int) ([]provider.Change, error) {
-	typeFilter := make(map[string]bool, len(wanted))
-	for _, t := range wanted {
-		typeFilter[t] = true
-	}
 	q := url.Values{}
 	q.Set(orderingParam, "-created")
 	if !spec.From.IsZero() {
@@ -70,12 +74,14 @@ func (p *Provider) journalEntries(ctx context.Context, spec provider.ChangeSpec,
 		q.Set("created_before", spec.To.UTC().Format(time.RFC3339))
 	}
 
+	// One read, or one per type when the types go by name (objectTypeReads).
+	trs := []typeRead{{}}
 	var inScope map[int64]bool
 	if scope != nil {
 		// As in changeReads, the object types list isn't pushed with a scope: its
 		// ids would OR with the scope type's. A list without the scope type has
 		// nothing to read.
-		if len(wanted) > 0 && !typeFilter[scope.Type] {
+		if len(wanted) > 0 && !slices.Contains(wanted, scope.Type) {
 			return nil, nil
 		}
 		if scope.TypeID != 0 {
@@ -88,41 +94,50 @@ func (p *Provider) journalEntries(ctx context.Context, spec provider.ChangeSpec,
 			inScope[o.ID] = true
 			q.Add(assignedObjectIDParam, strconv.FormatInt(o.ID, 10))
 		}
-	} else if err := p.pushAssignedObjectType(ctx, q, wanted); err != nil {
-		return nil, err
-	}
-
-	rows, _, err := p.fetchRows(ctx, journalEndpoint, q, limit)
-	if err != nil {
-		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
-			return nil, &AnnotationError{Reason: provider.AnnotationReasonJournalForbidden}
+	} else {
+		var err error
+		if trs, err = p.objectTypeReads(ctx, wanted, assignedObjectTypeIDParam, assignedObjectTypeParam); err != nil {
+			return nil, err
 		}
-		return nil, err
 	}
 
 	var entries []journalEntry
-	for _, raw := range rows {
-		var e journalEntry
-		if json.Unmarshal(raw, &e) != nil {
-			continue
+	for _, tr := range trs {
+		rows, _, err := p.fetchRows(ctx, journalEndpoint, tr.with(maps.Clone(q)), limit)
+		if err != nil {
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
+				return nil, &AnnotationError{Reason: provider.AnnotationReasonJournalForbidden}
+			}
+			return nil, err
 		}
-		t := normalizeObjectType(e.AssignedType)
-		if len(typeFilter) > 0 && !typeFilter[t] {
-			continue
+		for _, raw := range rows {
+			var e journalEntry
+			if json.Unmarshal(raw, &e) != nil {
+				continue
+			}
+			// The read's types unscoped; the scope's type and objects scoped.
+			t := normalizeObjectType(e.AssignedType)
+			if !tr.keeps(t) {
+				continue
+			}
+			if scope != nil && (t != scope.Type || !inScope[e.AssignedID]) {
+				continue
+			}
+			entries = append(entries, e)
 		}
-		if scope != nil && (t != scope.Type || !inScope[e.AssignedID]) {
-			continue
-		}
-		entries = append(entries, e)
+	}
+	if len(trs) > 1 {
+		// Each read is newest first; the track is the newest limit of them all.
+		slices.SortStableFunc(entries, func(a, b journalEntry) int { return b.createdAt().Compare(a.createdAt()) })
+		entries = entries[:min(limit, len(entries))]
 	}
 
 	users := p.journalAuthors(ctx, entries)
 	out := make([]provider.Change, 0, len(entries))
 	for _, e := range entries {
-		t, _ := time.Parse(time.RFC3339, e.Created)
 		c := provider.Change{
-			Time:        t,
+			Time:        e.createdAt(),
 			Kind:        provider.ChangeKindJournal,
 			ObjectType:  e.AssignedType,
 			ObjectRepr:  e.title(),
@@ -136,36 +151,6 @@ func (p *Provider) journalEntries(ctx context.Context, spec provider.ChangeSpec,
 		out = append(out, c)
 	}
 	return out, nil
-}
-
-// pushAssignedObjectType moves the object types into the journal read, as
-// pushChangedObjectType does for the change log: one repeated id per type when
-// the id map is readable. Without the map one type goes by name and several go
-// nowhere; the caller's local check still applies either way.
-func (p *Provider) pushAssignedObjectType(ctx context.Context, q url.Values, wanted []string) error {
-	if len(wanted) == 0 {
-		return nil
-	}
-	ids, err := p.objectTypeIDMap(ctx)
-	if err != nil {
-		if ctx.Err() != nil {
-			return err
-		}
-		log.DefaultLogger.Warn("netbox: could not resolve NetBox object-type ids; the journal's type filter is only partly pushed upstream",
-			"error", logSafe(err.Error()))
-		if len(wanted) == 1 {
-			q.Set(assignedObjectTypeParam, wanted[0])
-		}
-		return nil
-	}
-	for _, t := range wanted {
-		id, ok := ids[t]
-		if !ok {
-			return &UnknownObjectTypeError{Type: logSafe(t), Known: len(ids)}
-		}
-		q.Add(assignedObjectTypeIDParam, strconv.Itoa(id))
-	}
-	return nil
 }
 
 // journalAuthors resolves the entries' created_by ids to usernames, in batches.

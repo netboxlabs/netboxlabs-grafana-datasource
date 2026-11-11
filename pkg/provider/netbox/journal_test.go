@@ -57,6 +57,9 @@ type journalServer struct {
 	typesStatus   int
 	branches      string
 	usersHandle   func() // non-nil: runs before users/users answers
+	// honorsTypeName makes the journal keep the last assigned_object_type and
+	// answer at most limit rows, as NetBox does, in place of ignoring both.
+	honorsTypeName bool
 
 	mu       sync.Mutex
 	requests []string // path?query
@@ -100,11 +103,19 @@ func (s *journalServer) start(t *testing.T) *Provider {
 				refuse(s.journalStatus)
 				return
 			}
-			rows := make([]string, len(s.rows))
-			for i, row := range s.rows {
-				rows[i] = row.json()
+			q := r.URL.Query()
+			var rows []string
+			for _, row := range s.rows {
+				if vals := q["assigned_object_type"]; s.honorsTypeName && len(vals) > 0 && row.typ != vals[len(vals)-1] {
+					continue
+				}
+				rows = append(rows, row.json())
 			}
-			writePage(w, len(rows), rows)
+			total := len(rows)
+			if lim, err := strconv.Atoi(q.Get("limit")); err == nil && s.honorsTypeName && lim < len(rows) {
+				rows = rows[:lim]
+			}
+			writePage(w, total, rows)
 		case "users/users":
 			if s.usersHandle != nil {
 				s.usersHandle()
@@ -254,6 +265,9 @@ func TestJournal_UnscopedNoTypesSendsNoTypeFilter(t *testing.T) {
 	}
 }
 
+// Without the object-type map each type is read by name on its own. The fixture
+// ignores the filter, so every read returns every row: each read keeps only its
+// own type, and no entry shows twice.
 func TestJournal_DegradedMapStillNonWidening(t *testing.T) {
 	s := &journalServer{typesStatus: http.StatusForbidden, rows: []journalRow{
 		{typ: "dcim.site", objID: 1, display: "ams1", minutes: 1},
@@ -265,15 +279,47 @@ func TestJournal_DegradedMapStillNonWidening(t *testing.T) {
 	if len(got) != 2 || got[0].ObjectRepr != "ams1" || got[1].ObjectRepr != "leaf1" {
 		t.Errorf("entries = %+v", got)
 	}
-	q := s.journalReads()[0]
-	if q.Has("assigned_object_type_id") || q.Has("assigned_object_type") {
-		t.Errorf("several types pushed without the map: %v", q)
+	var sent []string
+	for _, q := range s.journalReads() {
+		if q.Has("assigned_object_type_id") || len(q["assigned_object_type"]) != 1 {
+			t.Errorf("read %v: want one assigned_object_type and no ids", q)
+		}
+		sent = append(sent, q.Get("assigned_object_type"))
 	}
+	slices.Sort(sent)
+	if want := []string{"dcim.device", "dcim.site"}; !reflect.DeepEqual(sent, want) {
+		t.Errorf("assigned_object_type sent = %v, want %v", sent, want)
+	}
+}
 
-	// One type goes by name.
-	journalOf(t, p, journalSpec(), nil, "dcim.site")
-	if got := s.journalReads()[1].Get("assigned_object_type"); got != "dcim.site" {
-		t.Errorf("assigned_object_type = %q, want dcim.site", got)
+// The newest entries are another type's. One read left to the local check would
+// fetch only those and come back empty; a read per type finds the newest limit
+// of the types asked for.
+func TestJournal_DegradedMapReadsEachTypeToTheLimit(t *testing.T) {
+	s := &journalServer{typesStatus: http.StatusForbidden, honorsTypeName: true, rows: []journalRow{
+		{typ: "dcim.site", objID: 1, display: "ams1", minutes: 1},
+		{typ: "dcim.site", objID: 2, display: "ams2", minutes: 2},
+		{typ: "dcim.cable", objID: 3, display: "c3", minutes: 3},
+		{typ: "dcim.device", objID: 4, display: "leaf1", minutes: 4},
+		{typ: "dcim.device", objID: 5, display: "leaf2", minutes: 5},
+	}}
+	spec := journalSpec()
+	spec.Limit = 2
+	var titles []string
+	for _, c := range journalOf(t, s.start(t), spec, nil, "dcim.device", "dcim.cable") {
+		titles = append(titles, c.ObjectRepr)
+	}
+	if want := []string{"c3", "leaf1"}; !reflect.DeepEqual(titles, want) {
+		t.Errorf("titles = %v, want %v", titles, want)
+	}
+}
+
+// One type goes by name in one read.
+func TestJournal_DegradedMapOneTypeByName(t *testing.T) {
+	s := &journalServer{typesStatus: http.StatusForbidden}
+	journalOf(t, s.start(t), journalSpec(), nil, "dcim.site")
+	if reads := s.journalReads(); len(reads) != 1 || reads[0].Get("assigned_object_type") != "dcim.site" {
+		t.Errorf("journal reads = %v, want one with assigned_object_type=dcim.site", reads)
 	}
 }
 

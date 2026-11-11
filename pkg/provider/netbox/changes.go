@@ -402,38 +402,38 @@ func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, sc
 		return q
 	}
 
-	// The local type filter stays, and is not dead code once the type is pushed
+	// The local type check stays, and is not dead code once the type is pushed
 	// upstream. It is not a correctness net — an unknown type never reaches the
 	// query at all — it is what makes the pushdown strictly NON-WIDENING:
 	// whatever NetBox does with the parameter (ignores it, ORs it, honours only
 	// the last value, or does not implement it on this version), the frame can
-	// never contain a type the user did not ask for. It is also the only filter
-	// at all on the degraded path, where the id map could not be read and a
-	// multi-type request is pushed nowhere.
+	// never contain a type the user did not ask for. Each read checks its own
+	// types (typeRead), which on the degraded path is the one type it asked for
+	// by name.
 	//
 	// Built from the SAME list the pushdown is given, not from spec.ObjectTypes
 	// again: " DCIM.Device " resolves to an id whose rows NetBox returns, and must
 	// not then be discarded here for its spacing — and a blank entry, which is no
 	// filter upstream, must not become "match nothing" here.
-	typeFilter := make(map[string]bool, len(wanted))
-	for _, t := range wanted {
-		typeFilter[t] = true
-	}
-	wantedType := func(oc objectChange) bool {
-		return len(typeFilter) == 0 || typeFilter[normalizeObjectType(oc.changedType())]
+	keepType := func(tr typeRead) func(objectChange) bool {
+		return func(oc objectChange) bool { return tr.keeps(normalizeObjectType(oc.changedType())) }
 	}
 
 	if scope == nil {
-		q := base()
 		// An object type the instance does not know is an ERROR here, before any
 		// change-log request is made, and that is the point of the id form: it is
 		// a wrong question, and answering it with an empty annotation track that
 		// looks exactly like a quiet window is the silent-wrong-answer this whole
 		// function is being fixed for.
-		if err := p.pushChangedObjectType(ctx, q, wanted); err != nil {
+		trs, err := p.objectTypeReads(ctx, wanted, changedObjectTypeIDParam, changedObjectTypeParam)
+		if err != nil {
 			return nil, err
 		}
-		return []changeRead{{q: q, keep: wantedType}}, nil
+		reads := make([]changeRead, 0, len(trs))
+		for _, tr := range trs {
+			reads = append(reads, changeRead{q: tr.with(base()), keep: keepType(tr)})
+		}
+		return reads, nil
 	}
 	// resolveAnnotationScope never returns a scope without objects. If one got
 	// here, read 2 would go out with related_object_type and no related_object_id,
@@ -451,7 +451,7 @@ func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, sc
 	// The scope objects' own changes. Object types is not pushed here: its type
 	// ids would OR with the scope type's and let in other types' objects that
 	// share an id. A list without the scope type skips the read.
-	if len(wanted) == 0 || typeFilter[scope.Type] {
+	if len(wanted) == 0 || slices.Contains(wanted, scope.Type) {
 		q := base()
 		if scope.TypeID != 0 {
 			q.Set(changedObjectTypeIDParam, strconv.Itoa(scope.TypeID))
@@ -467,15 +467,19 @@ func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, sc
 	}
 	// The changes recorded against them. The change log doesn't return the
 	// related object, so these rows can only be checked for their type.
-	q := base()
-	q.Set(relatedObjectTypeParam, scope.Type)
-	for _, o := range scope.Objects {
-		q.Add(relatedObjectIDParam, strconv.FormatInt(o.ID, 10))
-	}
-	if err := p.pushChangedObjectType(ctx, q, wanted); err != nil {
+	trs, err := p.objectTypeReads(ctx, wanted, changedObjectTypeIDParam, changedObjectTypeParam)
+	if err != nil {
 		return nil, err
 	}
-	return append(reads, changeRead{q: q, keep: wantedType, fromRelated: true, relatedTypeID: scope.TypeID}), nil
+	for _, tr := range trs {
+		q := base()
+		q.Set(relatedObjectTypeParam, scope.Type)
+		for _, o := range scope.Objects {
+			q.Add(relatedObjectIDParam, strconv.FormatInt(o.ID, 10))
+		}
+		reads = append(reads, changeRead{q: tr.with(q), keep: keepType(tr), fromRelated: true, relatedTypeID: scope.TypeID})
+	}
+	return reads, nil
 }
 
 // changeReadResult is what one read found.

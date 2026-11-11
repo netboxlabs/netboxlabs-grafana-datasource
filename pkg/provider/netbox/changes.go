@@ -115,13 +115,17 @@ type rawFieldChange struct {
 // decodedChange is a change-log row plus its field-level diff. at is the row's
 // time as a read parsed it (zero when it doesn't parse). fromRelated marks a
 // row read as a change recorded against the scope rather than a change to it,
-// and parent names the scope object it was recorded against.
+// and parent names the scope object it was recorded against. descendant marks a
+// row read as a change to something the scope owns, and owner is the id of the
+// scope object that owns it.
 type decodedChange struct {
 	oc          objectChange
 	diff        []rawFieldChange
 	at          time.Time
 	fromRelated bool
 	parent      string
+	descendant  bool
+	owner       int64
 }
 
 // decodeChange parses one change-log row, including its time once (zero when it
@@ -376,6 +380,10 @@ type changeRead struct {
 	// keep is the read's own type and scope check, applied to every row whatever
 	// NetBox did with q.
 	keep func(objectChange) bool
+	// descendant, when set, is used in place of keep: it matches a row to the
+	// scope by the row's own snapshot, and returns the id of the scope object
+	// that owns what the row changed.
+	descendant func(objectChange) (owner int64, ok bool)
 	// fromRelated marks the read of the changes recorded against the scope, and
 	// relatedTypeID is then the scope type's id for NetBox versions that take
 	// related_object_type as an id; 0 when it's unknown.
@@ -383,24 +391,28 @@ type changeRead struct {
 	relatedTypeID int
 }
 
+// changeLogQuery is the part of a change-log read every read shares: newest
+// first, the time range, and the one Action NetBox is asked for.
+func changeLogQuery(spec provider.ChangeSpec, f changeFilter) url.Values {
+	q := url.Values{}
+	q.Set(orderingParam, "-time")
+	if !spec.From.IsZero() {
+		q.Set("time_after", spec.From.UTC().Format(time.RFC3339))
+	}
+	if !spec.To.IsZero() {
+		q.Set("time_before", spec.To.UTC().Format(time.RFC3339))
+	}
+	if f.push != "" {
+		q.Set(actionParam, f.push)
+	}
+	return q
+}
+
 // changeReads builds a query's change-log reads. Unscoped, it is the one read
 // Changes has always made. Scoped, it is the scope objects' own changes and the
 // changes recorded against them.
 func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, scope *resolvedScope, wanted []string, f changeFilter) ([]changeRead, error) {
-	base := func() url.Values {
-		q := url.Values{}
-		q.Set(orderingParam, "-time")
-		if !spec.From.IsZero() {
-			q.Set("time_after", spec.From.UTC().Format(time.RFC3339))
-		}
-		if !spec.To.IsZero() {
-			q.Set("time_before", spec.To.UTC().Format(time.RFC3339))
-		}
-		if f.push != "" {
-			q.Set(actionParam, f.push)
-		}
-		return q
-	}
+	base := func() url.Values { return changeLogQuery(spec, f) }
 
 	// The local type check stays, and is not dead code once the type is pushed
 	// upstream. It is not a correctness net — an unknown type never reaches the
@@ -490,7 +502,15 @@ type changeReadResult struct {
 	// matches; oldest is the time of the oldest row it scanned.
 	capped bool
 	oldest time.Time
-	err    error
+	// scan marks a read that scans for its matches, so that capped means rows it
+	// would have kept may lie past the cap. A read whose matches NetBox already
+	// narrowed to has nothing to miss.
+	scan bool
+	// descendant marks a membership read or a descendant scan.
+	descendant bool
+	// full is a read that stopped at limit kept rows with rows left.
+	full bool
+	err  error
 }
 
 // runChangeRead walks one read to limit matches or maxRows rows. A related read
@@ -519,8 +539,8 @@ func relatedTypeRefused(err error) bool {
 		slices.Contains(blamedParams(apiErr.Body), relatedObjectTypeParam)
 }
 
-// walkChangeRead reads q, keeping each row that passes the read's own check and
-// the filter, until limit rows are kept. A row the read already returned (offset
+// walkChangeRead reads q, keeping each row that passes the read's own check (its
+// descendant matcher, when it has one) and the filter, until limit rows are kept. A row the read already returned (offset
 // pages shift as changes are logged) is skipped by walkRows, and doesn't count
 // toward maxRows.
 func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Values, f changeFilter, limit, maxRows int) changeReadResult {
@@ -533,7 +553,13 @@ func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Value
 		if !d.at.IsZero() {
 			res.oldest = d.at
 		}
-		if !r.keep(d.oc) || !f.keep(d) {
+		if r.descendant != nil {
+			owner, ok := r.descendant(d.oc)
+			if !ok || !f.keep(d) {
+				return true
+			}
+			d.descendant, d.owner = true, owner
+		} else if !r.keep(d.oc) || !f.keep(d) {
 			return true
 		}
 		d.fromRelated = r.fromRelated
@@ -542,6 +568,7 @@ func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Value
 	})
 	res.scanned, res.err = scanned, err
 	res.capped = more && len(res.rows) < limit
+	res.full = more && len(res.rows) == limit
 	return res
 }
 
@@ -629,22 +656,29 @@ func scopeObjectName(scope *resolvedScope, o scopeObject) string {
 	return fmt.Sprintf("%s #%d", scope.Type, o.ID)
 }
 
-// cutoffChange is the marker for reads that stopped at the scan cap with rows
-// left, if any did. It sits at the newest of those reads' oldest scanned times:
-// older than that, at least one read is incomplete. Scanned counts every read's
-// rows.
+// cutoffChange is the marker for scanning reads that stopped at the scan cap
+// with rows left, if any did. It sits at the newest of those reads' oldest
+// scanned times: older than that, at least one read is incomplete. A read that
+// doesn't scan can't have missed a match, so its cap doesn't count. When every
+// capped read is a descendant read, DescendantsOnly is set: the scope's own
+// changes were all read. Scanned counts every read's rows.
 func cutoffChange(results []changeReadResult) (provider.Change, bool) {
 	c := provider.Change{Kind: provider.ChangeKindCutoff}
 	capped := false
+	c.DescendantsOnly = true
 	for _, r := range results {
 		c.Scanned += r.scanned
-		if r.capped {
+		if r.capped && r.scan {
 			if !capped || r.oldest.After(c.Time) {
 				c.Time = r.oldest
 			}
 			capped = true
+			if !r.descendant {
+				c.DescendantsOnly = false
+			}
 		}
 	}
+	c.DescendantsOnly = c.DescendantsOnly && capped
 	return c, capped
 }
 
@@ -657,4 +691,31 @@ func cutoffChange(results []changeReadResult) (provider.Change, bool) {
 // too.
 func cutoffMayMiss(kept []decodedChange, limit int, at time.Time) bool {
 	return len(kept) < limit || !kept[len(kept)-1].at.After(at)
+}
+
+// limitReached reports whether the track was cut at limit with changes left
+// out: kept holds limit changes and either a read stopped at limit with rows
+// left, or a read holds a row kept lacks. A row whose id kept holds is a change
+// two reads returned, and is not left out; ID 0 is no id, so it is never one.
+func limitReached(results []changeReadResult, kept []decodedChange, limit int) bool {
+	if len(kept) != limit {
+		return false
+	}
+	ids := make(map[int]bool, len(kept))
+	for _, d := range kept {
+		if d.oc.ID != 0 {
+			ids[d.oc.ID] = true
+		}
+	}
+	for _, r := range results {
+		if r.full {
+			return true
+		}
+		for _, d := range r.rows {
+			if d.oc.ID == 0 || !ids[d.oc.ID] {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -1747,7 +1747,10 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	results := make([]changeReadResult, len(reads))
 	var wg sync.WaitGroup
 	for i, r := range reads {
-		wg.Go(func() { results[i] = p.runChangeRead(ctx, r, filter, limit, maxRows) })
+		wg.Go(func() {
+			results[i] = p.runChangeRead(ctx, r, filter, limit, maxRows)
+			results[i].scan = filter.localScan()
+		})
 	}
 	var journal []provider.Change
 	var journalErr error
@@ -1774,10 +1777,8 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	// decide it.
 	var cut provider.Change
 	showCut := false
-	if filter.localScan() {
-		if c, capped := cutoffChange(results); capped && cutoffMayMiss(kept, limit, c.Time) {
-			cut, showCut = c, true
-		}
+	if c, capped := cutoffChange(results); capped && cutoffMayMiss(kept, limit, c.Time) {
+		cut, showCut = c, true
 	}
 	if scope != nil {
 		for i := range kept {

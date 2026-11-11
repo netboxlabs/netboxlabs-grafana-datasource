@@ -115,6 +115,8 @@ type Provider struct {
 	namesWaitOverride time.Duration
 	// changeScanCapOverride lowers changeScanCapRows; tests only.
 	changeScanCapOverride int
+	// childListCapOverride lowers childListCapRows; tests only.
+	childListCapOverride int
 
 	// branchingInstalled caches whether netbox-branching is installed — an
 	// instance-wide, branch-invariant property, so a single value + expiry

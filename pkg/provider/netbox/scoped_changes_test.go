@@ -21,10 +21,17 @@ import (
 
 // scopedTypeIDs are the fixture's object-type ids.
 var scopedTypeIDs = map[string]int{
-	"dcim.site":      6,
-	"dcim.device":    12,
-	"dcim.interface": 14,
-	"dcim.cable":     17,
+	"dcim.site":                     6,
+	"dcim.device":                   12,
+	"dcim.interface":                14,
+	"dcim.cable":                    17,
+	"ipam.ipaddress":                20,
+	"dcim.macaddress":               21,
+	"dcim.module":                   22,
+	"ipam.service":                  23,
+	"dcim.cabletermination":         24,
+	"virtualization.virtualmachine": 30,
+	"virtualization.vminterface":    31,
 }
 
 // scopedSchema gives devices and interfaces a name filter, for the scope's name
@@ -98,6 +105,12 @@ func (c loggedChange) object(raw string) loggedChange {
 	return c
 }
 
+// snapshots sets the row's prechange and postchange data, raw JSON; "" is null.
+func (c loggedChange) snapshots(pre, post string) loggedChange {
+	c.pre, c.post = pre, post
+	return c
+}
+
 func (c loggedChange) json() string { return c.render(true) }
 
 // render is the row as NetBox serves it. withRepr false leaves out object_repr,
@@ -127,17 +140,25 @@ func (c loggedChange) render(withRepr bool) string {
 // changed_object_id and related_object_id OR their repeated values.
 // changed_object_type and action keep only the last value. related_object_type
 // takes app_label.model from 4.4.4, where an id matches nothing, and an id up to
-// 4.4.3, where a name is a 400. It pages by offset, with next links. Every
-// request but the branch list is recorded with its X-NetBox-Branch.
+// 4.4.3, where a name is a 400. time_after and time_before bound the row's time,
+// inclusive. It pages by offset, with next links. Every request but the branch
+// list is recorded with its X-NetBox-Branch.
 //
 // Switched to NetBox 4.2's shape (see TestChanges_NetBox42ShapedScopedByName),
 // core/object-types 404s, extras/object-types serves rows without
 // rest_api_endpoint, the API index answers discovery, and change rows have no
 // object_repr.
+//
+// The list paths Include descendants reads (dcim/interfaces,
+// virtualization/virtual-machines, virtualization/interfaces and dcim/cables)
+// filter as NetBox does too: repeated values OR, and each parameter narrows.
+// device_id and virtual_machine_id are choice filters on the interface lists,
+// so an id that names no device or VM is a 400; dcim/cables' device_id isn't.
 type scopedChangeServer struct {
 	changes        []loggedChange // newest first
 	relatedByID    bool           // related_object_type takes an id, as up to NetBox 4.4.3
 	ignoreChangedQ bool           // changed_object_type(_id) and changed_object_id are ignored
+	ignoreRelatedQ bool           // related_object_type and related_object_id are ignored
 	coreStatus     int            // non-zero: core/object-types answers this status
 	schema         string         // "" answers 403
 	schemaHold     chan struct{}  // non-nil: the schema answers only once it is closed
@@ -156,9 +177,36 @@ type scopedChangeServer struct {
 	index        map[string][]string // non-nil: the API index for discovery, "dcim" -> ["devices"]
 	noObjectRepr bool                // change rows carry no object_repr, as before NetBox 4.5
 
+	// What's attached, for Include descendants.
+	interfaces       []childRow // dcim/interfaces
+	vms              []string   // brief rows at virtualization/virtual-machines
+	vmInterfaces     []childRow // virtualization/interfaces
+	cables           []cableRow // dcim/cables
+	listPageSize     int        // non-zero: the list paths above serve at most this many rows a page
+	listStatus       int        // non-zero: the list paths above answer this status
+	ignoreListFilter bool       // the list paths above ignore their filters
+
 	mu       sync.Mutex
 	requests []string // path?query
 	headers  []string // X-NetBox-Branch of each recorded request
+}
+
+// childRow is an interface or VM interface on owner, the device or VM, with its
+// cable (0 for none).
+type childRow struct {
+	id, owner, cable int64
+}
+
+// cableRow is a cable and its ends: the first is its A side, the rest its B.
+type cableRow struct {
+	id   int64
+	ends []cableEnd
+}
+
+// cableEnd is one cable termination: object ct id, on device.
+type cableEnd struct {
+	ct         string
+	id, device int64
 }
 
 func newScopedChangeServer(changes ...loggedChange) *scopedChangeServer {
@@ -208,8 +256,12 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 			}
 			var rows []string
 			for ct, id := range scopedTypeIDs {
-				_, model, _ := strings.Cut(ct, ".")
-				rows = append(rows, objectTypeRow(id, ct, "/api/dcim/"+model+"s/"))
+				app, model, _ := strings.Cut(ct, ".")
+				rest := "/api/" + app + "/" + model + "s/"
+				if ct == "virtualization.virtualmachine" {
+					rest = "/api/virtualization/virtual-machines/"
+				}
+				rows = append(rows, objectTypeRow(id, ct, rest))
 			}
 			writePage(w, len(rows), rows)
 		case "extras/object-types":
@@ -239,6 +291,8 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 			time.Sleep(s.devicesDelay)
 			rows := lookupMatches(s.devices, r.URL.Query())
 			writePage(w, len(rows), rows)
+		case "dcim/interfaces", "virtualization/virtual-machines", "virtualization/interfaces", "dcim/cables":
+			s.serveChildren(w, r, path)
 		case "core/object-changes":
 			time.Sleep(s.changeDelay)
 			s.serveChanges(w, r)
@@ -292,7 +346,7 @@ func (s *scopedChangeServer) serveChanges(w http.ResponseWriter, r *http.Request
 			keep(func(c loggedChange) bool { return hasID(vals, c.objID) })
 		}
 	}
-	if vals := q["related_object_type"]; len(vals) > 0 {
+	if vals := q["related_object_type"]; len(vals) > 0 && !s.ignoreRelatedQ {
 		v := vals[len(vals)-1]
 		_, err := strconv.Atoi(v)
 		switch isID := err == nil; {
@@ -308,42 +362,157 @@ func (s *scopedChangeServer) serveChanges(w http.ResponseWriter, r *http.Request
 			keep(func(c loggedChange) bool { return c.relType == v })
 		}
 	}
-	if vals := q["related_object_id"]; len(vals) > 0 {
+	if vals := q["related_object_id"]; len(vals) > 0 && !s.ignoreRelatedQ {
 		keep(func(c loggedChange) bool { return hasID(vals, c.relID) })
 	}
 	if vals := q["action"]; len(vals) > 0 {
 		keep(func(c loggedChange) bool { return c.action == vals[len(vals)-1] })
 	}
+	at := func(c loggedChange) time.Time { return scopedNow.Add(-time.Duration(c.minutes) * time.Minute) }
+	if v := q.Get("time_after"); v != "" {
+		after, _ := time.Parse(time.RFC3339, v)
+		keep(func(c loggedChange) bool { return !at(c).Before(after) })
+	}
+	if v := q.Get("time_before"); v != "" {
+		before, _ := time.Parse(time.RFC3339, v)
+		keep(func(c loggedChange) bool { return !at(c).After(before) })
+	}
 
+	out := make([]string, len(rows))
+	for i, c := range rows {
+		out[i] = c.render(!s.noObjectRepr)
+	}
 	limit, err := strconv.Atoi(q.Get("limit"))
 	if err != nil {
 		limit = 50
 	}
+	writeOffsetPage(w, r, out, limit)
+}
+
+// writeOffsetPage answers one offset page of rows, size rows long, with the
+// match count and a next link while rows are left.
+func writeOffsetPage(w http.ResponseWriter, r *http.Request, rows []string, size int) {
+	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	total := len(rows)
-	page := rows[min(offset, total):min(offset+limit, total)]
-	out := make([]string, len(page))
-	for i, c := range page {
-		out[i] = c.render(!s.noObjectRepr)
-	}
+	page := rows[min(offset, total):min(offset+size, total)]
 	next := "null"
-	if offset+limit < total {
-		q.Set("offset", strconv.Itoa(offset+limit))
+	if offset+size < total {
+		q.Set("offset", strconv.Itoa(offset+size))
 		next = strconv.Quote("http://" + r.Host + r.URL.Path + "?" + q.Encode())
 	}
-	_, _ = fmt.Fprintf(w, `{"count":%d,"next":%s,"previous":null,"results":[%s]}`, total, next, strings.Join(out, ","))
+	_, _ = fmt.Fprintf(w, `{"count":%d,"next":%s,"previous":null,"results":[%s]}`, total, next, strings.Join(page, ","))
+}
+
+// serveChildren answers the list paths Include descendants reads.
+func (s *scopedChangeServer) serveChildren(w http.ResponseWriter, r *http.Request, path string) {
+	if s.listStatus != 0 {
+		w.WriteHeader(s.listStatus)
+		_, _ = fmt.Fprint(w, `{"detail":"nope"}`)
+		return
+	}
+	q := r.URL.Query()
+	if s.ignoreListFilter {
+		q = url.Values{}
+	}
+	in := func(param string, id int64) bool {
+		vals, ok := q[param]
+		return !ok || slices.Contains(vals, strconv.FormatInt(id, 10))
+	}
+	// A choice filter refuses an id that names no object, as NetBox's
+	// ModelMultipleChoiceFilter does.
+	refuseUnknown := func(param string, known []string) bool {
+		for _, v := range q[param] {
+			if !slices.ContainsFunc(known, func(row string) bool {
+				var obj struct {
+					ID int64 `json:"id"`
+				}
+				return json.Unmarshal([]byte(row), &obj) == nil && strconv.FormatInt(obj.ID, 10) == v
+			}) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprintf(w, `{%q:["Select a valid choice. %s is not one of the available choices."]}`, param, v)
+				return true
+			}
+		}
+		return false
+	}
+	var rows []string
+	switch path {
+	case "dcim/interfaces":
+		if refuseUnknown("device_id", s.devices) {
+			return
+		}
+		for _, c := range s.interfaces {
+			if in("device_id", c.owner) && in("id", c.id) {
+				cable := "null"
+				if c.cable != 0 {
+					cable = fmt.Sprintf(`{"id":%d}`, c.cable)
+				}
+				rows = append(rows, fmt.Sprintf(`{"id":%d,"display":"if%d","device":{"id":%d},"cable":%s}`, c.id, c.id, c.owner, cable))
+			}
+		}
+	case "virtualization/virtual-machines":
+		rows = lookupMatches(s.vms, q)
+	case "virtualization/interfaces":
+		if refuseUnknown("virtual_machine_id", s.vms) {
+			return
+		}
+		for _, c := range s.vmInterfaces {
+			if in("virtual_machine_id", c.owner) {
+				rows = append(rows, fmt.Sprintf(`{"id":%d,"display":"vif%d","virtual_machine":{"id":%d}}`, c.id, c.id, c.owner))
+			}
+		}
+	case "dcim/cables":
+		for _, c := range s.cables {
+			if !slices.ContainsFunc(c.ends, func(e cableEnd) bool { return in("device_id", e.device) }) {
+				continue
+			}
+			var a, b []string
+			for i, e := range c.ends {
+				end := fmt.Sprintf(`{"object_type":%q,"object_id":%d,"object":{"id":%d,"device":{"id":%d}}}`, e.ct, e.id, e.id, e.device)
+				if i == 0 {
+					a = append(a, end)
+				} else {
+					b = append(b, end)
+				}
+			}
+			rows = append(rows, fmt.Sprintf(`{"id":%d,"a_terminations":[%s],"b_terminations":[%s]}`, c.id, strings.Join(a, ","), strings.Join(b, ",")))
+		}
+	}
+	size := len(rows)
+	if s.listPageSize > 0 {
+		size = s.listPageSize
+		if limit, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && limit > 0 {
+			size = min(size, limit)
+		}
+	}
+	writeOffsetPage(w, r, rows, max(size, 1))
 }
 
 // changeLog returns the query of every change-log request, in order.
-func (s *scopedChangeServer) changeLog() []url.Values {
+func (s *scopedChangeServer) changeLog() []url.Values { return s.requestsTo(changeLogEndpoint) }
+
+// requestsTo returns the query of every request to an API path
+// ("dcim/interfaces"), in order.
+func (s *scopedChangeServer) requestsTo(path string) []url.Values {
+	var out []url.Values
+	for _, raw := range s.rawQueries(path) {
+		q, _ := url.ParseQuery(raw)
+		out = append(out, q)
+	}
+	return out
+}
+
+// rawQueries returns the encoded query of every request to an API path, in
+// order.
+func (s *scopedChangeServer) rawQueries(path string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []url.Values
+	var out []string
 	for _, req := range s.requests {
 		p, raw, _ := strings.Cut(req, "?")
-		if p == "/api/core/object-changes/" {
-			q, _ := url.ParseQuery(raw)
-			out = append(out, q)
+		if p == "/api/"+path+"/" {
+			out = append(out, raw)
 		}
 	}
 	return out

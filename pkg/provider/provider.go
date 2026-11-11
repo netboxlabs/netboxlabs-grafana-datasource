@@ -270,6 +270,11 @@ const (
 	ChangeKindChange  ChangeKind = "" // zero value: existing literals stay valid
 	ChangeKindJournal ChangeKind = "journal"
 	ChangeKindCutoff  ChangeKind = "cutoff"
+	// ChangeKindLimit marks that the query's Limit cut the result short.
+	ChangeKindLimit ChangeKind = "limit"
+	// ChangeKindDescendantsError marks that the descendants read failed while the
+	// scope's own changes were read in full.
+	ChangeKindDescendantsError ChangeKind = "descendants-error"
 )
 
 // FieldChange is one changed field, formatted for display ("" = null/empty).
@@ -295,6 +300,11 @@ type Change struct {
 	JournalKind string // journal only
 	Comments    string // journal only
 	Scanned     int    // cutoff only
+
+	Limit           int       // limit only: the query's limit
+	Until           time.Time // limit only: the oldest shown change's time
+	DescendantsOnly bool      // cutoff only: every cut read was a descendant read
+	Err             error     // descendants-error only; the plugin maps it to Message
 }
 
 // ChangeSpec bounds an annotation query.
@@ -312,6 +322,9 @@ type ChangeSpec struct {
 	Actions       []string // subset of create|update|delete
 	ChangedFields []string
 	Journal       bool
+	// Descendants adds changes to what is attached to the scope: its cables, IP
+	// and MAC addresses, modules and services.
+	Descendants bool
 }
 
 // TopologySpec bounds a topology (node-graph) query.

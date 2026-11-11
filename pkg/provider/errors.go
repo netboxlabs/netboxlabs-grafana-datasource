@@ -84,6 +84,18 @@ const (
 	// AnnotationReasonObjectTypesUnreadable is an object-type list that couldn't
 	// be read where its ids are needed to find related changes.
 	AnnotationReasonObjectTypesUnreadable = "object-types-unreadable"
+	// AnnotationReasonTooManyChildren is a scope with more interfaces or cables
+	// than Include descendants will follow.
+	AnnotationReasonTooManyChildren = "too-many-children"
+	// AnnotationReasonDescendantTypesUnreadable is an object-type list that
+	// couldn't be read where Include descendants needs it.
+	AnnotationReasonDescendantTypesUnreadable = "descendant-types-unreadable"
+	// AnnotationReasonDescendantsForbidden is a read of the scope's interfaces or
+	// cables the API token isn't allowed.
+	AnnotationReasonDescendantsForbidden = "descendants-forbidden"
+	// AnnotationReasonDescendantsSlow is a descendants read that ran past its
+	// time budget (AnnotationCount = seconds).
+	AnnotationReasonDescendantsSlow = "descendants-slow"
 )
 
 // UpstreamError is a provider's own classification of a failure it received.

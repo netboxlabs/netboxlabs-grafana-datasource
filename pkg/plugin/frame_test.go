@@ -8,6 +8,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 func TestBuildFrame_TypesAndLinks(t *testing.T) {
@@ -195,6 +196,61 @@ func TestBuildAnnotationsFrame_Cutoff(t *testing.T) {
 		t.Errorf("text = %q, want %q", got, want)
 	}
 	if got := f.Fields[3].At(0).(string); got != "netbox,cutoff" {
+		t.Errorf("tags = %q", got)
+	}
+}
+
+func TestBuildAnnotationsFrame_DescendantsOnlyCutoff(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindCutoff, Scanned: 2500, DescendantsOnly: true}})
+	if got := f.Fields[1].At(0).(string); got != "NetBox change log" {
+		t.Errorf("title = %q", got)
+	}
+	want := "Older changes to what's attached not checked: read 2,500 change-log entries without reaching the start of the range. The scope's own changes were all read."
+	if got := f.Fields[2].At(0).(string); got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,cutoff" {
+		t.Errorf("tags = %q", got)
+	}
+}
+
+func TestBuildAnnotationsFrame_Limit(t *testing.T) {
+	until := time.Date(2026, 11, 9, 11, 30, 5, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		limit int
+		want  string
+	}{
+		{"below the maximum", 50,
+			"Limit reached: changes before 2026-11-09 11:30:05 UTC in this range aren't shown. Raise Limit (now 50), narrow the range, or narrow Object types."},
+		{"at the maximum", netbox.MaxLimit,
+			"Limit reached: changes before 2026-11-09 11:30:05 UTC in this range aren't shown. Narrow the range or Object types."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindLimit, Limit: tc.limit, Until: until}})
+			if got := f.Fields[1].At(0).(string); got != "NetBox change log" {
+				t.Errorf("title = %q", got)
+			}
+			if got := f.Fields[2].At(0).(string); got != tc.want {
+				t.Errorf("text = %q, want %q", got, tc.want)
+			}
+			if got := f.Fields[3].At(0).(string); got != "netbox,limit" {
+				t.Errorf("tags = %q", got)
+			}
+		})
+	}
+}
+
+func TestBuildAnnotationsFrame_DescendantsError(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindDescendantsError, Message: `Reading what's attached took <20> s`}})
+	if got := f.Fields[1].At(0).(string); got != "NetBox annotation warning" {
+		t.Errorf("title = %q", got)
+	}
+	want := "Reading what&#39;s attached took &lt;20&gt; s"
+	if got := f.Fields[2].At(0).(string); got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,error" {
 		t.Errorf("tags = %q", got)
 	}
 }

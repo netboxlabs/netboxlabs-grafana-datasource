@@ -108,6 +108,10 @@ func TestDescendantMembers_DeviceInterfaces(t *testing.T) {
 	p, scope, kind, ids := membersSetup(t, s, spec)
 	m := membersOK(t, p, spec, scope, kind, ids, true, false)
 	wantSet(t, "ifaces", m.ifaces, map[int64]int64{100: 17, 101: 17, 105: 17, 106: 17})
+	// The delete read ran out of rows: its oldest is the last row it read.
+	if len(m.reads) != 1 || m.reads[0].capped || !m.reads[0].oldest.Equal(scopedNow.Add(-30*time.Minute)) {
+		t.Errorf("reads = %+v, want the delete read, not capped, oldest at 30m", m.reads)
+	}
 
 	lists := s.requestsTo("dcim/interfaces")
 	if len(lists) != 1 || !reflect.DeepEqual(lists[0]["device_id"], []string{"17"}) || lists[0].Get("brief") != "true" {
@@ -150,20 +154,33 @@ func TestDescendantMembers_DeleteReadChecksTheSnapshotOwner(t *testing.T) {
 }
 
 // A NetBox that ignores the lists' filters can't put another device's
-// interfaces or cables on this one.
+// interfaces or cables on this one, or another interface's cable on an
+// interface scope.
 func TestDescendantMembers_ListRowsCheckedLocally(t *testing.T) {
-	s := newScopedChangeServer()
-	s.interfaces = []childRow{{id: 100, owner: 17}, {id: 102, owner: 18}}
-	s.cables = []cableRow{
-		{id: 300, ends: []cableEnd{{"dcim.interface", 100, 17}, {"dcim.interface", 200, 18}}},
-		{id: 302, ends: []cableEnd{{"dcim.interface", 102, 18}, {"dcim.interface", 201, 18}}},
-	}
-	s.ignoreListFilter = true
-	spec := nameScope("leaf1")
-	p, scope, kind, ids := membersSetup(t, s, spec)
-	m := membersOK(t, p, spec, scope, kind, ids, true, true)
-	wantSet(t, "ifaces", m.ifaces, map[int64]int64{100: 17})
-	wantSet(t, "cables", m.cables, map[int64]int64{300: 17})
+	t.Run("device scope", func(t *testing.T) {
+		s := newScopedChangeServer()
+		s.interfaces = []childRow{{id: 100, owner: 17}, {id: 102, owner: 18}}
+		s.cables = []cableRow{
+			{id: 300, ends: []cableEnd{{"dcim.interface", 100, 17}, {"dcim.interface", 200, 18}}},
+			{id: 302, ends: []cableEnd{{"dcim.interface", 102, 18}, {"dcim.interface", 201, 18}}},
+		}
+		s.ignoreListFilter = true
+		spec := nameScope("leaf1")
+		p, scope, kind, ids := membersSetup(t, s, spec)
+		m := membersOK(t, p, spec, scope, kind, ids, true, true)
+		wantSet(t, "ifaces", m.ifaces, map[int64]int64{100: 17})
+		wantSet(t, "cables", m.cables, map[int64]int64{300: 17})
+	})
+	t.Run("interface scope", func(t *testing.T) {
+		s := newScopedChangeServer()
+		s.interfaces = []childRow{{id: 100, owner: 17, cable: 300}, {id: 101, owner: 17, cable: 302}}
+		s.ignoreListFilter = true
+		spec := idScope("100")
+		spec.ScopeType = "dcim.interface"
+		p, scope, kind, ids := membersSetup(t, s, spec)
+		m := membersOK(t, p, spec, scope, kind, ids, true, true)
+		wantSet(t, "cables", m.cables, map[int64]int64{300: 100})
+	})
 }
 
 // device_id is a choice filter on the interface list: one deleted device's id
@@ -205,11 +222,15 @@ func TestDescendantMembers_DeviceCables(t *testing.T) {
 		cableEndChange(12, 5, "create", 100, 303, 14, 100),
 		cableEndChange(13, 20, "create", 100, 305, 99, 100),
 	)
-	s.cables = []cableRow{{id: 300, ends: []cableEnd{{"dcim.interface", 100, 17}, {"dcim.interface", 200, 18}}}}
+	// 306 is on leaf1 by its B side only.
+	s.cables = []cableRow{
+		{id: 300, ends: []cableEnd{{"dcim.interface", 100, 17}, {"dcim.interface", 200, 18}}},
+		{id: 306, ends: []cableEnd{{"dcim.interface", 202, 18}, {"dcim.interface", 101, 17}}},
+	}
 	spec := rangeSpec()
 	p, scope, kind, ids := membersSetup(t, s, spec)
 	m := membersOK(t, p, spec, scope, kind, ids, true, true)
-	wantSet(t, "cables", m.cables, map[int64]int64{300: 17, 301: 17, 303: 17, 304: 17})
+	wantSet(t, "cables", m.cables, map[int64]int64{300: 17, 301: 17, 303: 17, 304: 17, 306: 17})
 
 	lists := s.requestsTo("dcim/cables")
 	if len(lists) != 1 || lists[0].Get("fields") != "id,a_terminations,b_terminations" ||
@@ -295,27 +316,33 @@ func TestDescendantMembers_CableEndsBatch(t *testing.T) {
 	}
 }
 
+// An interface scope's interfaces are its own objects, whether or not the
+// caller wants them read: its cable ends are read through them either way.
 func TestDescendantMembers_InterfaceScope(t *testing.T) {
-	s := newScopedChangeServer(cableEndChange(10, 20, "delete", 100, 301, 14, 100))
-	s.interfaces = []childRow{{id: 100, owner: 17, cable: 300}, {id: 101, owner: 17, cable: 302}}
-	spec := idScope("100")
-	spec.ScopeType = "dcim.interface"
-	p, scope, kind, ids := membersSetup(t, s, spec)
-	m := membersOK(t, p, spec, scope, kind, ids, true, true)
-	wantSet(t, "ifaces", m.ifaces, map[int64]int64{100: 100})
-	wantSet(t, "cables", m.cables, map[int64]int64{300: 100, 301: 100})
+	for name, wantIfaces := range map[string]bool{"interfaces wanted": true, "cables only": false} {
+		t.Run(name, func(t *testing.T) {
+			s := newScopedChangeServer(cableEndChange(10, 20, "delete", 100, 301, 14, 100))
+			s.interfaces = []childRow{{id: 100, owner: 17, cable: 300}, {id: 101, owner: 17, cable: 302}}
+			spec := idScope("100")
+			spec.ScopeType = "dcim.interface"
+			p, scope, kind, ids := membersSetup(t, s, spec)
+			m := membersOK(t, p, spec, scope, kind, ids, wantIfaces, true)
+			wantSet(t, "ifaces", m.ifaces, map[int64]int64{100: 100})
+			wantSet(t, "cables", m.cables, map[int64]int64{300: 100, 301: 100})
 
-	lists := s.requestsTo("dcim/interfaces")
-	if len(lists) != 1 || !reflect.DeepEqual(lists[0]["id"], []string{"100"}) || lists[0].Get("brief") != "true" {
-		t.Errorf("interface lists = %v, want one with id=100&brief=true", lists)
-	}
-	if lists := s.requestsTo("dcim/cables"); len(lists) != 0 {
-		t.Errorf("cable lists = %v, want none", lists)
-	}
-	reads := s.changeLog()
-	if len(reads) != 1 || reads[0].Get("changed_object_type_id") != "24" ||
-		!reflect.DeepEqual(reads[0]["related_object_id"], []string{"100"}) {
-		t.Errorf("change-log reads = %v, want one cable-end read related to 100", reads)
+			lists := s.requestsTo("dcim/interfaces")
+			if len(lists) != 1 || !reflect.DeepEqual(lists[0]["id"], []string{"100"}) || lists[0].Get("brief") != "true" {
+				t.Errorf("interface lists = %v, want one with id=100&brief=true", lists)
+			}
+			if lists := s.requestsTo("dcim/cables"); len(lists) != 0 {
+				t.Errorf("cable lists = %v, want none", lists)
+			}
+			reads := s.changeLog()
+			if len(reads) != 1 || reads[0].Get("changed_object_type_id") != "24" ||
+				!reflect.DeepEqual(reads[0]["related_object_id"], []string{"100"}) {
+				t.Errorf("change-log reads = %v, want one cable-end read related to 100", reads)
+			}
+		})
 	}
 }
 
@@ -453,46 +480,64 @@ func TestDescendantMembers_ListForbidden(t *testing.T) {
 	annotationErr(t, err, provider.AnnotationReasonDescendantsForbidden)
 }
 
-// cappedMembers is leaf1 with three cable ends after To on interface 100, read
-// two rows at most, with To as given.
-func cappedMembers(t *testing.T, to time.Time) changeReadResult {
+// cableEndRead is leaf1 over [scopedNow-60m, to], with cable ends on interface
+// 100 at the given minutes before scopedNow, read maxRows rows at most (0: the
+// default cap). It returns the cable-end read's result, after the delete read's.
+func cableEndRead(t *testing.T, to time.Time, maxRows int, minutes ...int) changeReadResult {
 	t.Helper()
-	s := newScopedChangeServer(
-		cableEndChange(10, 1, "create", 100, 301, 14, 100),
-		cableEndChange(11, 2, "create", 100, 302, 14, 100),
-		cableEndChange(12, 3, "create", 100, 303, 14, 100),
-	)
+	var rows []loggedChange
+	for i, m := range minutes {
+		rows = append(rows, cableEndChange(10+i, m, "create", 100, int64(301+i), 14, 100))
+	}
+	s := newScopedChangeServer(rows...)
 	s.interfaces = []childRow{{id: 100, owner: 17}}
 	spec := nameScope("leaf1")
 	spec.From, spec.To = scopedNow.Add(-60*time.Minute), to
 	p, scope, kind, ids := membersSetup(t, s, spec)
-	p.changeScanCapOverride = 2
+	p.changeScanCapOverride = maxRows
 	m := membersOK(t, p, spec, scope, kind, ids, true, true)
-	for _, r := range m.reads {
-		if r.capped {
-			if !r.scan || !r.descendant || len(r.rows) != 0 {
-				t.Errorf("capped read: %d rows, scan %v, descendant %v; want no rows, scan and descendant", len(r.rows), r.scan, r.descendant)
-			}
-			return r
-		}
+	if len(m.reads) != 2 {
+		t.Fatalf("reads = %d, want 2 (the delete read and one cable-end read)", len(m.reads))
 	}
-	t.Fatalf("no capped read in %d reads", len(m.reads))
-	return changeReadResult{}
+	r := m.reads[1]
+	if !r.scan || !r.descendant || len(r.rows) != 0 {
+		t.Errorf("cable-end read: %d rows, scan %v, descendant %v; want no rows, scan and descendant", len(r.rows), r.scan, r.descendant)
+	}
+	return r
 }
 
 // A membership read capped after To may have missed members that changed
 // anywhere in the range, so its cut-off is To.
 func TestDescendantMembers_CappedReadClampsToTo(t *testing.T) {
 	to := scopedNow.Add(-10 * time.Minute)
-	if r := cappedMembers(t, to); !r.oldest.Equal(to) {
-		t.Errorf("oldest = %v, want To %v", r.oldest, to)
+	r := cableEndRead(t, to, 2, 1, 2, 3)
+	if !r.capped || !r.oldest.Equal(to) {
+		t.Errorf("capped %v, oldest %v; want capped at To %v", r.capped, r.oldest, to)
 	}
 }
 
 func TestDescendantMembers_NoClampWithoutTo(t *testing.T) {
-	if r, want := cappedMembers(t, time.Time{}), scopedNow.Add(-2*time.Minute); !r.oldest.Equal(want) {
-		t.Errorf("oldest = %v, want the oldest row read, %v", r.oldest, want)
+	r, want := cableEndRead(t, time.Time{}, 2, 1, 2, 3), scopedNow.Add(-2*time.Minute)
+	if !r.capped || !r.oldest.Equal(want) {
+		t.Errorf("capped %v, oldest %v; want capped at the oldest row read, %v", r.capped, r.oldest, want)
 	}
+}
+
+// Only a capped read is clamped, and only when it stopped after To.
+func TestDescendantMembers_ClampOnlyCappedReadsAfterTo(t *testing.T) {
+	to := scopedNow.Add(-10 * time.Minute)
+	t.Run("not capped", func(t *testing.T) {
+		r, want := cableEndRead(t, to, 0, 1, 2, 3), scopedNow.Add(-3*time.Minute)
+		if r.capped || !r.oldest.Equal(want) {
+			t.Errorf("capped %v, oldest %v; want not capped, at the oldest row read, %v", r.capped, r.oldest, want)
+		}
+	})
+	t.Run("capped before To", func(t *testing.T) {
+		r, want := cableEndRead(t, to, 3, 1, 2, 15, 20), scopedNow.Add(-15*time.Minute)
+		if !r.capped || !r.oldest.Equal(want) {
+			t.Errorf("capped %v, oldest %v; want capped at the oldest row read, %v", r.capped, r.oldest, want)
+		}
+	})
 }
 
 func TestDescendantMembers_NothingWantedNoRequests(t *testing.T) {

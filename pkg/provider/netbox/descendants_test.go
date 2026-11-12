@@ -261,7 +261,7 @@ func TestDescendantMembers_DeviceCables(t *testing.T) {
 	}
 }
 
-// R7: a cable's owner is the one the cable list gave it, else the first match
+// A cable's owner is the one the cable list gave it, else the first match
 // in the cable-end rows, newest first, the after side before the before side.
 func TestDescendantMembers_CableOwners(t *testing.T) {
 	moved := ch(10, 20, "dcim.cabletermination", 910).relatedTo("dcim.interface", 100).snapshots(
@@ -720,7 +720,7 @@ func TestChanges_DescendantIPMovedShowsOnBothTracks(t *testing.T) {
 	}
 }
 
-// With several scope objects, a descendant is on the one it matched (R7).
+// With several scope objects, a descendant is on the one it matched.
 func TestChanges_DescendantsMultiScopeParent(t *testing.T) {
 	s := newestFirst(
 		created(1, 1, "dcim.module", 500, `{"device":18}`),
@@ -770,7 +770,7 @@ func TestChanges_DescendantsVM(t *testing.T) {
 }
 
 // On an interface scope, an IP on it is also recorded against it: it shows
-// once (R13).
+// once.
 func TestChanges_DescendantsInterfaceScope(t *testing.T) {
 	s := newestFirst(
 		ch(1, 1, "dcim.cable", 300),
@@ -860,8 +860,8 @@ func TestChanges_DescendantsNoopWhereTheyCantApply(t *testing.T) {
 }
 
 // Object types decides which scans run, and which children are read for them:
-// a device's cables need its interfaces, which its cable ends are read through
-// (R5). The interface deletes that build them don't reach the track (R9).
+// a device's cables need its interfaces, which its cable ends are read
+// through. The interface deletes that build them don't reach the track.
 func TestChanges_DescendantsObjectTypesNarrowTheReads(t *testing.T) {
 	s := newestFirst(
 		ch(1, 1, "dcim.cable", 300),
@@ -950,7 +950,7 @@ func TestChanges_DescendantsOneActionPushed(t *testing.T) {
 }
 
 // A scan that stops at the cap ends the track with a cut-off that says only
-// what's attached was cut (R8).
+// what's attached was cut.
 func TestChanges_DescendantScanCapShowsCutoff(t *testing.T) {
 	var rows []loggedChange
 	for i := 1; i <= 5; i++ {
@@ -1015,7 +1015,7 @@ func trackServer() *scopedChangeServer {
 }
 
 // A failed descendant read drops every descendant row, the parts scan's that
-// succeeded included, and keeps the rest of the track, with a marker (R2).
+// succeeded included, and keeps the rest of the track, with a marker.
 func TestChanges_DescendantReadFailureKeepsTheTrack(t *testing.T) {
 	s := trackServer()
 	s.failTypeID = 20
@@ -1047,7 +1047,7 @@ func TestChanges_DescendantTypeMapUnreadableKeepsTheTrack(t *testing.T) {
 }
 
 // A descendant read held past the descendants deadline doesn't hold the track:
-// it shows, with a descendants-slow marker (R15).
+// it shows, with a descendants-slow marker.
 func TestChanges_DescendantsSlowKeepsTheTrack(t *testing.T) {
 	s := trackServer()
 	s.delayTypeID, s.delayFor = 20, 5*time.Second
@@ -1101,7 +1101,7 @@ func TestChanges_CallerCancelledFails(t *testing.T) {
 }
 
 // A track whose descendant rows were merged says when the limit left a change
-// out (R12). Without them, the track is today's.
+// out. Without them, the track is today's.
 func TestChanges_DescendantsLimitMarker(t *testing.T) {
 	rows := []loggedChange{
 		ch(1, 1, "dcim.device", 17),

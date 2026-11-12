@@ -978,6 +978,11 @@ func TestLimitReached(t *testing.T) {
 			{rows: []decodedChange{row(1), row(2)}},
 			{rows: []decodedChange{row(3)}},
 		}, []decodedChange{row(1), row(2)}, 2, true},
+		// Change-log rows always carry an id; id 0 is a malformed row, so it can't
+		// be matched to a kept copy and counts as left out.
+		{"at the limit, a kept row with id 0", []changeReadResult{
+			{rows: []decodedChange{row(0), row(1)}},
+		}, []decodedChange{row(0), row(1)}, 2, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

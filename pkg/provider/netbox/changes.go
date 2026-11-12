@@ -673,8 +673,7 @@ func scopeObjectName(scope *resolvedScope, o scopeObject) string {
 // changes were all read. Scanned counts every read's rows.
 func cutoffChange(results []changeReadResult) (provider.Change, bool) {
 	c := provider.Change{Kind: provider.ChangeKindCutoff}
-	capped := false
-	c.DescendantsOnly = true
+	capped, allDescendant := false, true
 	for _, r := range results {
 		c.Scanned += r.scanned
 		if r.capped && r.scan {
@@ -682,12 +681,10 @@ func cutoffChange(results []changeReadResult) (provider.Change, bool) {
 				c.Time = r.oldest
 			}
 			capped = true
-			if !r.descendant {
-				c.DescendantsOnly = false
-			}
+			allDescendant = allDescendant && r.descendant
 		}
 	}
-	c.DescendantsOnly = c.DescendantsOnly && capped
+	c.DescendantsOnly = capped && allDescendant
 	return c, capped
 }
 

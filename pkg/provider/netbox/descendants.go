@@ -29,8 +29,8 @@ func (p *Provider) childListCap() int {
 	return childListCapRows
 }
 
-// cableEndWorkers is how many cable-end batches run at once (R16): bounded,
-// without a long serial chain on a device with thousands of interfaces.
+// cableEndWorkers is how many cable-end batches run at once: bounded, without
+// a long serial chain on a device with thousands of interfaces.
 const cableEndWorkers = 4
 
 // maxDescendantsBudget caps the time the descendant reads get. They run in a
@@ -53,9 +53,9 @@ func (p *Provider) descendantsBudget() time.Duration {
 }
 
 // descendantsDeadline is now + descendantsBudget(), narrowed to leave a fifth of
-// the caller's remaining time when ctx has a deadline (R15), as
-// utilizationDeadline does: the rest of the track is merged and returned in
-// that fifth, rather than lost with the caller's deadline.
+// the caller's remaining time when ctx has a deadline, as utilizationDeadline
+// does: the rest of the track is merged and returned in that fifth, rather
+// than lost with the caller's deadline.
 func (p *Provider) descendantsDeadline(ctx context.Context) time.Time {
 	now := time.Now()
 	deadline := now.Add(p.descendantsBudget())
@@ -112,7 +112,7 @@ func (p *Provider) listChildren(ctx context.Context, endpoint string, q url.Valu
 // descendantKind is what Include descendants follows from one scope type.
 type descendantKind struct {
 	ifaceType  string // the interface type whose addresses (and, on devices, cable ends) are followed
-	scopeList  string // the scope type's list endpoint, for R11; "" for interface scopes
+	scopeList  string // the scope type's list endpoint, to find which Match-by-ID objects exist; "" for interface scopes
 	ifaceList  string // the scope's current interfaces; "" when the scope objects are the interfaces
 	ownerParam string // ifaceList's filter by scope object
 	ownerField string // names the scope object in an interface row, an interface snapshot and a 4.2 service snapshot; "" for interface scopes
@@ -164,11 +164,11 @@ const (
 //
 // The scan types are decided before anything is read, so a query whose Object
 // types leave none reads nothing, not even the type map. Children are read
-// only for the scans that need them (R5), and a scan nothing can match is
-// skipped: no addresses without interfaces, no cables without cables. Each scan
-// pushes its types as changed_object_type_id, and keeps a row only when the
-// row's own snapshot, or its cable id, ties it to the scope, whatever NetBox
-// did with the filters.
+// only for the scans that need them, and a scan nothing can match is skipped:
+// no addresses without interfaces, no cables without cables. Each scan pushes
+// its types as changed_object_type_id, and keeps a row only when the row's own
+// snapshot, or its cable id, ties it to the scope, whatever NetBox did with
+// the filters.
 func (p *Provider) descendantChanges(ctx context.Context, spec provider.ChangeSpec, scope *resolvedScope, wanted []string, f changeFilter, limit int) ([]changeReadResult, error) {
 	kind, ok := descendantKinds[scope.Type]
 	if !ok {
@@ -189,7 +189,7 @@ func (p *Provider) descendantChanges(ctx context.Context, spec provider.ChangeSp
 		}
 		return nil, &AnnotationError{Reason: provider.AnnotationReasonDescendantTypesUnreadable}
 	}
-	// A type the map lacks is a model this NetBox doesn't have (R6). Without the
+	// A type the map lacks is a model this NetBox doesn't have. Without the
 	// interface type's id, no address can be matched to an interface.
 	unknown := func(t string) bool { return ids[t] == 0 }
 	addrTypes = slices.DeleteFunc(addrTypes, unknown)
@@ -201,7 +201,8 @@ func (p *Provider) descendantChanges(ctx context.Context, spec provider.ChangeSp
 		return nil, nil
 	}
 
-	// A device's cable ends are read through its interfaces (R5).
+	// A device's cable ends are read through its interfaces, so its cables need
+	// them read too.
 	wantCables := slices.Contains(partTypes, cableType)
 	wantIfaces := len(addrTypes) > 0 || (wantCables && scope.Type == "dcim.device")
 	m, err := p.descendantMembers(ctx, spec, scope, kind, ids, wantIfaces, wantCables)
@@ -276,7 +277,7 @@ func (p *Provider) descendantChanges(ctx context.Context, spec provider.ChangeSp
 type members struct {
 	ifaces map[int64]int64    // interface id -> owning scope object id
 	cables map[int64]int64    // cable id -> owning scope object id
-	reads  []changeReadResult // membership reads (R9)
+	reads  []changeReadResult // membership reads, rows cleared, for the cut-off (membershipResult)
 }
 
 // descendantMembers finds the scope's interfaces and cables over [From, now]:
@@ -288,7 +289,7 @@ type members struct {
 // wantIfaces reads a device or VM scope's interfaces; an interface scope's are
 // its own objects, read or not. wantCables reads a device or interface scope's
 // cables. A device's cable ends are found through its interfaces, so a caller
-// that wants a device's cables wants its interfaces too (R5).
+// that wants a device's cables wants its interfaces too.
 //
 // Stage 1 runs the interface list, the interface-delete read and the cable list
 // at once; stage 2, the cable-end reads, needs the interfaces stage 1 found.
@@ -317,7 +318,8 @@ func (p *Provider) descendantMembers(ctx context.Context, spec provider.ChangeSp
 	var wg sync.WaitGroup
 	if readIfaces {
 		wg.Go(func() { ifaceRows, ifaceErr = p.currentInterfaces(ctx, spec, kind, inScope, scopeIDs) })
-		// A type the map lacks is a model this NetBox doesn't have (R6).
+		// A type the map lacks is a model this NetBox doesn't have: no deletes
+		// to read.
 		if typeID := ids[kind.ifaceType]; typeID != 0 {
 			deleteRan = true
 			r := interfaceDeleteRead(spec, scope, kind, ids, typeID, inScope, scopeIDs)
@@ -393,8 +395,9 @@ func (p *Provider) descendantMembers(ctx context.Context, spec provider.ChangeSp
 	}
 	for _, r := range ends {
 		for _, d := range r.rows {
-			// The after side first (R7). A cable the list found keeps the list's
-			// owner, which addMember leaves in place.
+			// The after side first, so an end that moved names the interface
+			// it's on now. A cable the list found keeps the list's owner, which
+			// addMember leaves in place.
 			for _, data := range []map[string]json.RawMessage{d.oc.PostchangeData, d.oc.PrechangeData} {
 				if cable, owner, ok := cableEndMember(data, ifaceTypeID, m.ifaces); ok {
 					addMember(m.cables, cable, owner)
@@ -409,7 +412,7 @@ func (p *Provider) descendantMembers(ctx context.Context, spec provider.ChangeSp
 // currentInterfaces reads a device or VM scope's current interfaces. On a
 // Match-by-ID scope it first reads which scope objects exist, and lists only
 // those: the interface lists' device_id and virtual_machine_id are choice
-// filters, and one deleted id makes the list a 400 (R11). A deleted object's
+// filters, and one deleted id makes the list a 400. A deleted object's
 // interface deletes still come from the delete read.
 func (p *Provider) currentInterfaces(ctx context.Context, spec provider.ChangeSpec, kind descendantKind, inScope map[int64]bool, scopeIDs []string) ([]json.RawMessage, error) {
 	owners := scopeIDs
@@ -456,9 +459,9 @@ func interfaceDeleteRead(spec provider.ChangeSpec, scope *resolvedScope, kind de
 
 // cableEndReads reads the cable ends recorded against ifaces since From: a
 // related read over the interfaces, not a scan of every cable end, since cable
-// ends are recorded against their port (R4). The ids are sorted and batched to
-// the URL budget, and at most cableEndWorkers batches run at once (R16). The
-// results are in batch order.
+// ends are recorded against their port. The ids are sorted and batched to the
+// URL budget, and at most cableEndWorkers batches run at once. The results are
+// in batch order.
 func (p *Provider) cableEndReads(ctx context.Context, spec provider.ChangeSpec, ifaceTypeID, endTypeID int, ifaces map[int64]int64) []changeReadResult {
 	fixed := membershipQuery(spec)
 	fixed.Set(relatedObjectTypeParam, interfaceType)
@@ -494,15 +497,16 @@ func membershipQuery(spec provider.ChangeSpec) url.Values {
 	return changeLogQuery(provider.ChangeSpec{From: spec.From}, changeFilter{})
 }
 
-// runMembershipRead walks one membership read to changeScanCap rows (R9). Its
-// limit is one more, so it never stops for having kept enough: any row it
-// hasn't read may name a child.
+// runMembershipRead walks one membership read to changeScanCap rows, through
+// runChangeRead so it gets the related-type retry. Its limit is one more, so
+// it never stops for having kept enough: any row it hasn't read may name a
+// child.
 func (p *Provider) runMembershipRead(ctx context.Context, r changeRead) changeReadResult {
 	maxRows := p.changeScanCap()
 	return p.runChangeRead(ctx, r, changeFilter{}, maxRows+1, maxRows)
 }
 
-// membershipResult makes a membership read's result what Changes merges (R9).
+// membershipResult makes a membership read's result what Changes merges.
 // Its rows only named children, so none may reach the track. It scans, so its
 // cap can have missed children, and it's a descendant read. A capped read that
 // stopped after To may have missed a child whose changes lie anywhere in the
@@ -537,7 +541,7 @@ func cableOwner(row map[string]json.RawMessage, inScope map[int64]bool) (int64, 
 // cableEndMember reads one side of a cable-end row: its cable, owned by the
 // owner of its interface, when the end is on one of ifaces. The match is on the
 // termination's type and id together, so a console port that shares an
-// interface's id doesn't match (R4).
+// interface's id doesn't match.
 func cableEndMember(data map[string]json.RawMessage, ifaceTypeID int, ifaces map[int64]int64) (cable, owner int64, ok bool) {
 	termType, typed := snapshotID(data, "termination_type")
 	termID, identified := snapshotID(data, "termination_id")
@@ -550,7 +554,7 @@ func cableEndMember(data map[string]json.RawMessage, ifaceTypeID int, ifaces map
 }
 
 // addMember records a child's owner unless the child already has one: the
-// first read to name a child owns it (R7).
+// first read to name a child owns it.
 func addMember(set map[int64]int64, child, owner int64) {
 	if _, ok := set[child]; !ok {
 		set[child] = owner
@@ -560,7 +564,7 @@ func addMember(set map[int64]int64, child, owner int64) {
 // matchAssigned matches an address row to one of ifaces: its assigned_object_type
 // is the interface type's id and its assigned_object_id is in ifaces. The after
 // side is read first, so an address moved between two scope objects is on the
-// one it moved to (R7). The owner is the interface's.
+// one it moved to. The owner is the interface's.
 func matchAssigned(oc objectChange, ifaceTypeID int, ifaces map[int64]int64) (owner int64, ok bool) {
 	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
 		typ, typed := snapshotID(data, "assigned_object_type")
@@ -576,8 +580,8 @@ func matchAssigned(oc objectChange, ifaceTypeID int, ifaces map[int64]int64) (ow
 }
 
 // matchOwner matches a row whose field names a scope object, as a module's
-// device does: the after side first, then the before (R7). The owner is that
-// object.
+// device does: the after side first, then the before, so a moved module is on
+// the device it moved to. The owner is that object.
 func matchOwner(oc objectChange, field string, scopeIDs map[int64]bool) (owner int64, ok bool) {
 	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
 		if id, named := snapshotID(data, field); named && scopeIDs[id] {
@@ -590,7 +594,8 @@ func matchOwner(oc objectChange, field string, scopeIDs map[int64]bool) (owner i
 // matchServiceParent matches a service row to its parent scope object: from
 // NetBox 4.3, parent_object_type is the scope type's id and parent_object_id a
 // scope object; on 4.2, ownerField (device or virtual_machine) is a scope
-// object. The after side first, then the before (R7).
+// object. The after side first, then the before, so a moved service is on its
+// new parent.
 func matchServiceParent(oc objectChange, scopeTypeID int, ownerField string, scopeIDs map[int64]bool) (owner int64, ok bool) {
 	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
 		typ, typed := snapshotID(data, "parent_object_type")

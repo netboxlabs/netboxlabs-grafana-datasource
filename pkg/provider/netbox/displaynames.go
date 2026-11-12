@@ -144,11 +144,14 @@ func (p *Provider) resolveDiffs(ctx context.Context, rows []decodedChange, prefe
 }
 
 // diffFieldMatches reports whether a diff field is one of the Changed-fields
-// names: the name itself, cf_<name> for a custom field named without its
-// prefix, or any custom field for custom_fields.
+// names: the name itself (cf_<name> for a custom field), or any custom field
+// for custom_fields. A bare name is never a custom field: checkChangedFields
+// refuses one no object type has when it can read the schema, so matching it
+// to cf_<name> too would make the same query a refusal or a track depending on
+// whether the schema answered in time.
 func diffFieldMatches(field string, names []string) bool {
 	for _, n := range names {
-		if field == n || field == cfPrefix+n || (n == customFieldsKey && strings.HasPrefix(field, cfPrefix)) {
+		if field == n || (n == customFieldsKey && strings.HasPrefix(field, cfPrefix)) {
 			return true
 		}
 	}

@@ -863,6 +863,8 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 		return fmt.Sprintf("%q isn't a field of any NetBox object type. Custom fields are written cf_<name>.", value)
 	case provider.AnnotationReasonUnknownAction:
 		return fmt.Sprintf("%q isn't a change action. Use create, update or delete.", value)
+	case provider.AnnotationReasonUntrackedField:
+		return fmt.Sprintf("%q isn't compared between changes, so it can't filter them. Pick another field.", value)
 	case provider.AnnotationReasonJournalForbidden:
 		return "The API token can't read journal entries. Turn off Journal entries, or let the token view them."
 	case provider.AnnotationReasonObjectTypesUnreadable:

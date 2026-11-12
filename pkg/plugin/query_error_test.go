@@ -108,6 +108,8 @@ func TestQueryErrorMessage_Annotation(t *testing.T) {
 			`"platfrom" isn't a field of any NetBox object type. Custom fields are written cf_<name>.`},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonUnknownAction, Value: "deleted"},
 			`"deleted" isn't a change action. Use create, update or delete.`},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonUntrackedField, Value: "last_updated"},
+			`"last_updated" isn't compared between changes, so it can't filter them. Pick another field.`},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonJournalForbidden},
 			"The API token can't read journal entries. Turn off Journal entries, or let the token view them."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonObjectTypesUnreadable},

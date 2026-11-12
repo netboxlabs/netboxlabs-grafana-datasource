@@ -81,6 +81,10 @@ const (
 	// AnnotationReasonUnknownAction is an Actions value that isn't create,
 	// update or delete (AnnotationValue).
 	AnnotationReasonUnknownAction = "unknown-action"
+	// AnnotationReasonUntrackedField is a Changed-fields name the change log's
+	// diff doesn't compare: created, last_updated or one starting with _
+	// (AnnotationValue).
+	AnnotationReasonUntrackedField = "untracked-field"
 	// AnnotationReasonJournalForbidden is a journal read the API token isn't
 	// allowed.
 	AnnotationReasonJournalForbidden = "journal-forbidden"

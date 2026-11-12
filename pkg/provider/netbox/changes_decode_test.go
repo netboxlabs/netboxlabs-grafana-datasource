@@ -120,6 +120,29 @@ func TestChangeDiff_NumericCanonicalEquality(t *testing.T) {
 	}
 }
 
+// Integers past 2^53 lose digits as float64, so 9007199254740992 and
+// 9007199254740993 would compare equal and the change would vanish from the
+// diff and from a Changed-fields filter. They compare, and show, exactly. A
+// float literal still equals the integer it holds, as 1.0 equals 1.
+func TestChangeDiff_LargeIntegersCompareExactly(t *testing.T) {
+	d := mustDecode(t, `{"action":{"value":"update"},
+		"prechange_data":{"x":9007199254740992,"y":[9007199254740992],"z":9007199254740992,"w":1e3},
+		"postchange_data":{"x":9007199254740993,"y":[9007199254740993],"z":9007199254740992.0,"w":1000}}`)
+	var fields []string
+	for _, f := range d.diff {
+		fields = append(fields, f.Field)
+	}
+	if want := []string{"x", "y"}; !reflect.DeepEqual(fields, want) {
+		t.Fatalf("fields = %v, want %v", fields, want)
+	}
+	if before, after := formatValue(d.diff[0].Before), formatValue(d.diff[0].After); before != "9007199254740992" || after != "9007199254740993" {
+		t.Errorf("x shows %s → %s, want 9007199254740992 → 9007199254740993", before, after)
+	}
+	if !(changeFilter{fields: []string{"x"}}).keep(d) {
+		t.Error("Changed fields [x] dropped the update")
+	}
+}
+
 func TestFormatValue(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{`null`, ""},
@@ -130,6 +153,10 @@ func TestFormatValue(t *testing.T) {
 		{`42`, "42"},
 		{`42.0`, "42"},
 		{`1.5`, "1.5"},
+		{`1e3`, "1000"},
+		{`9007199254740993`, "9007199254740993"},
+		{`-9007199254740993`, "-9007199254740993"},
+		{`[9007199254740993,1.0]`, "9007199254740993, 1"},
 		{`[1,"a",true]`, "1, a, true"},
 		{`[]`, ""},
 		{`{"b":1,"a": 2}`, `{"b":1,"a":2}`},

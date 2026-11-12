@@ -1062,8 +1062,9 @@ func TestChanges_DescendantsSlowKeepsTheTrack(t *testing.T) {
 }
 
 // The caller's context ending is the query ending: an error, not a marker. It
-// is cancelled once the address scan is held, so the own and related reads are
-// done and only a descendant read is cut.
+// is cancelled once the address scan is held. By then the own and related
+// reads have very likely finished, so it is a descendant read the cancel cuts;
+// if one of them hadn't, the query still fails, as it should.
 func TestChanges_CallerCancelledFails(t *testing.T) {
 	s := trackServer()
 	s.delayTypeID, s.delayFor = 20, 5*time.Second
@@ -1088,8 +1089,8 @@ func TestChanges_CallerCancelledFails(t *testing.T) {
 	}()
 	select {
 	case got := <-done:
-		if got.err == nil {
-			t.Errorf("Changes = %v, nil; want an error", changeIDs(got.changes))
+		if !errors.Is(got.err, context.Canceled) {
+			t.Errorf("Changes = %v, %v; want the cancellation", changeIDs(got.changes), got.err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Changes still blocked 3s after its context was cancelled")
@@ -1203,7 +1204,9 @@ func TestChanges_EarlyFailureIsNotSlow(t *testing.T) {
 	s.failTypeID = 20
 	s.delayTypeID, s.delayFor = 22, 5*time.Second
 	p := s.start(t)
-	p.descendantsWaitOverride = 100 * time.Millisecond
+	// Long enough that the membership reads finish well inside it, even on a
+	// loaded -race run: only the held parts scan is cut.
+	p.descendantsWaitOverride = 500 * time.Millisecond
 	changes, _ := changesWithin(t, p, withDescendants(nameScope("leaf1")), 2*time.Second)
 	wantIDs(t, changes, "#1", "#2", "descendants-error")
 	c := descendantsError(t, changes)

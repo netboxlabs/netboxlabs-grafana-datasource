@@ -1714,9 +1714,10 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 // can't hold the track past the caller's. While the caller's context is live,
 // a descendant read that fails or runs past that deadline doesn't fail the
 // query: the descendant rows are dropped and the track ends with one
-// descendants-error marker (R2). A track whose descendant rows were merged
-// ends with a limit marker when the limit left a change out (R12); every other
-// track is cut at the limit silently, as before.
+// descendants-error marker (R2). When the descendant reads succeeded (they
+// returned results and no error), the track ends with a limit marker if the
+// limit left a change out (R12); every other track is cut at the limit
+// silently, as before.
 //
 // The names the markers carry are best effort, and none holds the query. The
 // network name reads (the by-ID name fill, the diffs' related names and the

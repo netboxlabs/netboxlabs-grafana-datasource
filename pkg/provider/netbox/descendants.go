@@ -606,7 +606,10 @@ func matchServiceParent(oc objectChange, scopeTypeID int, ownerField string, sco
 		if typed && identified && typ == int64(scopeTypeID) && scopeIDs[id] {
 			return id, true
 		}
-		if id, named := snapshotID(data, ownerField); ownerField != "" && named && scopeIDs[id] {
+		if ownerField == "" {
+			continue
+		}
+		if id, named := snapshotID(data, ownerField); named && scopeIDs[id] {
 			return id, true
 		}
 	}

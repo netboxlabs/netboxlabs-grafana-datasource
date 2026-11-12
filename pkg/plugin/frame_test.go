@@ -222,7 +222,7 @@ func TestBuildAnnotationsFrame_Limit(t *testing.T) {
 		want  string
 	}{
 		{"below the maximum", 50,
-			"Limit reached: changes before 2026-11-09 11:30:05 UTC in this range aren't shown. Raise Limit (now 50), narrow the range, or narrow Object types."},
+			"Limit reached: changes before 2026-11-09 11:30:05 UTC in this range aren't shown. Raise Limit (now 50, at most 10,000), narrow the range, or narrow Object types."},
 		{"at the maximum", netbox.MaxLimit,
 			"Limit reached: changes before 2026-11-09 11:30:05 UTC in this range aren't shown. Narrow the range or Object types."},
 	} {

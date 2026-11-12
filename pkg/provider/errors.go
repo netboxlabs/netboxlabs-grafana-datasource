@@ -90,8 +90,8 @@ const (
 	// AnnotationReasonDescendantTypesUnreadable is an object-type list that
 	// couldn't be read where Include descendants needs it.
 	AnnotationReasonDescendantTypesUnreadable = "descendant-types-unreadable"
-	// AnnotationReasonDescendantsForbidden is a read of the scope's interfaces or
-	// cables the API token isn't allowed.
+	// AnnotationReasonDescendantsForbidden is a read of the scope's objects,
+	// interfaces or cables the API token isn't allowed.
 	AnnotationReasonDescendantsForbidden = "descendants-forbidden"
 	// AnnotationReasonDescendantsSlow is a descendants read that ran past its
 	// time budget (AnnotationCount = seconds).

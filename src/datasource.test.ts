@@ -192,6 +192,18 @@ describe('applyTemplateVariables scope', () => {
     expect(out.scope).toBeUndefined();
     expect(out).not.toHaveProperty('scopeSet');
   });
+
+  // A provisioned dashboard can carry "scope": null; it is no scope, as absent is.
+  it('treats a null scope as no scope', () => {
+    const ds = makeDS();
+    const q = { refId: 'A', queryType: 'annotations', scope: null } as unknown as NetBoxQuery;
+    let out: NetBoxQuery | undefined;
+    expect(() => {
+      out = ds.applyTemplateVariables(q, {});
+    }).not.toThrow();
+    expect(out?.scope ?? undefined).toBeUndefined();
+    expect(out).not.toHaveProperty('scopeSet');
+  });
 });
 
 describe('prepareAnnotationQuery', () => {

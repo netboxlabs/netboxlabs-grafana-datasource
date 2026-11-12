@@ -115,7 +115,7 @@ func TestQueryErrorMessage_Annotation(t *testing.T) {
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonDescendantTypesUnreadable},
 			"NetBox's object-type list couldn't be read. If this keeps happening, turn off Include descendants."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonDescendantsForbidden},
-			"The API token can't read this scope's interfaces or cables. Let the token view them, or turn off Include descendants."},
+			"The API token can't read this scope's objects, interfaces or cables. Let the token view them, or turn off Include descendants."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonDescendantsSlow, Count: 20},
 			"Reading what's attached took longer than 20 s. Narrow the range, or turn off Include descendants on a busy NetBox."},
 	}

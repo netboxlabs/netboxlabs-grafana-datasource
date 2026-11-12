@@ -870,7 +870,7 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 	case provider.AnnotationReasonDescendantTypesUnreadable:
 		return "NetBox's object-type list couldn't be read. If this keeps happening, turn off Include descendants."
 	case provider.AnnotationReasonDescendantsForbidden:
-		return "The API token can't read this scope's interfaces or cables. Let the token view them, or turn off Include descendants."
+		return "The API token can't read this scope's objects, interfaces or cables. Let the token view them, or turn off Include descendants."
 	case provider.AnnotationReasonDescendantsSlow:
 		return fmt.Sprintf("Reading what's attached took longer than %d s. Narrow the range, or turn off Include descendants on a busy NetBox.", u.AnnotationCount)
 	}

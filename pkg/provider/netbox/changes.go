@@ -703,6 +703,11 @@ func cutoffMayMiss(kept []decodedChange, limit int, at time.Time) bool {
 // out: kept holds limit changes and either a read stopped at limit with rows
 // left, or a read holds a row kept lacks. A row whose id kept holds is a change
 // two reads returned, and is not left out; ID 0 is no id, so it is never one.
+//
+// A read that stopped at limit holds limit distinct changes, so kept holds
+// limit too, however many of them another read also returned, and none older
+// than that read's last row. What the limit left out is therefore no newer than
+// the oldest kept change, which is where Changes puts the marker's Until.
 func limitReached(results []changeReadResult, kept []decodedChange, limit int) bool {
 	if len(kept) != limit {
 		return false

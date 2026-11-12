@@ -978,6 +978,12 @@ func TestLimitReached(t *testing.T) {
 			{rows: []decodedChange{row(1), row(2)}},
 			{rows: []decodedChange{row(3)}},
 		}, []decodedChange{row(1), row(2)}, 2, true},
+		// A full read holds limit distinct changes, so kept holds limit however
+		// many of them another read returned too.
+		{"at the limit, a full read deduped against another", []changeReadResult{
+			{rows: []decodedChange{row(1), row(2)}, full: true},
+			{rows: []decodedChange{row(1), row(2)}},
+		}, []decodedChange{row(1), row(2)}, 2, true},
 		// Change-log rows always carry an id; id 0 is a malformed row, so it can't
 		// be matched to a kept copy and counts as left out.
 		{"at the limit, a kept row with id 0", []changeReadResult{

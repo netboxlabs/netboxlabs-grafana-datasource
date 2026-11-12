@@ -241,6 +241,23 @@ func wantObjects(t *testing.T, scope *resolvedScope, want ...scopeObject) {
 	}
 }
 
+// The log text names what Count counts: objects for a scope too large, seconds
+// for a descendants read that ran past its budget.
+func TestAnnotationError_Error(t *testing.T) {
+	for _, tc := range []struct {
+		err  *AnnotationError
+		want string
+	}{
+		{&AnnotationError{Reason: provider.AnnotationReasonNoMatch, Value: "leaf9"}, `annotation query refused: no-match "leaf9"`},
+		{&AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: 120}, "annotation query refused: too-many-objects (120 objects)"},
+		{&AnnotationError{Reason: provider.AnnotationReasonDescendantsSlow, Count: 4}, "annotation query refused: descendants-slow (4 s)"},
+	} {
+		if got := tc.err.Error(); got != tc.want {
+			t.Errorf("Error() = %q, want %q", got, tc.want)
+		}
+	}
+}
+
 func TestAnnotationScope_Unscoped(t *testing.T) {
 	s := newAnnoScopeServer()
 	p := s.start(t)

@@ -103,6 +103,18 @@ export const DEFAULT_QUERY: Partial<NetBoxQuery> = {
   limit: 100,
 };
 
+/** Annotations: the scope types whose attached objects (cables, addresses,
+ * modules, services) the backend can follow, so the editor offers Include
+ * descendants for them. MUST be changed together with descendantKinds
+ * (pkg/provider/netbox/descendants.go); TestDescendantScopeTypesMatchFrontend
+ * fails when they differ. */
+export const DESCENDANT_SCOPE_TYPES: string[] = [
+  'dcim.device',
+  'virtualization.virtualmachine',
+  'dcim.interface',
+  'virtualization.vminterface',
+];
+
 /** Variable query — populates a dashboard variable from NetBox. */
 export interface NetBoxVariableQuery extends DataQuery {
   objectType?: string;

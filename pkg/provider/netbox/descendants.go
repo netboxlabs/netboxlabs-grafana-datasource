@@ -122,7 +122,9 @@ type descendantKind struct {
 }
 
 // descendantKinds are the scope types Include descendants applies to. Any other
-// scope type reads what it read before.
+// scope type reads what it read before. Its keys MUST be changed together with
+// DESCENDANT_SCOPE_TYPES (src/types.ts), which shows the switch:
+// TestDescendantScopeTypesMatchFrontend fails when they differ.
 var descendantKinds = map[string]descendantKind{
 	"dcim.device": {
 		ifaceType: "dcim.interface", scopeList: "dcim/devices", ifaceList: "dcim/interfaces",

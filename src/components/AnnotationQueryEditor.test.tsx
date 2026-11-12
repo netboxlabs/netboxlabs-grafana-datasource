@@ -42,6 +42,16 @@ describe('scope fields', () => {
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ scope: '$device' }));
   });
 
+  it('commits the scope on Enter', async () => {
+    const onChange = jest.fn();
+    render(<AnnotationQueryEditor query={{ refId: 'A' } as any} onChange={onChange} datasource={dsMock} />);
+    const input = await screen.findByLabelText('Scope');
+    fireEvent.change(input, { target: { value: 'leaf1' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ scope: 'leaf1' }));
+  });
+
   it('sets scopeMatch when ID is chosen', async () => {
     const onChange = jest.fn();
     render(<AnnotationQueryEditor query={{ refId: 'A' } as any} onChange={onChange} datasource={dsMock} />);

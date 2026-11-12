@@ -90,16 +90,18 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
       // backend expands into repeated NetBox query params.
       value: srv.replace(f.value ?? '', scopedVars, 'csv'),
     }));
-    // A provisioned dashboard can carry "scope": null, which is no scope too.
+    // A provisioned dashboard can carry "scope": null, which is no scope too, or
+    // a bare id such as "scope": 17, which is read as its string.
+    const rawScope = query.scope == null ? undefined : String(query.scope);
     const scoped =
-      query.scope == null
+      rawScope === undefined
         ? {}
         : {
             // 'csv' so a multi-value variable reaches the backend comma-joined (the
             // default format is the glob `{a,b}`). scopeSet comes from the RAW value so
             // an empty variable is distinguishable from no scope at all.
-            scope: srv.replace(query.scope, scopedVars, 'csv'),
-            scopeSet: query.scope.trim() !== '',
+            scope: srv.replace(rawScope, scopedVars, 'csv'),
+            scopeSet: rawScope.trim() !== '',
           };
     return {
       ...query,

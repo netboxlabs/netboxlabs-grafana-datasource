@@ -204,6 +204,15 @@ describe('applyTemplateVariables scope', () => {
     expect(out?.scope ?? undefined).toBeUndefined();
     expect(out).not.toHaveProperty('scopeSet');
   });
+
+  // A provisioned dashboard can carry a bare id: "scope": 17.
+  it('sends a number scope as its string', () => {
+    const ds = makeDS();
+    const q = { refId: 'A', queryType: 'annotations', scope: 17 } as unknown as NetBoxQuery;
+    const out = ds.applyTemplateVariables(q, {});
+    expect(out.scope).toBe('17');
+    expect(out.scopeSet).toBe(true);
+  });
 });
 
 describe('prepareAnnotationQuery', () => {

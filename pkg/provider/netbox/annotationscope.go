@@ -45,6 +45,25 @@ type resolvedScope struct {
 	Objects  []scopeObject
 }
 
+// idSet is the scope objects' ids, for checking a row against the scope.
+func (s *resolvedScope) idSet() map[int64]bool {
+	set := make(map[int64]bool, len(s.Objects))
+	for _, o := range s.Objects {
+		set[o.ID] = true
+	}
+	return set
+}
+
+// idStrings is the scope objects' ids in decimal, in scope order, for a
+// request parameter that repeats once per id.
+func (s *resolvedScope) idStrings() []string {
+	ids := make([]string, 0, len(s.Objects))
+	for _, o := range s.Objects {
+		ids = append(ids, strconv.FormatInt(o.ID, 10))
+	}
+	return ids
+}
+
 // AnnotationError is an annotation query the provider refuses as configured.
 // Reason is one of provider's AnnotationReason constants. Value is log-safe'd
 // where the error is constructed: it is free text from the editor or a variable,

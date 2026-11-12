@@ -1759,6 +1759,27 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		return nil, err
 	}
 
+	// The descendant reads run under their own deadline. dctx is made before
+	// the other reads start, so that one of them failing can cancel it: the
+	// query then fails with that read's error without waiting out the
+	// descendant chain. Otherwise dctx ends with its deadline, the caller's
+	// context, or Changes returning.
+	var (
+		desc            []changeReadResult
+		descErr         error
+		dctx            context.Context
+		start, deadline time.Time
+	)
+	stopDescendants := func() {}
+	descendants := spec.Descendants && scope != nil
+	if descendants {
+		start, deadline = time.Now(), p.descendantsDeadline(ctx)
+		var cancel context.CancelFunc
+		dctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+		stopDescendants = cancel
+	}
+
 	// Each read owns its result slot, so no lock is needed.
 	results := make([]changeReadResult, len(reads))
 	var wg sync.WaitGroup
@@ -1766,29 +1787,27 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		wg.Go(func() {
 			results[i] = p.runChangeRead(ctx, r, filter, limit, maxRows)
 			results[i].scan = filter.localScan()
+			if results[i].err != nil {
+				stopDescendants()
+			}
 		})
 	}
 	var journal []provider.Change
 	var journalErr error
 	if spec.Journal {
-		wg.Go(func() { journal, journalErr = p.journalEntries(ctx, spec, scope, wanted, limit) })
+		wg.Go(func() {
+			if journal, journalErr = p.journalEntries(ctx, spec, scope, wanted, limit); journalErr != nil {
+				stopDescendants()
+			}
+		})
 	}
-	// What's attached, under its own deadline (R15). dctx is cancelled only when
-	// Changes returns, so its error below is the deadline's or the caller's.
-	var (
-		desc            []changeReadResult
-		descErr         error
-		dctx            context.Context
-		start, deadline time.Time
-	)
-	if spec.Descendants && scope != nil {
-		start, deadline = time.Now(), p.descendantsDeadline(ctx)
-		var cancel context.CancelFunc
-		dctx, cancel = context.WithDeadline(ctx, deadline)
-		defer cancel()
+	if descendants {
 		wg.Go(func() { desc, descErr = p.descendantChanges(dctx, spec, scope, wanted, filter, limit) })
 	}
 	wg.Wait()
+	// A read or the journal that failed is the query's error, checked before
+	// descErr: a descendant read stopDescendants cancelled is never reported,
+	// and so never taken for slow or turned into a marker.
 	for _, r := range results {
 		if r.err != nil {
 			return nil, r.err

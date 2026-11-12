@@ -128,9 +128,20 @@ type decodedChange struct {
 	owner       int64
 }
 
-// decodeChange parses one change-log row, including its time once (zero when it
-// does not parse). A row that is not valid JSON is skipped.
+// decodeChange parses one change-log row and its diff.
 func decodeChange(raw json.RawMessage) (decodedChange, bool) {
+	d, ok := decodeChangeRow(raw)
+	if ok {
+		d.diff = changeDiff(d.oc)
+	}
+	return d, ok
+}
+
+// decodeChangeRow parses one change-log row, including its time once (zero when
+// it does not parse), but not its diff: a read works that out only for a row
+// its own check keeps, since a scan can reject thousands. A row that is not
+// valid JSON is skipped.
+func decodeChangeRow(raw json.RawMessage) (decodedChange, bool) {
 	var oc objectChange
 	if err := json.Unmarshal(raw, &oc); err != nil {
 		return decodedChange{}, false
@@ -139,7 +150,7 @@ func decodeChange(raw json.RawMessage) (decodedChange, bool) {
 	if err != nil {
 		at = time.Time{}
 	}
-	return decodedChange{oc: oc, diff: changeDiff(oc), at: at}, true
+	return decodedChange{oc: oc, at: at}, true
 }
 
 // canonicalJSON re-encodes a value with sorted keys and normalised numbers, so
@@ -455,10 +466,7 @@ func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, sc
 		return nil, &AnnotationError{Reason: provider.AnnotationReasonEmptyScope}
 	}
 
-	inScope := make(map[int64]bool, len(scope.Objects))
-	for _, o := range scope.Objects {
-		inScope[o.ID] = true
-	}
+	inScope := scope.idSet()
 	var reads []changeRead
 	// The scope objects' own changes. Object types is not pushed here: its type
 	// ids would OR with the scope type's and let in other types' objects that
@@ -470,9 +478,7 @@ func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, sc
 		} else {
 			q.Set(changedObjectTypeParam, scope.Type)
 		}
-		for _, o := range scope.Objects {
-			q.Add(changedObjectIDParam, strconv.FormatInt(o.ID, 10))
-		}
+		q[changedObjectIDParam] = scope.idStrings()
 		reads = append(reads, changeRead{q: q, keep: func(oc objectChange) bool {
 			return normalizeObjectType(oc.changedType()) == scope.Type && inScope[oc.ChangedObjectID]
 		}})
@@ -486,9 +492,7 @@ func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, sc
 	for _, tr := range trs {
 		q := base()
 		q.Set(relatedObjectTypeParam, scope.Type)
-		for _, o := range scope.Objects {
-			q.Add(relatedObjectIDParam, strconv.FormatInt(o.ID, 10))
-		}
+		q[relatedObjectIDParam] = scope.idStrings()
 		reads = append(reads, changeRead{q: tr.with(q), keep: keepType(tr), fromRelated: true, relatedTypeID: scope.TypeID})
 	}
 	return reads, nil
@@ -539,14 +543,16 @@ func relatedTypeRefused(err error) bool {
 		slices.Contains(blamedParams(apiErr.Body), relatedObjectTypeParam)
 }
 
-// walkChangeRead reads q, keeping each row that passes the read's own check (its
-// descendant matcher, when it has one) and the filter, until limit rows are kept. A row the read already returned (offset
-// pages shift as changes are logged) is skipped by walkRows, and doesn't count
-// toward maxRows.
+// walkChangeRead reads q, keeping each row that passes the read's own check
+// (its descendant matcher, when it has one) and the filter, until limit rows
+// are kept. A row's diff, which the filter's Changed fields and the track both
+// read, is worked out only once the read's own check has passed it. A row the
+// read already returned (offset pages shift as changes are logged) is skipped
+// by walkRows, and doesn't count toward maxRows.
 func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Values, f changeFilter, limit, maxRows int) changeReadResult {
 	var res changeReadResult
 	scanned, more, err := p.walkRows(ctx, changeLogEndpoint, q, maxRows, func(raw json.RawMessage) bool {
-		d, ok := decodeChange(raw)
+		d, ok := decodeChangeRow(raw)
 		if !ok {
 			return true
 		}
@@ -555,11 +561,14 @@ func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Value
 		}
 		if r.descendant != nil {
 			owner, ok := r.descendant(d.oc)
-			if !ok || !f.keep(d) {
+			if !ok {
 				return true
 			}
 			d.descendant, d.owner = true, owner
-		} else if !r.keep(d.oc) || !f.keep(d) {
+		} else if !r.keep(d.oc) {
+			return true
+		}
+		if d.diff = changeDiff(d.oc); !f.keep(d) {
 			return true
 		}
 		d.fromRelated = r.fromRelated

@@ -186,6 +186,12 @@ type scopedChangeServer struct {
 	listStatus       int        // non-zero: the list paths above answer this status
 	ignoreListFilter bool       // the list paths above ignore their filters
 
+	// Failing and slow change-log reads, picked by a changed_object_type_id the
+	// request carries.
+	failTypeID  int           // non-zero: requests carrying this type id answer 500
+	delayTypeID int           // non-zero: requests carrying this type id are held delayFor
+	delayFor    time.Duration // ends early when the request's context does
+
 	mu       sync.Mutex
 	requests []string // path?query
 	headers  []string // X-NetBox-Branch of each recorded request
@@ -295,6 +301,18 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 			s.serveChildren(w, r, path)
 		case "core/object-changes":
 			time.Sleep(s.changeDelay)
+			types := r.URL.Query()["changed_object_type_id"]
+			if s.failTypeID != 0 && slices.Contains(types, strconv.Itoa(s.failTypeID)) {
+				refuse(http.StatusInternalServerError, `{"detail":"boom"}`)
+				return
+			}
+			if s.delayTypeID != 0 && slices.Contains(types, strconv.Itoa(s.delayTypeID)) {
+				select {
+				case <-time.After(s.delayFor):
+				case <-r.Context().Done():
+					return
+				}
+			}
 			s.serveChanges(w, r)
 		case "extras/journal-entries":
 			rows := make([]string, len(s.journal))
@@ -532,16 +550,17 @@ func scoped(spec provider.ChangeSpec, limit int) provider.ChangeSpec {
 	return spec
 }
 
-// changeIDs names each change marker by its object_repr ("#<id>"), and a
-// cut-off marker as "cutoff".
+// changeIDs names each change marker by its object_repr ("#<id>"), and the
+// cut-off, limit and descendants-error markers by their kind.
 func changeIDs(changes []provider.Change) []string {
 	out := make([]string, 0, len(changes))
 	for _, c := range changes {
-		if c.Kind == provider.ChangeKindCutoff {
-			out = append(out, "cutoff")
-			continue
+		switch c.Kind {
+		case provider.ChangeKindCutoff, provider.ChangeKindLimit, provider.ChangeKindDescendantsError:
+			out = append(out, string(c.Kind))
+		default:
+			out = append(out, c.ObjectRepr)
 		}
-		out = append(out, c.ObjectRepr)
 	}
 	return out
 }

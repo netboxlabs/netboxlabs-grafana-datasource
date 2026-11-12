@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -31,6 +32,40 @@ func (p *Provider) childListCap() int {
 // cableEndWorkers is how many cable-end batches run at once (R16): bounded,
 // without a long serial chain on a device with thousands of interfaces.
 const cableEndWorkers = 4
+
+// maxDescendantsBudget caps the time the descendant reads get. They run in a
+// chain (lists, then cable ends, then scans), and a short dashboard refresh
+// must not lose the scope's own changes to them.
+const maxDescendantsBudget = 8 * time.Second
+
+// descendantsBudget is min(half the datasource Timeout, 8s), the Timeout being
+// requestTimeout, else defaultRequestTimeout; or descendantsWaitOverride when a
+// test set one.
+func (p *Provider) descendantsBudget() time.Duration {
+	if p.descendantsWaitOverride > 0 {
+		return p.descendantsWaitOverride
+	}
+	timeout := p.requestTimeout
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+	return min(timeout/2, maxDescendantsBudget)
+}
+
+// descendantsDeadline is now + descendantsBudget(), narrowed to leave a fifth of
+// the caller's remaining time when ctx has a deadline (R15), as
+// utilizationDeadline does: the rest of the track is merged and returned in
+// that fifth, rather than lost with the caller's deadline.
+func (p *Provider) descendantsDeadline(ctx context.Context) time.Time {
+	now := time.Now()
+	deadline := now.Add(p.descendantsBudget())
+	if dl, ok := ctx.Deadline(); ok {
+		if reserved := now.Add(dl.Sub(now) * 4 / 5); reserved.Before(deadline) {
+			return reserved
+		}
+	}
+	return deadline
+}
 
 // listChildren reads a current-children list. It reads page 1 itself
 // (getListPageRetry) and fails with too-many-children when that page's count
@@ -110,6 +145,134 @@ const (
 	interfaceList        = "dcim/interfaces"
 	cableList            = "dcim/cables"
 )
+
+// The types the descendant scans read: addresses in one scan, the parts in
+// another, so address churn can't use up the cap the parts share.
+const (
+	ipAddressType  = "ipam.ipaddress"
+	macAddressType = "dcim.macaddress"
+	cableType      = "dcim.cable"
+	moduleType     = "dcim.module"
+	serviceType    = "ipam.service"
+)
+
+// descendantChanges reads the scope's descendant changes over [From, To]: the
+// membership reads' results, then the scans' results, every one with scan and
+// descendant set. nil, nil when the scope type has no descendantKinds row or no
+// descendant type survives Object types. The first error among its reads is
+// returned.
+//
+// The scan types are decided before anything is read, so a query whose Object
+// types leave none reads nothing, not even the type map. Children are read
+// only for the scans that need them (R5), and a scan nothing can match is
+// skipped: no addresses without interfaces, no cables without cables. Each scan
+// pushes its types as changed_object_type_id, and keeps a row only when the
+// row's own snapshot, or its cable id, ties it to the scope, whatever NetBox
+// did with the filters.
+func (p *Provider) descendantChanges(ctx context.Context, spec provider.ChangeSpec, scope *resolvedScope, wanted []string, f changeFilter, limit int) ([]changeReadResult, error) {
+	kind, ok := descendantKinds[scope.Type]
+	if !ok {
+		return nil, nil
+	}
+	notWanted := func(t string) bool { return len(wanted) > 0 && !slices.Contains(wanted, t) }
+	addrTypes := slices.DeleteFunc([]string{ipAddressType, macAddressType}, notWanted)
+	applies := map[string]bool{cableType: kind.cables, moduleType: kind.modules, serviceType: kind.services}
+	partTypes := slices.DeleteFunc([]string{cableType, moduleType, serviceType}, func(t string) bool { return !applies[t] || notWanted(t) })
+	if len(addrTypes) == 0 && len(partTypes) == 0 {
+		return nil, nil
+	}
+
+	ids, err := p.objectTypeIDMap(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &AnnotationError{Reason: provider.AnnotationReasonDescendantTypesUnreadable}
+	}
+	// A type the map lacks is a model this NetBox doesn't have (R6). Without the
+	// interface type's id, no address can be matched to an interface.
+	unknown := func(t string) bool { return ids[t] == 0 }
+	addrTypes = slices.DeleteFunc(addrTypes, unknown)
+	if ids[kind.ifaceType] == 0 {
+		addrTypes = nil
+	}
+	partTypes = slices.DeleteFunc(partTypes, unknown)
+	if len(addrTypes) == 0 && len(partTypes) == 0 {
+		return nil, nil
+	}
+
+	// A device's cable ends are read through its interfaces (R5).
+	wantCables := slices.Contains(partTypes, cableType)
+	wantIfaces := len(addrTypes) > 0 || (wantCables && scope.Type == "dcim.device")
+	m, err := p.descendantMembers(ctx, spec, scope, kind, ids, wantIfaces, wantCables)
+	if err != nil {
+		return nil, err
+	}
+	if len(m.cables) == 0 {
+		partTypes = slices.DeleteFunc(partTypes, func(t string) bool { return t == cableType })
+	}
+	if len(m.ifaces) == 0 {
+		addrTypes = nil
+	}
+
+	inScope := make(map[int64]bool, len(scope.Objects))
+	for _, o := range scope.Objects {
+		inScope[o.ID] = true
+	}
+	ifaceTypeID, scopeTypeID := ids[kind.ifaceType], ids[scope.Type]
+	match := func(oc objectChange) (int64, bool) {
+		switch normalizeObjectType(oc.changedType()) {
+		case ipAddressType, macAddressType:
+			return matchAssigned(oc, ifaceTypeID, m.ifaces)
+		case cableType:
+			owner, ok := m.cables[oc.ChangedObjectID]
+			return owner, ok
+		case moduleType:
+			return matchOwner(oc, "device", inScope)
+		case serviceType:
+			return matchServiceParent(oc, scopeTypeID, kind.ownerField, inScope)
+		}
+		return 0, false
+	}
+
+	// The address scan, then the parts scan; each owns its result slot.
+	scans := [][]string{addrTypes, partTypes}
+	found := make([]changeReadResult, len(scans))
+	var wg sync.WaitGroup
+	for i, types := range scans {
+		if len(types) == 0 {
+			continue
+		}
+		q := changeLogQuery(spec, f)
+		for _, t := range types {
+			q.Add(changedObjectTypeIDParam, strconv.Itoa(ids[t]))
+		}
+		r := changeRead{q: q, descendant: func(oc objectChange) (int64, bool) {
+			// A type the scan didn't ask for isn't kept, so a NetBox that ignores
+			// the type filter can't widen it.
+			if !slices.Contains(types, normalizeObjectType(oc.changedType())) {
+				return 0, false
+			}
+			return match(oc)
+		}}
+		wg.Go(func() {
+			found[i] = p.runChangeRead(ctx, r, f, limit, p.changeScanCap())
+			found[i].scan, found[i].descendant = true, true
+		})
+	}
+	wg.Wait()
+	results := m.reads
+	for i, types := range scans {
+		if len(types) == 0 {
+			continue
+		}
+		if found[i].err != nil {
+			return nil, found[i].err
+		}
+		results = append(results, found[i])
+	}
+	return results, nil
+}
 
 // members is who the scope's children are over [From, now]. Each child is
 // mapped to the scope object that owns it, which names it on the track.
@@ -400,6 +563,69 @@ func addMember(set map[int64]int64, child, owner int64) {
 	if _, ok := set[child]; !ok {
 		set[child] = owner
 	}
+}
+
+// matchAssigned matches an address row to one of ifaces: its assigned_object_type
+// is the interface type's id and its assigned_object_id is in ifaces. The after
+// side is read first, so an address moved between two scope objects is on the
+// one it moved to (R7). The owner is the interface's.
+func matchAssigned(oc objectChange, ifaceTypeID int, ifaces map[int64]int64) (owner int64, ok bool) {
+	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
+		typ, typed := snapshotID(data, "assigned_object_type")
+		id, identified := snapshotID(data, "assigned_object_id")
+		if !typed || !identified || typ != int64(ifaceTypeID) {
+			continue
+		}
+		if owner, ok = ifaces[id]; ok {
+			return owner, true
+		}
+	}
+	return 0, false
+}
+
+// matchOwner matches a row whose field names a scope object, as a module's
+// device does: the after side first, then the before (R7). The owner is that
+// object.
+func matchOwner(oc objectChange, field string, scopeIDs map[int64]bool) (owner int64, ok bool) {
+	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
+		if id, named := snapshotID(data, field); named && scopeIDs[id] {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
+// matchServiceParent matches a service row to its parent scope object: from
+// NetBox 4.3, parent_object_type is the scope type's id and parent_object_id a
+// scope object; on 4.2, ownerField (device or virtual_machine) is a scope
+// object. The after side first, then the before (R7).
+func matchServiceParent(oc objectChange, scopeTypeID int, ownerField string, scopeIDs map[int64]bool) (owner int64, ok bool) {
+	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
+		typ, typed := snapshotID(data, "parent_object_type")
+		id, identified := snapshotID(data, "parent_object_id")
+		if typed && identified && typ == int64(scopeTypeID) && scopeIDs[id] {
+			return id, true
+		}
+		if id, named := snapshotID(data, ownerField); ownerField != "" && named && scopeIDs[id] {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
+// descendantParent names the scope object a descendant row matched, for the
+// marker title's "on <name>": with one scope object it is that object, else
+// the one whose id is owner, else "".
+func descendantParent(scope *resolvedScope, owner int64) string {
+	if len(scope.Objects) == 1 {
+		return scopeObjectName(scope, scope.Objects[0])
+	}
+	for _, o := range scope.Objects {
+		if o.ID == owner {
+			return scopeObjectName(scope, o)
+		}
+	}
+	return ""
 }
 
 // briefQuery is brief=true plus param once per value.

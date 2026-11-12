@@ -484,7 +484,8 @@ what's attached to it. Each marker says what changed.
    exactly. If one name matches more than 20 objects, the query fails: give the
    variable ids and set **Match by** to ID. A scope of more than 100 objects fails
    too: narrow the variable's selection, or give its All option the custom value
-   `$__all`.
+   `$__all`. To type a name that contains a comma, write it as `\,`; variable values
+   are escaped for you.
 3. A marker reads like `Ethernet2 on NYC1-leaf-01`, then one `field: before → after`
    line per changed field (at most 5, then `+N more`), the change message if there is
    one, and `Updated by <user> · Open in NetBox`. Related objects show by name

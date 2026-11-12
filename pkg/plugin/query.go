@@ -536,19 +536,39 @@ func dropAllFilters(filters []provider.Filter) []provider.Filter {
 	return out
 }
 
-// parseScope splits an annotation's interpolated scope on commas. The whole value
-// $__all is unscoped on purpose (all), the token dropAllFilters honours. A list
-// holding $__all beside other values is malformed and stays a list of values:
-// it must not widen the query.
+// parseScope splits an annotation's interpolated scope on commas. A NetBox name
+// can hold a comma, so one written \, is part of its value, as is a backslash
+// written \\: the frontend escapes variable values so (scopeFormat), and a user
+// can type them. A backslash before anything else stays as it is, so a name
+// such as Gi0\1 reads as written. The whole value $__all is
+// unscoped on purpose (all), the token dropAllFilters honours. A list holding
+// $__all beside other values is malformed and stays a list of values: it must
+// not widen the query.
 func parseScope(raw string) (values []string, all bool) {
 	if strings.TrimSpace(raw) == allFilterValue {
 		return nil, true
 	}
-	for _, v := range strings.Split(raw, ",") {
-		if v = strings.TrimSpace(v); v != "" {
+	var cur strings.Builder
+	flush := func() {
+		if v := strings.TrimSpace(cur.String()); v != "" {
 			values = append(values, v)
 		}
+		cur.Reset()
 	}
+	// Byte by byte: a comma and a backslash are ASCII, never part of a UTF-8
+	// sequence.
+	for i := 0; i < len(raw); i++ {
+		switch c := raw[i]; {
+		case c == '\\' && i+1 < len(raw) && (raw[i+1] == ',' || raw[i+1] == '\\'):
+			cur.WriteByte(raw[i+1])
+			i++
+		case c == ',':
+			flush()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	flush()
 	return values, false
 }
 

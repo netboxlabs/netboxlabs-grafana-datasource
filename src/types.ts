@@ -47,6 +47,8 @@ export interface NetBoxQuery extends DataQuery {
   changedFields?: string[];
   /** Annotations: include journal entries (for the scoped objects when a scope is set). */
   journal?: boolean;
+  /** Annotations: also show changes to what's attached to the scope. Absent means on. */
+  includeDescendants?: boolean;
   filters?: FilterRow[];
   /** Optional subset (and order) of columns to return. */
   fields?: string[];

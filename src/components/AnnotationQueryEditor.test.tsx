@@ -56,6 +56,50 @@ describe('scope fields', () => {
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ journal: true }));
   });
 
+  it('shows Include descendants, on by default, for a scoped device', async () => {
+    render(
+      <AnnotationQueryEditor query={{ refId: 'A', scope: 'leaf1' } as any} onChange={jest.fn()} datasource={dsMock} />
+    );
+    expect(await screen.findByLabelText('Include descendants')).toBeChecked();
+  });
+
+  it('turns descendants off from the switch', async () => {
+    const onChange = jest.fn();
+    render(
+      <AnnotationQueryEditor query={{ refId: 'A', scope: 'leaf1' } as any} onChange={onChange} datasource={dsMock} />
+    );
+    fireEvent.click(await screen.findByLabelText('Include descendants'));
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ includeDescendants: false }));
+  });
+
+  it('shows the switch unchecked when includeDescendants is false', async () => {
+    const q = { refId: 'A', scope: 'x', includeDescendants: false } as any;
+    render(<AnnotationQueryEditor query={q} onChange={jest.fn()} datasource={dsMock} />);
+    expect(await screen.findByLabelText('Include descendants')).not.toBeChecked();
+  });
+
+  it('hides Include descendants without a scope or for other scope types', async () => {
+    const { rerender } = render(
+      <AnnotationQueryEditor query={{ refId: 'A' } as any} onChange={jest.fn()} datasource={dsMock} />
+    );
+    await screen.findByLabelText('Journal entries');
+    expect(screen.queryByLabelText('Include descendants')).toBeNull();
+    rerender(
+      <AnnotationQueryEditor
+        query={{ refId: 'A', scope: 'x', scopeType: 'dcim.site' } as any}
+        onChange={jest.fn()}
+        datasource={dsMock}
+      />
+    );
+    expect(screen.queryByLabelText('Include descendants')).toBeNull();
+  });
+
+  it('normalises the scope type before deciding to show Include descendants', async () => {
+    const q = { refId: 'A', scope: 'x', scopeType: ' Virtualization.VMInterface ' } as any;
+    render(<AnnotationQueryEditor query={q} onChange={jest.fn()} datasource={dsMock} />);
+    expect(await screen.findByLabelText('Include descendants')).toBeInTheDocument();
+  });
+
   it('sets actions from the Actions select', async () => {
     const onChange = jest.fn();
     render(<AnnotationQueryEditor query={{ refId: 'A' } as any} onChange={onChange} datasource={dsMock} />);

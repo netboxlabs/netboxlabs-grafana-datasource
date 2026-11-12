@@ -35,6 +35,7 @@ export function prepareAnnotationQuery(anno: any): NetBoxQuery {
     actions: target.actions,
     changedFields: target.changedFields,
     journal: target.journal,
+    includeDescendants: target.includeDescendants,
   };
 }
 

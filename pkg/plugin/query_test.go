@@ -961,6 +961,10 @@ func TestQuery_AnnotationsMapsScopeFields(t *testing.T) {
 		{"empty variable", `{"queryType":"annotations","scope":"","scopeSet":true}`, nil, true, false},
 		{"scope without scopeSet", `{"queryType":"annotations","scope":"leaf1"}`, []string{"leaf1"}, true, false},
 		{"blank values", `{"queryType":"annotations","scope":" , "}`, nil, true, false},
+		// A stored dashboard can carry a bare id, and reach the backend without
+		// the frontend's interpolation (a public dashboard).
+		{"number", `{"queryType":"annotations","scope":17}`, []string{"17"}, true, false},
+		{"null", `{"queryType":"annotations","scope":null}`, nil, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := run(t, tc.body)
@@ -969,6 +973,22 @@ func TestQuery_AnnotationsMapsScopeFields(t *testing.T) {
 					got.Scope, got.ScopeSet, got.ScopeAll, tc.scope, tc.scopeSet, tc.scopeAll)
 			}
 		})
+	}
+}
+
+// A scope that is neither a string nor a number is refused as before, with the
+// decoder's own message.
+func TestQuery_AnnotationsScopeOfAnotherKindIsRefused(t *testing.T) {
+	for kind, body := range map[string]string{
+		"bool":   `{"queryType":"annotations","scope":true}`,
+		"object": `{"queryType":"annotations","scope":{"id":17}}`,
+		"array":  `{"queryType":"annotations","scope":["17"]}`,
+	} {
+		resp := newTestDatasource(&fakeProvider{}).query(context.Background(), backend.DataQuery{RefID: "Anno", JSON: []byte(body)}, consumerDashboard)
+		want := "cannot unmarshal " + kind + " into Go struct field queryModel.scope of type string"
+		if resp.Error == nil || resp.Status != backend.StatusBadRequest || !strings.Contains(resp.Error.Error(), want) {
+			t.Errorf("%s scope: status %v, error %v; want a bad request saying %q", kind, resp.Status, resp.Error, want)
+		}
 	}
 }
 

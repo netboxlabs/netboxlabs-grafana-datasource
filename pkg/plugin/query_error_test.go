@@ -128,8 +128,14 @@ func TestQueryErrorMessage_Annotation(t *testing.T) {
 			if got := queryErrorMessage(tc.err, false); got != tc.want {
 				t.Errorf("message = %q, want %q", got, tc.want)
 			}
-			if got := queryErrorStatus(tc.err); got != backend.StatusBadRequest {
-				t.Errorf("status = %v, want %v", got, backend.StatusBadRequest)
+			// An object-type list that couldn't be read is NetBox's side, often
+			// passing; every other refusal is the query's.
+			want := backend.StatusBadRequest
+			if tc.err.Reason == provider.AnnotationReasonObjectTypesUnreadable {
+				want = backend.StatusInternal
+			}
+			if got := queryErrorStatus(tc.err); got != want {
+				t.Errorf("status = %v, want %v", got, want)
 			}
 		})
 	}

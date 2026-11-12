@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -89,10 +91,10 @@ type queryModel struct {
 	// csv format. ScopeSet says a scope was configured before interpolation, so
 	// an empty variable is an error rather than all of NetBox. ScopeMatch is
 	// "name" (or empty) or "id".
-	ScopeType  string `json:"scopeType"`
-	Scope      string `json:"scope"`
-	ScopeSet   bool   `json:"scopeSet"`
-	ScopeMatch string `json:"scopeMatch"`
+	ScopeType  string    `json:"scopeType"`
+	Scope      scopeText `json:"scope"`
+	ScopeSet   bool      `json:"scopeSet"`
+	ScopeMatch string    `json:"scopeMatch"`
 	// Actions, ChangedFields and Journal (for annotations) narrow the change
 	// markers to some actions and changed fields, and add journal entries.
 	Actions       []string `json:"actions"`
@@ -102,6 +104,39 @@ type queryModel struct {
 	// the scope. A pointer so an absent field means on: dashboards saved before the
 	// field existed get descendants.
 	IncludeDescendants *bool `json:"includeDescendants"`
+}
+
+// scopeText is an annotation's scope as the query JSON carries it: a string,
+// or a bare number, as a stored dashboard can hold ("scope": 17), read as its
+// text. A query reaches the backend without the frontend's interpolation on a
+// public dashboard, so the number can't be left to the frontend. null is
+// empty; anything else is refused as a string field refuses it.
+type scopeText string
+
+func (s *scopeText) UnmarshalJSON(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return err
+	}
+	switch v := v.(type) {
+	case nil:
+	case string:
+		*s = scopeText(v)
+	case json.Number:
+		*s = scopeText(v)
+	default:
+		kind := "array"
+		switch v.(type) {
+		case bool:
+			kind = "bool"
+		case map[string]any:
+			kind = "object"
+		}
+		return &json.UnmarshalTypeError{Value: kind, Type: reflect.TypeFor[string]()}
+	}
+	return nil
 }
 
 // query executes a single query and returns its data response.
@@ -125,7 +160,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 
 	switch qm.QueryType {
 	case queryTypeAnnotations:
-		scope, scopeAll := parseScope(qm.Scope)
+		scope, scopeAll := parseScope(string(qm.Scope))
 		changes, err := d.provider.Changes(ctx, provider.ChangeSpec{
 			From:        q.TimeRange.From,
 			To:          q.TimeRange.To,
@@ -134,7 +169,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			ScopeType:   qm.ScopeType,
 			Scope:       scope,
 			// A caller that sends a scope without scopeSet still configured one.
-			ScopeSet:      qm.ScopeSet || strings.TrimSpace(qm.Scope) != "",
+			ScopeSet:      qm.ScopeSet || strings.TrimSpace(string(qm.Scope)) != "",
 			ScopeAll:      scopeAll,
 			ScopeMatch:    qm.ScopeMatch,
 			Actions:       qm.Actions,
@@ -903,11 +938,14 @@ func (d *Datasource) queryErrorResponse(err error) backend.DataResponse {
 // a NetBox 500, an unreachable host — stays StatusInternal, which is the honest
 // "our side broke, try again". A query that could never have worked as written
 // is a bad request, and saying otherwise tells the reader to retry something
-// only they can fix.
+// only they can fix. object-types-unreadable is an annotation refusal, but of
+// a read that failed upstream, often in passing, so it is StatusInternal too.
 func queryErrorStatus(err error) backend.Status {
 	if u := provider.Classify(err); u != nil {
-		switch u.Kind {
-		case provider.ErrorKindUnknownObjectType, provider.ErrorKindAnnotation:
+		switch {
+		case u.Kind == provider.ErrorKindAnnotation && u.AnnotationReason == provider.AnnotationReasonObjectTypesUnreadable:
+			return backend.StatusInternal
+		case u.Kind == provider.ErrorKindUnknownObjectType, u.Kind == provider.ErrorKindAnnotation:
 			return backend.StatusBadRequest
 		}
 	}

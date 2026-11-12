@@ -193,9 +193,11 @@ type scopedChangeServer struct {
 	delayTypeID int           // non-zero: requests carrying this type id are held delayFor
 	delayFor    time.Duration // ends early when the request's context does
 
-	mu       sync.Mutex
-	requests []string // path?query
-	headers  []string // X-NetBox-Branch of each recorded request
+	mu          sync.Mutex
+	requests    []string // path?query
+	headers     []string // X-NetBox-Branch of each recorded request
+	inFlight    int      // change-log requests being answered now
+	maxInFlight int      // the most inFlight has been
 }
 
 // childRow is an interface or VM interface on owner, the device or VM, with its
@@ -301,6 +303,15 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 		case "dcim/interfaces", "virtualization/virtual-machines", "virtualization/interfaces", "dcim/cables":
 			s.serveChildren(w, r, path)
 		case "core/object-changes":
+			s.mu.Lock()
+			s.inFlight++
+			s.maxInFlight = max(s.maxInFlight, s.inFlight)
+			s.mu.Unlock()
+			defer func() {
+				s.mu.Lock()
+				s.inFlight--
+				s.mu.Unlock()
+			}()
 			time.Sleep(s.changeDelay)
 			types := r.URL.Query()["changed_object_type_id"]
 			if s.failTypeID != 0 && slices.Contains(types, strconv.Itoa(s.failTypeID)) {
@@ -822,6 +833,28 @@ func TestChanges_TwoActionsFilteredLocally(t *testing.T) {
 		if q.Get("limit") != "500" {
 			t.Errorf("read %v: limit %s, want a scan page of 500", q, q.Get("limit"))
 		}
+	}
+}
+
+// With the object-type map unreadable, each object type is a read of its own.
+// They don't all run at once: at most four are in flight, though more than one
+// is.
+func TestChanges_DegradedReadsBounded(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.coreStatus = http.StatusForbidden
+	s.changeDelay = 100 * time.Millisecond
+	var types []string
+	for i := range 10 {
+		types = append(types, fmt.Sprintf("dcim.model%d", i))
+	}
+	changesOK(t, s.start(t), provider.ChangeSpec{ObjectTypes: types, Limit: 10})
+	if n := len(s.changeLog()); n != len(types) {
+		t.Fatalf("change-log reads = %d, want one per type, %d", n, len(types))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.maxInFlight > 4 || s.maxInFlight < 2 {
+		t.Errorf("at most %d change-log reads in flight, want 2 to 4", s.maxInFlight)
 	}
 }
 

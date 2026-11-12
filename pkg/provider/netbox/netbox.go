@@ -1696,6 +1696,13 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 	return false
 }
 
+// changeReadWorkers is how many of a Changes call's change-log reads run at
+// once. With the object-type map unreadable, each object type is a read of its
+// own (objectTypeReads), so a query with fifteen types would otherwise open
+// fifteen walks of the change log at once. The journal and the descendant
+// reads don't count toward it.
+const changeReadWorkers = 4
+
 // Changes returns change-log events within a time window for annotations.
 //
 // Unscoped, it is one read of the change log. Scoped, it is two, run at once:
@@ -1786,11 +1793,16 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		stopDescendants = cancel
 	}
 
-	// Each read owns its result slot, so no lock is needed.
+	// Each read owns its result slot, so no lock is needed. At most
+	// changeReadWorkers of them run at once; each waits in its own goroutine, so
+	// the journal and the descendant reads start without waiting.
 	results := make([]changeReadResult, len(reads))
+	sem := make(chan struct{}, changeReadWorkers)
 	var wg sync.WaitGroup
 	for i, r := range reads {
 		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			results[i] = p.runChangeRead(ctx, r, filter, limit, maxRows)
 			results[i].scan = filter.localScan()
 			if results[i].err != nil {

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -150,15 +152,66 @@ func canonicalJSON(raw json.RawMessage) string {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return "null"
 	}
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	v, err := decodeJSON(raw)
+	if err != nil {
 		return string(raw)
 	}
-	b, err := json.Marshal(v)
+	b, err := json.Marshal(canonicalNumbers(v))
 	if err != nil {
 		return string(raw)
 	}
 	return string(b)
+}
+
+// decodeJSON decodes one JSON value with its numbers as json.Number, so an
+// integer past 2^53 keeps every digit, which float64 would round. Anything
+// after the value is an error, as it is for json.Unmarshal.
+func decodeJSON(raw json.RawMessage) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("data after the JSON value")
+	}
+	return v, nil
+}
+
+// maxExactInt is 2^53: every integer up to it in magnitude is exact as a
+// float64, and not every one past it is.
+const maxExactInt = 1 << 53
+
+// canonicalNumbers replaces each number in v, in place, with the text it
+// compares by: an integer literal as written, so integers past 2^53 compare
+// exactly; any other literal by its float64 value, written as the integer it
+// holds when it is integral within ±2^53, so 1.0 and 1e0 equal 1.
+func canonicalNumbers(v any) any {
+	switch t := v.(type) {
+	case json.Number:
+		s := t.String()
+		if !strings.ContainsAny(s, ".eE") {
+			return t
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return t
+		}
+		if f == math.Trunc(f) && math.Abs(f) <= maxExactInt {
+			return json.Number(strconv.FormatInt(int64(f), 10))
+		}
+		return json.Number(strconv.FormatFloat(f, 'g', -1, 64))
+	case []any:
+		for i := range t {
+			t[i] = canonicalNumbers(t[i])
+		}
+	case map[string]any:
+		for k := range t {
+			t[k] = canonicalNumbers(t[k])
+		}
+	}
+	return v
 }
 
 // changeDiff lists the fields an update changed. The change log's pre/post data
@@ -220,13 +273,14 @@ func unionKeys(a, b map[string]json.RawMessage) map[string]struct{} {
 	return keys
 }
 
-// formatValue renders a JSON value for display.
+// formatValue renders a JSON value for display. An integer shows as written,
+// every digit of it; any other number as its float64 value in plain notation.
 func formatValue(v json.RawMessage) string {
 	if len(bytes.TrimSpace(v)) == 0 {
 		return ""
 	}
-	var x any
-	if err := json.Unmarshal(v, &x); err != nil {
+	x, err := decodeJSON(v)
+	if err != nil {
 		return string(v)
 	}
 	switch t := x.(type) {
@@ -236,8 +290,16 @@ func formatValue(v json.RawMessage) string {
 		return t
 	case bool:
 		return strconv.FormatBool(t)
-	case float64:
-		return strconv.FormatFloat(t, 'f', -1, 64)
+	case json.Number:
+		s := t.String()
+		if !strings.ContainsAny(s, ".eE") {
+			return s
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return s
+		}
+		return strconv.FormatFloat(f, 'f', -1, 64)
 	case []any:
 		var elems []json.RawMessage
 		_ = json.Unmarshal(v, &elems)

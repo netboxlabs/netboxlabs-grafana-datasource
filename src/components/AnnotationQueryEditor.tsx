@@ -7,7 +7,7 @@ import {
   BRANCH_FIELD_TOOLTIP,
   BRANCH_FIELD_DISABLED_TOOLTIP,
 } from '../hooks/useBranchingInstalled';
-import { NetBoxQuery } from '../types';
+import { DESCENDANT_SCOPE_TYPES, NetBoxQuery } from '../types';
 
 interface Props {
   query: NetBoxQuery;
@@ -17,15 +17,6 @@ interface Props {
   // gate the Branch field on branching availability.
   datasource: DataSource;
 }
-
-// Scope types whose attached objects (cables, addresses, modules, services) the
-// backend can follow.
-const DESCENDANT_SCOPE_TYPES = [
-  'dcim.device',
-  'virtualization.virtualmachine',
-  'dcim.interface',
-  'virtualization.vminterface',
-];
 
 // Common NetBox content types for filtering changelog annotations. Users can add
 // custom values for plugin models.
@@ -65,7 +56,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
   const branchingInstalled = useBranchingInstalled(datasource);
   const branchDisabled = branchingInstalled === false;
   // Grafana re-runs the annotation query on every editor change, so the scope is
-  // edited locally and committed on blur.
+  // edited locally and committed on blur or Enter.
   const [scopeText, setScopeText] = useState(query.scope ?? '');
   const [seenScope, setSeenScope] = useState(query.scope);
   if (seenScope !== query.scope) {
@@ -73,6 +64,12 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
     setSeenScope(query.scope);
     setScopeText(query.scope ?? '');
   }
+  const commitScope = () => {
+    const next = scopeText === '' ? undefined : scopeText;
+    if (next !== query.scope) {
+      onChange({ ...query, scope: next });
+    }
+  };
   const selected = (query.objectTypes ?? []).map((v) => ({ label: v, value: v }));
 
   const scopeType = (query.scopeType ?? '').trim().toLowerCase() || 'dcim.device';
@@ -121,10 +118,10 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
           value={scopeText}
           placeholder="name, id or $variable"
           onChange={(e) => setScopeText(e.currentTarget.value)}
-          onBlur={() => {
-            const next = scopeText === '' ? undefined : scopeText;
-            if (next !== query.scope) {
-              onChange({ ...query, scope: next });
+          onBlur={commitScope}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              commitScope();
             }
           }}
         />

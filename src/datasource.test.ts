@@ -1,9 +1,17 @@
-import { DataSource, prepareAnnotationQuery } from './datasource';
+import { DataSource, prepareAnnotationQuery, scopeFormat } from './datasource';
 import { NetBoxQuery } from './types';
 
-const mockReplace = jest.fn((s: string, _scopedVars?: unknown, _format?: string) => {
+const mockReplace = jest.fn((s: string, _scopedVars?: unknown, format?: string | ((value: unknown) => string)) => {
   if (s === '$empty') {
     return '';
+  }
+  // Variables whose values hold a comma and a backslash, interpolated with the
+  // format the caller passes, as Grafana does.
+  if (s === '$acme' && typeof format === 'function') {
+    return format('Acme, West\\1');
+  }
+  if (s === '$acmes' && typeof format === 'function') {
+    return format(['Acme, West', 'b\\c']);
   }
   if (s === '$site') {
     return 'dc1,dc2';
@@ -170,11 +178,35 @@ describe('applyTemplateVariables', () => {
 });
 
 describe('applyTemplateVariables scope', () => {
-  it('interpolates the scope with the csv format', () => {
+  it('interpolates the scope with the escaping scope format', () => {
     const ds = makeDS();
     const scopedVars = {};
     ds.applyTemplateVariables({ refId: 'A', queryType: 'annotations', scope: '$device' }, scopedVars);
-    expect(mockReplace).toHaveBeenCalledWith('$device', scopedVars, 'csv');
+    expect(mockReplace).toHaveBeenCalledWith('$device', scopedVars, scopeFormat);
+  });
+
+  // A NetBox name can hold a comma, which the backend would otherwise split on.
+  it('escapes commas and backslashes in variable values', () => {
+    const ds = makeDS();
+    const one = ds.applyTemplateVariables({ refId: 'A', queryType: 'annotations', scope: '$acme' }, {});
+    expect(one.scope).toBe('Acme\\, West\\\\1');
+    const many = ds.applyTemplateVariables({ refId: 'A', queryType: 'annotations', scope: '$acmes' }, {});
+    expect(many.scope).toBe('Acme\\, West,b\\\\c');
+  });
+
+  it('leaves typed text as typed: a typed comma separates', () => {
+    const ds = makeDS();
+    const out = ds.applyTemplateVariables({ refId: 'A', queryType: 'annotations', scope: 'a, b' }, {});
+    expect(out.scope).toBe('a, b');
+  });
+
+  // Grafana hands a custom All value through unformatted; were it formatted,
+  // $__all holds nothing to escape, so the backend still reads it as all.
+  it('keeps $__all recognisable', () => {
+    expect(scopeFormat('$__all')).toBe('$__all');
+    const ds = makeDS();
+    const out = ds.applyTemplateVariables({ refId: 'A', queryType: 'annotations', scope: '$__all' }, {});
+    expect(out.scope).toBe('$__all');
   });
 
   it('sets scopeSet from the raw scope, even when it interpolates to nothing', () => {

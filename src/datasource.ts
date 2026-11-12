@@ -39,6 +39,24 @@ export function prepareAnnotationQuery(anno: any): NetBoxQuery {
   };
 }
 
+/**
+ * Formats a variable's value(s) for an annotation scope. The backend splits the
+ * scope on commas, and a NetBox name or cid can hold one ("Acme, West"), so each
+ * value has its backslashes and commas escaped ("\\" and "\,") and the values
+ * are joined with plain commas. Typed text outside a variable isn't formatted:
+ * there a comma separates, and "\," is a literal one.
+ */
+export function scopeFormat(value: unknown): string {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .map((v) =>
+      String(v ?? '')
+        .replace(/\\/g, '\\\\')
+        .replace(/,/g, '\\,')
+    )
+    .join(',');
+}
+
 export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSourceOptions> {
   constructor(instanceSettings: DataSourceInstanceSettings<NetBoxDataSourceOptions>) {
     super(instanceSettings);
@@ -97,10 +115,11 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
       rawScope === undefined
         ? {}
         : {
-            // 'csv' so a multi-value variable reaches the backend comma-joined (the
-            // default format is the glob `{a,b}`). scopeSet comes from the RAW value so
-            // an empty variable is distinguishable from no scope at all.
-            scope: srv.replace(rawScope, scopedVars, 'csv'),
+            // scopeFormat so a multi-value variable reaches the backend comma-joined
+            // (the default format is the glob `{a,b}`), with any comma inside a value
+            // escaped. scopeSet comes from the RAW value so an empty variable is
+            // distinguishable from no scope at all.
+            scope: srv.replace(rawScope, scopedVars, scopeFormat),
             scopeSet: rawScope.trim() !== '',
           };
     return {

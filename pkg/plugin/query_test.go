@@ -913,6 +913,13 @@ func TestParseScope(t *testing.T) {
 		// Malformed: All is never one element of a list. Kept as a value, so the
 		// lookup fails on it rather than the query widening.
 		{"$__all,leaf1", []string{"$__all", "leaf1"}, false},
+		// A comma inside a value comes escaped (the frontend's scopeFormat, or
+		// typed as \,), and so does a backslash. Any other backslash is literal.
+		{`Acme\, West,leaf1`, []string{"Acme, West", "leaf1"}, false},
+		{`a\\b,c`, []string{`a\b`, "c"}, false},
+		{`a\\,b`, []string{`a\`, "b"}, false},
+		{`Gi0\1, x\y\`, []string{`Gi0\1`, `x\y\`}, false},
+		{"a, b", []string{"a", "b"}, false},
 	} {
 		got, all := parseScope(tc.raw)
 		if !reflect.DeepEqual(got, tc.want) || all != tc.wantAll {

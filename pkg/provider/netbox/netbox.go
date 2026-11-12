@@ -1710,14 +1710,15 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 // With Include descendants on, a device, VM, interface or VM-interface scope
 // also reads the changes to what's attached to it (descendantChanges),
 // alongside the other reads, and merges them in the same way. Those reads run
-// under their own deadline (descendantsDeadline, R15), so a slow chain of them
+// under their own deadline (descendantsDeadline), so a slow chain of them
 // can't hold the track past the caller's. While the caller's context is live,
 // a descendant read that fails or runs past that deadline doesn't fail the
 // query: the descendant rows are dropped and the track ends with one
-// descendants-error marker (R2). When the descendant reads succeeded (they
-// returned results and no error), the track ends with a limit marker if the
-// limit left a change out (R12); every other track is cut at the limit
-// silently, as before.
+// descendants-error marker: the switch is on by default, and a slow or
+// refused read of what's attached mustn't blank the scope's own track. When
+// the descendant reads succeeded (they returned results and no error), the
+// track ends with a limit marker if the limit left a change out; every other
+// track is cut at the limit silently, as before.
 //
 // The names the markers carry are best effort, and none holds the query. The
 // network name reads (the by-ID name fill, the diffs' related names and the
@@ -1826,7 +1827,7 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		if errors.Is(descErr, context.DeadlineExceeded) && errors.Is(dctx.Err(), context.DeadlineExceeded) {
 			descErr = &AnnotationError{Reason: provider.AnnotationReasonDescendantsSlow, Count: max(1, int(deadline.Sub(start).Seconds()))}
 		}
-		// R2: the rest of the track stands, and a marker says what's missing.
+		// The rest of the track stands, and a marker says what's missing.
 		desc = nil
 	}
 	descMerged := len(desc) > 0
@@ -1856,8 +1857,9 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		}
 	}
 	changes := p.resolveDiffs(ctx, kept, filter.fields)
-	// R12. The journal merge can leave a change out too, so this is decided
-	// while the change-log rows and the journal entries are still apart.
+	// A track with descendant rows says when the limit left a change out. The
+	// journal merge can leave one out too, so this is decided while the
+	// change-log rows and the journal entries are still apart.
 	showLimit := descMerged && (limitReached(results, kept, limit) || len(changes)+len(journal) > limit)
 	if len(journal) > 0 {
 		changes = mergeJournal(changes, journal, limit)

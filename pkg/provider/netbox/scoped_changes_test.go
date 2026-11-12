@@ -1366,11 +1366,11 @@ func TestChanges_NetBox42ShapedScopedByName(t *testing.T) {
 	}
 }
 
-// decodeChange parses the row's time once, so every consumer of a decoded row
-// sees the same instant; a time that does not parse leaves the zero time and
-// the row is still decoded.
-func TestDecodeChange_ParsesTheRowTime(t *testing.T) {
-	d, ok := decodeChange(json.RawMessage(`{"id":1,"time":"2026-11-09T20:47:09.123456Z"}`))
+// decodeChangeRow parses the row's time once, so every consumer of a decoded
+// row sees the same instant; a time that does not parse leaves the zero time
+// and the row is still decoded.
+func TestDecodeChangeRow_ParsesTheRowTime(t *testing.T) {
+	d, ok := decodeChangeRow(json.RawMessage(`{"id":1,"time":"2026-11-09T20:47:09.123456Z"}`))
 	if !ok {
 		t.Fatal("row not decoded")
 	}
@@ -1378,7 +1378,7 @@ func TestDecodeChange_ParsesTheRowTime(t *testing.T) {
 	if !d.at.Equal(want) {
 		t.Errorf("at = %v, want %v", d.at, want)
 	}
-	d, ok = decodeChange(json.RawMessage(`{"id":2,"time":"yesterday"}`))
+	d, ok = decodeChangeRow(json.RawMessage(`{"id":2,"time":"yesterday"}`))
 	if !ok {
 		t.Fatal("row with an unparseable time not decoded")
 	}

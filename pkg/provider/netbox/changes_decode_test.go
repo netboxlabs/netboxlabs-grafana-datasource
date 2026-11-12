@@ -9,12 +9,15 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
+// mustDecode decodes one change-log row and works out its diff, as
+// walkChangeRead does for a row it keeps.
 func mustDecode(t *testing.T, rec string) decodedChange {
 	t.Helper()
-	d, ok := decodeChange(json.RawMessage(rec))
+	d, ok := decodeChangeRow(json.RawMessage(rec))
 	if !ok {
-		t.Fatalf("decodeChange(%s) failed", rec)
+		t.Fatalf("decodeChangeRow(%s) failed", rec)
 	}
+	d.diff = changeDiff(d.oc)
 	return d
 }
 

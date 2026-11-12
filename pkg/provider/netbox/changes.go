@@ -128,15 +128,6 @@ type decodedChange struct {
 	owner       int64
 }
 
-// decodeChange parses one change-log row and its diff.
-func decodeChange(raw json.RawMessage) (decodedChange, bool) {
-	d, ok := decodeChangeRow(raw)
-	if ok {
-		d.diff = changeDiff(d.oc)
-	}
-	return d, ok
-}
-
 // decodeChangeRow parses one change-log row, including its time once (zero when
 // it does not parse), but not its diff: a read works that out only for a row
 // its own check keeps, since a scan can reject thousands. A row that is not

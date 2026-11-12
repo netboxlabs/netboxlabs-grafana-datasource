@@ -15,18 +15,19 @@ import (
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
-// childListCapRows bounds a current-children list Include descendants reads:
+// ChildListCapRows bounds a current-children list Include descendants reads:
 // a scope's interfaces or cables. The list is up to 20 pages, and every
 // interface's id then goes into the cable-end reads a few hundred to a request,
-// so a scope with more is refused rather than followed.
-const childListCapRows = 10000
+// so a scope with more is refused rather than followed. It is exported because
+// pkg/plugin's annotationErrorMessage states it in the refusal.
+const ChildListCapRows = 10000
 
-// childListCap is childListCapRows unless a test has lowered it.
+// childListCap is ChildListCapRows unless a test has lowered it.
 func (p *Provider) childListCap() int {
 	if p.childListCapOverride > 0 {
 		return p.childListCapOverride
 	}
-	return childListCapRows
+	return ChildListCapRows
 }
 
 // cableEndWorkers is how many cable-end batches run at once: bounded, without

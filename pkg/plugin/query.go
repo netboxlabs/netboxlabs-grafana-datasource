@@ -850,7 +850,7 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 	case provider.AnnotationReasonNoMatch:
 		return fmt.Sprintf("No NetBox object named %q for this annotation's scope. Check the name, or match by ID.", value)
 	case provider.AnnotationReasonTooManyMatches:
-		return fmt.Sprintf("%q matches more than 20 NetBox objects. Names like interface names repeat across devices: give the variable ids and set Match by to ID.", value)
+		return fmt.Sprintf("%q matches more than %d NetBox objects. Names like interface names repeat across devices: give the variable ids and set Match by to ID.", value, netbox.MaxNameMatches)
 	case provider.AnnotationReasonNotAnID:
 		return fmt.Sprintf("%q isn't a NetBox id. Set Match by to Name, or give the variable ids.", value)
 	case provider.AnnotationReasonNoNameFilter:
@@ -858,15 +858,17 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 	case provider.AnnotationReasonNoEndpoint:
 		return "This NetBox doesn't say where this object type lives, so it can't be looked up by name. Set Match by to ID."
 	case provider.AnnotationReasonTooManyObjects:
-		return fmt.Sprintf("The scope covers %d objects; the limit is 100. Narrow the variable's selection. If All means every object, give the All option the custom value $__all.", u.AnnotationCount)
+		return fmt.Sprintf("The scope covers %d objects; the limit is %d. Narrow the variable's selection. If All means every object, give the All option the custom value $__all.", u.AnnotationCount, netbox.MaxScopeObjects)
 	case provider.AnnotationReasonUnknownField:
 		return fmt.Sprintf("%q isn't a field of any NetBox object type. Custom fields are written cf_<name>.", value)
+	case provider.AnnotationReasonUnknownAction:
+		return fmt.Sprintf("%q isn't a change action. Use create, update or delete.", value)
 	case provider.AnnotationReasonJournalForbidden:
 		return "The API token can't read journal entries. Turn off Journal entries, or let the token view them."
 	case provider.AnnotationReasonObjectTypesUnreadable:
 		return "NetBox's object-type list couldn't be read, and this NetBox version needs it to find related changes. Check that the token can read object types."
 	case provider.AnnotationReasonTooManyChildren:
-		return "This scope has more than 10,000 interfaces or cables to follow. Narrow the scope, or turn off Include descendants."
+		return fmt.Sprintf("This scope has more than %s interfaces or cables to follow. Narrow the scope, or turn off Include descendants.", thousands(netbox.ChildListCapRows))
 	case provider.AnnotationReasonDescendantTypesUnreadable:
 		return "NetBox's object-type list couldn't be read. If this keeps happening, turn off Include descendants."
 	case provider.AnnotationReasonDescendantsForbidden:

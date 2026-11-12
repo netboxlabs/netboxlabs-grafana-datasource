@@ -304,13 +304,22 @@ type changeFilter struct {
 	fields  []string        // Changed fields; nil = any
 }
 
+// changeActions are the change-log actions NetBox records.
+var changeActions = []string{"create", "update", "delete"}
+
 // newChangeFilter reads a query's Actions and Changed fields, trimmed, with
-// blanks and repeats dropped. Exactly one Action is pushed upstream.
-func newChangeFilter(spec provider.ChangeSpec) changeFilter {
+// blanks and repeats dropped. Exactly one Action is pushed upstream. An Action
+// NetBox doesn't record is refused: it would match no row, and the track would
+// come up short with nothing to say why.
+func newChangeFilter(spec provider.ChangeSpec) (changeFilter, error) {
 	var f changeFilter
-	for _, a := range spec.Actions {
-		if a = strings.ToLower(strings.TrimSpace(a)); a == "" {
+	for _, raw := range spec.Actions {
+		a := strings.ToLower(strings.TrimSpace(raw))
+		if a == "" {
 			continue
+		}
+		if !slices.Contains(changeActions, a) {
+			return changeFilter{}, &AnnotationError{Reason: provider.AnnotationReasonUnknownAction, Value: logSafe(strings.TrimSpace(raw))}
 		}
 		if f.actions == nil {
 			f.actions = map[string]bool{}
@@ -327,7 +336,7 @@ func newChangeFilter(spec provider.ChangeSpec) changeFilter {
 			f.fields = append(f.fields, n)
 		}
 	}
-	return f
+	return f, nil
 }
 
 // localScan reports whether rows are discarded here that NetBox can't discard:

@@ -79,6 +79,27 @@ func TestChangeDiff_CustomFieldsPerKey(t *testing.T) {
 	}
 }
 
+// Custom fields are written cf_<name> in Changed fields: a bare name is a
+// standard field, and doesn't match the custom field it shares a name with.
+// custom_fields matches any of them.
+func TestChangeFilter_CustomFieldNames(t *testing.T) {
+	d := mustDecode(t, `{"action":{"value":"update"},
+		"prechange_data":{"custom_fields":{"owner":"a"}},
+		"postchange_data":{"custom_fields":{"owner":"b"}}}`)
+	for _, tc := range []struct {
+		fields []string
+		want   bool
+	}{
+		{[]string{"owner"}, false},
+		{[]string{"cf_owner"}, true},
+		{[]string{"custom_fields"}, true},
+	} {
+		if got := (changeFilter{fields: tc.fields}).keep(d); got != tc.want {
+			t.Errorf("Changed fields %v keep a cf_owner change = %v, want %v", tc.fields, got, tc.want)
+		}
+	}
+}
+
 func TestChangeDiff_CreateAndDeleteHaveNone(t *testing.T) {
 	for _, rec := range []string{
 		`{"action":{"value":"create"},"prechange_data":null,"postchange_data":{"name":"a"}}`,

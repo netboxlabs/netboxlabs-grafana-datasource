@@ -184,7 +184,7 @@ func changeDiff(o objectChange) []rawFieldChange {
 		}
 	}
 	for key := range unionKeys(o.PrechangeData, o.PostchangeData) {
-		if strings.HasPrefix(key, "_") || key == "created" || key == "last_updated" {
+		if untrackedField(key) {
 			continue
 		}
 		if key == "custom_fields" {
@@ -200,6 +200,13 @@ func changeDiff(o objectChange) []rawFieldChange {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Field < out[j].Field })
 	return out
+}
+
+// untrackedField reports a snapshot key changeDiff doesn't compare: NetBox's
+// bookkeeping (created, last_updated) and its private keys (a leading _). Every
+// save touches the first, and the second isn't the object's data.
+func untrackedField(key string) bool {
+	return strings.HasPrefix(key, "_") || key == "created" || key == "last_updated"
 }
 
 func unionKeys(a, b map[string]json.RawMessage) map[string]struct{} {
@@ -300,8 +307,10 @@ var changeActions = []string{"create", "update", "delete"}
 
 // newChangeFilter reads a query's Actions and Changed fields, trimmed, with
 // blanks and repeats dropped. Exactly one Action is pushed upstream. An Action
-// NetBox doesn't record is refused: it would match no row, and the track would
-// come up short with nothing to say why.
+// NetBox doesn't record is refused, and so is a Changed field changeDiff
+// doesn't compare (untrackedField), whatever the schema says of it: either
+// would match no row, and the track would come up short with nothing to say
+// why. Both are refused here, before any request.
 func newChangeFilter(spec provider.ChangeSpec) (changeFilter, error) {
 	var f changeFilter
 	for _, raw := range spec.Actions {
@@ -323,9 +332,13 @@ func newChangeFilter(spec provider.ChangeSpec) (changeFilter, error) {
 		}
 	}
 	for _, n := range spec.ChangedFields {
-		if n = strings.TrimSpace(n); n != "" && !slices.Contains(f.fields, n) {
-			f.fields = append(f.fields, n)
+		if n = strings.TrimSpace(n); n == "" || slices.Contains(f.fields, n) {
+			continue
 		}
+		if untrackedField(n) {
+			return changeFilter{}, &AnnotationError{Reason: provider.AnnotationReasonUntrackedField, Value: logSafe(n)}
+		}
+		f.fields = append(f.fields, n)
 	}
 	return f, nil
 }

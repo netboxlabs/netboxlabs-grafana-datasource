@@ -1749,8 +1749,8 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	// went upstream) but kept by the local filter (every row was discarded), which
 	// is a silently empty annotation with no error anywhere.
 	wanted := normalizeObjectTypes(spec.ObjectTypes)
-	// Before any request: an Action NetBox doesn't record needs no lookup to
-	// refuse.
+	// Before any request: an Action NetBox doesn't record, or a Changed field
+	// the diff doesn't compare, needs no lookup to refuse.
 	filter, err := newChangeFilter(spec)
 	if err != nil {
 		return nil, err

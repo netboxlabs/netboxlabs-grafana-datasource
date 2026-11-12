@@ -316,8 +316,8 @@ func TestResolveDiffs_PreferredFieldsFirst(t *testing.T) {
 	}{
 		{"none: alphabetical", nil,
 			[]string{"asset_tag", "cf_owner", "cf_site_code", "comments", "description", "name", "serial", "status"}},
-		{"a field and a custom field by its name", []string{"status", "owner"},
-			[]string{"cf_owner", "status", "asset_tag", "cf_site_code", "comments", "description", "name", "serial"}},
+		{"a bare name isn't its custom field", []string{"status", "owner"},
+			[]string{"status", "asset_tag", "cf_owner", "cf_site_code", "comments", "description", "name", "serial"}},
 		{"a custom field by cf_ name", []string{"cf_site_code"},
 			[]string{"cf_site_code", "asset_tag", "cf_owner", "comments", "description", "name", "serial", "status"}},
 		{"custom_fields matches every custom field", []string{"custom_fields", "serial"},

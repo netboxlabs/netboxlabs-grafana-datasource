@@ -892,6 +892,29 @@ func TestChanges_UnknownActionRefused(t *testing.T) {
 	wantIDs(t, changesOK(t, s.start(t), spec), "#1")
 }
 
+// A field the change log's diff doesn't compare would keep no update, so the
+// track would come up short with nothing to say why. It is refused before any
+// request, whether or not the schema lists it.
+func TestChanges_UntrackedFieldRefused(t *testing.T) {
+	for _, field := range []string{"last_updated", "created", "_path"} {
+		t.Run(field, func(t *testing.T) {
+			s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+			spec := scoped(nameScope("leaf1"), 10)
+			spec.ChangedFields = []string{"status", " " + field + " "}
+			_, err := s.start(t).Changes(context.Background(), spec)
+			var ae *AnnotationError
+			if !errors.As(err, &ae) || ae.Reason != provider.AnnotationReasonUntrackedField || ae.Value != field {
+				t.Errorf("Changes error = %v, want %s %q", err, provider.AnnotationReasonUntrackedField, field)
+			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if len(s.requests) != 0 {
+				t.Errorf("requests = %v, want none", s.requests)
+			}
+		})
+	}
+}
+
 // A busy device: the status changes sit behind pages of description edits. The
 // scan pages on until it finds them, within its cap.
 func TestChanges_ChangedFieldsFindsMatchesBehindUnrelatedPages(t *testing.T) {

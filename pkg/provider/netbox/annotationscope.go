@@ -90,7 +90,12 @@ func (e *AnnotationError) Error() string {
 	if e.Value != "" {
 		msg += fmt.Sprintf(" %q", e.Value)
 	}
-	if e.Count != 0 {
+	// Count is seconds for a descendants read that ran past its budget, and an
+	// object count otherwise.
+	switch {
+	case e.Count != 0 && e.Reason == provider.AnnotationReasonDescendantsSlow:
+		msg += fmt.Sprintf(" (%d s)", e.Count)
+	case e.Count != 0:
 		msg += fmt.Sprintf(" (%d objects)", e.Count)
 	}
 	return msg

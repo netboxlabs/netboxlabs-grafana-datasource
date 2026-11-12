@@ -167,7 +167,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
         label="Changed fields"
         labelWidth={20}
         grow
-        tooltip="Only changes that touched one of these fields. Custom fields are written cf_name."
+        tooltip="Only updates that touched one of these fields; creates and deletes follow Actions. Custom fields are written cf_name."
       >
         <MultiSelect
           inputId="annotation-changed-fields"

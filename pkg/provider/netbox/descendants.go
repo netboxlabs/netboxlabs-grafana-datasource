@@ -215,10 +215,7 @@ func (p *Provider) descendantChanges(ctx context.Context, spec provider.ChangeSp
 		addrTypes = nil
 	}
 
-	inScope := make(map[int64]bool, len(scope.Objects))
-	for _, o := range scope.Objects {
-		inScope[o.ID] = true
-	}
+	inScope := scope.idSet()
 	ifaceTypeID, scopeTypeID := ids[kind.ifaceType], ids[scope.Type]
 	match := func(oc objectChange) (int64, bool) {
 		switch normalizeObjectType(oc.changedType()) {
@@ -301,12 +298,7 @@ type members struct {
 // first error, in that order, is returned as it came.
 func (p *Provider) descendantMembers(ctx context.Context, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, wantIfaces, wantCables bool) (members, error) {
 	m := members{ifaces: map[int64]int64{}, cables: map[int64]int64{}}
-	inScope := make(map[int64]bool, len(scope.Objects))
-	scopeIDs := make([]string, 0, len(scope.Objects))
-	for _, o := range scope.Objects {
-		inScope[o.ID] = true
-		scopeIDs = append(scopeIDs, strconv.FormatInt(o.ID, 10))
-	}
+	inScope, scopeIDs := scope.idSet(), scope.idStrings()
 	// changeReads refuses a scope without objects before this runs. Without ids
 	// every list and read here would ask for all of NetBox.
 	if len(scopeIDs) == 0 {

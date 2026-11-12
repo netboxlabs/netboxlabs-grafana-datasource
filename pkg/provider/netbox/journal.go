@@ -89,11 +89,8 @@ func (p *Provider) journalEntries(ctx context.Context, spec provider.ChangeSpec,
 		} else {
 			q.Set(assignedObjectTypeParam, scope.Type)
 		}
-		inScope = make(map[int64]bool, len(scope.Objects))
-		for _, o := range scope.Objects {
-			inScope[o.ID] = true
-			q.Add(assignedObjectIDParam, strconv.FormatInt(o.ID, 10))
-		}
+		inScope = scope.idSet()
+		q[assignedObjectIDParam] = scope.idStrings()
 	} else {
 		var err error
 		if trs, err = p.objectTypeReads(ctx, wanted, assignedObjectTypeIDParam, assignedObjectTypeParam); err != nil {

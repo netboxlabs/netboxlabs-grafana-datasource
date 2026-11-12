@@ -1238,6 +1238,31 @@ func TestChanges_RequestTimeoutIsNotSlow(t *testing.T) {
 	}
 }
 
+// A query whose own read failed doesn't wait out the descendant reads: they
+// are cancelled, and the own read's error is the query's. The address scan is
+// held for longer than the test waits, with the descendants deadline left at
+// its 8s default.
+func TestChanges_FailedReadCancelsDescendants(t *testing.T) {
+	s := trackServer()
+	s.failTypeID = scopedTypeIDs["dcim.device"]
+	s.delayTypeID, s.delayFor = 20, 5*time.Second
+	p := s.start(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Changes(context.Background(), withDescendants(nameScope("leaf1")))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
+			t.Errorf("Changes error = %v, want the own read's 500", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Changes still blocked 1s after its own read failed")
+	}
+}
+
 func TestChanges_DescendantsCarryBranch(t *testing.T) {
 	s := eachKindServer()
 	s.branches = `{"count":1,"next":null,"results":[{"name":"br1","schema_id":"td5smq0f"}]}`

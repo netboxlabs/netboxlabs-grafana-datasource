@@ -294,10 +294,12 @@ func cutoffMarker(c provider.Change) (title, text, tag string) {
 }
 
 // limitMarker says the query's Limit hid older changes in the range, and from
-// when. Past the largest Limit there is nothing to raise.
+// when. Past the largest Limit there is nothing to raise. Below it, the text
+// names the largest too: Changes reads a Limit above it as the default, so a
+// user who set more sees the default here and needs to know why.
 func limitMarker(c provider.Change) (title, text, tag string) {
 	at := c.Until.UTC().Format("2006-01-02 15:04:05 UTC")
-	text = fmt.Sprintf("Limit reached: changes before %s in this range aren't shown. Raise Limit (now %d), narrow the range, or narrow Object types.", at, c.Limit)
+	text = fmt.Sprintf("Limit reached: changes before %s in this range aren't shown. Raise Limit (now %d, at most %s), narrow the range, or narrow Object types.", at, c.Limit, thousands(netbox.MaxLimit))
 	if c.Limit >= netbox.MaxLimit {
 		text = fmt.Sprintf("Limit reached: changes before %s in this range aren't shown. Narrow the range or Object types.", at)
 	}

@@ -106,6 +106,8 @@ func TestQueryErrorMessage_Annotation(t *testing.T) {
 			"The scope covers 120 objects; the limit is 100. Narrow the variable's selection. If All means every object, give the All option the custom value $__all."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonUnknownField, Value: "platfrom"},
 			`"platfrom" isn't a field of any NetBox object type. Custom fields are written cf_<name>.`},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonUnknownAction, Value: "deleted"},
+			`"deleted" isn't a change action. Use create, update or delete.`},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonJournalForbidden},
 			"The API token can't read journal entries. Turn off Journal entries, or let the token view them."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonObjectTypesUnreadable},

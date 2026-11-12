@@ -115,7 +115,7 @@ type Provider struct {
 	namesWaitOverride time.Duration
 	// changeScanCapOverride lowers changeScanCapRows; tests only.
 	changeScanCapOverride int
-	// childListCapOverride lowers childListCapRows; tests only.
+	// childListCapOverride lowers ChildListCapRows; tests only.
 	childListCapOverride int
 	// descendantsWaitOverride replaces descendantsBudget; tests only.
 	descendantsWaitOverride time.Duration
@@ -1742,12 +1742,17 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	// went upstream) but kept by the local filter (every row was discarded), which
 	// is a silently empty annotation with no error anywhere.
 	wanted := normalizeObjectTypes(spec.ObjectTypes)
+	// Before any request: an Action NetBox doesn't record needs no lookup to
+	// refuse.
+	filter, err := newChangeFilter(spec)
+	if err != nil {
+		return nil, err
+	}
 
 	scope, err := p.resolveAnnotationScope(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
-	filter := newChangeFilter(spec)
 	maxRows := limit
 	if filter.localScan() {
 		maxRows = p.changeScanCap()

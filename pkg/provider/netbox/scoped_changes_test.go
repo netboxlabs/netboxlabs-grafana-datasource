@@ -3,6 +3,7 @@ package netbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -822,6 +823,40 @@ func TestChanges_TwoActionsFilteredLocally(t *testing.T) {
 			t.Errorf("read %v: limit %s, want a scan page of 500", q, q.Get("limit"))
 		}
 	}
+}
+
+// An action NetBox doesn't have would match no row, so the track would come up
+// short with nothing to say why. It is refused before any request, the scope
+// lookup's included.
+func TestChanges_UnknownActionRefused(t *testing.T) {
+	for _, tc := range []struct {
+		actions []string
+		want    string
+	}{
+		{[]string{"deleted"}, "deleted"},
+		{[]string{"create", "update", " Deleted "}, "Deleted"},
+	} {
+		t.Run(strings.Join(tc.actions, ","), func(t *testing.T) {
+			s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+			spec := scoped(nameScope("leaf1"), 10)
+			spec.Actions = tc.actions
+			_, err := s.start(t).Changes(context.Background(), spec)
+			var ae *AnnotationError
+			if !errors.As(err, &ae) || ae.Reason != provider.AnnotationReasonUnknownAction || ae.Value != tc.want {
+				t.Errorf("Changes error = %v, want %s %q", err, provider.AnnotationReasonUnknownAction, tc.want)
+			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if len(s.requests) != 0 {
+				t.Errorf("requests = %v, want none", s.requests)
+			}
+		})
+	}
+	// Case and spacing are forgiven, as they always were.
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	spec := scoped(nameScope("leaf1"), 10)
+	spec.Actions = []string{" Update "}
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1")
 }
 
 // A busy device: the status changes sit behind pages of description edits. The

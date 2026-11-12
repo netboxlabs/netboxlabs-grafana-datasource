@@ -78,6 +78,9 @@ const (
 	// AnnotationReasonUnknownField is a Changed-fields name no object type has
 	// (AnnotationValue).
 	AnnotationReasonUnknownField = "unknown-field"
+	// AnnotationReasonUnknownAction is an Actions value that isn't create,
+	// update or delete (AnnotationValue).
+	AnnotationReasonUnknownAction = "unknown-action"
 	// AnnotationReasonJournalForbidden is a journal read the API token isn't
 	// allowed.
 	AnnotationReasonJournalForbidden = "journal-forbidden"

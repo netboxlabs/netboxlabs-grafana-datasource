@@ -15,12 +15,13 @@ import (
 )
 
 // Scope bounds. Each scope object's id goes into the change-log reads' URLs, so
-// a scope holds at most maxScopeObjects. maxNameMatches is how many objects one
+// a scope holds at most MaxScopeObjects. MaxNameMatches is how many objects one
 // name may match: interface names repeat on every device, and a scope like that
-// wants ids instead. pkg/plugin's annotationErrorMessage states both numbers.
+// wants ids instead. Both are exported because pkg/plugin's
+// annotationErrorMessage states them in the refusals it shows.
 const (
-	maxScopeObjects = 100
-	maxNameMatches  = 20
+	MaxScopeObjects = 100
+	MaxNameMatches  = 20
 )
 
 // defaultScopeType is the scope type when the query names none.
@@ -111,7 +112,7 @@ func (p *Provider) resolveAnnotationScope(ctx context.Context, spec provider.Cha
 	if len(values) == 0 {
 		return nil, &AnnotationError{Reason: provider.AnnotationReasonEmptyScope}
 	}
-	if len(values) > maxScopeObjects {
+	if len(values) > MaxScopeObjects {
 		return nil, &AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: len(values)}
 	}
 	byID := spec.ScopeMatch == scopeMatchID
@@ -221,7 +222,7 @@ var caseInsensitiveNames = map[string]bool{"dcim.device": true, "virtualization.
 // parameters, and a name several objects share keeps all of them.
 //
 // Each batch reads one row more than its names may match between them. A name
-// whose bucket holds more than maxNameMatches is too many matches. A batch that
+// whose bucket holds more than MaxNameMatches is too many matches. A batch that
 // fills its limit with no name over that was filled by rows that match no name,
 // which is NetBox ignoring the filter: the type can't be looked up by name, and
 // no name is to blame. The rows are bucketed here, ignoring case only for the
@@ -261,7 +262,7 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 	batcher := newQueryBatcher(field, url.Values{"brief": {"true"}})
 	seen := map[int64]bool{}
 	for _, chunk := range batcher.chunk(names) {
-		limit := len(chunk)*maxNameMatches + 1
+		limit := len(chunk)*MaxNameMatches + 1
 		rows, _, err := p.fetchRows(ctx, endpoint, batcher.query(chunk), limit)
 		if err != nil {
 			return err
@@ -284,7 +285,7 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 				most = i
 			}
 		}
-		if len(buckets[most]) > maxNameMatches {
+		if len(buckets[most]) > MaxNameMatches {
 			return &AnnotationError{Reason: provider.AnnotationReasonTooManyMatches, Value: logSafe(chunk[most])}
 		}
 		if len(rows) >= limit {
@@ -302,7 +303,7 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 			}
 		}
 	}
-	if len(scope.Objects) > maxScopeObjects {
+	if len(scope.Objects) > MaxScopeObjects {
 		return &AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: len(scope.Objects)}
 	}
 	return nil

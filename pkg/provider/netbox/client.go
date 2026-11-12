@@ -111,6 +111,16 @@ func (c *Client) apiURL(path string, query url.Values) string {
 	return u
 }
 
+// apiRootPath is the path of the API root, the configured URL's path included:
+// "/api/" at a host's root, "/netbox/api/" under a BASE_PATH of netbox/.
+func (c *Client) apiRootPath() string {
+	u, err := url.Parse(c.apiURL("", nil))
+	if err != nil {
+		return "/api/"
+	}
+	return u.Path
+}
+
 // nextPageURL is the URL of the page after current, given the `next` link
 // NetBox returned with it.
 //

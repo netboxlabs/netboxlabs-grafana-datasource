@@ -2308,6 +2308,7 @@ func (p *Provider) readObjectTypeIDs(ctx context.Context) (map[string]int, map[s
 	}
 	ids := make(map[string]int, len(rows))
 	endpoints := make(map[string]string, len(rows))
+	root := p.client.apiRootPath()
 	for _, raw := range rows {
 		var ot struct {
 			ID       int    `json:"id"`
@@ -2324,7 +2325,7 @@ func (p *Provider) readObjectTypeIDs(ctx context.Context) (map[string]int, map[s
 		ids[key] = ot.ID
 		var rest string
 		if json.Unmarshal(ot.RESTAPIEndpoint, &rest) == nil {
-			if e := restAPIPath(rest); e != "" {
+			if e := restAPIPath(rest, root); e != "" {
 				endpoints[key] = e
 			}
 		}

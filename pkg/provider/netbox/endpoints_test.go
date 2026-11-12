@@ -274,6 +274,34 @@ func TestContentTypeEndpoint_FromRestAPIEndpoint(t *testing.T) {
 	}
 }
 
+// A BASE_PATH can hold "/api/" itself. The instance's own API root is
+// stripped from rest_api_endpoint, not everything up to the first "/api/",
+// which would leave "netbox/api/dcim/devices". A value outside that root, as
+// behind a proxy that rewrites the path, still falls back to the first /api/.
+func TestContentTypeEndpoint_BasePathHoldingAPI(t *testing.T) {
+	rows := []string{
+		objectTypeRow(12, "dcim.device", "/api/netbox/api/dcim/devices/"),
+		objectTypeRow(14, "dcim.interface", "/other/api/dcim/interfaces/"),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/netbox/api/core/object-types/" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprint(w, `{"detail":"Not found."}`)
+			return
+		}
+		writePage(w, len(rows), rows)
+	}))
+	t.Cleanup(srv.Close)
+	p := New(srv.URL+"/api/netbox/", "token", srv.Client())
+
+	for ct, want := range map[string]string{"dcim.device": "dcim/devices", "dcim.interface": "dcim/interfaces"} {
+		if endpoint, found, err := p.contentTypeEndpoint(context.Background(), ct); err != nil || !found || endpoint != want {
+			t.Errorf("contentTypeEndpoint(%s) = %q, %v, %v; want %q", ct, endpoint, found, err, want)
+		}
+	}
+}
+
 // NetBox 4.2 and 4.3 have no rest_api_endpoint, so the endpoint is matched
 // against the discovered list endpoints by NetBox's URL naming.
 func TestContentTypeEndpoint_FallbackHeuristic(t *testing.T) {

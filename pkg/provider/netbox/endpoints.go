@@ -23,9 +23,15 @@ const legacyObjectTypesEndpoint = "extras/object-types"
 
 // restAPIPath normalises an object type's rest_api_endpoint to the list path
 // queries address it by. NetBox includes its BASE_PATH ("/netbox/api/dcim/
-// devices/"), so everything up to the first /api/ is dropped. A value with no
-// /api/ in it, or none at all, is "".
-func restAPIPath(endpoint string) string {
+// devices/"), so root, the API root path the provider requests
+// (Client.apiRootPath), is dropped. Cutting at the first /api/ instead would
+// keep part of a BASE_PATH that holds one ("api/netbox/"). A value outside
+// root, as behind a proxy that rewrites the path, falls back to that cut. A
+// value with no /api/ in it, or none at all, is "".
+func restAPIPath(endpoint, root string) string {
+	if rest, ok := strings.CutPrefix(endpoint, root); ok && root != "" {
+		return strings.Trim(rest, "/")
+	}
 	_, rest, ok := strings.Cut(endpoint, "/api/")
 	if !ok {
 		return ""

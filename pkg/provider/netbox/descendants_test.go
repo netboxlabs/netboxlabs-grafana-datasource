@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -570,5 +571,732 @@ func TestSnapshotID(t *testing.T) {
 		if id, ok := snapshotID(data, key); ok {
 			t.Errorf("snapshotID(%s) = %d, true; want false", key, id)
 		}
+	}
+}
+
+// withDescendants is spec with Include descendants on, read to a limit of 50
+// unless spec sets one.
+func withDescendants(spec provider.ChangeSpec) provider.ChangeSpec {
+	spec.Descendants = true
+	if spec.Limit == 0 {
+		spec.Limit = 50
+	}
+	return spec
+}
+
+// assignedTo is an address snapshot assigned to interface type typeID's id.
+func assignedTo(typeID int, id int64) string {
+	return fmt.Sprintf(`{"assigned_object_type":%d,"assigned_object_id":%d}`, typeID, id)
+}
+
+// created is change id: ct objID created minutes before scopedNow, with post as
+// its after data.
+func created(id, minutes int, ct string, objID int64, post string) loggedChange {
+	return ch(id, minutes, ct, objID).as("create").snapshots("", post)
+}
+
+// newestFirst is a server holding rows sorted newest first, as the change log
+// returns them.
+func newestFirst(rows ...loggedChange) *scopedChangeServer {
+	slices.SortStableFunc(rows, func(a, b loggedChange) int { return cmp.Compare(a.minutes, b.minutes) })
+	return newScopedChangeServer(rows...)
+}
+
+// wantParents asserts each named change is on parent.
+func wantParents(t *testing.T, changes []provider.Change, parent string, reprs ...string) {
+	t.Helper()
+	for _, repr := range reprs {
+		if c := byRepr(t, changes, repr); c.Parent != parent {
+			t.Errorf("%s Parent = %q, want %q", repr, c.Parent, parent)
+		}
+	}
+}
+
+// typeIDsOf is a change-log request's changed_object_type_id values, sorted.
+func typeIDsOf(t *testing.T, q url.Values) []int64 {
+	t.Helper()
+	return sortedInts(t, q["changed_object_type_id"])
+}
+
+// carries reports whether a change-log request asks for any of the type ids.
+func carries(q url.Values, typeIDs ...int) bool {
+	return slices.ContainsFunc(typeIDs, func(id int) bool { return slices.Contains(q["changed_object_type_id"], strconv.Itoa(id)) })
+}
+
+// scanReads is the change-log requests that carry any of the type ids and are
+// neither an own read nor a related read.
+func scanReads(s *scopedChangeServer, typeIDs ...int) []url.Values {
+	return slices.DeleteFunc(s.changeLog(), func(q url.Values) bool {
+		return !carries(q, typeIDs...) || q.Has("changed_object_id") || q.Has("related_object_id")
+	})
+}
+
+// descendantsError is the track's last change, which must be its one
+// descendants-error marker.
+func descendantsError(t *testing.T, changes []provider.Change) provider.Change {
+	t.Helper()
+	n := 0
+	for _, c := range changes {
+		if c.Kind == provider.ChangeKindDescendantsError {
+			n++
+		}
+	}
+	if n != 1 || len(changes) == 0 || changes[len(changes)-1].Kind != provider.ChangeKindDescendantsError {
+		t.Fatalf("changes = %v, want one descendants-error marker, last", changeIDs(changes))
+	}
+	c := changes[len(changes)-1]
+	if c.Err == nil {
+		t.Fatal("descendants-error marker has no Err")
+	}
+	return c
+}
+
+// sameRows asserts two tracks read from different fixture servers hold the
+// same rows. Each row's link names its server, so links are left out.
+func sameRows(t *testing.T, got, want []provider.Change) {
+	t.Helper()
+	unlinked := func(changes []provider.Change) []provider.Change {
+		out := slices.Clone(changes)
+		for i := range out {
+			out[i].URL = ""
+		}
+		return out
+	}
+	if !reflect.DeepEqual(unlinked(got), unlinked(want)) {
+		t.Errorf("changes = %+v, want %+v as with Include descendants off", got, want)
+	}
+}
+
+// eachKindServer is leaf1 (17) with interfaces 100 (cable 300) and 101, leaf2
+// (18) with interface 200, and a change log holding one change of each kind
+// Include descendants shows on leaf1 (#1-#8), then the ones it must not (#9-#15).
+func eachKindServer() *scopedChangeServer {
+	s := newestFirst(
+		ch(1, 1, "dcim.cable", 300),
+		ch(2, 2, "dcim.cable", 301).as("delete"),
+		created(3, 3, "ipam.ipaddress", 401, assignedTo(14, 100)),
+		ch(4, 4, "ipam.ipaddress", 402).snapshots(assignedTo(14, 100), `{"assigned_object_type":null,"assigned_object_id":null}`),
+		created(5, 5, "dcim.macaddress", 403, assignedTo(14, 101)),
+		created(6, 6, "dcim.module", 500, `{"device":17}`),
+		created(7, 7, "ipam.service", 600, `{"parent_object_type":12,"parent_object_id":17}`),
+		created(8, 8, "ipam.service", 601, `{"device":17}`),
+
+		// A VM interface sharing interface 100's id.
+		created(9, 9, "ipam.ipaddress", 404, assignedTo(31, 100)),
+		// On leaf2's interface, and in leaf2.
+		created(10, 10, "ipam.ipaddress", 405, assignedTo(14, 200)),
+		created(11, 11, "dcim.module", 501, `{"device":18}`),
+		// A cable on no leaf1 interface.
+		ch(12, 12, "dcim.cable", 999),
+		// A service on VM 17, not device 17.
+		created(13, 13, "ipam.service", 602, `{"parent_object_type":30,"parent_object_id":17}`),
+		// An interface id that isn't a plain integer.
+		created(14, 14, "ipam.ipaddress", 406, `{"assigned_object_type":14,"assigned_object_id":"100"}`),
+		// Cable 301's end on interface 100, deleted with it: only this names it.
+		cableEndChange(15, 15, "delete", 100, 301, 14, 100),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17, cable: 300}, {id: 101, owner: 17}, {id: 200, owner: 18}}
+	s.cables = []cableRow{{id: 300, ends: []cableEnd{{"dcim.interface", 100, 17}, {"dcim.interface", 200, 18}}}}
+	return s
+}
+
+func TestChanges_DescendantsDeviceShowsEachKind(t *testing.T) {
+	changes := changesOK(t, eachKindServer().start(t), withDescendants(nameScope("leaf1")))
+	shown := []string{"#1", "#2", "#3", "#4", "#5", "#6", "#7", "#8"}
+	wantIDs(t, changes, shown...)
+	wantParents(t, changes, "leaf1", shown...)
+}
+
+// An IP moved from leaf1's interface to leaf2's is on leaf1 by its before data
+// and on leaf2 by its after data.
+func TestChanges_DescendantIPMovedShowsOnBothTracks(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "ipam.ipaddress", 401).snapshots(assignedTo(14, 100), assignedTo(14, 200)))
+	s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+	p := s.start(t)
+	for _, device := range []string{"leaf1", "leaf2"} {
+		changes := changesOK(t, p, withDescendants(nameScope(device)))
+		wantIDs(t, changes, "#1")
+		wantParents(t, changes, device, "#1")
+	}
+}
+
+// With several scope objects, a descendant is on the one it matched (R7).
+func TestChanges_DescendantsMultiScopeParent(t *testing.T) {
+	s := newestFirst(
+		created(1, 1, "dcim.module", 500, `{"device":18}`),
+		ch(2, 2, "dcim.cable", 300),
+		created(3, 3, "ipam.ipaddress", 401, assignedTo(14, 101)),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17}, {id: 101, owner: 17}, {id: 200, owner: 18}}
+	s.cables = []cableRow{{id: 300, ends: []cableEnd{{"dcim.interface", 100, 17}, {"dcim.interface", 200, 18}}}}
+	changes := changesOK(t, s.start(t), withDescendants(nameScope("leaf1", "leaf2")))
+	wantIDs(t, changes, "#1", "#2", "#3")
+	wantParents(t, changes, "leaf2", "#1")
+	wantParents(t, changes, "leaf1", "#2", "#3")
+}
+
+// Changed fields applies to descendant updates as to any other; creates and
+// deletes pass.
+func TestChanges_DescendantsChangedFieldsApply(t *testing.T) {
+	s := newestFirst(
+		ch(1, 1, "dcim.cable", 300).changing("status", "connected", "planned"),
+		ch(2, 2, "dcim.cable", 300),
+		ch(3, 3, "dcim.cable", 300).as("delete"),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17, cable: 300}}
+	s.cables = []cableRow{{id: 300, ends: []cableEnd{{"dcim.interface", 100, 17}}}}
+	spec := withDescendants(nameScope("leaf1"))
+	spec.ChangedFields = []string{"status"}
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1", "#3")
+}
+
+func TestChanges_DescendantsVM(t *testing.T) {
+	s := newestFirst(
+		created(1, 1, "ipam.ipaddress", 401, assignedTo(31, 500)),
+		created(2, 2, "dcim.macaddress", 402, assignedTo(31, 500)),
+		created(3, 3, "ipam.service", 600, `{"parent_object_type":30,"parent_object_id":40}`),
+		created(4, 4, "ipam.service", 601, `{"virtual_machine":40}`),
+		// A device interface sharing VM interface 500's id.
+		created(5, 5, "ipam.ipaddress", 403, assignedTo(14, 500)),
+	)
+	s.vms = []string{briefRow("virtualization/virtual-machines", 40, "name", "vm40", "vm40")}
+	s.vmInterfaces = []childRow{{id: 500, owner: 40}}
+	spec := withDescendants(idScope("40"))
+	spec.ScopeType = "virtualization.virtualmachine"
+	changes := changesOK(t, s.start(t), spec)
+	shown := []string{"#1", "#2", "#3", "#4"}
+	wantIDs(t, changes, shown...)
+	wantParents(t, changes, "vm40", shown...)
+}
+
+// On an interface scope, an IP on it is also recorded against it: it shows
+// once (R13).
+func TestChanges_DescendantsInterfaceScope(t *testing.T) {
+	s := newestFirst(
+		ch(1, 1, "dcim.cable", 300),
+		created(2, 2, "dcim.macaddress", 402, assignedTo(14, 100)),
+		created(3, 3, "ipam.ipaddress", 401, assignedTo(14, 100)).relatedTo("dcim.interface", 100),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17, cable: 300}}
+	spec := withDescendants(idScope("100"))
+	spec.ScopeType = "dcim.interface"
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1", "#2", "#3")
+}
+
+// A device with nothing attached reads no addresses, and scans only for
+// modules and services: no cable can match. Its track is today's.
+func TestChanges_DescendantsNothingAttached(t *testing.T) {
+	rows := []loggedChange{
+		ch(1, 1, "dcim.device", 17),
+		ch(2, 2, "dcim.interface", 5).relatedTo("dcim.device", 17),
+	}
+	s := newScopedChangeServer(rows...)
+	got := changesOK(t, s.start(t), withDescendants(nameScope("leaf1")))
+	sameRows(t, got, changesOK(t, newScopedChangeServer(rows...).start(t), scoped(nameScope("leaf1"), 50)))
+
+	for _, q := range s.changeLog() {
+		if carries(q, 20, 21) {
+			t.Errorf("change-log read %v: want no address scan", q)
+		}
+	}
+	parts := scanReads(s, 17, 22, 23)
+	if len(parts) != 1 {
+		t.Fatalf("parts scans = %v, want one", parts)
+	}
+	if got := typeIDsOf(t, parts[0]); !reflect.DeepEqual(got, []int64{22, 23}) {
+		t.Errorf("parts scan changed_object_type_id = %v, want [22 23]", got)
+	}
+}
+
+func TestChanges_DescendantsOffMakesTodaysRequests(t *testing.T) {
+	s := eachKindServer()
+	changesOK(t, s.start(t), scoped(nameScope("leaf1"), 50))
+	for _, path := range []string{"dcim/interfaces", "dcim/cables", "virtualization/virtual-machines", "virtualization/interfaces"} {
+		if lists := s.requestsTo(path); len(lists) != 0 {
+			t.Errorf("%s requests = %v, want none", path, lists)
+		}
+	}
+	if own, related, all := len(s.ownReads()), len(s.relatedReads()), len(s.changeLog()); own != 1 || related != 1 || all != 2 {
+		t.Errorf("own reads %d, related reads %d, all %d; want 1, 1, 2", own, related, all)
+	}
+}
+
+// Where Include descendants can't apply, it makes no request and reads no type
+// map: with the map failing, there is no descendants-error marker. Each run
+// gets a fresh server and provider, since the map's failure is cached.
+func TestChanges_DescendantsNoopWhereTheyCantApply(t *testing.T) {
+	site := idScope("6")
+	site.ScopeType = "dcim.site"
+	deviceOnly := idScope("17")
+	deviceOnly.ObjectTypes = []string{"dcim.device"}
+	for name, spec := range map[string]provider.ChangeSpec{
+		"unscoped":                    {},
+		"site scope":                  site,
+		"device scope, own type only": deviceOnly,
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := func(descendants bool) ([]provider.Change, []string) {
+				s := newScopedChangeServer(ch(1, 1, "dcim.device", 17), ch(2, 2, "dcim.site", 6))
+				s.interfaces = []childRow{{id: 100, owner: 17, cable: 300}}
+				s.coreStatus = http.StatusForbidden
+				spec := spec
+				spec.Limit, spec.Descendants = 10, descendants
+				changes := changesOK(t, s.start(t), spec)
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				return changes, slices.Sorted(slices.Values(s.requests))
+			}
+			on, onRequests := run(true)
+			off, offRequests := run(false)
+			if slices.Contains(changeIDs(on), string(provider.ChangeKindDescendantsError)) {
+				t.Errorf("changes = %v, want no descendants-error marker", changeIDs(on))
+			}
+			sameRows(t, on, off)
+			if !reflect.DeepEqual(onRequests, offRequests) {
+				t.Errorf("requests = %v, want %v as with Include descendants off", onRequests, offRequests)
+			}
+		})
+	}
+}
+
+// Object types decides which scans run, and which children are read for them:
+// a device's cables need its interfaces, which its cable ends are read through
+// (R5). The interface deletes that build them don't reach the track (R9).
+func TestChanges_DescendantsObjectTypesNarrowTheReads(t *testing.T) {
+	s := newestFirst(
+		ch(1, 1, "dcim.cable", 300),
+		ifaceDelete(2, 2, 105, 17),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17, cable: 300}}
+	s.cables = []cableRow{{id: 300, ends: []cableEnd{{"dcim.interface", 100, 17}}}}
+	spec := withDescendants(nameScope("leaf1"))
+	spec.ObjectTypes = []string{"dcim.cable"}
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1")
+
+	if lists := s.requestsTo("dcim/interfaces"); len(lists) != 1 {
+		t.Errorf("interface lists = %v, want one", lists)
+	}
+	deletes := slices.DeleteFunc(s.changeLog(), func(q url.Values) bool { return !carries(q, 14) || q.Get("action") != "delete" })
+	if len(deletes) != 1 {
+		t.Errorf("interface-delete reads = %v, want one", deletes)
+	}
+	for _, q := range s.changeLog() {
+		if carries(q, 20, 21) {
+			t.Errorf("change-log read %v: want no address scan", q)
+		}
+	}
+	parts := scanReads(s, 17, 22, 23)
+	if len(parts) != 1 || !reflect.DeepEqual(parts[0]["changed_object_type_id"], []string{"17"}) {
+		t.Errorf("parts scans = %v, want one with changed_object_type_id=17 only", parts)
+	}
+}
+
+// A NetBox that ignores the scans' type filter can't widen them: a scan keeps
+// only the types it asked for, though the IP and the module would match leaf1.
+func TestChanges_DescendantScansCheckTheirTypes(t *testing.T) {
+	s := newestFirst(
+		ch(1, 1, "dcim.cable", 300),
+		created(2, 2, "ipam.ipaddress", 401, assignedTo(14, 100)),
+		created(3, 3, "dcim.module", 500, `{"device":17}`),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17, cable: 300}}
+	s.cables = []cableRow{{id: 300, ends: []cableEnd{{"dcim.interface", 100, 17}}}}
+	s.ignoreChangedQ = true
+	spec := withDescendants(nameScope("leaf1"))
+	spec.ObjectTypes = []string{"dcim.cable"}
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1")
+}
+
+// One Action is pushed to the scans. The membership reads don't take the
+// query's filters: only the interface-delete read asks for an action, its own.
+func TestChanges_DescendantsOneActionPushed(t *testing.T) {
+	s := newestFirst(
+		ch(1, 1, "dcim.cable", 300).as("delete"),
+		created(2, 2, "ipam.ipaddress", 401, assignedTo(14, 100)),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17, cable: 300}}
+	s.cables = []cableRow{{id: 300, ends: []cableEnd{{"dcim.interface", 100, 17}}}}
+	spec := withDescendants(nameScope("leaf1"))
+	spec.Actions = []string{"delete"}
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1")
+
+	all := scanReads(s, 20, 21, 17, 22, 23)
+	if len(all) != 2 {
+		t.Fatalf("scans = %v, want the address and parts scans", all)
+	}
+	for _, q := range all {
+		if !reflect.DeepEqual(q["action"], []string{"delete"}) {
+			t.Errorf("scan %v: want action=delete", q)
+		}
+	}
+	membership := 0
+	for _, q := range s.changeLog() {
+		switch {
+		case carries(q, 14):
+			membership++
+			if !reflect.DeepEqual(q["action"], []string{"delete"}) {
+				t.Errorf("interface-delete read %v: want action=delete", q)
+			}
+		case carries(q, 24):
+			membership++
+			if q.Has("action") {
+				t.Errorf("cable-end read %v: want no action", q)
+			}
+		}
+	}
+	if membership != 2 {
+		t.Errorf("membership reads = %d, want the interface-delete and cable-end reads", membership)
+	}
+}
+
+// A scan that stops at the cap ends the track with a cut-off that says only
+// what's attached was cut (R8).
+func TestChanges_DescendantScanCapShowsCutoff(t *testing.T) {
+	var rows []loggedChange
+	for i := 1; i <= 5; i++ {
+		rows = append(rows, created(i, i, "ipam.ipaddress", int64(400+i), assignedTo(14, 200)))
+	}
+	rows = append(rows, ch(10, 10, "dcim.device", 17))
+	s := newScopedChangeServer(rows...)
+	s.interfaces = []childRow{{id: 100, owner: 17}}
+	p := s.start(t)
+	p.changeScanCapOverride = 3
+	changes := changesOK(t, p, withDescendants(nameScope("leaf1")))
+	wantIDs(t, changes, "#10", "cutoff")
+	if cut := changes[len(changes)-1]; !cut.DescendantsOnly {
+		t.Errorf("cut-off DescendantsOnly = false, want true: only the address scan was cut")
+	}
+}
+
+func TestChanges_CutoffNotDescendantsOnlyWhenOwnReadCut(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17), ch(2, 2, "dcim.device", 17), ch(3, 3, "dcim.device", 17))
+	p := s.start(t)
+	p.changeScanCapOverride = 2
+	spec := withDescendants(nameScope("leaf1"))
+	spec.ChangedFields = []string{"status"}
+	changes := changesOK(t, p, spec)
+	wantIDs(t, changes, "cutoff")
+	if cut := changes[len(changes)-1]; cut.DescendantsOnly {
+		t.Errorf("cut-off DescendantsOnly = true, want false: the own read was cut")
+	}
+}
+
+// A membership read capped after To may have missed a child with changes
+// anywhere in the range: the cut-off is To.
+func TestChanges_DescendantMembershipCapShowsCutoffAtTo(t *testing.T) {
+	s := newScopedChangeServer(
+		ifaceDelete(1, 1, 105, 17),
+		ifaceDelete(2, 2, 106, 17),
+		ifaceDelete(3, 3, 107, 17),
+		ch(4, 20, "dcim.device", 17),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17}}
+	p := s.start(t)
+	p.changeScanCapOverride = 2
+	spec := withDescendants(rangeSpec())
+	changes := changesOK(t, p, spec)
+	wantIDs(t, changes, "#4", "cutoff")
+	if cut := changes[len(changes)-1]; !cut.Time.Equal(spec.To) || !cut.DescendantsOnly {
+		t.Errorf("cut-off at %v, DescendantsOnly %v; want at To %v, true", cut.Time, cut.DescendantsOnly, spec.To)
+	}
+}
+
+// leaf1 with interface 100, its own change (#1), a change recorded against it
+// (#2), and an IP (#3) and a module (#4) attached to it.
+func trackServer() *scopedChangeServer {
+	s := newScopedChangeServer(
+		ch(1, 1, "dcim.device", 17),
+		ch(2, 2, "dcim.interface", 100).relatedTo("dcim.device", 17),
+		created(3, 3, "ipam.ipaddress", 401, assignedTo(14, 100)),
+		created(4, 4, "dcim.module", 500, `{"device":17}`),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17}}
+	return s
+}
+
+// A failed descendant read drops every descendant row, the parts scan's that
+// succeeded included, and keeps the rest of the track, with a marker (R2).
+func TestChanges_DescendantReadFailureKeepsTheTrack(t *testing.T) {
+	s := trackServer()
+	s.failTypeID = 20
+	spec := withDescendants(nameScope("leaf1"))
+	spec.To = scopedNow
+	changes := changesOK(t, s.start(t), spec)
+	wantIDs(t, changes, "#1", "#2", "descendants-error")
+	if c := descendantsError(t, changes); !c.Time.Equal(spec.To) {
+		t.Errorf("descendants-error at %v, want at To %v", c.Time, spec.To)
+	}
+	if parts := scanReads(s, 22); len(parts) != 1 {
+		t.Errorf("parts scans = %v, want one: its rows are dropped, not unread", parts)
+	}
+}
+
+func TestChanges_DescendantTypeMapUnreadableKeepsTheTrack(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.coreStatus = http.StatusForbidden
+	before := time.Now()
+	changes := changesOK(t, s.start(t), withDescendants(idScope("17")))
+	wantIDs(t, changes, "#1", "descendants-error")
+	c := descendantsError(t, changes)
+	if c.Time.Before(before) || c.Time.After(time.Now()) {
+		t.Errorf("descendants-error at %v, want now: the query has no To", c.Time)
+	}
+	if u := provider.Classify(c.Err); u == nil || u.AnnotationReason != provider.AnnotationReasonDescendantTypesUnreadable {
+		t.Errorf("Err = %v, want %s", c.Err, provider.AnnotationReasonDescendantTypesUnreadable)
+	}
+}
+
+// A descendant read held past the descendants deadline doesn't hold the track:
+// it shows, with a descendants-slow marker (R15).
+func TestChanges_DescendantsSlowKeepsTheTrack(t *testing.T) {
+	s := trackServer()
+	s.delayTypeID, s.delayFor = 20, 5*time.Second
+	p := s.start(t)
+	p.descendantsWaitOverride = 100 * time.Millisecond
+	changes, _ := changesWithin(t, p, withDescendants(nameScope("leaf1")), 2*time.Second)
+	wantIDs(t, changes, "#1", "#2", "descendants-error")
+	c := descendantsError(t, changes)
+	if u := provider.Classify(c.Err); u == nil || u.AnnotationReason != provider.AnnotationReasonDescendantsSlow || u.AnnotationCount < 1 {
+		t.Errorf("Err = %v, want %s with a count of seconds", c.Err, provider.AnnotationReasonDescendantsSlow)
+	}
+}
+
+// The caller's context ending is the query ending: an error, not a marker. It
+// is cancelled once the address scan is held, so the own and related reads are
+// done and only a descendant read is cut.
+func TestChanges_CallerCancelledFails(t *testing.T) {
+	s := trackServer()
+	s.delayTypeID, s.delayFor = 20, 5*time.Second
+	p := s.start(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for end := time.Now().Add(2 * time.Second); len(scanReads(s, 20)) == 0 && time.Now().Before(end); {
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+	}()
+
+	type result struct {
+		changes []provider.Change
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		changes, err := p.Changes(ctx, withDescendants(nameScope("leaf1")))
+		done <- result{changes, err}
+	}()
+	select {
+	case got := <-done:
+		if got.err == nil {
+			t.Errorf("Changes = %v, nil; want an error", changeIDs(got.changes))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Changes still blocked 3s after its context was cancelled")
+	}
+	if held := scanReads(s, 20); len(held) != 1 {
+		t.Errorf("address scans = %v, want the one the cancel cut", held)
+	}
+}
+
+// A track whose descendant rows were merged says when the limit left a change
+// out (R12). Without them, the track is today's.
+func TestChanges_DescendantsLimitMarker(t *testing.T) {
+	rows := []loggedChange{
+		ch(1, 1, "dcim.device", 17),
+		created(2, 2, "ipam.ipaddress", 401, assignedTo(14, 100)),
+		ch(3, 3, "dcim.interface", 100).relatedTo("dcim.device", 17),
+		ch(4, 4, "dcim.device", 17),
+		created(5, 5, "dcim.module", 500, `{"device":17}`),
+	}
+	from := scopedNow.Add(-60 * time.Minute)
+	start := func() *Provider {
+		s := newScopedChangeServer(rows...)
+		s.interfaces = []childRow{{id: 100, owner: 17}}
+		return s.start(t)
+	}
+	spec := withDescendants(nameScope("leaf1"))
+	spec.From, spec.Limit = from, 3
+
+	t.Run("descendants merged", func(t *testing.T) {
+		changes := changesOK(t, start(), spec)
+		wantIDs(t, changes, "#1", "#2", "#3", "limit")
+		c := changes[len(changes)-1]
+		if until := scopedNow.Add(-3 * time.Minute); !c.Time.Equal(from) || !c.Until.Equal(until) || c.Limit != 3 {
+			t.Errorf("limit marker at %v, until %v, limit %d; want at From %v, until %v, limit 3", c.Time, c.Until, c.Limit, from, until)
+		}
+	})
+	t.Run("From zero", func(t *testing.T) {
+		spec := spec
+		spec.From = time.Time{}
+		changes := changesOK(t, start(), spec)
+		wantIDs(t, changes, "#1", "#2", "#3", "limit")
+		if c, until := changes[len(changes)-1], scopedNow.Add(-3*time.Minute); !c.Time.Equal(until) || !c.Until.Equal(until) {
+			t.Errorf("limit marker at %v, until %v; want both at the oldest shown change, %v", c.Time, c.Until, until)
+		}
+	})
+	t.Run("descendants off", func(t *testing.T) {
+		spec := spec
+		spec.Descendants = false
+		wantIDs(t, changesOK(t, start(), spec), "#1", "#3", "#4")
+	})
+	// The change-log reads stop short of the limit (#1 and #2); the journal
+	// merge drops the older of two entries. The oldest shown is the newer one.
+	t.Run("journal merge drops a change", func(t *testing.T) {
+		s := newScopedChangeServer(rows[0], rows[1])
+		s.interfaces = []childRow{{id: 100, owner: 17}}
+		s.journal = []journalRow{
+			{typ: "dcim.device", objID: 17, display: "leaf1", minutes: 3},
+			{typ: "dcim.device", objID: 17, display: "leaf1", minutes: 4},
+		}
+		spec := spec
+		spec.Journal = true
+		changes := changesOK(t, s.start(t), spec)
+		var kinds []provider.ChangeKind
+		for _, c := range changes {
+			kinds = append(kinds, c.Kind)
+		}
+		want := []provider.ChangeKind{provider.ChangeKindChange, provider.ChangeKindChange, provider.ChangeKindJournal, provider.ChangeKindLimit}
+		if !reflect.DeepEqual(kinds, want) {
+			t.Fatalf("kinds = %v (%v), want two changes, a journal entry, then limit", kinds, changeIDs(changes))
+		}
+		if c := changes[3]; !c.Until.Equal(scopedNow.Add(-3 * time.Minute)) {
+			t.Errorf("limit marker until %v, want the journal entry's time", c.Until)
+		}
+	})
+	t.Run("unscoped", func(t *testing.T) {
+		wantIDs(t, changesOK(t, start(), provider.ChangeSpec{From: from, Limit: 3, Descendants: true}), "#1", "#2", "#3")
+	})
+}
+
+func TestDescendantsDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		caller  time.Duration // 0: no caller deadline
+		want    time.Duration
+	}{
+		{"capped at 8s", 30 * time.Second, 0, 8 * time.Second},
+		{"half the Timeout", 10 * time.Second, 0, 5 * time.Second},
+		{"a fifth of the caller's time left", 30 * time.Second, 5 * time.Second, 4 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New("http://nb", "token", http.DefaultClient, WithRequestTimeout(tc.timeout))
+			ctx := context.Background()
+			if tc.caller > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.caller)
+				defer cancel()
+			}
+			want := time.Now().Add(tc.want)
+			if got := p.descendantsDeadline(ctx); got.Sub(want).Abs() > 250*time.Millisecond {
+				t.Errorf("deadline = now+%v, want about now+%v", time.Until(got).Round(time.Millisecond), tc.want)
+			}
+		})
+	}
+}
+
+// An error that came back before the descendants deadline keeps its own cause,
+// though the deadline then cut another read.
+func TestChanges_EarlyFailureIsNotSlow(t *testing.T) {
+	s := trackServer()
+	s.failTypeID = 20
+	s.delayTypeID, s.delayFor = 22, 5*time.Second
+	p := s.start(t)
+	p.descendantsWaitOverride = 100 * time.Millisecond
+	changes, _ := changesWithin(t, p, withDescendants(nameScope("leaf1")), 2*time.Second)
+	wantIDs(t, changes, "#1", "#2", "descendants-error")
+	c := descendantsError(t, changes)
+	if u := provider.Classify(c.Err); u != nil && u.AnnotationReason == provider.AnnotationReasonDescendantsSlow {
+		t.Errorf("Err = %v, want the 500's own cause", c.Err)
+	}
+	var apiErr *APIError
+	if !errors.As(c.Err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("Err = %v, want the address scan's 500", c.Err)
+	}
+}
+
+// A read cut by the HTTP client's own timeout matches context.DeadlineExceeded
+// too, but the descendants deadline didn't cut it: it keeps its own cause.
+func TestChanges_RequestTimeoutIsNotSlow(t *testing.T) {
+	s := trackServer()
+	s.delayTypeID, s.delayFor = 20, 5*time.Second
+	p := s.start(t)
+	p.client.http.Timeout = 200 * time.Millisecond
+	p.descendantsWaitOverride = 3 * time.Second
+	changes, _ := changesWithin(t, p, withDescendants(nameScope("leaf1")), 2*time.Second)
+	wantIDs(t, changes, "#1", "#2", "descendants-error")
+	c := descendantsError(t, changes)
+	if u := provider.Classify(c.Err); u != nil && u.AnnotationReason == provider.AnnotationReasonDescendantsSlow {
+		t.Errorf("Err = %v, want the client timeout's own cause", c.Err)
+	}
+	if !errors.Is(c.Err, context.DeadlineExceeded) {
+		t.Errorf("Err = %v, want a timeout", c.Err)
+	}
+}
+
+func TestChanges_DescendantsCarryBranch(t *testing.T) {
+	s := eachKindServer()
+	s.branches = `{"count":1,"next":null,"results":[{"name":"br1","schema_id":"td5smq0f"}]}`
+	changes, err := s.start(t).Changes(provider.WithBranch(context.Background(), "br1"), withDescendants(nameScope("leaf1")))
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	wantIDs(t, changes, "#1", "#2", "#3", "#4", "#5", "#6", "#7", "#8")
+
+	for _, path := range []string{"dcim/interfaces", "dcim/cables"} {
+		if len(s.requestsTo(path)) == 0 {
+			t.Errorf("no %s request", path)
+		}
+	}
+	if len(scanReads(s, 20)) == 0 {
+		t.Error("no address scan")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, h := range s.headers {
+		if h != "td5smq0f" {
+			t.Errorf("%s sent X-NetBox-Branch %q, want td5smq0f", s.requests[i], h)
+		}
+	}
+}
+
+func TestMatchers(t *testing.T) {
+	change := func(pre, post string) objectChange {
+		return objectChange{PrechangeData: decodeObject(json.RawMessage(pre)), PostchangeData: decodeObject(json.RawMessage(post))}
+	}
+	ifaces := map[int64]int64{100: 17, 200: 18}
+	scopeIDs := map[int64]bool{17: true}
+	unassigned := `{"assigned_object_type":null,"assigned_object_id":null}`
+	for _, tc := range []struct {
+		name      string
+		match     func(objectChange) (int64, bool)
+		pre, post string
+		owner     int64
+		ok        bool
+	}{
+		{"assigned: after side", nil, "", assignedTo(14, 100), 17, true},
+		{"assigned: before side", nil, assignedTo(14, 100), unassigned, 17, true},
+		{"assigned: after side wins", nil, assignedTo(14, 100), assignedTo(14, 200), 18, true},
+		{"assigned: type mismatch", nil, "", assignedTo(31, 100), 0, false},
+		{"assigned: string id", nil, "", `{"assigned_object_type":14,"assigned_object_id":"100"}`, 0, false},
+		{"service: 4.3 shape", func(oc objectChange) (int64, bool) { return matchServiceParent(oc, 12, "device", scopeIDs) },
+			"", `{"parent_object_type":12,"parent_object_id":17}`, 17, true},
+		{"service: 4.2 shape", func(oc objectChange) (int64, bool) { return matchServiceParent(oc, 12, "device", scopeIDs) },
+			"", `{"device":17}`, 17, true},
+		{"service: wrong parent type", func(oc objectChange) (int64, bool) { return matchServiceParent(oc, 12, "device", scopeIDs) },
+			"", `{"parent_object_type":30,"parent_object_id":17}`, 0, false},
+		{"owner: before side", func(oc objectChange) (int64, bool) { return matchOwner(oc, "device", scopeIDs) },
+			`{"device":17}`, "", 17, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			match := tc.match
+			if match == nil {
+				match = func(oc objectChange) (int64, bool) { return matchAssigned(oc, 14, ifaces) }
+			}
+			if owner, ok := match(change(tc.pre, tc.post)); owner != tc.owner || ok != tc.ok {
+				t.Errorf("= %d, %v; want %d, %v", owner, ok, tc.owner, tc.ok)
+			}
+		})
 	}
 }

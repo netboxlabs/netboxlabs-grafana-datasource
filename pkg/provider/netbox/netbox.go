@@ -117,6 +117,8 @@ type Provider struct {
 	changeScanCapOverride int
 	// childListCapOverride lowers childListCapRows; tests only.
 	childListCapOverride int
+	// descendantsWaitOverride replaces descendantsBudget; tests only.
+	descendantsWaitOverride time.Duration
 
 	// branchingInstalled caches whether netbox-branching is installed — an
 	// instance-wide, branch-invariant property, so a single value + expiry
@@ -1705,6 +1707,17 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 // when scoped) are read alongside the change-log reads and merged in by time,
 // under the same limit.
 //
+// With Include descendants on, a device, VM, interface or VM-interface scope
+// also reads the changes to what's attached to it (descendantChanges),
+// alongside the other reads, and merges them in the same way. Those reads run
+// under their own deadline (descendantsDeadline, R15), so a slow chain of them
+// can't hold the track past the caller's. While the caller's context is live,
+// a descendant read that fails or runs past that deadline doesn't fail the
+// query: the descendant rows are dropped and the track ends with one
+// descendants-error marker (R2). A track whose descendant rows were merged
+// ends with a limit marker when the limit left a change out (R12); every other
+// track is cut at the limit silently, as before.
+//
 // The names the markers carry are best effort, and none holds the query. The
 // network name reads (the by-ID name fill, the diffs' related names and the
 // journal authors) each wait their own namesWait. The waits on the cached
@@ -1759,6 +1772,21 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	if spec.Journal {
 		wg.Go(func() { journal, journalErr = p.journalEntries(ctx, spec, scope, wanted, limit) })
 	}
+	// What's attached, under its own deadline (R15). dctx is cancelled only when
+	// Changes returns, so its error below is the deadline's or the caller's.
+	var (
+		desc            []changeReadResult
+		descErr         error
+		dctx            context.Context
+		start, deadline time.Time
+	)
+	if spec.Descendants && scope != nil {
+		start, deadline = time.Now(), p.descendantsDeadline(ctx)
+		var cancel context.CancelFunc
+		dctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+		wg.Go(func() { desc, descErr = p.descendantChanges(dctx, spec, scope, wanted, filter, limit) })
+	}
 	wg.Wait()
 	for _, r := range results {
 		if r.err != nil {
@@ -1768,6 +1796,21 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	if journalErr != nil {
 		return nil, journalErr
 	}
+	if descErr != nil {
+		// The caller's context ending ends the query, as it does for any read.
+		if ctx.Err() != nil {
+			return nil, descErr
+		}
+		// Slow only when the descendants deadline cut a read. An error that came
+		// back before it, such as a 500, keeps its own cause.
+		if errors.Is(descErr, context.DeadlineExceeded) && errors.Is(dctx.Err(), context.DeadlineExceeded) {
+			descErr = &AnnotationError{Reason: provider.AnnotationReasonDescendantsSlow, Count: max(1, int(deadline.Sub(start).Seconds()))}
+		}
+		// R2: the rest of the track stands, and a marker says what's missing.
+		desc = nil
+	}
+	descMerged := len(desc) > 0
+	results = append(results, desc...)
 
 	kept := mergeChanges(results, limit)
 	// The cut-off is decided on the change-log rows (kept), before the journal
@@ -1784,18 +1827,46 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	}
 	if scope != nil {
 		for i := range kept {
-			if kept[i].fromRelated {
+			switch {
+			case kept[i].descendant:
+				kept[i].parent = descendantParent(scope, kept[i].owner)
+			case kept[i].fromRelated:
 				kept[i].parent = relatedParent(scope, kept[i].oc)
 			}
 		}
 	}
 	changes := p.resolveDiffs(ctx, kept, filter.fields)
+	// R12. The journal merge can leave a change out too, so this is decided
+	// while the change-log rows and the journal entries are still apart.
+	showLimit := descMerged && (limitReached(results, kept, limit) || len(changes)+len(journal) > limit)
 	if len(journal) > 0 {
 		changes = mergeJournal(changes, journal, limit)
+	}
+	// The oldest shown change, before any marker is appended: what the limit
+	// left out is older. A track cut at the limit holds at least one change.
+	var oldest time.Time
+	if len(changes) > 0 {
+		oldest = changes[len(changes)-1].Time
 	}
 	// After the cut, so the limit can't drop it.
 	if showCut {
 		changes = append(changes, cut)
+	}
+	if showLimit {
+		// At From rather than at the oldest shown change, which a marker at its
+		// own time would cover in Grafana.
+		at := spec.From
+		if at.IsZero() {
+			at = oldest
+		}
+		changes = append(changes, provider.Change{Kind: provider.ChangeKindLimit, Time: at, Until: oldest, Limit: limit})
+	}
+	if descErr != nil {
+		at := spec.To
+		if at.IsZero() {
+			at = time.Now()
+		}
+		changes = append(changes, provider.Change{Kind: provider.ChangeKindDescendantsError, Time: at, Err: descErr})
 	}
 	for i := range changes {
 		changes[i].URL = withBranchParam(changes[i].URL, branch)

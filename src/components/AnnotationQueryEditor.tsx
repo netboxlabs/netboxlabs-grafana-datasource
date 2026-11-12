@@ -18,6 +18,15 @@ interface Props {
   datasource: DataSource;
 }
 
+// Scope types whose attached objects (cables, addresses, modules, services) the
+// backend can follow.
+const DESCENDANT_SCOPE_TYPES = [
+  'dcim.device',
+  'virtualization.virtualmachine',
+  'dcim.interface',
+  'virtualization.vminterface',
+];
+
 // Common NetBox content types for filtering changelog annotations. Users can add
 // custom values for plugin models.
 const CONTENT_TYPE_PRESETS: Array<SelectableValue<string>> = [
@@ -65,6 +74,9 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
     setScopeText(query.scope ?? '');
   }
   const selected = (query.objectTypes ?? []).map((v) => ({ label: v, value: v }));
+
+  const scopeType = (query.scopeType ?? '').trim().toLowerCase() || 'dcim.device';
+  const showDescendants = !!query.scope && DESCENDANT_SCOPE_TYPES.includes(scopeType);
 
   return (
     <Stack gap={1} direction="column">
@@ -124,6 +136,19 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
           onChange={(v) => onChange({ ...query, scopeMatch: v })}
         />
       </InlineField>
+      {showDescendants && (
+        <InlineField
+          label="Include descendants"
+          labelWidth={20}
+          tooltip="Also show changes to what's attached: cables, IP and MAC addresses on its interfaces, modules and services. Uses more NetBox requests."
+        >
+          <InlineSwitch
+            id="annotation-descendants"
+            value={query.includeDescendants ?? true}
+            onChange={(e) => onChange({ ...query, includeDescendants: e.currentTarget.checked })}
+          />
+        </InlineField>
+      )}
       <InlineField
         label="Actions"
         labelWidth={20}

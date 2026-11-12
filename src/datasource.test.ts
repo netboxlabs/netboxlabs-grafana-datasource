@@ -204,6 +204,7 @@ describe('prepareAnnotationQuery', () => {
         actions: ['update'],
         changedFields: ['status'],
         journal: true,
+        includeDescendants: false,
       },
     });
     expect(out).toEqual(
@@ -214,6 +215,7 @@ describe('prepareAnnotationQuery', () => {
         actions: ['update'],
         changedFields: ['status'],
         journal: true,
+        includeDescendants: false,
       })
     );
   });

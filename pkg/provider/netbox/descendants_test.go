@@ -1170,6 +1170,30 @@ func TestChanges_DescendantsLimitMarker(t *testing.T) {
 	})
 }
 
+// On an interface scope the related read and the address scan return the same
+// IP changes, and the track keeps each once. The address scan stopping at the
+// limit still fills the track: a read that stops there holds limit distinct
+// changes, so the dedupe can't leave the track short of it. The limit marker
+// shows, until the oldest shown change; nothing older is shown.
+func TestChanges_DescendantsLimitMarkerAfterDedupe(t *testing.T) {
+	var rows []loggedChange
+	for i := 1; i <= 5; i++ {
+		rows = append(rows, created(i, i, "ipam.ipaddress", int64(400+i), assignedTo(14, 100)).relatedTo("dcim.interface", 100))
+	}
+	s := newestFirst(rows...)
+	s.interfaces = []childRow{{id: 100, owner: 17}}
+	spec := withDescendants(idScope("100"))
+	spec.ScopeType, spec.Limit = "dcim.interface", 3
+	changes := changesOK(t, s.start(t), spec)
+	wantIDs(t, changes, "#1", "#2", "#3", "limit")
+	if c, until := changes[len(changes)-1], scopedNow.Add(-3*time.Minute); !c.Until.Equal(until) {
+		t.Errorf("limit marker until %v, want the oldest shown change, %v", c.Until, until)
+	}
+	if scans := scanReads(s, 20); len(scans) != 1 {
+		t.Errorf("address scans = %v, want one", scans)
+	}
+}
+
 func TestDescendantsDeadline(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

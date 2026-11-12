@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 
@@ -146,6 +147,16 @@ func TestQueryErrorMessage_Annotation(t *testing.T) {
 		got := queryErrorMessage(&netbox.AnnotationError{Reason: provider.AnnotationReasonNoMatch, Value: long}, false)
 		if strings.Contains(got, long[:maxUpstreamDetail+1]) || !strings.Contains(got, long[:maxUpstreamDetail]+"…") {
 			t.Errorf("message (%d bytes) does not bound the value at %d bytes", len(got), maxUpstreamDetail)
+		}
+	})
+
+	// Device names aren't ASCII everywhere: the cut must not split a character.
+	t.Run("a long non-ASCII value is cut on a character", func(t *testing.T) {
+		// The leading byte puts a byte-count cut in the middle of an "é".
+		long := "x" + strings.Repeat("é", 5000)
+		got := queryErrorMessage(&netbox.AnnotationError{Reason: provider.AnnotationReasonNoMatch, Value: long}, false)
+		if !utf8.ValidString(got) || strings.Contains(got, `\x`) {
+			t.Errorf("message splits a character: %q", got)
 		}
 	})
 }

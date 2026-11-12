@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
@@ -875,9 +876,15 @@ func queryErrorMessage(err error, viaProxy bool) string {
 func annotationErrorMessage(u *provider.UpstreamError) string {
 	// Bounded like the object type above: the value is free text from the
 	// annotation editor or a dashboard variable, and lands in the same toast.
+	// The cut steps back to a character's first byte, so a non-ASCII name isn't
+	// split into an escape.
 	value := u.AnnotationValue
 	if len(value) > maxUpstreamDetail {
-		value = value[:maxUpstreamDetail] + "…"
+		n := maxUpstreamDetail
+		for n > 0 && !utf8.RuneStart(value[n]) {
+			n--
+		}
+		value = value[:n] + "…"
 	}
 	switch u.AnnotationReason {
 	case provider.AnnotationReasonEmptyScope:

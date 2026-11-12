@@ -143,3 +143,23 @@ func TestOrderingFieldsMatchFrontend(t *testing.T) {
 		}
 	}
 }
+
+// tsScopeType matches one quoted app_label.model in a declaration.
+var tsScopeType = regexp.MustCompile(`'([a-z_0-9]+\.[a-z_0-9]+)'`)
+
+// TestDescendantScopeTypesMatchFrontend pairs descendantKinds (descendants.go)
+// with DESCENDANT_SCOPE_TYPES (src/types.ts), the scope types the editor offers
+// Include descendants for. A type only Go has follows nothing from the editor,
+// since the switch never shows; a type only the editor has shows a switch the
+// backend ignores.
+func TestDescendantScopeTypesMatchFrontend(t *testing.T) {
+	decl := tsDeclaration(t, "DESCENDANT_SCOPE_TYPES")
+	var ts []string
+	for _, m := range tsScopeType.FindAllStringSubmatch(decl, -1) {
+		ts = append(ts, m[1])
+	}
+	slices.Sort(ts)
+	if want := slices.Sorted(maps.Keys(descendantKinds)); !slices.Equal(ts, want) {
+		t.Errorf("DESCENDANT_SCOPE_TYPES (src/types.ts) = %v, descendantKinds (pkg/provider/netbox/descendants.go) = %v; change them together", ts, want)
+	}
+}

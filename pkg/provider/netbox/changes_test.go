@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -438,8 +439,8 @@ func TestChanges_MatchesTypeNamesCaseInsensitively(t *testing.T) {
 }
 
 // If the id map cannot be read at all, the annotation still answers: the query
-// degrades to the single-type name parameter (and, for several types, to the
-// local filter alone) rather than failing outright.
+// degrades to the name parameter, one read per type, rather than failing
+// outright.
 func TestChanges_DegradesWhenObjectTypesCannotBeRead(t *testing.T) {
 	records := []string{
 		changeRecord("dcim.device", "leaf1", 0),
@@ -468,28 +469,43 @@ func TestChanges_DegradesWhenObjectTypesCannotBeRead(t *testing.T) {
 		}
 	})
 
-	t.Run("several types fall back to the local filter", func(t *testing.T) {
-		s := &changeLogServer{records: records, objectTypesStatus: http.StatusForbidden}
+	t.Run("several types are read by name, one read each", func(t *testing.T) {
+		// The newest rows are another type's. One read left to the local filter
+		// would fetch only those and come back empty.
+		s := &changeLogServer{records: []string{
+			changeRecord("dcim.site", "AMS1", 0),
+			changeRecord("dcim.site", "AMS2", 1),
+			changeRecord("dcim.device", "leaf1", 2),
+			changeRecord("ipam.ipaddress", "10.0.0.1/24", 3),
+		}, objectTypesStatus: http.StatusForbidden}
 		p := s.start(t)
 
 		changes, err := p.Changes(context.Background(), provider.ChangeSpec{
-			ObjectTypes: []string{"dcim.device", "ipam.ipaddress"}, Limit: 10,
+			ObjectTypes: []string{"dcim.device", "ipam.ipaddress"}, Limit: 2,
 		})
 		if err != nil {
 			t.Fatalf("Changes: %v", err)
 		}
-		if got := s.sentParam(t, "changed_object_type"); len(got) != 0 {
-			t.Errorf("changed_object_type sent = %v, want none: repeated it is LAST WINS on 4.4.10, which would drop a type", got)
+		var sent []string
+		s.mu.Lock()
+		for _, q := range s.requests {
+			// Repeated, the name is LAST WINS on 4.4.10, which would drop a type.
+			if q.Has("changed_object_type_id") || len(q["changed_object_type"]) != 1 {
+				t.Errorf("read %v: want one changed_object_type and no ids", q)
+			}
+			sent = append(sent, q.Get("changed_object_type"))
 		}
-		if got := s.sentParam(t, "changed_object_type_id"); len(got) != 0 {
-			t.Errorf("changed_object_type_id sent = %v, want none", got)
+		s.mu.Unlock()
+		sort.Strings(sent)
+		if want := []string{"dcim.device", "ipam.ipaddress"}; !slices.Equal(sent, want) {
+			t.Errorf("changed_object_type sent = %v, want %v", sent, want)
 		}
-		seen := map[string]bool{}
+		var reprs []string
 		for _, c := range changes {
-			seen[c.ObjectType] = true
+			reprs = append(reprs, c.ObjectRepr)
 		}
-		if !seen["dcim.device"] || !seen["ipam.ipaddress"] || len(changes) != 2 {
-			t.Errorf("changes = %+v, want one dcim.device and one ipam.ipaddress", changes)
+		if want := []string{"leaf1", "10.0.0.1/24"}; !slices.Equal(reprs, want) {
+			t.Errorf("changes = %v, want %v", reprs, want)
 		}
 	})
 
@@ -865,5 +881,120 @@ func TestChanges_LocalFilterKeepsThePushdownNonWidening(t *testing.T) {
 	}
 	if len(changes) != 1 || changes[0].ObjectType != "dcim.device" {
 		t.Errorf("changes = %+v, want only the dcim.device row", changes)
+	}
+}
+
+func TestCutoffChange_OnlyScanningReadsCut(t *testing.T) {
+	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Hour)
+	results := []changeReadResult{
+		{capped: true, oldest: t1},
+		{capped: true, scan: true, oldest: t2, scanned: 5},
+		{scanned: 3},
+	}
+	c, capped := cutoffChange(results)
+	if !capped || !c.Time.Equal(t2) || c.Scanned != 8 || c.DescendantsOnly {
+		t.Fatalf("cutoff = %+v capped=%v, want capped at %v with 8 scanned and not descendants-only", c, capped, t2)
+	}
+
+	results[1].descendant = true
+	if c, _ := cutoffChange(results); !c.DescendantsOnly {
+		t.Errorf("DescendantsOnly = false, want true when every capped read is a descendant read")
+	}
+
+	if _, capped := cutoffChange([]changeReadResult{{capped: true, oldest: t1}, {scanned: 3}}); capped {
+		t.Errorf("a capped read that doesn't scan cut the track")
+	}
+}
+
+func TestWalkChangeRead_DescendantMatcherSetsOwner(t *testing.T) {
+	p := newScopedChangeServer(
+		ch(1, 1, "dcim.interface", 5),
+		ch(2, 2, "dcim.interface", 6),
+	).start(t)
+	r := changeRead{
+		q:    url.Values{},
+		keep: func(objectChange) bool { t.Fatal("keep called on a descendant read"); return false },
+		descendant: func(oc objectChange) (int64, bool) {
+			if oc.ID == 1 {
+				return 17, true
+			}
+			return 0, false
+		},
+	}
+	res := p.walkChangeRead(context.Background(), r, r.q, changeFilter{}, 10, 10)
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if len(res.rows) != 1 || res.rows[0].oc.ID != 1 || !res.rows[0].descendant || res.rows[0].owner != 17 {
+		t.Fatalf("rows = %+v, want row 1 only, descendant, owner 17", res.rows)
+	}
+}
+
+func threeDeviceChanges() *scopedChangeServer {
+	return newScopedChangeServer(ch(1, 1, "dcim.device", 17), ch(2, 2, "dcim.device", 17), ch(3, 3, "dcim.device", 17))
+}
+
+func TestWalkChangeRead_LimitAboveMaxRowsIsCapped(t *testing.T) {
+	p := threeDeviceChanges().start(t)
+	r := changeRead{q: url.Values{}, keep: func(objectChange) bool { return true }}
+	res := p.walkChangeRead(context.Background(), r, r.q, changeFilter{}, 3, 2)
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if !res.capped || res.full || len(res.rows) != 2 {
+		t.Fatalf("capped=%v full=%v rows=%d, want capped, not full, 2 rows", res.capped, res.full, len(res.rows))
+	}
+}
+
+func TestWalkChangeRead_FullAtLimit(t *testing.T) {
+	p := threeDeviceChanges().start(t)
+	r := changeRead{q: url.Values{}, keep: func(objectChange) bool { return true }}
+	res := p.walkChangeRead(context.Background(), r, r.q, changeFilter{}, 2, 10)
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if !res.full || res.capped || len(res.rows) != 2 {
+		t.Fatalf("capped=%v full=%v rows=%d, want full, not capped, 2 rows", res.capped, res.full, len(res.rows))
+	}
+}
+
+func TestLimitReached(t *testing.T) {
+	row := func(id int) decodedChange { return decodedChange{oc: objectChange{ID: id}} }
+	tests := []struct {
+		name    string
+		results []changeReadResult
+		kept    []decodedChange
+		limit   int
+		want    bool
+	}{
+		{"under the limit", []changeReadResult{{rows: []decodedChange{row(1)}, full: true}}, []decodedChange{row(1)}, 2, false},
+		{"at the limit, a result full", []changeReadResult{{rows: []decodedChange{row(1), row(2)}, full: true}}, []decodedChange{row(1), row(2)}, 2, true},
+		{"at the limit, leftover row deduped", []changeReadResult{
+			{rows: []decodedChange{row(1), row(2)}},
+			{rows: []decodedChange{row(2)}},
+		}, []decodedChange{row(1), row(2)}, 2, false},
+		{"at the limit, leftover row not kept", []changeReadResult{
+			{rows: []decodedChange{row(1), row(2)}},
+			{rows: []decodedChange{row(3)}},
+		}, []decodedChange{row(1), row(2)}, 2, true},
+		// A full read holds limit distinct changes, so kept holds limit however
+		// many of them another read returned too.
+		{"at the limit, a full read deduped against another", []changeReadResult{
+			{rows: []decodedChange{row(1), row(2)}, full: true},
+			{rows: []decodedChange{row(1), row(2)}},
+		}, []decodedChange{row(1), row(2)}, 2, true},
+		// Change-log rows always carry an id; id 0 is a malformed row, so it can't
+		// be matched to a kept copy and counts as left out.
+		{"at the limit, a kept row with id 0", []changeReadResult{
+			{rows: []decodedChange{row(0), row(1)}},
+		}, []decodedChange{row(0), row(1)}, 2, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := limitReached(tt.results, tt.kept, tt.limit); got != tt.want {
+				t.Errorf("limitReached = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

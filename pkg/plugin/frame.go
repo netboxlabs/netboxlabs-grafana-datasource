@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"html"
 	"strconv"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 // timeColumns are column names whose RFC3339 string values are rendered as time
@@ -186,40 +188,162 @@ func addObjectDataLinks(frame *data.Frame, columns []string) {
 	}
 }
 
+// Annotation rendering limits. A marker shows provider.MaxDiffLines diff lines.
+const (
+	maxDiffValueLen  = 60
+	maxJournalLength = 200
+)
+
 // buildAnnotationsFrame builds a frame whose field names follow Grafana's
 // annotation convention (time/title/text/tags), so changelog events render as
-// annotations on any time-series panel.
+// annotations on any time-series panel. Title and text are HTML, so every
+// NetBox-supplied value is escaped. The id field is always 0: a marker with an
+// id makes Grafana's tooltip offer Edit, which would save a copy.
 func buildAnnotationsFrame(changes []provider.Change) *data.Frame {
 	times := make([]time.Time, 0, len(changes))
 	titles := make([]string, 0, len(changes))
 	texts := make([]string, 0, len(changes))
 	tags := make([]string, 0, len(changes))
+	ids := make([]int64, 0, len(changes))
 
 	for _, c := range changes {
 		times = append(times, c.Time)
-		titles = append(titles, c.ObjectRepr)
-		text := c.Action
-		if c.User != "" {
-			text = fmt.Sprintf("%s by %s", c.Action, c.User)
+		ids = append(ids, 0)
+		var title, text, tag string
+		switch c.Kind {
+		case provider.ChangeKindJournal:
+			title, text, tag = journalMarker(c)
+		case provider.ChangeKindCutoff:
+			title, text, tag = cutoffMarker(c)
+		case provider.ChangeKindLimit:
+			title, text, tag = limitMarker(c)
+		case provider.ChangeKindDescendantsError:
+			// The track around it is intact, so it isn't titled like a failed query.
+			title, text, tag = "NetBox annotation warning", html.EscapeString(c.Message), "netbox,error"
+		default:
+			title, text, tag = changeMarker(c)
 		}
+		titles = append(titles, title)
 		texts = append(texts, text)
-		tagParts := []string{"netbox"}
-		if c.ObjectType != "" {
-			tagParts = append(tagParts, c.ObjectType)
-		}
-		if c.Action != "" {
-			tagParts = append(tagParts, strings.ToLower(c.Action))
-		}
-		tags = append(tags, strings.Join(tagParts, ","))
+		tags = append(tags, tag)
 	}
 
-	frame := data.NewFrame("netbox_changes",
+	return data.NewFrame("netbox_changes",
 		data.NewField("time", nil, times),
 		data.NewField("title", nil, titles),
 		data.NewField("text", nil, texts),
 		data.NewField("tags", nil, tags),
+		data.NewField("id", nil, ids),
 	)
-	return frame
+}
+
+func changeMarker(c provider.Change) (title, text, tag string) {
+	title = html.EscapeString(c.ObjectRepr)
+	if c.Parent != "" {
+		title += " on " + html.EscapeString(c.Parent)
+	}
+
+	var lines []string
+	for i, d := range c.Diff {
+		if i == provider.MaxDiffLines {
+			lines = append(lines, fmt.Sprintf("+%d more", len(c.Diff)-provider.MaxDiffLines))
+			break
+		}
+		lines = append(lines, fmt.Sprintf("%s: %s → %s",
+			html.EscapeString(d.Field), diffValue(d.Before), diffValue(d.After)))
+	}
+	if c.Message != "" {
+		lines = append(lines, `"`+html.EscapeString(c.Message)+`"`)
+	}
+	who := html.EscapeString(c.Action)
+	if c.User != "" {
+		who += " by " + html.EscapeString(c.User)
+	}
+	lines = append(lines, who+markerLink(c.URL))
+	text = strings.Join(lines, "<br>")
+
+	tagParts := []string{"netbox"}
+	if c.ObjectType != "" {
+		tagParts = append(tagParts, c.ObjectType)
+	}
+	if c.Action != "" {
+		tagParts = append(tagParts, strings.ToLower(c.Action))
+	}
+	return title, text, strings.Join(tagParts, ",")
+}
+
+func journalMarker(c provider.Change) (title, text, tag string) {
+	who := "Journal"
+	if c.User != "" {
+		who += " by " + html.EscapeString(c.User)
+	}
+	// CRLF (from NetBox's UI) and a lone CR are line ends too.
+	comments := strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(c.Comments)
+	comments = strings.ReplaceAll(html.EscapeString(truncateRunes(comments, maxJournalLength)), "\n", "<br>")
+	return html.EscapeString(c.ObjectRepr),
+		comments + "<br>" + who + markerLink(c.URL),
+		"netbox,journal," + c.JournalKind
+}
+
+func cutoffMarker(c provider.Change) (title, text, tag string) {
+	text = fmt.Sprintf("Older changes not checked: read %s change-log entries without reaching the start of the range.", thousands(c.Scanned))
+	if c.DescendantsOnly {
+		text = fmt.Sprintf("Older changes to what's attached not checked: read %s change-log entries without reaching the start of the range. The scope's own changes were all read.", thousands(c.Scanned))
+	}
+	return "NetBox change log", text, "netbox,cutoff"
+}
+
+// limitMarker says the query's Limit hid older changes in the range, and from
+// when. Past the largest Limit there is nothing to raise. Below it, the text
+// names the largest too: Changes reads a Limit above it as the default, so a
+// user who set more sees the default here and needs to know why.
+func limitMarker(c provider.Change) (title, text, tag string) {
+	at := c.Until.UTC().Format("2006-01-02 15:04:05 UTC")
+	text = fmt.Sprintf("Limit reached: changes before %s in this range aren't shown. Raise Limit (now %d, at most %s), narrow the range, or narrow Object types.", at, c.Limit, thousands(netbox.MaxLimit))
+	if c.Limit >= netbox.MaxLimit {
+		text = fmt.Sprintf("Limit reached: changes before %s in this range aren't shown. Narrow the range or Object types.", at)
+	}
+	return "NetBox change log", text, "netbox,limit"
+}
+
+// annotationErrorFrame is a failed annotation query's error as one marker at
+// at, in buildAnnotationsFrame's shape. Grafana's scenes dashboards drop an
+// annotation query's error, so without it a failure looks like a quiet window.
+// The message can quote a variable's value, so it is escaped.
+func annotationErrorFrame(msg string, at time.Time) *data.Frame {
+	return data.NewFrame("netbox_changes",
+		data.NewField("time", nil, []time.Time{at}),
+		data.NewField("title", nil, []string{"NetBox annotation error"}),
+		data.NewField("text", nil, []string{html.EscapeString(msg)}),
+		data.NewField("tags", nil, []string{"netbox,error"}),
+		data.NewField("id", nil, []int64{0}),
+	)
+}
+
+// diffValue formats one side of a field change: empty becomes a dash, newlines
+// a space, and long values are cut.
+func diffValue(v string) string {
+	if v == "" {
+		return "—"
+	}
+	v = strings.ReplaceAll(v, "\n", " ")
+	return html.EscapeString(truncateRunes(v, maxDiffValueLen))
+}
+
+func markerLink(url string) string {
+	if url == "" {
+		return ""
+	}
+	return ` · <a href="` + html.EscapeString(url) + `" target="_blank">Open in NetBox</a>`
+}
+
+// truncateRunes cuts s to n runes, marking the cut with an ellipsis.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // buildNodeGraphFrames builds the two frames (nodes + edges) Grafana's node

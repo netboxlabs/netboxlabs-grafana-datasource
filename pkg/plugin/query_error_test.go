@@ -7,15 +7,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/url"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
@@ -78,6 +82,131 @@ func TestQueryErrorResponse_ClassifiesAnUnknownObjectType(t *testing.T) {
 			t.Errorf("status = %v, want %v", resp.Status, backend.StatusInternal)
 		}
 	})
+}
+
+// Every way the provider refuses an annotation query says what to change, and
+// is the query's fault rather than NetBox's.
+func TestQueryErrorMessage_Annotation(t *testing.T) {
+	cases := []struct {
+		err  *netbox.AnnotationError
+		want string
+	}{
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonEmptyScope},
+			"The annotation's scope came out empty. Is its variable empty?"},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonNoMatch, Value: "leaf9"},
+			`No NetBox object named "leaf9" for this annotation's scope. Check the name, or match by ID.`},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonTooManyMatches, Value: "Gi0/1"},
+			`"Gi0/1" matches more than 20 NetBox objects. Names like interface names repeat across devices: give the variable ids and set Match by to ID.`},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonNotAnID, Value: "sw1"},
+			`"sw1" isn't a NetBox id. Set Match by to Name, or give the variable ids.`},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonNoNameFilter},
+			"This object type can't be looked up by name. Set Match by to ID."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonNoEndpoint},
+			"This NetBox doesn't say where this object type lives, so it can't be looked up by name. Set Match by to ID."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: 120},
+			"The scope covers 120 objects; the limit is 100. Narrow the variable's selection. If All means every object, give the All option the custom value $__all."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonUnknownField, Value: "platfrom"},
+			`"platfrom" isn't a field of any NetBox object type. Custom fields are written cf_<name>.`},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonUnknownAction, Value: "deleted"},
+			`"deleted" isn't a change action. Use create, update or delete.`},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonUntrackedField, Value: "last_updated"},
+			`"last_updated" isn't compared between changes, so it can't filter them. Pick another field.`},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonJournalForbidden},
+			"The API token can't read journal entries. Turn off Journal entries, or let the token view them."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonObjectTypesUnreadable},
+			"NetBox's object-type list couldn't be read, and this NetBox version needs it to find related changes. Check that the token can read object types."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonTooManyChildren},
+			"This scope has more than 10,000 interfaces or cables to follow. Narrow the scope, or turn off Include descendants."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonDescendantTypesUnreadable},
+			"NetBox's object-type list couldn't be read. If this keeps happening, turn off Include descendants."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonDescendantsForbidden},
+			"The API token can't read this scope's objects, interfaces or cables. Let the token view them, or turn off Include descendants."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonDescendantsSlow, Count: 20},
+			"Reading what's attached took longer than 20 s. Narrow the range, or turn off Include descendants on a busy NetBox."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.err.Reason, func(t *testing.T) {
+			if got := queryErrorMessage(tc.err, false); got != tc.want {
+				t.Errorf("message = %q, want %q", got, tc.want)
+			}
+			// An object-type list that couldn't be read is NetBox's side, often
+			// passing; every other refusal is the query's.
+			want := backend.StatusBadRequest
+			if tc.err.Reason == provider.AnnotationReasonObjectTypesUnreadable {
+				want = backend.StatusInternal
+			}
+			if got := queryErrorStatus(tc.err); got != want {
+				t.Errorf("status = %v, want %v", got, want)
+			}
+		})
+	}
+
+	// The value is free text from a dashboard variable and lands in a toast.
+	t.Run("a long value is bounded", func(t *testing.T) {
+		long := strings.Repeat("x", 5000)
+		got := queryErrorMessage(&netbox.AnnotationError{Reason: provider.AnnotationReasonNoMatch, Value: long}, false)
+		if strings.Contains(got, long[:maxUpstreamDetail+1]) || !strings.Contains(got, long[:maxUpstreamDetail]+"…") {
+			t.Errorf("message (%d bytes) does not bound the value at %d bytes", len(got), maxUpstreamDetail)
+		}
+	})
+
+	// Device names aren't ASCII everywhere: the cut must not split a character.
+	t.Run("a long non-ASCII value is cut on a character", func(t *testing.T) {
+		// The leading byte puts a byte-count cut in the middle of an "é".
+		long := "x" + strings.Repeat("é", 5000)
+		got := queryErrorMessage(&netbox.AnnotationError{Reason: provider.AnnotationReasonNoMatch, Value: long}, false)
+		if !utf8.ValidString(got) || strings.Contains(got, `\x`) {
+			t.Errorf("message splits a character: %q", got)
+		}
+	})
+}
+
+// Grafana's scenes dashboards drop an annotation query's error, so every error,
+// the annotation's own and any other, also comes back as one marker at the end
+// of the range.
+func TestQuery_AnnotationErrorCarriesMarker(t *testing.T) {
+	to := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name   string
+		err    error
+		status backend.Status
+	}{
+		{"annotation error", &netbox.AnnotationError{Reason: provider.AnnotationReasonNoMatch, Value: "leaf9"}, backend.StatusBadRequest},
+		{"upstream failure", &netbox.APIError{Status: 500, Body: "boom"}, backend.StatusInternal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDatasource(&fakeProvider{changesErr: tc.err})
+			resp := d.query(context.Background(), backend.DataQuery{
+				RefID:     "Anno",
+				TimeRange: backend.TimeRange{From: to.Add(-time.Hour), To: to},
+				JSON:      []byte(`{"queryType":"annotations"}`),
+			}, consumerDashboard)
+
+			if resp.Error == nil || resp.Status != tc.status {
+				t.Fatalf("error = %v, status = %v; want an error with status %v", resp.Error, resp.Status, tc.status)
+			}
+			if len(resp.Frames) != 1 {
+				t.Fatalf("frames = %d, want 1 error marker", len(resp.Frames))
+			}
+			f := resp.Frames[0]
+			if f.RefID != "Anno" {
+				t.Errorf("RefID = %q, want Anno", f.RefID)
+			}
+			if n, _ := f.RowLen(); n != 1 {
+				t.Fatalf("marker rows = %d, want 1", n)
+			}
+			if got := f.Fields[0].At(0).(time.Time); !got.Equal(to) {
+				t.Errorf("marker time = %v, want the range's end %v", got, to)
+			}
+			if got := f.Fields[1].At(0).(string); got != "NetBox annotation error" {
+				t.Errorf("marker title = %q", got)
+			}
+			if got, want := f.Fields[2].At(0).(string), html.EscapeString(resp.Error.Error()); got != want {
+				t.Errorf("marker text = %q, want the error message %q", got, want)
+			}
+		})
+	}
 }
 
 // TestQueryErrorMessage_BatchedTransportFailureIsBounded is the regression test

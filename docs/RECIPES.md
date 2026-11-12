@@ -459,7 +459,133 @@ filters so every match fits.
   On an IP-enrichment query's IP list the token has nothing to drop — the list is
   the input — so All resolves nothing, like an empty list.
 - **Change annotations:** add a dashboard annotation backed by NetBox; optionally
-  restrict to content types (`dcim.device`, `ipam.prefix`). Change-log events overlay
-  your panels with who-changed-what.
+  restrict to content types (`dcim.device`, `ipam.prefix`) or follow one object and the
+  changes recorded against it. Each marker says what changed. See
+  [Device dashboard with change markers](#device-dashboard-with-change-markers), and
+  [Push recipe, no plugin](#push-recipe-no-plugin) for markers stored in Grafana.
 - **Deep links:** include the `display_url` column (hideable); the primary label column
   links each row back to its NetBox object page, and links survive joins.
+
+## Device dashboard with change markers
+
+An annotation can follow one device: its own changes, the changes NetBox records
+against it (its interfaces, and cables being connected to them), and the changes to
+what's attached to it. Each marker says what changed.
+
+1. Add a dashboard variable of type **Query** → NetBox datasource → _Devices_, value
+   field `name`, called `device`.
+2. Add an annotation (dashboard settings → Annotations) backed by NetBox, and set:
+   - **Scope type:** `dcim.device`
+   - **Scope:** `$device`
+   - **Match by:** Name
+
+   Several names, or a multi-value variable, put every matching device in scope.
+   Device and virtual machine names match case-insensitively; other types match
+   exactly. If one name matches more than 20 objects, the query fails: give the
+   variable ids and set **Match by** to ID. A scope of more than 100 objects fails
+   too: narrow the variable's selection, or give its All option the custom value
+   `$__all`. To type a name that contains a comma, write it as `\,`; variable values
+   are escaped for you.
+3. A marker reads like `Ethernet2 on NYC1-leaf-01`, then one `field: before → after`
+   line per changed field (at most 5, then `+N more`), the change message if there is
+   one, and `Updated by <user> · Open in NetBox`. Related objects show by name
+   (`role: Leaf → Spine`).
+
+Cut the noise with the other editor fields:
+
+- **Actions:** only created, updated or deleted changes. Empty means all.
+- **Changed fields:** only updates that touch these top-level fields (`status`, `role`).
+  Write a custom field as `cf_<name>`. Matching fields are listed first. Creates and
+  deletes are governed by Actions alone. This filter scans up to 2,500 change rows
+  per read; if the range holds more, a last marker says older changes weren't checked.
+- **Journal entries:** also show journal entries (for the scoped objects when a
+  scope is set), tagged `journal`. The token needs permission to read them.
+
+**Include descendants** is on by default when a scope is set. It adds what NetBox
+doesn't record against the device: its cables (edits and deletions too), IP and MAC
+addresses on its interfaces (including ones removed or moved off), modules and
+services. A virtual machine gets its addresses and services; an interface, its cable
+and its addresses. A cable shows all its changes in the range, including from before
+it reached this device or after it left. A cable deleted from, or moved off, a console,
+power, front or rear port doesn't show. When Limit leaves changes out, a marker at the
+start of the range says so.
+
+It costs about seven more NetBox requests per refresh on a quiet NetBox. On a busy
+one, each of the two scans can take up to five pages, and a scope with hundreds of
+interfaces adds a request per two hundred or so. The scans read NetBox's whole change
+log for those object types, up to 2,500 rows each, so on a busy NetBox a last marker
+often says older changes to what's attached weren't checked; the device's own changes
+were still all read. If these reads fail, or take longer than 8 seconds (or half the
+datasource's Timeout, if that's shorter), the rest of the track still shows, with a
+warning marker. Turn the switch off on a busy NetBox. With it off, a deleted cable
+shows at most as an interface update with no changed fields: NetBox records the
+deletion against the cable, not the device.
+
+For an interface dashboard, names like `Gi0/1` repeat on every device. Set
+**Scope type** to `dcim.interface`, give the variable the value field `id` (text field
+`name`) and set **Match by** to ID. IDs are not checked against NetBox, so a deleted
+object's history still shows.
+
+Not included: the devices inside a site, location or rack scope, the members of a
+virtual chassis, and (on NetBox 4.2) rack reservations against a rack.
+
+A bad scope shows up as a **NetBox annotation error** marker at the right edge of the
+time range, and as the error in the annotation editor, since dashboards don't show
+annotation errors themselves. That covers an unknown name, an unknown type, an empty
+variable, and a variable set to **All** with no **Custom all value** when All covers more
+than 100 objects. Below that, All scopes to every object it covers. Only `$__all` means
+"no scope".
+
+## Push recipe, no plugin
+
+If you want markers stored in Grafana, with their own edit and delete, have NetBox push
+them. This needs no plugin: a NetBox Event Rule runs a Webhook that posts to Grafana's
+annotations API.
+
+1. In Grafana, create a service account with the Editor role (it needs
+   `annotations:create`) and a token for it.
+2. In NetBox, create a **Webhook**:
+   - **Payload URL:** `https://<grafana>/api/annotations`. NetBox's background worker
+     makes the call, so that URL must be reachable from it.
+   - **HTTP method:** POST; **HTTP content type:** `application/json`
+   - **Additional headers:** `Authorization: Bearer <service-account token>`
+   - **Body template:** the Jinja below.
+3. Create an **Event Rule** for the object types you care about (for example
+   `dcim.device`), on object created, updated and deleted, with action Webhook pointing
+   at the one above.
+
+```jinja
+{%- macro show(x) -%}{{ "—" if x is none or x == "" else x }}{%- endmacro -%}
+{%- set pre = snapshots.prechange or {} -%}
+{%- set post = snapshots.postchange or {} -%}
+{%- set ns = namespace(lines=[]) -%}
+{%- if pre and post -%}
+  {%- for k, v in post | dictsort -%}
+    {%- if k not in ["created", "last_updated"] and show(pre.get(k)) != show(v) -%}
+      {%- set ns.lines = ns.lines + [(k | e) ~ ": " ~ (show(pre.get(k)) | e) ~ " → " ~ (show(v) | e)] -%}
+    {%- endif -%}
+  {%- endfor -%}
+{%- endif -%}
+{"tags": ["netbox", {{ data.name | default(data.display, true) | string | tojson }}], "text": {{ ("<b>" ~ (data.display | e) ~ "</b> " ~ (event | e) ~ " by " ~ (username | e) ~ ("<br>" if ns.lines else "") ~ ns.lines | join("<br>")) | tojson }}}
+```
+
+Every NetBox value goes through `e` (HTML-escape), and the whole text through `tojson`
+(JSON-quote), because Grafana renders annotation text as HTML. The body has no `time`,
+so Grafana stamps the arrival time. The `pre and post` check keeps creates and deletes
+to a single line. Each create, update and delete makes one annotation, tagged `netbox`
+and the object's name. NetBox's webhook sandbox supports `e`, `tojson` and `dictsort`
+(checked on 4.4).
+
+On a dashboard, add an annotation using the built-in **Annotations & Alerts** query,
+filtered by tag `netbox` (add the object's name as a second tag to follow one object).
+
+Trade-offs against the datasource's own markers:
+
+- The service-account token is stored in NetBox.
+- There is no backfill: only changes made after the rule exists appear.
+- Related objects show as ids (`role: 2 → 1`), because webhook snapshots hold ids.
+- NetBox's background worker must be running for webhooks to fire.
+
+On NetBox 4.4 and later, a change message set through the `changelog_message` field of a
+REST write's body is recorded with the change and shown by the datasource's markers.
+

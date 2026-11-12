@@ -1,9 +1,13 @@
-import React from 'react';
-import { InlineField, MultiSelect, Input, Stack } from '@grafana/ui';
+import React, { useState } from 'react';
+import { InlineField, InlineSwitch, MultiSelect, Input, RadioButtonGroup, Select, Stack } from '@grafana/ui';
 import { SelectableValue } from '@grafana/data';
 import { DataSource } from '../datasource';
-import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, BRANCH_FIELD_DISABLED_TOOLTIP } from '../hooks/useBranchingInstalled';
-import { NetBoxQuery } from '../types';
+import {
+  useBranchingInstalled,
+  BRANCH_FIELD_TOOLTIP,
+  BRANCH_FIELD_DISABLED_TOOLTIP,
+} from '../hooks/useBranchingInstalled';
+import { DESCENDANT_SCOPE_TYPES, NetBoxQuery } from '../types';
 
 interface Props {
   query: NetBoxQuery;
@@ -28,10 +32,48 @@ const CONTENT_TYPE_PRESETS: Array<SelectableValue<string>> = [
   { label: 'Circuit', value: 'circuits.circuit' },
 ];
 
+const SCOPE_TYPE_PRESETS: Array<SelectableValue<string>> = [
+  { label: 'Device', value: 'dcim.device' },
+  { label: 'Virtual machine', value: 'virtualization.virtualmachine' },
+  { label: 'Rack', value: 'dcim.rack' },
+  { label: 'Site', value: 'dcim.site' },
+  { label: 'Circuit', value: 'circuits.circuit' },
+  { label: 'Interface', value: 'dcim.interface' },
+];
+
+const SCOPE_MATCH_OPTIONS: Array<SelectableValue<'name' | 'id'>> = [
+  { label: 'Name', value: 'name' },
+  { label: 'ID', value: 'id' },
+];
+
+const ACTION_OPTIONS: Array<SelectableValue<string>> = [
+  { label: 'Created', value: 'create' },
+  { label: 'Updated', value: 'update' },
+  { label: 'Deleted', value: 'delete' },
+];
+
 export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
   const branchingInstalled = useBranchingInstalled(datasource);
   const branchDisabled = branchingInstalled === false;
+  // Grafana re-runs the annotation query on every editor change, so the scope is
+  // edited locally and committed on blur or Enter.
+  const [scopeText, setScopeText] = useState(query.scope ?? '');
+  const [seenScope, setSeenScope] = useState(query.scope);
+  if (seenScope !== query.scope) {
+    // The query changed from outside (e.g. an undo): adopt it.
+    setSeenScope(query.scope);
+    setScopeText(query.scope ?? '');
+  }
+  const commitScope = () => {
+    const next = scopeText === '' ? undefined : scopeText;
+    if (next !== query.scope) {
+      onChange({ ...query, scope: next });
+    }
+  };
   const selected = (query.objectTypes ?? []).map((v) => ({ label: v, value: v }));
+
+  const scopeType = (query.scopeType ?? '').trim().toLowerCase() || 'dcim.device';
+  const showDescendants = !!query.scope && DESCENDANT_SCOPE_TYPES.includes(scopeType);
 
   return (
     <Stack gap={1} direction="column">
@@ -47,6 +89,107 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
           allowCustomValue
           placeholder="All object types"
           onChange={(vals) => onChange({ ...query, objectTypes: vals.map((v) => v.value!).filter(Boolean) })}
+        />
+      </InlineField>
+      <InlineField
+        label="Scope type"
+        labelWidth={20}
+        tooltip="NetBox content type of the objects to follow. Defaults to dcim.device when a scope is set. Leave Scope empty to show all changes."
+      >
+        <Select
+          inputId="annotation-scope-type"
+          width={40}
+          options={SCOPE_TYPE_PRESETS}
+          value={query.scopeType ? { label: query.scopeType, value: query.scopeType } : null}
+          allowCustomValue
+          isClearable
+          placeholder="dcim.device"
+          onChange={(v) => onChange({ ...query, scopeType: v?.value || undefined })}
+        />
+      </InlineField>
+      <InlineField
+        label="Scope"
+        labelWidth={20}
+        tooltip="Names, ids or a dashboard variable selecting the objects whose changes to show."
+      >
+        <Input
+          id="annotation-scope"
+          width={40}
+          value={scopeText}
+          placeholder="name, id or $variable"
+          onChange={(e) => setScopeText(e.currentTarget.value)}
+          onBlur={commitScope}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              commitScope();
+            }
+          }}
+        />
+      </InlineField>
+      <InlineField label="Match by" labelWidth={20} tooltip="Whether the scope values are object names or ids.">
+        <RadioButtonGroup
+          options={SCOPE_MATCH_OPTIONS}
+          value={query.scopeMatch ?? 'name'}
+          onChange={(v) => onChange({ ...query, scopeMatch: v })}
+        />
+      </InlineField>
+      {showDescendants && (
+        <InlineField
+          label="Include descendants"
+          labelWidth={20}
+          tooltip="Also show changes to what's attached: cables, IP and MAC addresses on its interfaces, modules and services. Uses more NetBox requests."
+        >
+          <InlineSwitch
+            id="annotation-descendants"
+            value={query.includeDescendants ?? true}
+            onChange={(e) => onChange({ ...query, includeDescendants: e.currentTarget.checked })}
+          />
+        </InlineField>
+      )}
+      <InlineField
+        label="Actions"
+        labelWidth={20}
+        grow
+        tooltip="Restrict to these change actions. Leave empty for all."
+      >
+        <MultiSelect
+          inputId="annotation-actions"
+          options={ACTION_OPTIONS}
+          value={query.actions ?? []}
+          placeholder="All actions"
+          onChange={(vals) => {
+            const actions = vals.map((v) => v.value!).filter(Boolean);
+            onChange({ ...query, actions: actions.length ? actions : undefined });
+          }}
+        />
+      </InlineField>
+      <InlineField
+        label="Changed fields"
+        labelWidth={20}
+        grow
+        tooltip="Only updates that touched one of these fields; creates and deletes follow Actions. Custom fields are written cf_name."
+      >
+        <MultiSelect
+          inputId="annotation-changed-fields"
+          options={[]}
+          value={(query.changedFields ?? []).map((v) => ({ label: v, value: v }))}
+          allowCustomValue
+          placeholder="Any field (custom fields: cf_name)"
+          onChange={(vals) => {
+            const fields = vals.map((v) => v.value!).filter(Boolean);
+            onChange({ ...query, changedFields: fields.length ? fields : undefined });
+          }}
+        />
+      </InlineField>
+      <InlineField
+        label="Journal entries"
+        labelWidth={20}
+        tooltip="Also show journal entries (for the scoped objects when a scope is set)."
+      >
+        <InlineSwitch
+          id="annotation-journal"
+          value={query.journal ?? false}
+          onChange={(e) => onChange({ ...query, journal: e.currentTarget.checked })}
         />
       </InlineField>
       <InlineField label="Limit" labelWidth={20} tooltip="Maximum number of change events">

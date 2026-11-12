@@ -2,9 +2,12 @@ package plugin
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
@@ -893,4 +896,203 @@ func TestQuery_Objects_AlertEvaluationRejectsATruncatedResult(t *testing.T) {
 			t.Error("dashboard dropped the truncation notice, so the gap is invisible")
 		}
 	})
+}
+
+func TestParseScope(t *testing.T) {
+	for _, tc := range []struct {
+		raw     string
+		want    []string
+		wantAll bool
+	}{
+		{"", nil, false},
+		{" , ,", nil, false},
+		{"leaf1", []string{"leaf1"}, false},
+		{" leaf1 , leaf2,,", []string{"leaf1", "leaf2"}, false},
+		{"$__all", nil, true},
+		{" $__all ", nil, true},
+		// Malformed: All is never one element of a list. Kept as a value, so the
+		// lookup fails on it rather than the query widening.
+		{"$__all,leaf1", []string{"$__all", "leaf1"}, false},
+		// A comma inside a value comes escaped (the frontend's scopeFormat, or
+		// typed as \,), and so does a backslash. Any other backslash is literal.
+		{`Acme\, West,leaf1`, []string{"Acme, West", "leaf1"}, false},
+		{`a\\b,c`, []string{`a\b`, "c"}, false},
+		{`a\\,b`, []string{`a\`, "b"}, false},
+		{`Gi0\1, x\y\`, []string{`Gi0\1`, `x\y\`}, false},
+		{"a, b", []string{"a", "b"}, false},
+	} {
+		got, all := parseScope(tc.raw)
+		if !reflect.DeepEqual(got, tc.want) || all != tc.wantAll {
+			t.Errorf("parseScope(%q) = %q, %v; want %q, %v", tc.raw, got, all, tc.want, tc.wantAll)
+		}
+	}
+}
+
+func TestQuery_AnnotationsMapsScopeFields(t *testing.T) {
+	from := time.Date(2026, 11, 9, 11, 0, 0, 0, time.UTC)
+	to := from.Add(time.Hour)
+	run := func(t *testing.T, body string) provider.ChangeSpec {
+		t.Helper()
+		fp := &fakeProvider{}
+		resp := newTestDatasource(fp).query(context.Background(), backend.DataQuery{
+			RefID:     "Anno",
+			TimeRange: backend.TimeRange{From: from, To: to},
+			JSON:      []byte(body),
+		}, consumerDashboard)
+		if resp.Error != nil {
+			t.Fatalf("query: %v", resp.Error)
+		}
+		return fp.lastChangeSpec
+	}
+
+	got := run(t, `{"queryType":"annotations","objectTypes":["dcim.interface"],"limit":20,
+		"scopeType":"dcim.device","scope":"leaf1, leaf2","scopeSet":true,"scopeMatch":"id",
+		"actions":["create","update"],"changedFields":["status"],"journal":true,"includeDescendants":true}`)
+	want := provider.ChangeSpec{
+		From: from, To: to, ObjectTypes: []string{"dcim.interface"}, Limit: 20,
+		ScopeType: "dcim.device", Scope: []string{"leaf1", "leaf2"}, ScopeSet: true, ScopeMatch: "id",
+		Actions: []string{"create", "update"}, ChangedFields: []string{"status"}, Journal: true,
+		Descendants: true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("spec = %+v\nwant  %+v", got, want)
+	}
+
+	for _, tc := range []struct {
+		name, body         string
+		scope              []string
+		scopeSet, scopeAll bool
+	}{
+		{"unscoped", `{"queryType":"annotations"}`, nil, false, false},
+		{"all", `{"queryType":"annotations","scope":"$__all","scopeSet":true}`, nil, true, true},
+		{"empty variable", `{"queryType":"annotations","scope":"","scopeSet":true}`, nil, true, false},
+		{"scope without scopeSet", `{"queryType":"annotations","scope":"leaf1"}`, []string{"leaf1"}, true, false},
+		{"blank values", `{"queryType":"annotations","scope":" , "}`, nil, true, false},
+		// A stored dashboard can carry a bare id, and reach the backend without
+		// the frontend's interpolation (a public dashboard).
+		{"number", `{"queryType":"annotations","scope":17}`, []string{"17"}, true, false},
+		{"null", `{"queryType":"annotations","scope":null}`, nil, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := run(t, tc.body)
+			if !reflect.DeepEqual(got.Scope, tc.scope) || got.ScopeSet != tc.scopeSet || got.ScopeAll != tc.scopeAll {
+				t.Errorf("Scope %q, ScopeSet %v, ScopeAll %v; want %q, %v, %v",
+					got.Scope, got.ScopeSet, got.ScopeAll, tc.scope, tc.scopeSet, tc.scopeAll)
+			}
+		})
+	}
+}
+
+// A scope that is neither a string nor a number is refused as before, with the
+// decoder's own message.
+func TestQuery_AnnotationsScopeOfAnotherKindIsRefused(t *testing.T) {
+	for kind, body := range map[string]string{
+		"bool":   `{"queryType":"annotations","scope":true}`,
+		"object": `{"queryType":"annotations","scope":{"id":17}}`,
+		"array":  `{"queryType":"annotations","scope":["17"]}`,
+	} {
+		resp := newTestDatasource(&fakeProvider{}).query(context.Background(), backend.DataQuery{RefID: "Anno", JSON: []byte(body)}, consumerDashboard)
+		want := "cannot unmarshal " + kind + " into Go struct field queryModel.scope of type string"
+		if resp.Error == nil || resp.Status != backend.StatusBadRequest || !strings.Contains(resp.Error.Error(), want) {
+			t.Errorf("%s scope: status %v, error %v; want a bad request saying %q", kind, resp.Status, resp.Error, want)
+		}
+	}
+}
+
+func TestQuery_AnnotationsDescendantsFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"absent", `{"queryType":"annotations"}`, true},
+		{"false", `{"queryType":"annotations","includeDescendants":false}`, false},
+		{"true", `{"queryType":"annotations","includeDescendants":true}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProvider{}
+			resp := newTestDatasource(fp).query(context.Background(), backend.DataQuery{
+				RefID: "Anno", JSON: []byte(tc.body),
+			}, consumerDashboard)
+			if resp.Error != nil {
+				t.Fatalf("query: %v", resp.Error)
+			}
+			if fp.lastChangeSpec.Descendants != tc.want {
+				t.Errorf("Descendants = %v, want %v", fp.lastChangeSpec.Descendants, tc.want)
+			}
+		})
+	}
+}
+
+func TestQuery_AnnotationsDescendantsErrorNilErr(t *testing.T) {
+	d := newTestDatasource(&fakeProvider{changes: []provider.Change{{Kind: provider.ChangeKindDescendantsError}}})
+	resp := d.query(context.Background(), backend.DataQuery{RefID: "Anno", JSON: []byte(`{"queryType":"annotations"}`)}, consumerDashboard)
+	if resp.Error != nil || len(resp.Frames) != 1 {
+		t.Fatalf("query: %v, frames %d", resp.Error, len(resp.Frames))
+	}
+	if text := resp.Frames[0].Fields[2].At(0).(string); text == "" {
+		t.Error("text is empty")
+	}
+}
+
+func TestQuery_AnnotationsDescendantsErrorMarker(t *testing.T) {
+	to := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	d := newTestDatasource(&fakeProvider{changes: []provider.Change{
+		{Time: to.Add(-time.Minute), Action: "Updated", ObjectRepr: "leaf1"},
+		{Kind: provider.ChangeKindDescendantsError, Time: to, Err: errors.New("boom")},
+	}})
+	resp := d.query(context.Background(), backend.DataQuery{
+		RefID:     "Anno",
+		TimeRange: backend.TimeRange{From: to.Add(-time.Hour), To: to},
+		JSON:      []byte(`{"queryType":"annotations","includeDescendants":true}`),
+	}, consumerDashboard)
+	if resp.Error != nil || len(resp.Frames) != 1 {
+		t.Fatalf("query: %v, frames %d", resp.Error, len(resp.Frames))
+	}
+	f := resp.Frames[0]
+	if f.Fields[2].Len() != 2 {
+		t.Fatalf("rows = %d, want 2", f.Fields[2].Len())
+	}
+	text := f.Fields[2].At(1).(string)
+	if !strings.HasPrefix(text, "Changes to what&#39;s attached weren&#39;t read. ") ||
+		!strings.HasSuffix(text, "If this keeps happening, turn off Include descendants.") {
+		t.Errorf("text = %q", text)
+	}
+	if got := f.Fields[1].At(1).(string); got != "NetBox annotation warning" {
+		t.Errorf("title = %q", got)
+	}
+}
+
+func TestQuery_AnnotationLinksUsePublicURL(t *testing.T) {
+	changes := func() []provider.Change {
+		return []provider.Change{
+			{Action: "Updated", ObjectRepr: "leaf1", URL: "http://nb/dcim/devices/1/"},
+			{Action: "Updated", ObjectRepr: "x", URL: "https://elsewhere.example/dcim/devices/1/"},
+		}
+	}
+	texts := func(t *testing.T, publicURL string) []string {
+		t.Helper()
+		d := newTestDatasource(&fakeProvider{changes: changes()})
+		d.cfg.PublicURL = publicURL
+		resp := d.query(context.Background(), backend.DataQuery{RefID: "Anno", JSON: []byte(`{"queryType":"annotations"}`)}, consumerDashboard)
+		if resp.Error != nil || len(resp.Frames) != 1 {
+			t.Fatalf("query: %v, frames %d", resp.Error, len(resp.Frames))
+		}
+		f := resp.Frames[0]
+		out := make([]string, f.Fields[2].Len())
+		for i := range out {
+			out[i] = f.Fields[2].At(i).(string)
+		}
+		return out
+	}
+
+	got := texts(t, "http://localhost:8000/")
+	if !strings.Contains(got[0], `href="http://localhost:8000/dcim/devices/1/"`) {
+		t.Errorf("text = %q, want the link on the public URL", got[0])
+	}
+	if !strings.Contains(got[1], `href="https://elsewhere.example/dcim/devices/1/"`) {
+		t.Errorf("text = %q, want a link off the NetBox base left alone", got[1])
+	}
+	if got := texts(t, ""); !strings.Contains(got[0], `href="http://nb/dcim/devices/1/"`) {
+		t.Errorf("text = %q, want the link unchanged without a public URL", got[0])
+	}
 }

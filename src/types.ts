@@ -33,6 +33,22 @@ export interface NetBoxQuery extends DataQuery {
    * When set, the query targets that branch; empty targets main. Requires the
    * netbox-branching plugin on the NetBox side. */
   branch?: string;
+  /** Annotations: NetBox content type of the scope objects, e.g. 'dcim.device'. */
+  scopeType?: string;
+  /** Annotations: names, ids or a $variable selecting the objects to follow. */
+  scope?: string;
+  /** Annotations: set by applyTemplateVariables from the raw scope, never stored. */
+  scopeSet?: boolean;
+  /** Annotations: whether scope values are names (default) or ids. */
+  scopeMatch?: 'name' | 'id';
+  /** Annotations: restrict to these change actions (create, update, delete). */
+  actions?: string[];
+  /** Annotations: only changes touching one of these fields. */
+  changedFields?: string[];
+  /** Annotations: include journal entries (for the scoped objects when a scope is set). */
+  journal?: boolean;
+  /** Annotations: also show changes to what's attached to the scope. Absent means on. */
+  includeDescendants?: boolean;
   filters?: FilterRow[];
   /** Optional subset (and order) of columns to return. */
   fields?: string[];
@@ -86,6 +102,18 @@ export const DEFAULT_QUERY: Partial<NetBoxQuery> = {
   filters: [],
   limit: 100,
 };
+
+/** Annotations: the scope types whose attached objects (cables, addresses,
+ * modules, services) the backend can follow, so the editor offers Include
+ * descendants for them. MUST be changed together with descendantKinds
+ * (pkg/provider/netbox/descendants.go); TestDescendantScopeTypesMatchFrontend
+ * fails when they differ. */
+export const DESCENDANT_SCOPE_TYPES: string[] = [
+  'dcim.device',
+  'virtualization.virtualmachine',
+  'dcim.interface',
+  'virtualization.vminterface',
+];
 
 /** Variable query — populates a dashboard variable from NetBox. */
 export interface NetBoxVariableQuery extends DataQuery {

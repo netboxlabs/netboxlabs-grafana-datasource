@@ -263,6 +263,27 @@ type Cap struct {
 	Rows int
 }
 
+// ChangeKind distinguishes the sorts of annotation marker a Changes call returns.
+type ChangeKind string
+
+const (
+	ChangeKindChange  ChangeKind = "" // zero value: existing literals stay valid
+	ChangeKindJournal ChangeKind = "journal"
+	ChangeKindCutoff  ChangeKind = "cutoff"
+	// ChangeKindLimit marks that the query's Limit cut the result short.
+	ChangeKindLimit ChangeKind = "limit"
+	// ChangeKindDescendantsError marks that the descendants read failed while the
+	// scope's own changes were read in full.
+	ChangeKindDescendantsError ChangeKind = "descendants-error"
+)
+
+// FieldChange is one changed field, formatted for display ("" = null/empty).
+type FieldChange struct{ Field, Before, After string }
+
+// MaxDiffLines is how many of a Change's Diff lines a marker shows; the rest
+// are summed up as "+N more". Only those lines get related names looked up.
+const MaxDiffLines = 5
+
 // Change is a single change-log/audit event, used to render annotations.
 type Change struct {
 	Time       time.Time `json:"time"`
@@ -271,6 +292,19 @@ type Change struct {
 	ObjectRepr string    `json:"objectRepr"`
 	User       string    `json:"user"`
 	URL        string    `json:"url"` // deep link to the object/change in the UI
+
+	Kind        ChangeKind
+	Parent      string        // scope object's display name for related changes, else ""
+	Diff        []FieldChange // updates only, in display order; the frame caps it
+	Message     string
+	JournalKind string // journal only
+	Comments    string // journal only
+	Scanned     int    // cutoff only
+
+	Limit           int       // limit only: the query's limit
+	Until           time.Time // limit only: the oldest shown change's time; always set
+	DescendantsOnly bool      // cutoff only: every cut read was a descendant read
+	Err             error     // descendants-error only; the plugin maps it to Message
 }
 
 // ChangeSpec bounds an annotation query.
@@ -279,6 +313,18 @@ type ChangeSpec struct {
 	To          time.Time
 	ObjectTypes []string // content-type filters, e.g. ["dcim.device"]; empty = all
 	Limit       int
+
+	ScopeType     string   // app_label.model; "" = dcim.device when scoped
+	Scope         []string // split values; nil = unscoped
+	ScopeSet      bool     // a scope was configured (even if it interpolated to nothing)
+	ScopeAll      bool     // the scope was exactly $__all: unscoped on purpose
+	ScopeMatch    string   // "name" (default) | "id"
+	Actions       []string // subset of create|update|delete
+	ChangedFields []string
+	Journal       bool
+	// Descendants adds changes to what is attached to the scope: its cables, IP
+	// and MAC addresses, modules and services.
+	Descendants bool
 }
 
 // TopologySpec bounds a topology (node-graph) query.

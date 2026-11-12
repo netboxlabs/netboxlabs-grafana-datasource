@@ -28,6 +28,8 @@ type fakeProvider struct {
 	types             []provider.ObjectType
 	result            *provider.Result
 	changes           []provider.Change
+	changesErr        error               // returned by Changes
+	lastChangeSpec    provider.ChangeSpec // captured by Changes
 	ipResult          *provider.Result
 	ipRow             map[string]interface{} // when set, ResolveIPs projects it onto the requested fields
 	ipFields          []string               // captured by ResolveIPs for passthrough asserts
@@ -78,7 +80,11 @@ func (f *fakeProvider) FieldValues(ctx context.Context, _, _, _ string, _ int) (
 	f.fieldValuesBranch = provider.BranchFromContext(ctx)
 	return []string{"a", "b"}, nil
 }
-func (f *fakeProvider) Changes(context.Context, provider.ChangeSpec) ([]provider.Change, error) {
+func (f *fakeProvider) Changes(_ context.Context, spec provider.ChangeSpec) ([]provider.Change, error) {
+	f.lastChangeSpec = spec
+	if f.changesErr != nil {
+		return nil, f.changesErr
+	}
 	return f.changes, nil
 }
 

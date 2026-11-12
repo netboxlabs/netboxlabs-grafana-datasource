@@ -468,9 +468,9 @@ filters so every match fits.
 
 ## Device dashboard with change markers
 
-An annotation can follow one device: its own changes, plus the changes NetBox records
-against it (its interfaces, and the cables connected to them), each marker saying what
-changed.
+An annotation can follow one device: its own changes, the changes NetBox records
+against it (its interfaces, and cables being connected to them), and the changes to
+what's attached to it. Each marker says what changed.
 
 1. Add a dashboard variable of type **Query** → NetBox datasource → _Devices_, value
    field `name`, called `device`.
@@ -500,13 +500,33 @@ Cut the noise with the other editor fields:
 - **Journal entries:** also show journal entries (for the scoped objects when a
   scope is set), tagged `journal`. The token needs permission to read them.
 
+**Include descendants** is on by default when a scope is set. It adds what NetBox
+doesn't record against the device: its cables (edits and deletions too), IP and MAC
+addresses on its interfaces (including ones removed or moved off), modules and
+services. A virtual machine gets its addresses and services; an interface, its cable
+and its addresses. A cable shows all its changes in the range, including from before
+it reached this device or after it left. A cable deleted from, or moved off, a console,
+power, front or rear port doesn't show. When Limit leaves changes out, a marker at the
+start of the range says so.
+
+It costs about seven more NetBox requests per refresh on a quiet NetBox. On a busy
+one, each of the two scans can take up to five pages, and a scope with hundreds of
+interfaces adds a request per two hundred or so. The scans read NetBox's whole change
+log for those object types, up to 2,500 rows each, so on a busy NetBox a last marker
+often says older changes to what's attached weren't checked; the device's own changes
+were still all read. If these reads fail, or take longer than 8 seconds (or half the
+datasource's Timeout, if that's shorter), the rest of the track still shows, with a
+warning marker. Turn the switch off on a busy NetBox. With it off, a deleted cable
+shows at most as an interface update with no changed fields: NetBox records the
+deletion against the cable, not the device.
+
 For an interface dashboard, names like `Gi0/1` repeat on every device. Set
 **Scope type** to `dcim.interface`, give the variable the value field `id` (text field
 `name`) and set **Match by** to ID. IDs are not checked against NetBox, so a deleted
 object's history still shows.
 
-Not included: IP addresses assigned to the device's interfaces, and (on NetBox 4.2) rack
-reservations against a rack.
+Not included: the devices inside a site, location or rack scope, the members of a
+virtual chassis, and (on NetBox 4.2) rack reservations against a rack.
 
 A bad scope shows up as a **NetBox annotation error** marker at the right edge of the
 time range, and as the error in the annotation editor, since dashboards don't show

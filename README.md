@@ -43,9 +43,10 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
   and filter every panel on the dashboard. Multi-value variables become OR filters; a
   Custom all value of `$__all` makes **All** send no filter at all.
 - **Annotations.** Overlay NetBox change-log events (who changed what, when), and
-  optionally journal entries, on any time-series panel. Scope them to one object and the
-  changes NetBox records against it (a device's interfaces and cables); each marker says
-  what changed. See [docs/RECIPES.md](docs/RECIPES.md#device-dashboard-with-change-markers).
+  optionally journal entries, on any time-series panel. Scope them to one object: its
+  changes, the changes NetBox records against it, and what's attached to it (a device's
+  cables, addresses, modules and services). Each marker says what changed. See
+  [docs/RECIPES.md](docs/RECIPES.md#device-dashboard-with-change-markers).
 - **Deep links.** Every row links straight back to the NetBox object page, and the link
   survives the join, so an enriched metrics table stays clickable through to NetBox.
 - **Correlations (Explore drill-downs).** Provision links from any Prometheus/Loki series

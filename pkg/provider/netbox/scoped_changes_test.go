@@ -169,9 +169,11 @@ type scopedChangeServer struct {
 	devicesDelay   time.Duration  // held before each dcim/devices answer
 
 	// The journal, for Journal on: its rows, and the users their authors are.
-	journal    []journalRow
-	users      map[int64]string
-	usersDelay time.Duration // held before each users/users answer
+	journal       []journalRow
+	journalHold   time.Duration // held before each journal answer; ends early when the request's context does
+	journalStatus int           // non-zero: the journal answers this status
+	users         map[int64]string
+	usersDelay    time.Duration // held before each users/users answer
 
 	// NetBox 4.2's shape.
 	extrasServes bool                // extras/object-types answers rows without rest_api_endpoint; 404 otherwise
@@ -188,10 +190,12 @@ type scopedChangeServer struct {
 	ignoreListFilter bool       // the list paths above ignore their filters
 
 	// Failing and slow change-log reads, picked by a changed_object_type_id the
-	// request carries.
-	failTypeID  int           // non-zero: requests carrying this type id answer 500
-	delayTypeID int           // non-zero: requests carrying this type id are held delayFor
-	delayFor    time.Duration // ends early when the request's context does
+	// request carries. The first that applies, in this order, answers.
+	failTypeID        int           // non-zero: requests carrying this type id answer 500
+	failDelay         time.Duration // held before that 500; ends early when the request's context does
+	unavailableTypeID int           // non-zero: requests carrying this type id answer 503
+	delayTypeID       int           // non-zero: requests carrying this type id are held delayFor
+	delayFor          time.Duration // ends early when the request's context does
 
 	mu          sync.Mutex
 	requests    []string // path?query
@@ -314,19 +318,30 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 			}()
 			time.Sleep(s.changeDelay)
 			types := r.URL.Query()["changed_object_type_id"]
-			if s.failTypeID != 0 && slices.Contains(types, strconv.Itoa(s.failTypeID)) {
-				refuse(http.StatusInternalServerError, `{"detail":"boom"}`)
+			picked := func(id int) bool { return id != 0 && slices.Contains(types, strconv.Itoa(id)) }
+			switch {
+			case picked(s.failTypeID):
+				if holdRequest(r, s.failDelay) {
+					refuse(http.StatusInternalServerError, `{"detail":"boom"}`)
+				}
 				return
-			}
-			if s.delayTypeID != 0 && slices.Contains(types, strconv.Itoa(s.delayTypeID)) {
-				select {
-				case <-time.After(s.delayFor):
-				case <-r.Context().Done():
+			case picked(s.unavailableTypeID):
+				refuse(http.StatusServiceUnavailable, `{"detail":"busy"}`)
+				return
+			case picked(s.delayTypeID):
+				if !holdRequest(r, s.delayFor) {
 					return
 				}
 			}
 			s.serveChanges(w, r)
 		case "extras/journal-entries":
+			if !holdRequest(r, s.journalHold) {
+				return
+			}
+			if s.journalStatus != 0 {
+				refuse(s.journalStatus, `{"detail":"nope"}`)
+				return
+			}
 			rows := make([]string, len(s.journal))
 			for i, row := range s.journal {
 				rows[i] = row.json()
@@ -417,6 +432,20 @@ func (s *scopedChangeServer) serveChanges(w http.ResponseWriter, r *http.Request
 		limit = 50
 	}
 	writeOffsetPage(w, r, out, limit)
+}
+
+// holdRequest waits d before a fixture answers, or until the request's context
+// ends, and reports whether the wait ran its course.
+func holdRequest(r *http.Request, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	select {
+	case <-time.After(d):
+		return true
+	case <-r.Context().Done():
+		return false
+	}
 }
 
 // writeOffsetPage answers one offset page of rows, size rows long, with the
@@ -759,9 +788,22 @@ func TestChanges_RelatedTypeNoIDIsObjectTypesUnreadable(t *testing.T) {
 	s.coreStatus = http.StatusForbidden
 	_, err := s.start(t).Changes(context.Background(), scoped(idScope("17"), 10))
 	annotationErr(t, err, provider.AnnotationReasonObjectTypesUnreadable)
+}
 
-	if own := s.ownReads(); len(own) != 1 || !reflect.DeepEqual(own[0]["changed_object_type"], []string{"dcim.device"}) {
-		t.Errorf("own reads = %v, want one by the type's name", own)
+// Without the object-type map, the scope objects' own changes are read by the
+// type's name, once. Every read succeeds here, so none is cancelled before it
+// is sent.
+func TestChanges_OwnReadByNameWithoutTheTypeMap(t *testing.T) {
+	s := newScopedChangeServer(
+		ch(1, 1, "dcim.device", 17),
+		ch(2, 2, "dcim.interface", 5).relatedTo("dcim.device", 17),
+	)
+	s.coreStatus = http.StatusForbidden
+	wantIDs(t, changesOK(t, s.start(t), scoped(idScope("17"), 10)), "#1", "#2")
+
+	if own := s.ownReads(); len(own) != 1 || !reflect.DeepEqual(own[0]["changed_object_type"], []string{"dcim.device"}) ||
+		own[0].Has("changed_object_type_id") {
+		t.Errorf("own reads = %v, want one by the type's name and no type id", own)
 	}
 }
 
@@ -855,6 +897,90 @@ func TestChanges_DegradedReadsBounded(t *testing.T) {
 	defer s.mu.Unlock()
 	if s.maxInFlight > 4 || s.maxInFlight < 2 {
 		t.Errorf("at most %d change-log reads in flight, want 2 to 4", s.maxInFlight)
+	}
+}
+
+// splitSpec is leaf1's track with Object types device and interface: the own
+// read carries only the device type id (12), the related read 12 and 14.
+func splitSpec() provider.ChangeSpec {
+	spec := scoped(nameScope("leaf1"), 10)
+	spec.ObjectTypes = []string{"dcim.device", "dcim.interface"}
+	return spec
+}
+
+// A read that fails ends the query without waiting for the others: the own
+// read and the journal, held for longer than the test waits, are cancelled,
+// and the failed read's error is the query's.
+func TestChanges_FailingReadCancelsTheOthers(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.failTypeID = scopedTypeIDs["dcim.interface"]
+	s.delayTypeID, s.delayFor = scopedTypeIDs["dcim.device"], 5*time.Second
+	s.journalHold = 5 * time.Second
+	p := s.start(t)
+	spec := splitSpec()
+	spec.Journal = true
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Changes(context.Background(), spec)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
+			t.Errorf("Changes error = %v, want the related read's 500", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Changes still blocked 1s after the related read failed")
+	}
+}
+
+// A journal that fails ends the query the same way: the change-log reads, held
+// for longer than the test waits, are cancelled, and the journal's error is
+// the query's.
+func TestChanges_FailingJournalCancelsTheReads(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.delayTypeID, s.delayFor = scopedTypeIDs["dcim.device"], 5*time.Second
+	s.journalStatus = http.StatusInternalServerError
+	p := s.start(t)
+	spec := splitSpec()
+	spec.Journal = true
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Changes(context.Background(), spec)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError ||
+			!strings.Contains(apiErr.URL, journalEndpoint) {
+			t.Errorf("Changes error = %v, want the journal's 500", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Changes still blocked 1s after the journal failed")
+	}
+}
+
+// A read cancelled while it waits to retry returns the error it was going to
+// retry, here a 503. That error is stale: the read whose failure cancelled it
+// is the query's error, though it holds the later slot.
+func TestChanges_StaleRetryErrorDoesNotOutrankTheCause(t *testing.T) {
+	saved := retryBackoff
+	retryBackoff = []time.Duration{2 * time.Second}
+	t.Cleanup(func() { retryBackoff = saved })
+
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	// The own read answers 503 and waits out its backoff; the related read's 500
+	// lands inside it.
+	s.unavailableTypeID = scopedTypeIDs["dcim.device"]
+	s.failTypeID, s.failDelay = scopedTypeIDs["dcim.interface"], 50*time.Millisecond
+	_, err := s.start(t).Changes(context.Background(), splitSpec())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("Changes error = %v, want the related read's 500, not the own read's stale 503", err)
 	}
 }
 

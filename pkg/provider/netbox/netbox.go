@@ -1714,6 +1714,10 @@ const changeReadWorkers = 4
 // when scoped) are read alongside the change-log reads and merged in by time,
 // under the same limit.
 //
+// A change-log read or the journal that fails fails the query. The first to
+// fail cancels every other read, the descendant reads included, rather than
+// wait for them, and its error is the query's.
+//
 // With Include descendants on, a device, VM, interface or VM-interface scope
 // also reads the changes to what's attached to it (descendantChanges),
 // alongside the other reads, and merges them in the same way. Those reads run
@@ -1772,25 +1776,29 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		return nil, err
 	}
 
-	// The descendant reads run under their own deadline. dctx is made before
-	// the other reads start, so that one of them failing can cancel it: the
-	// query then fails with that read's error without waiting out the
-	// descendant chain. Otherwise dctx ends with its deadline, the caller's
-	// context, or Changes returning.
+	// Any change-log read or the journal failing fails the query, so the first
+	// to fail cancels the others through readCtx, with its error as the cause,
+	// rather than leave the query waiting on reads whose rows won't be shown.
+	// A read the cancel ended calls cancelReads too, with the error the cancel
+	// caused, but readCtx has ended by then and keeps the cause it has.
+	readCtx, cancelReads := context.WithCancelCause(ctx)
+	defer cancelReads(nil)
+
+	// The descendant reads run under their own deadline, within readCtx, so a
+	// failed read cancels them too. Their own errors don't cancel readCtx: they
+	// become a marker, and the rest of the track stands.
 	var (
 		desc            []changeReadResult
 		descErr         error
 		dctx            context.Context
 		start, deadline time.Time
 	)
-	stopDescendants := func() {}
 	descendants := spec.Descendants && scope != nil
 	if descendants {
 		start, deadline = time.Now(), p.descendantsDeadline(ctx)
 		var cancel context.CancelFunc
-		dctx, cancel = context.WithDeadline(ctx, deadline)
+		dctx, cancel = context.WithDeadline(readCtx, deadline)
 		defer cancel()
-		stopDescendants = cancel
 	}
 
 	// Each read owns its result slot, so no lock is needed. At most
@@ -1803,10 +1811,10 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[i] = p.runChangeRead(ctx, r, filter, limit, maxRows)
+			results[i] = p.runChangeRead(readCtx, r, filter, limit, maxRows)
 			results[i].scan = filter.localScan()
 			if results[i].err != nil {
-				stopDescendants()
+				cancelReads(results[i].err)
 			}
 		})
 	}
@@ -1814,8 +1822,8 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	var journalErr error
 	if spec.Journal {
 		wg.Go(func() {
-			if journal, journalErr = p.journalEntries(ctx, spec, scope, wanted, limit); journalErr != nil {
-				stopDescendants()
+			if journal, journalErr = p.journalEntries(readCtx, spec, scope, wanted, limit); journalErr != nil {
+				cancelReads(journalErr)
 			}
 		})
 	}
@@ -1823,9 +1831,16 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		wg.Go(func() { desc, descErr = p.descendantChanges(dctx, spec, scope, wanted, filter, limit) })
 	}
 	wg.Wait()
-	// A read or the journal that failed is the query's error, checked before
-	// descErr: a descendant read stopDescendants cancelled is never reported,
-	// and so never taken for slow or turned into a marker.
+	// The read or the journal that failed first is the query's error. The
+	// others ended after its cancel, with context.Canceled or, when the cancel
+	// cut a retry's backoff, the stale error they were about to retry, so their
+	// errors are ignored. The cause is read before the caller's context is
+	// checked, so with that context live it can't be the caller's ending.
+	if cause := context.Cause(readCtx); cause != nil && ctx.Err() == nil {
+		return nil, cause
+	}
+	// Past that, a failed read or journal means the caller's context ended:
+	// any other failure would have set the cause.
 	for _, r := range results {
 		if r.err != nil {
 			return nil, r.err

@@ -232,9 +232,19 @@ func (f rawFieldChange) value(after bool) json.RawMessage {
 // nameEntry is what a brief lookup names an object by: its display, and its
 // parent's, the device or virtual machine its brief row nests ("" when it nests
 // neither). A plain foreign key shows the display alone. A generic relation
-// shows "display (parent)": its field says neither what kind of object it
-// points at nor whose, and an interface's display is only its own name.
+// shows "display (parent)" (label): its field says neither what kind of object
+// it points at nor whose, and an interface's display is only its own name. A
+// scope object is named the same way, for the same reason.
 type nameEntry struct{ display, parent string }
+
+// label is the display, with the parent's in brackets when there is one:
+// "eth0 (leaf1)". No display is no label.
+func (e nameEntry) label() string {
+	if e.display == "" || e.parent == "" {
+		return e.display
+	}
+	return e.display + " (" + e.parent + ")"
+}
 
 // diffNames is what displayNames found: which fields of which changed types are
 // plain foreign keys, the object types and endpoints generic relations point
@@ -284,8 +294,8 @@ func (n diffNames) name(fields map[string]string, data map[string]json.RawMessag
 	switch {
 	case !ok:
 		return "", false
-	case generic && e.parent != "":
-		return e.display + " (" + e.parent + ")", true
+	case generic:
+		return e.label(), true
 	}
 	return e.display, true
 }

@@ -534,6 +534,19 @@ func (s *scopedChangeServer) serveChildren(w http.ResponseWriter, r *http.Reques
 		}
 		return false
 	}
+	// displayOf is the display of the row in known with id, or "".
+	displayOf := func(known []string, id int64) string {
+		for _, row := range known {
+			var obj struct {
+				ID      int64  `json:"id"`
+				Display string `json:"display"`
+			}
+			if json.Unmarshal([]byte(row), &obj) == nil && obj.ID == id {
+				return obj.Display
+			}
+		}
+		return ""
+	}
 	var rows []string
 	switch path {
 	case "dcim/interfaces":
@@ -541,12 +554,14 @@ func (s *scopedChangeServer) serveChildren(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		for _, c := range s.interfaces {
-			if in("device_id", c.owner) && in("id", c.id) {
+			name := fmt.Sprintf("if%d", c.id)
+			if in("device_id", c.owner) && in("id", c.id) && (!q.Has("name") || slices.Contains(q["name"], name)) {
 				cable := "null"
 				if c.cable != 0 {
 					cable = fmt.Sprintf(`{"id":%d}`, c.cable)
 				}
-				rows = append(rows, fmt.Sprintf(`{"id":%d,"display":"if%d","device":{"id":%d},"cable":%s}`, c.id, c.id, c.owner, cable))
+				rows = append(rows, fmt.Sprintf(`{"id":%d,"name":%q,"display":%q,"device":{"id":%d,"display":%q},"cable":%s}`,
+					c.id, name, name, c.owner, displayOf(s.devices, c.owner), cable))
 			}
 		}
 	case "virtualization/virtual-machines":
@@ -1603,6 +1618,42 @@ func TestChanges_ScopeAndChangedFieldsCheckWaitTogether(t *testing.T) {
 	wantIDs(t, changes, "#1")
 }
 
+// An interface scope's markers name the interface with its device: "if100"
+// alone says nothing when every device has one. So by ID, by name, and with two
+// interfaces, where each related row's nested reference picks its interface.
+func TestChanges_InterfaceScopeParentNamesItsDevice(t *testing.T) {
+	ipOn := func(n int, iface int64) loggedChange {
+		return created(n, n, "ipam.ipaddress", int64(400+n), assignedTo(14, iface)).relatedTo("dcim.interface", iface).object(fmt.Sprintf(
+			`{"id":%d,"url":"http://nb/api/ipam/ip-addresses/%d/","display":"10.0.0.%d/24","assigned_object":{"id":%d,"url":"http://nb/api/dcim/interfaces/%d/","display":"if%d"}}`,
+			400+n, 400+n, n, iface, iface, iface))
+	}
+	for _, tc := range []struct {
+		name string
+		spec provider.ChangeSpec
+		want map[string]string // repr -> Parent
+	}{
+		{"one by id", idScope("100"), map[string]string{"#1": "if100 (leaf1)"}},
+		{"one by name", nameScope("if100"), map[string]string{"#1": "if100 (leaf1)"}},
+		{"two by id", idScope("100", "200"), map[string]string{"#1": "if100 (leaf1)", "#2": "if200 (leaf2)"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newScopedChangeServer(ipOn(1, 100), ipOn(2, 200))
+			s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+			spec := scoped(tc.spec, 10)
+			spec.ScopeType = "dcim.interface"
+			changes := changesOK(t, s.start(t), spec)
+			if len(changes) != len(tc.want) {
+				t.Fatalf("changes = %v, want %d", changeIDs(changes), len(tc.want))
+			}
+			for repr, parent := range tc.want {
+				if c := byRepr(t, changes, repr); c.Parent != parent {
+					t.Errorf("%s Parent = %q, want %q", repr, c.Parent, parent)
+				}
+			}
+		})
+	}
+}
+
 // When the scope lookup and the Changed-fields check both refuse, the scope's
 // refusal is the answer, though the field check refuses first.
 func TestChanges_ScopeRefusalOutranksChangedFields(t *testing.T) {
@@ -1837,11 +1888,13 @@ func TestChanges_ParentSuffix(t *testing.T) {
 		{"one object with no name", idScope("17"), []string{},
 			ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 17).object(iface(17)), "dcim.device #17"},
 		{"two objects, matched by URL", nameScope("leaf1", "leaf2"), nil,
+			ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 18).object(iface(18)), "leaf2"},
+		{"two objects with no names, matched by URL", idScope("17", "18"), []string{},
 			ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 18).object(iface(18)), "nested-18"},
 		{"a cable sharing a scope device's id", nameScope("leaf1", "leaf2"), nil,
 			ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 18).object(
 				`{"cable":{"id":17,"url":"http://nb/api/dcim/cables/17/","display":"#17"},"device":{"id":18,"url":"http://nb/api/dcim/devices/18/","display":"nested-18"}}`),
-			"nested-18"},
+			"leaf2"},
 		{"deleted child", nameScope("leaf1", "leaf2"), nil,
 			ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 18).as("delete"), ""},
 		{"deleted child, parent from its snapshot", nameScope("leaf1", "leaf2"), nil,

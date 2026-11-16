@@ -850,7 +850,7 @@ func relatedParent(scope *resolvedScope, objects map[int64]scopeObject, oc objec
 }
 
 // nestedParent finds the scope object a changed object's nested references
-// point at, by their API URLs.
+// point at, by their API URLs, and names it.
 func nestedParent(scope *resolvedScope, objects map[int64]scopeObject, oc objectChange) (string, bool) {
 	if scope.Endpoint == "" {
 		return "", false
@@ -874,7 +874,10 @@ func nestedParent(scope *resolvedScope, objects map[int64]scopeObject, oc object
 		if err != nil || !ok {
 			continue
 		}
-		if nested.Display != "" {
+		// The scope object's own name first: it carries an interface's device,
+		// which the nested reference's display doesn't. The reference's display
+		// names one the scope lookup couldn't.
+		if o.Name == "" && nested.Display != "" {
 			return nested.Display, true
 		}
 		return scopeObjectName(scope, o), true

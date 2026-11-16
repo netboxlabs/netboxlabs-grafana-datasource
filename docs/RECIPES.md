@@ -533,7 +533,8 @@ deletion against the cable, not the device.
 For an interface dashboard, names like `Gi0/1` repeat on every device. Set
 **Scope type** to `dcim.interface`, give the variable the value field `id` (text field
 `name`) and set **Match by** to ID. IDs are not checked against NetBox, so a deleted
-object's history still shows.
+object's history still shows. Markers name the interface with its device, as in
+`on Gi0/1 (leaf1)`.
 
 Not included: the devices inside a site, location or rack scope, the members of a
 virtual chassis, and (on NetBox 4.2) rack reservations against a rack.

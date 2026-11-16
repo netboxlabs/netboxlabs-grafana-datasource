@@ -366,6 +366,47 @@ func TestAnnotationScope_NameExactBucketOutsideDevicesAndVMs(t *testing.T) {
 	wantObjects(t, resolveOK(t, p, spec), scopeObject{5, "Eth0"})
 }
 
+// A component is named with the device or virtual machine its brief row nests,
+// by ID and by name: every device has an eth0. A device has no parent, and is
+// named by its display alone.
+func TestAnnotationScope_ComponentNamedWithItsParent(t *testing.T) {
+	s := newAnnoScopeServer()
+	s.objects["dcim/interfaces"] = []string{
+		`{"id":5,"url":"http://nb/api/dcim/interfaces/5/","display":"eth0","name":"eth0","device":{"id":17,"url":"http://nb/api/dcim/devices/17/","display":"leaf1"}}`,
+	}
+	s.objects["virtualization/interfaces"] = []string{
+		`{"id":7,"url":"http://nb/api/virtualization/interfaces/7/","display":"eth0","name":"eth0","virtual_machine":{"id":40,"url":"http://nb/api/virtualization/virtual-machines/40/","display":"vm40"}}`,
+	}
+	s.objectTypes = append(s.objectTypes, objectTypeRow(31, "virtualization.vminterface", "/api/virtualization/interfaces/"))
+	s.schema = `{"paths": {
+  "/api/dcim/devices/":            {"get": {"parameters": [{"name": "name", "in": "query"}]}},
+  "/api/dcim/interfaces/":         {"get": {"parameters": [{"name": "name", "in": "query"}]}},
+  "/api/virtualization/interfaces/": {"get": {"parameters": [{"name": "name", "in": "query"}]}}
+}}`
+	p := s.start(t)
+	for _, tc := range []struct {
+		typ, id, want string
+	}{
+		{"dcim.interface", "5", "eth0 (leaf1)"},
+		{"virtualization.vminterface", "7", "eth0 (vm40)"},
+	} {
+		for name, spec := range map[string]provider.ChangeSpec{"by id": idScope(tc.id), "by name": nameScope("eth0")} {
+			t.Run(tc.typ+" "+name, func(t *testing.T) {
+				spec.ScopeType = tc.typ
+				scope := resolveOK(t, p, spec)
+				if len(scope.Objects) != 1 || scope.Objects[0].Name != tc.want {
+					t.Errorf("objects = %+v, want one named %q", scope.Objects, tc.want)
+				}
+			})
+		}
+	}
+	for name, spec := range map[string]provider.ChangeSpec{"device by id": idScope("17"), "device by name": nameScope("leaf1")} {
+		t.Run(name, func(t *testing.T) {
+			wantObjects(t, resolveOK(t, p, spec), scopeObject{17, "leaf1"})
+		})
+	}
+}
+
 // Devices at different sites can share a name; every one of them is in scope.
 func TestAnnotationScope_SharedNameKeepsAll(t *testing.T) {
 	s := newAnnoScopeServer()

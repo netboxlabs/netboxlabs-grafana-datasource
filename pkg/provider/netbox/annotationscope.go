@@ -31,8 +31,9 @@ const defaultScopeType = "dcim.device"
 // Changes normalises it (trimmed, lowercase). Any other value matches by name.
 const scopeMatchID = "id"
 
-// scopeObject is one object an annotation is scoped to. Name is its display, or
-// "" when it couldn't be looked up.
+// scopeObject is one object an annotation is scoped to. Name is its display,
+// with the device's or virtual machine's its brief row nests, as an interface's
+// does (nameEntry.label), or "" when it couldn't be looked up.
 type scopeObject struct {
 	ID   int64
 	Name string
@@ -239,7 +240,7 @@ func (p *Provider) nameScopeIDs(ctx context.Context, scope *resolvedScope, ids [
 		cancel()
 	}
 	for _, id := range ids {
-		scope.Objects = append(scope.Objects, scopeObject{ID: id, Name: names[id].display})
+		scope.Objects = append(scope.Objects, scopeObject{ID: id, Name: names[id].label()})
 	}
 }
 
@@ -348,13 +349,16 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 	return nil
 }
 
-// decodeScopeRow reads a brief list row: the object, named by its display, and
-// the value of its lookup field. A row without an id or a string field is
-// skipped.
+// decodeScopeRow reads a brief list row: the object, named by its display with
+// its parent's, as lookupNames names one (nameEntry.label), and the value of
+// its lookup field. A row without an id or a string field is skipped.
 func decodeScopeRow(raw json.RawMessage, field string) (scopeObject, string, bool) {
 	var obj struct {
 		ID      int64  `json:"id"`
 		Display string `json:"display"`
+		// Raw, and read on their own, so an odd value can't cost the row.
+		Device         json.RawMessage `json:"device"`
+		VirtualMachine json.RawMessage `json:"virtual_machine"`
 	}
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &obj) != nil || obj.ID <= 0 || json.Unmarshal(raw, &fields) != nil {
@@ -364,5 +368,6 @@ func decodeScopeRow(raw json.RawMessage, field string) (scopeObject, string, boo
 	if json.Unmarshal(fields[field], &value) != nil {
 		return scopeObject{}, "", false
 	}
-	return scopeObject{ID: obj.ID, Name: obj.Display}, value, true
+	name := nameEntry{display: obj.Display, parent: parentDisplay(obj.Device, obj.VirtualMachine)}.label()
+	return scopeObject{ID: obj.ID, Name: name}, value, true
 }

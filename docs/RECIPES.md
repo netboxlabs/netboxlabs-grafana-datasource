@@ -519,14 +519,32 @@ power, front or rear port doesn't show. When Limit leaves changes out, a marker 
 start of the range says so. An admin can turn it off for every annotation in the data
 source settings (Annotations → Include descendants).
 
-It costs about seven more NetBox requests per refresh on a quiet NetBox. On a busy
-one, each of the two scans can take up to five pages, and a scope with hundreds of
-interfaces adds a request per two hundred or so. The scans read NetBox's whole change
-log for those object types, up to 2,500 rows each, so on a busy NetBox a last marker
-often says older changes to what's attached weren't checked; the device's own changes
-were still all read. If these reads fail, or take longer than 8 seconds (or half the
-datasource's Timeout, if that's shorter), the rest of the track still shows, with a
-warning marker. Turn the switch off on a busy NetBox. With it off, a deleted cable
+What's attached is found from NetBox's indexes: interfaces, cables, modules,
+services and MAC addresses from their lists, IP addresses from the changes
+recorded against the interfaces, then the changes to each by id. So it doesn't
+depend on how big the change log is. It costs about eleven more NetBox requests
+per refresh on a small device (twelve with Match by ID), and a request more per
+two hundred or so interfaces for the MAC list, the IP history and the cable ends.
+
+An IP address, MAC address, module or service taken off the device or deleted
+leaves nothing to list, so those are looked for in one page of the change log
+each: 500 rows of address changes and 500 of module and service changes. On a
+NetBox with 3 million change-log rows, that page reaches back about 16 minutes
+for addresses and about 2.4 hours for modules and services. When a page doesn't
+reach the start of the range, a marker at the start says so: "Removals before
+`<time>` not checked: …". That's normal on a busy NetBox. "Removals not checked:
+…" means the page couldn't be read in time.
+
+Listing needs the token to have view permission on MAC addresses, modules and
+services (`dcim.view_macaddress`, `dcim.view_module`, `ipam.view_service`). Without
+one, that kind comes only from the one-page look, and on a busy NetBox the marker
+says older changes to what's attached weren't checked. Object permissions that hide some objects from
+the token do so silently, and those objects' changes come only from that page.
+
+If the reads fail, or take longer than 8 seconds (or half the datasource's
+Timeout, if that's shorter), the rest of the track still shows, with a warning
+marker. The cost grows with the scope, so turn the switch off for very large
+ones, such as hundreds of devices in one scope. With it off, a deleted cable
 shows at most as an interface update with no changed fields: NetBox records the
 deletion against the cable, not the device.
 

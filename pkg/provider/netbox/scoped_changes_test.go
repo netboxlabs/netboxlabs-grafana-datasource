@@ -160,6 +160,7 @@ type scopedChangeServer struct {
 	relatedByID    bool           // related_object_type takes an id, as up to NetBox 4.4.3
 	ignoreChangedQ bool           // changed_object_type(_id) and changed_object_id are ignored
 	ignoreRelatedQ bool           // related_object_type and related_object_id are ignored
+	ignoreActionQ  bool           // action is ignored
 	coreStatus     int            // non-zero: core/object-types answers this status
 	schema         string         // "" answers 403
 	schemaHold     chan struct{}  // non-nil: the schema answers only once it is closed
@@ -410,7 +411,7 @@ func (s *scopedChangeServer) serveChanges(w http.ResponseWriter, r *http.Request
 	if vals := q["related_object_id"]; len(vals) > 0 && !s.ignoreRelatedQ {
 		keep(func(c loggedChange) bool { return hasID(vals, c.relID) })
 	}
-	if vals := q["action"]; len(vals) > 0 {
+	if vals := q["action"]; len(vals) > 0 && !s.ignoreActionQ {
 		keep(func(c loggedChange) bool { return c.action == vals[len(vals)-1] })
 	}
 	at := func(c loggedChange) time.Time { return scopedNow.Add(-time.Duration(c.minutes) * time.Minute) }
@@ -854,28 +855,66 @@ func TestChanges_OneActionPushed(t *testing.T) {
 }
 
 // NetBox's action filter keeps only the last of repeated values, as the
-// fixture does, so two Actions are filtered here instead.
-func TestChanges_TwoActionsFilteredLocally(t *testing.T) {
-	s := newScopedChangeServer(
-		ch(1, 1, "dcim.device", 17),
-		ch(2, 2, "dcim.device", 17).as("create"),
-		ch(3, 3, "dcim.device", 17).as("delete"),
-		ch(4, 4, "dcim.interface", 5).relatedTo("dcim.device", 17),
-		ch(5, 5, "dcim.interface", 6).relatedTo("dcim.device", 17).as("create"),
-		ch(6, 6, "dcim.interface", 7).relatedTo("dcim.device", 17).as("delete"),
-	)
-	spec := scoped(nameScope("leaf1"), 10)
-	spec.Actions = []string{"create", "update"}
-	wantIDs(t, changesOK(t, s.start(t), spec), "#1", "#2", "#4", "#5")
-
-	for _, q := range s.changeLog() {
-		if q.Has("action") {
-			t.Errorf("read %v sent action: NetBox would keep only the last", q)
-		}
-		if q.Get("limit") != "500" {
-			t.Errorf("read %v: limit %s, want a scan page of 500", q, q.Get("limit"))
+// fixture does, so two Actions are two reads of each kind, one per Action.
+// Each is exact: the 3,000 updates between the matches can't cut the track
+// short, though they are far more than the scan cap.
+func TestChanges_TwoActionsOneReadEach(t *testing.T) {
+	rows := []loggedChange{
+		ch(1, 1, "dcim.device", 17).as("delete"),
+		ch(2, 2, "dcim.interface", 5).relatedTo("dcim.device", 17).as("create"),
+	}
+	for i := range 3000 {
+		if i%2 == 0 {
+			rows = append(rows, ch(100+i, 3+i, "dcim.device", 17))
+		} else {
+			rows = append(rows, ch(100+i, 3+i, "dcim.interface", 5).relatedTo("dcim.device", 17))
 		}
 	}
+	rows = append(rows,
+		ch(3, 3003, "dcim.device", 17).as("create"),
+		ch(4, 3004, "dcim.interface", 6).relatedTo("dcim.device", 17).as("delete"))
+	s := newScopedChangeServer(rows...)
+	p := s.start(t)
+	p.changeScanCapOverride = 50
+	spec := scoped(nameScope("leaf1"), 10)
+	spec.Actions = []string{"create", "delete"}
+	wantIDs(t, changesOK(t, p, spec), "#1", "#2", "#3", "#4")
+
+	for name, reads := range map[string][]url.Values{"own": s.ownReads(), "related": s.relatedReads()} {
+		var sent []string
+		for _, q := range reads {
+			sent = append(sent, q["action"]...)
+		}
+		slices.Sort(sent)
+		if want := []string{"create", "delete"}; len(reads) != 2 || !reflect.DeepEqual(sent, want) {
+			t.Errorf("%s reads = %v, want two, one per Action %v", name, reads, want)
+		}
+	}
+	if n := len(s.changeLog()); n != 4 {
+		t.Errorf("change-log reads = %d, want 4", n)
+	}
+	for _, q := range s.changeLog() {
+		if len(q["action"]) != 1 {
+			t.Errorf("read %v: want exactly one action", q)
+		}
+		if q.Get("limit") != "10" {
+			t.Errorf("read %v: limit %s, want 10 (no local scan)", q, q.Get("limit"))
+		}
+	}
+
+	// Guard: a NetBox that ignored the action filter can't widen the track, and
+	// a change both of an Action's reads return shows once.
+	t.Run("action filter ignored", func(t *testing.T) {
+		s := newScopedChangeServer(
+			ch(1, 1, "dcim.device", 17).as("delete"),
+			ch(2, 2, "dcim.device", 17),
+			ch(3, 3, "dcim.device", 17).as("create"),
+			ch(4, 4, "dcim.interface", 5).relatedTo("dcim.device", 17),
+			ch(5, 5, "dcim.interface", 6).relatedTo("dcim.device", 17).as("create"),
+		)
+		s.ignoreActionQ = true
+		wantIDs(t, changesOK(t, s.start(t), spec), "#1", "#3", "#5")
+	})
 }
 
 // With the object-type map unreadable, each object type is a read of its own.
@@ -897,6 +936,55 @@ func TestChanges_DegradedReadsBounded(t *testing.T) {
 	defer s.mu.Unlock()
 	if s.maxInFlight > 4 || s.maxInFlight < 2 {
 		t.Errorf("at most %d change-log reads in flight, want 2 to 4", s.maxInFlight)
+	}
+}
+
+// With the object-type map unreadable and two Actions, each object type is
+// read by name once per Action. Those reads go through the same cap of four,
+// which three types (six reads) would pass, and the track is exact.
+func TestChanges_TwoActionsDegradedMapReadsPerTypePerAction(t *testing.T) {
+	for _, tc := range []struct {
+		types []string
+		want  []string
+	}{
+		{[]string{"dcim.device", "dcim.interface"}, []string{"#1", "#3", "#5"}},
+		{[]string{"dcim.device", "dcim.interface", "dcim.cable"}, []string{"#1", "#3", "#5", "#6"}},
+	} {
+		t.Run(strings.Join(tc.types, ","), func(t *testing.T) {
+			s := newScopedChangeServer(
+				ch(1, 1, "dcim.device", 17).as("create"),
+				ch(2, 2, "dcim.interface", 5),
+				ch(3, 3, "dcim.interface", 5).as("delete"),
+				ch(4, 4, "dcim.site", 6).as("create"),
+				ch(5, 5, "dcim.device", 18).as("delete"),
+				ch(6, 6, "dcim.cable", 300).as("create"),
+			)
+			s.coreStatus = http.StatusForbidden
+			s.changeDelay = 100 * time.Millisecond
+			spec := provider.ChangeSpec{ObjectTypes: tc.types, Actions: []string{"delete", "create"}, Limit: 10}
+			wantIDs(t, changesOK(t, s.start(t), spec), tc.want...)
+
+			var sent, want []string
+			for _, q := range s.changeLog() {
+				if q.Has("changed_object_type_id") || len(q["changed_object_type"]) != 1 || len(q["action"]) != 1 {
+					t.Errorf("read %v: want one type by name, one action and no type id", q)
+				}
+				sent = append(sent, q.Get("changed_object_type")+" "+q.Get("action"))
+			}
+			for _, ct := range tc.types {
+				want = append(want, ct+" create", ct+" delete")
+			}
+			slices.Sort(sent)
+			slices.Sort(want)
+			if !reflect.DeepEqual(sent, want) {
+				t.Errorf("reads = %v, want each type once per Action %v", sent, want)
+			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.maxInFlight > 4 || s.maxInFlight < 2 {
+				t.Errorf("at most %d change-log reads in flight, want 2 to 4", s.maxInFlight)
+			}
+		})
 	}
 }
 

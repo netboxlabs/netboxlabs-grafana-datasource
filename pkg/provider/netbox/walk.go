@@ -9,9 +9,9 @@ import (
 )
 
 // changeScanCapRows bounds a change-log read whose rows are filtered here rather
-// than by NetBox (two Actions, or Changed fields): it scans at most this many
-// rows, and the track then ends with a cut-off marker. 10,000 rows across two
-// reads timed out on busy instances, and a timed-out annotation query shows
+// than by NetBox (Changed fields, or a descendant scan): it scans at most this
+// many rows, and the track then ends with a cut-off marker. 10,000 rows across
+// two reads timed out on busy instances, and a timed-out annotation query shows
 // nothing at all.
 const changeScanCapRows = 2500
 

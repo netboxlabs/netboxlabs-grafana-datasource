@@ -1699,20 +1699,21 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 // changeReadWorkers is how many of a Changes call's change-log reads run at
 // once. With the object-type map unreadable, each object type is a read of its
 // own (objectTypeReads), so a query with fifteen types would otherwise open
-// fifteen walks of the change log at once. The journal and the descendant
-// reads don't count toward it.
+// fifteen walks of the change log at once, and two Actions double that
+// (perAction). The journal and the descendant reads don't count toward it.
 const changeReadWorkers = 4
 
 // Changes returns change-log events within a time window for annotations.
 //
 // Unscoped, it is one read of the change log. Scoped, it is two, run at once:
 // the scope objects' own changes and the changes recorded against them, merged
-// newest first (changeReads). Actions and Changed fields that NetBox can't
-// filter are applied here as rows are read, up to changeScanCap rows a read,
-// and a read that stops there short of a full track ends it with a cut-off
-// marker. With Journal on, the journal entries in range (for the scope objects
-// when scoped) are read alongside the change-log reads and merged in by time,
-// under the same limit.
+// newest first (changeReads). With two Actions, each read is made once per
+// Action, since NetBox's action filter takes one value. Changed fields, which
+// NetBox can't filter, are applied here as rows are read, up to changeScanCap
+// rows a read, and a read that stops there short of a full track ends it with
+// a cut-off marker. With Journal on, the journal entries in range (for the
+// scope objects when scoped) are read alongside the change-log reads and merged
+// in by time, under the same limit.
 //
 // A change-log read or the journal that fails fails the query. The first to
 // fail cancels every other read, the descendant reads included, rather than

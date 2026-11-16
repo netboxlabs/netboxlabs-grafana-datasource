@@ -359,18 +359,23 @@ const (
 )
 
 // changeFilter is the part of an annotation query applied to each change-log row
-// as it is read: its Actions and its Changed fields.
+// as it is read: its Actions and its Changed fields. NetBox is asked for the
+// Actions too (pushes), but each row's action is still checked here.
 type changeFilter struct {
 	actions map[string]bool // nil = every action
-	push    string          // the one action NetBox is asked for, or ""
-	fields  []string        // Changed fields; nil = any
+	// pushes is the Actions NetBox is asked for, sorted, one read each: NetBox's
+	// action filter takes one value. nil for none or all three, which filter
+	// nothing.
+	pushes []string
+	fields []string // Changed fields; nil = any
 }
 
 // changeActions are the change-log actions NetBox records.
 var changeActions = []string{"create", "update", "delete"}
 
 // newChangeFilter reads a query's Actions and Changed fields, trimmed, with
-// blanks and repeats dropped. Exactly one Action is pushed upstream. An Action
+// blanks and repeats dropped. One Action or two are pushed upstream, a read
+// each, so Actions never make a read scan (localScan). An Action
 // NetBox doesn't record is refused, and so is a Changed field changeDiff
 // doesn't compare (untrackedField), whatever the schema says of it: either
 // would match no row, and the track would come up short with nothing to say
@@ -390,10 +395,8 @@ func newChangeFilter(spec provider.ChangeSpec) (changeFilter, error) {
 		}
 		f.actions[a] = true
 	}
-	if len(f.actions) == 1 {
-		for a := range f.actions {
-			f.push = a
-		}
+	if n := len(f.actions); n == 1 || n == 2 {
+		f.pushes = slices.Sorted(maps.Keys(f.actions))
 	}
 	for _, n := range spec.ChangedFields {
 		if n = strings.TrimSpace(n); n == "" || slices.Contains(f.fields, n) {
@@ -408,10 +411,10 @@ func newChangeFilter(spec provider.ChangeSpec) (changeFilter, error) {
 }
 
 // localScan reports whether rows are discarded here that NetBox can't discard:
-// two Actions, which its single-valued action filter can't express, or Changed
-// fields. A read then scans up to changeScanCap rows for its matches.
+// Changed fields. A read then scans up to changeScanCap rows for its matches.
+// Actions never need it: two are a read each (pushes).
 func (f changeFilter) localScan() bool {
-	return len(f.fields) > 0 || len(f.actions) == 2
+	return len(f.fields) > 0
 }
 
 // keep applies the filter to one row. The action check stays when the action
@@ -480,7 +483,9 @@ type changeRead struct {
 }
 
 // changeLogQuery is the part of a change-log read every read shares: newest
-// first, the time range, and the one Action NetBox is asked for.
+// first, the time range, and the Action NetBox is asked for when there is one.
+// Two can't share a query: changeReads makes each read once per Action, and the
+// descendant scans, which aren't doubled, filter the two here.
 func changeLogQuery(spec provider.ChangeSpec, f changeFilter) url.Values {
 	q := url.Values{}
 	q.Set(orderingParam, "-time")
@@ -490,15 +495,16 @@ func changeLogQuery(spec provider.ChangeSpec, f changeFilter) url.Values {
 	if !spec.To.IsZero() {
 		q.Set("time_before", spec.To.UTC().Format(time.RFC3339))
 	}
-	if f.push != "" {
-		q.Set(actionParam, f.push)
+	if len(f.pushes) == 1 {
+		q.Set(actionParam, f.pushes[0])
 	}
 	return q
 }
 
 // changeReads builds a query's change-log reads. Unscoped, it is the one read
 // Changes has always made. Scoped, it is the scope objects' own changes and the
-// changes recorded against them.
+// changes recorded against them. With two Actions, each of those is made once
+// per Action (perAction).
 func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, scope *resolvedScope, wanted []string, f changeFilter) ([]changeRead, error) {
 	base := func() url.Values { return changeLogQuery(spec, f) }
 
@@ -533,7 +539,7 @@ func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, sc
 		for _, tr := range trs {
 			reads = append(reads, changeRead{q: tr.with(base()), keep: keepType(tr)})
 		}
-		return reads, nil
+		return perAction(reads, f.pushes), nil
 	}
 	// resolveAnnotationScope never returns a scope without objects. If one got
 	// here, read 2 would go out with related_object_type and no related_object_id,
@@ -572,7 +578,33 @@ func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, sc
 		q[relatedObjectIDParam] = scope.idStrings()
 		reads = append(reads, changeRead{q: tr.with(q), keep: keepType(tr), fromRelated: true, relatedTypeID: scope.TypeID})
 	}
-	return reads, nil
+	return perAction(reads, f.pushes), nil
+}
+
+// perAction makes each read once per Action when there are two: NetBox's
+// action filter keeps only the last of repeated values, so one read can't ask
+// for both, and leaving them to the local filter would scan, and could cut the
+// track short. Each read's copies take its place, so a scope's own reads still
+// come before its related ones, the order mergeChanges keeps a change by. With
+// one Action, changeLogQuery has already set it.
+func perAction(reads []changeRead, pushes []string) []changeRead {
+	if len(pushes) < 2 {
+		return reads
+	}
+	out := make([]changeRead, 0, len(reads)*len(pushes))
+	for _, r := range reads {
+		for _, a := range pushes {
+			q := make(url.Values, len(r.q)+1)
+			for k, vs := range r.q {
+				q[k] = slices.Clone(vs)
+			}
+			q.Set(actionParam, a)
+			c := r
+			c.q = q
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // changeReadResult is what one read found.

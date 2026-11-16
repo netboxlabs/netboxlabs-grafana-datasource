@@ -884,6 +884,35 @@ func TestChanges_LocalFilterKeepsThePushdownNonWidening(t *testing.T) {
 	}
 }
 
+// NetBox's action filter takes one value. One Action or two are pushed, sorted,
+// one read each, and neither scans; none or all three push nothing. The shared
+// query asks for the Action only when there is one: with two, each read asks
+// for its own.
+func TestNewChangeFilter_Pushes(t *testing.T) {
+	for _, tc := range []struct {
+		actions, pushes, action []string
+	}{
+		{nil, nil, nil},
+		{[]string{" Update "}, []string{"update"}, []string{"update"}},
+		{[]string{"delete", "create", "Delete"}, []string{"create", "delete"}, nil},
+		{[]string{"update", "delete", "create"}, nil, nil},
+	} {
+		f, err := newChangeFilter(provider.ChangeSpec{Actions: tc.actions})
+		if err != nil {
+			t.Fatalf("%v: %v", tc.actions, err)
+		}
+		if !slices.Equal(f.pushes, tc.pushes) {
+			t.Errorf("%v: pushes = %v, want %v", tc.actions, f.pushes, tc.pushes)
+		}
+		if f.localScan() {
+			t.Errorf("%v: localScan = true, want false: NetBox narrows every read", tc.actions)
+		}
+		if got := changeLogQuery(provider.ChangeSpec{}, f)[actionParam]; !slices.Equal(got, tc.action) {
+			t.Errorf("%v: shared query action = %v, want %v", tc.actions, got, tc.action)
+		}
+	}
+}
+
 func TestCutoffChange_OnlyScanningReadsCut(t *testing.T) {
 	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Hour)

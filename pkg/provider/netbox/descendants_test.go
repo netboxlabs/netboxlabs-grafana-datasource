@@ -949,6 +949,32 @@ func TestChanges_DescendantsOneActionPushed(t *testing.T) {
 	}
 }
 
+// Guard: the scans aren't read once per Action. With two Actions they ask for
+// none, and keep only the rows of those two.
+func TestChanges_TwoActionsDescendantScansFilterLocally(t *testing.T) {
+	onIface := func(desc string) string {
+		return fmt.Sprintf(`{"assigned_object_type":14,"assigned_object_id":100,"description":%q}`, desc)
+	}
+	s := newestFirst(
+		created(1, 1, "ipam.ipaddress", 401, assignedTo(14, 100)),
+		ch(2, 2, "ipam.ipaddress", 401).snapshots(onIface("a"), onIface("b")),
+		ch(3, 3, "ipam.ipaddress", 402).as("delete").snapshots(assignedTo(14, 100), ""),
+		created(4, 4, "dcim.module", 500, `{"device":17}`),
+		ch(5, 5, "dcim.module", 500).snapshots(`{"device":17,"serial":"a"}`, `{"device":17,"serial":"b"}`),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17}}
+	spec := withDescendants(nameScope("leaf1"))
+	spec.Actions = []string{"create", "delete"}
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1", "#3", "#4")
+
+	for name, ids := range map[string][]int{"address": {20, 21}, "parts": {17, 22, 23}} {
+		scans := scanReads(s, ids...)
+		if len(scans) != 1 || scans[0].Has("action") {
+			t.Errorf("%s scans = %v, want one with no action", name, scans)
+		}
+	}
+}
+
 // A scan that stops at the cap ends the track with a cut-off that says only
 // what's attached was cut.
 func TestChanges_DescendantScanCapShowsCutoff(t *testing.T) {

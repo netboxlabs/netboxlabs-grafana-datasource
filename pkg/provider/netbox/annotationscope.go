@@ -215,8 +215,14 @@ func (p *Provider) scopeType(ctx context.Context, raw string, set bool) (*resolv
 // and showing it is the point. An id NetBox doesn't return keeps an empty name.
 //
 // The lookup waits its own namesWait only, as every best-effort name read does:
-// past it the objects go unnamed. Endpoint discovery runs on the query's own
-// context, so on NetBox 4.2 and 4.3 it still warms the ObjectTypes cache.
+// past it the objects go unnamed. Finding the type's endpoint first is not
+// bounded by it, and can wait. On NetBox 4.4 and later the endpoint is on the
+// object-type map scopeType has just read, a cache hit. On NetBox 4.2 and 4.3,
+// or with that map unreadable, it is API discovery (ObjectTypes), which isn't
+// a detached read: it runs on the query's own context, so a namesWait bound
+// would cancel it and leave the ObjectTypes cache cold. A slow discovery then
+// holds the query, within the query's deadline and each index read's request
+// timeout.
 func (p *Provider) nameScopeIDs(ctx context.Context, scope *resolvedScope, ids []int64) {
 	endpoint, found, err := p.contentTypeEndpoint(ctx, scope.Type)
 	if err != nil {

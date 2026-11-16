@@ -1754,11 +1754,14 @@ const changeReadWorkers = 4
 // track ends with a limit marker if the limit left a change out; every other
 // track is cut at the limit silently, as before.
 //
-// The names the markers carry are best effort, and none holds the query. The
-// network name reads (the by-ID name fill, the diffs' related names and the
-// journal authors) each wait their own namesWait. The waits on the cached
-// schema (the scope lookup's name-filter check, the Changed-fields check and
-// the diffs' relation lookup) share one schema budget per call
+// The names the markers carry are best effort. The network name reads (the
+// by-ID name fill, the diffs' related names and the journal authors) each wait
+// their own namesWait, and past it the markers go without. The by-ID name fill
+// first finds the scope type's endpoint without that bound: on NetBox 4.2 and
+// 4.3, or with the object-type map unreadable, that is API discovery on the
+// query's own context, which can hold the query (nameScopeIDs). The waits on
+// the cached schema (the scope lookup's name-filter check, the Changed-fields
+// check and the diffs' relation lookup) share one schema budget per call
 // (budgetedSchema), so a cold schema costs one wait, not three. The
 // Changed-fields check's read of the custom-field list waits its own
 // customFieldsWait, beside its schema wait rather than after it, and the

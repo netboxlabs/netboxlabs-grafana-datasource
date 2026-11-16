@@ -1736,9 +1736,10 @@ const changeReadWorkers = 4
 // scope objects when scoped) are read alongside the change-log reads and merged
 // in by time, under the same limit.
 //
-// A change-log read or the journal that fails fails the query. The first to
-// fail cancels every other read, the descendant reads included, rather than
-// wait for them, and its error is the query's.
+// A change-log read or the journal that fails fails the query. While the
+// caller's context is live, the first to fail cancels every other read, the
+// descendant reads included, rather than wait for them, and its error is the
+// query's.
 //
 // With Include descendants on, a device, VM, interface or VM-interface scope
 // also reads the changes to what's attached to it (descendantChanges),

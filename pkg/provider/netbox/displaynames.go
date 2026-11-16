@@ -94,14 +94,15 @@ func (p *Provider) budgetedSchema(ctx context.Context) (schemaCacheEntry, error)
 	return entry, err
 }
 
-// logSchemaBudgetSpent says, once per call, why related objects stay ids.
+// logSchemaBudgetSpent says, once per call, why the related objects named
+// through the schema stay ids.
 func logSchemaBudgetSpent(b *schemaBudget) {
 	b.mu.Lock()
 	first := !b.spentLogged
 	b.spentLogged = true
 	b.mu.Unlock()
 	if first {
-		log.DefaultLogger.Debug("netbox: the call's schema wait budget is used up; related objects stay ids")
+		log.DefaultLogger.Debug("netbox: the call's schema wait budget is used up; related objects named through the schema stay ids (generic relations are still named)")
 	}
 }
 
@@ -251,7 +252,7 @@ type diffNames struct {
 // when the value is not looked up. A generic relation's type never is: the
 // object-type map already names it.
 func (n diffNames) lookup(fields map[string]string, data map[string]json.RawMessage, field string) (endpoint string, generic, ok bool) {
-	if typeID, ok := genericPairType(data, field); ok {
+	if typeID, pair := genericPairType(data, field); pair {
 		endpoint, ok = n.generic[n.types[typeID]]
 		return endpoint, true, ok
 	}

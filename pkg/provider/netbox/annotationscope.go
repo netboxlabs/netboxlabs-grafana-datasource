@@ -178,10 +178,10 @@ func scopeValues(scope []string) []string {
 // came out empty is an error, not the default: it is usually an empty variable,
 // and following devices instead would be a quiet wrong answer. A type holding a
 // comma is a multi-value variable, and $__all is a custom All value: neither is
-// one type, and the lookup's "unknown type" would blame the wrong thing. A type the instance doesn't report is
-// an UnknownObjectTypeError, as it is for the Object types field. A map that
-// can't be read is not an error: the scope carries on with TypeID 0, and its
-// reads filter by the type's name instead.
+// one type, and the lookup's "unknown type" would blame the wrong thing. A type
+// the instance doesn't report is an UnknownObjectTypeError, as it is for the
+// Object types field. A map that can't be read is not an error: the scope
+// carries on with TypeID 0, and its reads filter by the type's name instead.
 func (p *Provider) scopeType(ctx context.Context, raw string, set bool) (*resolvedScope, error) {
 	typ := normalizeObjectType(raw)
 	switch {

@@ -840,6 +840,29 @@ func TestChanges_RelatedTypeRetriesIDFormOn400(t *testing.T) {
 	}
 }
 
+// With two Actions, each Action's related read is refused in the name form and
+// retried in the id form on its own, keeping its Action.
+func TestChanges_RelatedTypeRetryKeepsEachAction(t *testing.T) {
+	s := newScopedChangeServer(
+		ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 17).as("create"),
+		ch(2, 2, "dcim.interface", 6).relatedTo("dcim.device", 17),
+		ch(3, 3, "dcim.interface", 7).relatedTo("dcim.device", 17).as("delete"),
+	)
+	s.relatedByID = true
+	spec := scoped(nameScope("leaf1"), 10)
+	spec.Actions = []string{"create", "delete"}
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1", "#3")
+
+	forms := map[string][]string{}
+	for _, q := range s.relatedReads() {
+		forms[q.Get(actionParam)] = append(forms[q.Get(actionParam)], q.Get("related_object_type"))
+	}
+	want := map[string][]string{"create": {"dcim.device", "12"}, "delete": {"dcim.device", "12"}}
+	if !reflect.DeepEqual(forms, want) {
+		t.Errorf("related_object_type sent by action = %v, want %v", forms, want)
+	}
+}
+
 // Without the object-type map there is no id to retry with, and the related
 // changes can't be read: an error, not a track of own changes only.
 func TestChanges_RelatedTypeNoIDIsObjectTypesUnreadable(t *testing.T) {

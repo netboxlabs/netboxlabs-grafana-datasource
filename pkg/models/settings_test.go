@@ -81,6 +81,8 @@ func TestLoadPluginSettings_AnnotationDescendants(t *testing.T) {
 		{"yes", `{"annotationDescendants": "yes"}`, true},
 		{"an unrecognised word", `{"annotationDescendants": "maybe"}`, true},
 		{"a non-zero number", `{"annotationDescendants": 1}`, true},
+		{"an object", `{"annotationDescendants": {}}`, true},
+		{"a list", `{"annotationDescendants": []}`, true},
 		{"false", `{"annotationDescendants": false}`, false},
 		{"off", `{"annotationDescendants": "off"}`, false},
 		{"no, padded and capitalised", `{"annotationDescendants": " No "}`, false},

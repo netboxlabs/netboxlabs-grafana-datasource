@@ -385,6 +385,10 @@ func TestResolveDiffs_GenericRelationNamesWithDevice(t *testing.T) {
 	if n := s.hits("/api/virtualization/interfaces/"); n != 1 {
 		t.Errorf("virtualization/interfaces read %d times, want 1", n)
 	}
+	// Generic relations are named from the object-type map alone.
+	if n := s.hits("/api/schema/"); n != 0 {
+		t.Errorf("schema read %d times, want none for generic relations only", n)
+	}
 }
 
 // A generic relation's type shows as app_label.model. A _type field with no

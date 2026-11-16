@@ -346,10 +346,12 @@ func memberSets(m members, want descendantWants) map[string]map[int64]int64 {
 // batched to the URL budget, with the rest of the query measured in it, so
 // the type ids repeat in every batch.
 //
-// An id filter ORed with a type filter can return another type's object that
-// shares a member's id, and a NetBox may ignore either filter, so a row is
-// kept only when its own type and id are a member's, and then only when match,
-// the type's scope check, passes it and names its owner.
+// NetBox ANDs the type filter with the id filter, but each ORs its own values,
+// so a batch asks for their cross product: a row of one member type whose id
+// is another type's member, as a module sharing an IP member's id, matches
+// both. A NetBox may ignore either filter too. So a row is kept only when its
+// own type and id are a member's, and then only when match, the type's scope
+// check, passes it and names its owner.
 //
 // Each batch is walked to limit rows kept or changeScanCap rows read, under a
 // slot of sem, which the membership reads share, and writes only its own

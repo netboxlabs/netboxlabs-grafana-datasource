@@ -1450,8 +1450,15 @@ func TestDescendantChanges_MembershipTakesFourSlots(t *testing.T) {
 	if len(history) < 2 {
 		t.Errorf("IP-history reads = %d, want more than one batch", len(history))
 	}
-	if n := len(byIDRequests(s)); n <= cableEndWorkers {
+	byID := byIDRequests(s)
+	if n := len(byID); n <= cableEndWorkers {
 		t.Errorf("by-id reads = %d, want more batches than the %d slots", n, cableEndWorkers)
+	}
+	// Every batch asks for both member types, the IPs' and the MACs'.
+	for _, q := range byID {
+		if got := q[changedObjectTypeIDParam]; !reflect.DeepEqual(got, []string{"20", "21"}) {
+			t.Errorf("by-id changed_object_type_id = %v, want [20 21] in every batch", got)
+		}
 	}
 	seen := map[int]bool{}
 	for _, r := range results {
@@ -2111,21 +2118,19 @@ func TestChanges_DescendantsObjectTypesNarrowTheReads(t *testing.T) {
 
 // A NetBox that ignores the type and id filters can't widen the address scan or
 // the by-id read: each keeps only the types it asked for and, by id, its
-// members, though the cable and the module would match leaf1.
+// members, though the module would match leaf1.
 func TestChanges_DescendantScansCheckTheirTypes(t *testing.T) {
 	s := newestFirst(
-		ch(1, 1, "dcim.cable", 300),
-		ipOn(2, 2, "create", 401, 100),
-		created(3, 3, "dcim.module", 500, `{"device":17}`),
+		ipOn(1, 1, "create", 401, 100),
+		created(2, 2, "dcim.module", 500, `{"device":17}`),
 	)
-	s.interfaces = []childRow{{id: 100, owner: 17, cable: 300}}
-	s.cables = []cableRow{{id: 300, ends: []cableEnd{{"dcim.interface", 100, 17}}}}
+	s.interfaces = []childRow{{id: 100, owner: 17}}
 	s.ignoreChangedQ = true
 	spec := withDescendants(nameScope("leaf1"))
 	spec.ObjectTypes = []string{"ipam.ipaddress"}
-	wantIDs(t, changesOK(t, s.start(t), spec), "#2")
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1")
 	// The IP history found member 401, so a by-id read ran, and NetBox gave it
-	// all three rows.
+	// both rows.
 	if byID := byIDRequests(s); len(byID) != 1 {
 		t.Errorf("by-id reads = %v, want one", byID)
 	}
@@ -2632,13 +2637,13 @@ func TestChanges_DescendantsCarryBranch(t *testing.T) {
 			t.Errorf("%s sent X-NetBox-Branch %q, want td5smq0f", s.requests[i], h)
 		}
 		// A by-id read: a change-log request carrying changed_object_id, not the
-		// scope's own read (type 12).
+		// scope's own read (dcim.device).
 		u, err := url.Parse(s.requests[i])
 		if err != nil {
 			t.Fatalf("request %q: %v", s.requests[i], err)
 		}
 		q := u.Query()
-		if u.Path == "/api/"+changeLogEndpoint+"/" && q.Has(changedObjectIDParam) && !carries(q, 12) && h == "td5smq0f" {
+		if u.Path == "/api/"+changeLogEndpoint+"/" && q.Has(changedObjectIDParam) && !carries(q, scopedTypeIDs["dcim.device"]) && h == "td5smq0f" {
 			byIDOnBranch = true
 		}
 	}

@@ -1496,6 +1496,10 @@ func TestChanges_ParentSuffix(t *testing.T) {
 			"nested-18"},
 		{"deleted child", nameScope("leaf1", "leaf2"), nil,
 			ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 18).as("delete"), ""},
+		{"deleted child, parent from its snapshot", nameScope("leaf1", "leaf2"), nil,
+			ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 18).as("delete").snapshots(`{"device":18}`, ""), "leaf2"},
+		{"deleted child whose snapshot names no scope object", nameScope("leaf1", "leaf2"), nil,
+			ch(1, 1, "dcim.interface", 5).relatedTo("dcim.device", 18).as("delete").snapshots(`{"device":19}`, ""), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newScopedChangeServer(tc.change)
@@ -1665,5 +1669,48 @@ func TestChanges_AllInChangedFieldsRefusedWithoutSchema(t *testing.T) {
 	defer s.mu.Unlock()
 	if len(s.requests) != 0 {
 		t.Errorf("requests = %v, want none", s.requests)
+	}
+}
+
+func TestRelatedParent_FromSnapshot(t *testing.T) {
+	ifaces := &resolvedScope{Type: "dcim.interface", TypeID: 14, Endpoint: "interfaces",
+		Objects: []scopeObject{{ID: 100, Name: "eth0"}, {ID: 101, Name: "eth1"}}}
+	devices := &resolvedScope{Type: "dcim.device", TypeID: 5, Endpoint: "devices",
+		Objects: []scopeObject{{ID: 17, Name: "leaf1"}, {ID: 18}}}
+	noEndpoint := &resolvedScope{Type: "dcim.device", TypeID: 5,
+		Objects: []scopeObject{{ID: 17, Name: "leaf1"}, {ID: 18, Name: "leaf2"}}}
+	del := func(pre, post string) objectChange {
+		oc := objectChange{}
+		if pre != "" {
+			_ = json.Unmarshal([]byte(pre), &oc.PrechangeData)
+		}
+		if post != "" {
+			_ = json.Unmarshal([]byte(post), &oc.PostchangeData)
+		}
+		return oc
+	}
+	for _, tc := range []struct {
+		name  string
+		scope *resolvedScope
+		oc    objectChange
+		want  string
+	}{
+		{"generic pair", ifaces, del(`{"assigned_object_type":14,"assigned_object_id":101}`, ""), "eth1"},
+		{"generic pair of another type", ifaces, del(`{"assigned_object_type":5,"assigned_object_id":101}`, ""), ""},
+		{"generic pair, type unread", &resolvedScope{Type: "dcim.interface", Endpoint: "interfaces", Objects: ifaces.Objects},
+			del(`{"assigned_object_type":0,"assigned_object_id":101}`, ""), ""},
+		{"generic pair naming no scope object", ifaces, del(`{"assigned_object_type":14,"assigned_object_id":7}`, ""), ""},
+		{"typed field", devices, del(`{"device":18}`, ""), "dcim.device #18"},
+		{"typed field with no endpoint", noEndpoint, del(`{"device":18}`, ""), "leaf2"},
+		{"id as a string names nothing", devices, del(`{"device":"18"}`, ""), ""},
+		{"after side first", devices, del(`{"device":17}`, `{"device":18}`), "dcim.device #18"},
+		{"before side when the after names none", devices, del(`{"device":17}`, `{"device":99}`), "leaf1"},
+		{"no matching field", devices, del(`{"name":"x"}`, ""), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := relatedParent(tc.scope, tc.oc); got != tc.want {
+				t.Errorf("relatedParent = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -730,15 +730,28 @@ func mergeChanges(results []changeReadResult, limit int) []decodedChange {
 // for the marker title's "on <name>". With one scope object it is that object.
 // With several it is the one the changed object's nested reference points at,
 // matched by its API URL (…/<endpoint>/<id>/) and not by id alone, since a cable
-// or a module can share an id with a scope device. A deleted object has no
-// nested references, and a scope of unknown endpoint can't be matched: both
-// give "".
+// or a module can share an id with a scope device. A scope of unknown endpoint
+// can't be matched that way. A deleted object has no nested references, so when
+// that finds nothing the row's snapshots are read instead (snapshotParent).
+// Only a row that points at no scope object gives "".
 func relatedParent(scope *resolvedScope, oc objectChange) string {
 	if len(scope.Objects) == 1 {
 		return scopeObjectName(scope, scope.Objects[0])
 	}
+	if name, ok := nestedParent(scope, oc); ok {
+		return name
+	}
+	if o, ok := snapshotParent(scope, oc); ok {
+		return scopeObjectName(scope, o)
+	}
+	return ""
+}
+
+// nestedParent finds the scope object a changed object's nested references
+// point at, by their API URLs.
+func nestedParent(scope *resolvedScope, oc objectChange) (string, bool) {
 	if scope.Endpoint == "" {
-		return ""
+		return "", false
 	}
 	byID := make(map[int64]scopeObject, len(scope.Objects))
 	for _, o := range scope.Objects {
@@ -764,11 +777,62 @@ func relatedParent(scope *resolvedScope, oc objectChange) string {
 			continue
 		}
 		if nested.Display != "" {
-			return nested.Display
+			return nested.Display, true
 		}
-		return scopeObjectName(scope, o)
+		return scopeObjectName(scope, o), true
 	}
-	return ""
+	return "", false
+}
+
+// scopeParentFields maps a scope's object type to the field a child's snapshot
+// holds that scope object's id in.
+var scopeParentFields = map[string]string{
+	"dcim.device":                   "device",
+	"virtualization.virtualmachine": "virtual_machine",
+	"dcim.rack":                     "rack",
+	"circuits.circuit":              "circuit",
+	"dcim.interface":                "interface",
+	"virtualization.vminterface":    "vminterface",
+}
+
+// snapshotParent finds the scope object a change's snapshots point at, for a
+// deleted object, which has no nested references to match. It reads the
+// postchange data first, then the prechange data, taking the type's own field
+// (scopeParentFields) and then any generic <x>_type / <x>_id pair whose type is
+// the scope's. The id has to be a scope object's, so a field that names
+// another object is not mistaken for the parent.
+func snapshotParent(scope *resolvedScope, oc objectChange) (scopeObject, bool) {
+	byID := make(map[int64]scopeObject, len(scope.Objects))
+	for _, o := range scope.Objects {
+		byID[o.ID] = o
+	}
+	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
+		if field, ok := scopeParentFields[scope.Type]; ok {
+			if id, ok := snapshotID(data, field); ok {
+				if o, ok := byID[id]; ok {
+					return o, true
+				}
+			}
+		}
+		if scope.TypeID == 0 {
+			continue
+		}
+		for _, key := range slices.Sorted(maps.Keys(data)) {
+			x, ok := strings.CutSuffix(key, "_type")
+			if !ok {
+				continue
+			}
+			if t, ok := snapshotID(data, key); !ok || t != int64(scope.TypeID) {
+				continue
+			}
+			if id, ok := snapshotID(data, x+"_id"); ok {
+				if o, ok := byID[id]; ok {
+					return o, true
+				}
+			}
+		}
+	}
+	return scopeObject{}, false
 }
 
 // scopeObjectName is a scope object's display, or "<type> #<id>" without one.

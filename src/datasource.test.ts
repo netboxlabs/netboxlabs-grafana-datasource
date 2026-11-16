@@ -25,6 +25,9 @@ const mockReplace = jest.fn((s: string, _scopedVars?: unknown, format?: string |
   if (s === '$act') {
     return 'create,delete';
   }
+  if (s === '$allActs') {
+    return 'create,update,delete';
+  }
   if (s === '$customAll') {
     return '$__all';
   }
@@ -305,6 +308,11 @@ describe('applyTemplateVariables scope type, actions and changed fields', () => 
     const ds = makeDS();
     expect(ds.applyTemplateVariables(anno({ actions: ['$empty', 'update'] }), {}).actions).toEqual(['update']);
     expect(ds.applyTemplateVariables(anno({ changedFields: ['$empty'] }), {}).changedFields).toBeUndefined();
+  });
+
+  it('passes all three actions on, which the backend reads as no filter', () => {
+    const out = makeDS().applyTemplateVariables(anno({ actions: ['$allActs'] }), {});
+    expect(out.actions).toEqual(['create', 'update', 'delete']);
   });
 
   // guard: a custom All value reaches the backend as typed, which refuses it.

@@ -913,6 +913,21 @@ func TestNewChangeFilter_Pushes(t *testing.T) {
 	}
 }
 
+// An Actions variable that expands to all three actions means no filter, as an
+// empty list does.
+func TestNewChangeFilter_AllThreeActionsIsNoFilter(t *testing.T) {
+	f, err := newChangeFilter(provider.ChangeSpec{Actions: []string{"create", "update", "delete"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.pushes != nil {
+		t.Errorf("pushes = %v, want none", f.pushes)
+	}
+	if got := changeLogQuery(provider.ChangeSpec{}, f)[actionParam]; got != nil {
+		t.Errorf("shared query action = %v, want none", got)
+	}
+}
+
 func TestCutoffChange_OnlyScanningReadsCut(t *testing.T) {
 	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Hour)

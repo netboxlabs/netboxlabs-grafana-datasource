@@ -508,7 +508,7 @@ func queryOrdering(ordering string, c consumer) string {
 
 // allFilterValue is Grafana's own token for a variable's "All" option. A filter
 // row whose value is exactly this means "do not filter on this field".
-const allFilterValue = "$__all"
+const allFilterValue = provider.AllValue
 
 // allNotAValue is the refusal for an Actions or Changed-fields entry that is a
 // custom All value: those lists mean every one when empty.

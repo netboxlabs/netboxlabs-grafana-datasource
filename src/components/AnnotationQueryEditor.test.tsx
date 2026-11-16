@@ -153,11 +153,12 @@ describe('scope fields', () => {
   it('shows a saved variable in Actions', async () => {
     render(
       <AnnotationQueryEditor
-        query={{ refId: 'A', actions: ['$act'] } as any}
+        query={{ refId: 'A', actions: ['update', '$act'] } as any}
         onChange={jest.fn()}
         datasource={dsMock}
       />
     );
     expect(await screen.findByText('$act')).toBeInTheDocument();
+    expect(screen.getByText('Updated')).toBeInTheDocument();
   });
 });

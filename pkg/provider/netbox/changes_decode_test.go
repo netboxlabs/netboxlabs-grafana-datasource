@@ -227,6 +227,18 @@ func TestChangeDiff_UpdateWithoutPostchangeHasNone(t *testing.T) {
 	}
 }
 
+// A field whose before and after are the same bytes is unchanged, whatever the
+// value holds; so is every custom field when custom_fields is the same bytes.
+func TestChangeDiff_IdenticalBytesHaveNone(t *testing.T) {
+	const same = `"tags":[1,2],"config":{"b":1.0,"a":[null]},"serial":"","big":12345678901234567890,"custom_fields":{"owner":"x","tier":1}`
+	d := mustDecode(t, `{"action":{"value":"update"},
+		"prechange_data":{"name":"a",`+same+`},
+		"postchange_data":{"name":"b",`+same+`}}`)
+	if len(d.diff) != 1 || d.diff[0].Field != "name" {
+		t.Errorf("diff = %+v, want only name", d.diff)
+	}
+}
+
 func TestChangeDiff_SkipsFieldsEmptyOnBothSides(t *testing.T) {
 	d := mustDecode(t, `{"action":{"value":"update"},
 		"prechange_data":{"label":"old"},

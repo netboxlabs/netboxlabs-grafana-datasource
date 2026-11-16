@@ -38,6 +38,11 @@ type objectChange struct {
 	ChangedObject  json.RawMessage            `json:"changed_object"`
 	PrechangeData  map[string]json.RawMessage `json:"prechange_data"`
 	PostchangeData map[string]json.RawMessage `json:"postchange_data"`
+
+	// changedObject decodes ChangedObject once, on first use, for a row a read
+	// kept (walkChangeRead): the title, the link and the parent lookup each
+	// read it. Copies of the row share it. nil decodes on every read.
+	changedObject func() map[string]json.RawMessage
 }
 
 type choice struct {
@@ -58,11 +63,24 @@ func (o objectChange) userName() string { return o.UserName }
 
 // changedObjectMap returns changed_object when it is an object, else nil.
 func (o objectChange) changedObjectMap() map[string]json.RawMessage {
+	if o.changedObject != nil {
+		return o.changedObject()
+	}
+	return decodeChangedObject(o.ChangedObject)
+}
+
+// onceChangedObject is decodeChangedObject of raw, run on first use and kept.
+func onceChangedObject(raw json.RawMessage) func() map[string]json.RawMessage {
+	return sync.OnceValue(func() map[string]json.RawMessage { return decodeChangedObject(raw) })
+}
+
+// decodeChangedObject decodes changed_object when it is an object, else nil.
+func decodeChangedObject(raw json.RawMessage) map[string]json.RawMessage {
 	var m map[string]json.RawMessage
-	if len(o.ChangedObject) == 0 || o.ChangedObject[0] != '{' {
+	if len(raw) == 0 || raw[0] != '{' {
 		return nil
 	}
-	if err := json.Unmarshal(o.ChangedObject, &m); err != nil {
+	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil
 	}
 	return m
@@ -228,6 +246,11 @@ func changeDiff(o objectChange) []rawFieldChange {
 	}
 	var out []rawFieldChange
 	add := func(field string, before, after json.RawMessage) {
+		// The same bytes are the same value, with nothing to decode. Most of an
+		// update's fields are unchanged.
+		if bytes.Equal(before, after) {
+			return
+		}
 		// A key missing on one side against ""/null/[] on the other is not a change
 		// anyone can see.
 		if formatValue(before) == "" && formatValue(after) == "" {
@@ -242,6 +265,10 @@ func changeDiff(o objectChange) []rawFieldChange {
 			continue
 		}
 		if key == "custom_fields" {
+			// The same bytes hold the same custom fields: none changed.
+			if bytes.Equal(o.PrechangeData[key], o.PostchangeData[key]) {
+				continue
+			}
 			var pre, post map[string]json.RawMessage
 			_ = json.Unmarshal(o.PrechangeData[key], &pre)
 			_ = json.Unmarshal(o.PostchangeData[key], &post)
@@ -757,6 +784,8 @@ func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Value
 		if d.diff = changeDiff(d.oc); !f.keep(d) {
 			return true
 		}
+		// Only once kept, so a scan's rejected rows don't pay for it.
+		d.oc.changedObject = onceChangedObject(d.oc.ChangedObject)
 		d.fromRelated = r.fromRelated
 		res.rows = append(res.rows, d)
 		return len(res.rows) < limit

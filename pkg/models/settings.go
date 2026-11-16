@@ -65,7 +65,7 @@ type PluginSettings struct {
 // on this datasource. It is on unless the setting reads as off, so a value the
 // plugin does not recognise keeps the default rather than failing anything.
 func (s *PluginSettings) AnnotationDescendantsOn() bool {
-	return !readsAsOff(s.AnnotationDescendants)
+	return !ReadsAsOff(s.AnnotationDescendants)
 }
 
 // SecretPluginSettings holds values that are encrypted at rest by Grafana and
@@ -177,11 +177,12 @@ func readsAsOn(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &n) == nil && n != 0
 }
 
-// readsAsOff is readsAsOn's mirror: whether a flag that is not a JSON boolean
+// ReadsAsOff is readsAsOn's mirror: whether a flag that is not a JSON boolean
 // was written to mean off — zero, or a string that strconv.ParseBool or YAML 1.1
 // reads as false, in any case. A JSON false reads as off too; absent, null and
-// anything unrecognised do not.
-func readsAsOff(raw json.RawMessage) bool {
+// anything unrecognised do not. Exported for the per-annotation Include
+// descendants switch, which is read the same way as the data source's.
+func ReadsAsOff(raw json.RawMessage) bool {
 	if len(raw) == 0 || string(raw) == "null" {
 		return false
 	}

@@ -1008,6 +1008,18 @@ func TestQuery_AnnotationsDescendantsFlag(t *testing.T) {
 		{"absent", `{"queryType":"annotations"}`, true},
 		{"false", `{"queryType":"annotations","includeDescendants":false}`, false},
 		{"true", `{"queryType":"annotations","includeDescendants":true}`, true},
+		// Read as leniently as the data source's switch: a provisioned "off" is
+		// off, not a query that fails to decode.
+		{"null", `{"queryType":"annotations","includeDescendants":null}`, true},
+		{"off", `{"queryType":"annotations","includeDescendants":"off"}`, false},
+		{"no, padded and capitalised", `{"queryType":"annotations","includeDescendants":" No "}`, false},
+		{"the string false", `{"queryType":"annotations","includeDescendants":"false"}`, false},
+		{"the string 0", `{"queryType":"annotations","includeDescendants":"0"}`, false},
+		{"the number 0", `{"queryType":"annotations","includeDescendants":0}`, false},
+		{"on", `{"queryType":"annotations","includeDescendants":"on"}`, true},
+		{"yes", `{"queryType":"annotations","includeDescendants":"yes"}`, true},
+		{"an unrecognised word", `{"queryType":"annotations","includeDescendants":"maybe"}`, true},
+		{"a non-zero number", `{"queryType":"annotations","includeDescendants":1}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fp := &fakeProvider{}

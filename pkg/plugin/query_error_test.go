@@ -235,6 +235,50 @@ func TestQuery_AnnotationErrorCarriesMarker(t *testing.T) {
 	}
 }
 
+// An annotation query whose JSON doesn't decode, as a provisioned dashboard's
+// can, fails with the same marker every other annotation error gets: scenes
+// dashboards drop the error itself. Any other query type fails as it did.
+func TestQuery_MalformedAnnotationCarriesMarker(t *testing.T) {
+	to := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	for _, body := range []string{
+		`{"queryType":"annotations","journal":"yes"}`,
+		`{"queryType":"annotations","actions":"create"}`,
+		`{"queryType":"annotations","scope":{"id":17}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			resp := newTestDatasource(&fakeProvider{}).query(context.Background(), backend.DataQuery{
+				RefID:     "Anno",
+				TimeRange: backend.TimeRange{From: to.Add(-time.Hour), To: to},
+				JSON:      []byte(body),
+			}, consumerDashboard)
+			if resp.Error == nil || resp.Status != backend.StatusBadRequest {
+				t.Fatalf("error = %v, status = %v; want a bad request", resp.Error, resp.Status)
+			}
+			if len(resp.Frames) != 1 {
+				t.Fatalf("frames = %d, want 1 error marker", len(resp.Frames))
+			}
+			f := resp.Frames[0]
+			if f.RefID != "Anno" {
+				t.Errorf("RefID = %q, want Anno", f.RefID)
+			}
+			if got := f.Fields[0].At(0).(time.Time); !got.Equal(to) {
+				t.Errorf("marker time = %v, want the range's end %v", got, to)
+			}
+			if got, want := f.Fields[2].At(0).(string), html.EscapeString(resp.Error.Error()); got != want {
+				t.Errorf("marker text = %q, want the error message %q", got, want)
+			}
+		})
+	}
+	t.Run("not an annotation query", func(t *testing.T) {
+		resp := newTestDatasource(&fakeProvider{}).query(context.Background(), backend.DataQuery{
+			RefID: "A", JSON: []byte(`{"queryType":"","limit":"ten"}`),
+		}, consumerDashboard)
+		if resp.Error == nil || len(resp.Frames) != 0 {
+			t.Errorf("error = %v, frames = %d; want the error and no marker", resp.Error, len(resp.Frames))
+		}
+	})
+}
+
 // TestQueryErrorMessage_BatchedTransportFailureIsBounded is the regression test
 // for the 12 KB error toast.
 //

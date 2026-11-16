@@ -20,6 +20,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/models"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
@@ -105,9 +106,11 @@ type queryModel struct {
 	ChangedFields []string `json:"changedFields"`
 	Journal       bool     `json:"journal"`
 	// IncludeDescendants (for annotations) adds changes to what is attached to
-	// the scope. A pointer so an absent field means on: dashboards saved before the
-	// field existed get descendants.
-	IncludeDescendants *bool `json:"includeDescendants"`
+	// the scope. Kept raw and read as the data source's switch is
+	// (models.ReadsAsOff): absent means on, so dashboards saved before the field
+	// existed get descendants, and a provisioned "off" is off rather than a
+	// query that fails to decode.
+	IncludeDescendants json.RawMessage `json:"includeDescendants"`
 }
 
 // scopeText is an annotation's scope as the query JSON carries it: a string,
@@ -143,6 +146,16 @@ func (s *scopeText) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// withAnnotationErrorMarker adds to an annotation query's error response its
+// error as one marker at the range's end: scenes dashboards drop an annotation
+// query's error, so without it the query fails with nothing to say why.
+func withAnnotationErrorMarker(resp backend.DataResponse, q backend.DataQuery) backend.DataResponse {
+	marker := annotationErrorFrame(resp.Error.Error(), q.TimeRange.To)
+	marker.RefID = q.RefID
+	resp.Frames = data.Frames{marker}
+	return resp
+}
+
 // query executes a single query and returns its data response.
 //
 // c says what will read the frames (see consumer and requestConsumer). It is an
@@ -153,7 +166,17 @@ func (s *scopeText) UnmarshalJSON(b []byte) error {
 func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer) backend.DataResponse {
 	var qm queryModel
 	if err := json.Unmarshal(q.JSON, &qm); err != nil {
-		return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err))
+		resp := backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err))
+		// An annotation query gets the marker its other errors get, or a scenes
+		// dashboard drops the error and shows nothing. The query type is read on
+		// its own, since the whole model didn't decode.
+		var kind struct {
+			QueryType string `json:"queryType"`
+		}
+		if json.Unmarshal(q.JSON, &kind) == nil && kind.QueryType == queryTypeAnnotations {
+			return withAnnotationErrorMarker(resp, q)
+		}
+		return resp
 	}
 
 	// Once, here, so no branch below can forget it (see dropAllFilters).
@@ -182,16 +205,10 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			Journal:       qm.Journal,
 			// The datasource's switch only turns descendants off; the annotation's
 			// own switch cannot turn them back on.
-			Descendants: d.cfg.AnnotationDescendantsOn() && (qm.IncludeDescendants == nil || *qm.IncludeDescendants),
+			Descendants: d.cfg.AnnotationDescendantsOn() && !models.ReadsAsOff(qm.IncludeDescendants),
 		})
 		if err != nil {
-			// Every error also comes back as a marker at the range's end:
-			// scenes dashboards drop an annotation query's error.
-			resp := d.queryErrorResponse(err)
-			marker := annotationErrorFrame(resp.Error.Error(), q.TimeRange.To)
-			marker.RefID = q.RefID
-			resp.Frames = data.Frames{marker}
-			return resp
+			return withAnnotationErrorMarker(d.queryErrorResponse(err), q)
 		}
 		for i := range changes {
 			if changes[i].Kind != provider.ChangeKindDescendantsError {

@@ -121,6 +121,42 @@ func cableEndChange(id, minutes int, action string, iface, cable int64, termType
 	return c.snapshots("", end)
 }
 
+// ipOnType is change id: IP ip created or deleted on interface iface of type
+// ifaceType ("dcim.interface", "virtualization.vminterface"), minutes before
+// scopedNow, related to the interface as NetBox records it: a create carries
+// the assignment in its after data, a delete in its before.
+func ipOnType(id, minutes int, action string, ip int64, ifaceType string, iface int64) loggedChange {
+	on := assignedTo(scopedTypeIDs[ifaceType], iface)
+	c := ch(id, minutes, "ipam.ipaddress", ip).relatedTo(ifaceType, iface).as(action)
+	if action == "delete" {
+		return c.snapshots(on, "")
+	}
+	return c.snapshots("", on)
+}
+
+// ipOn is ipOnType on a dcim.interface.
+func ipOn(id, minutes int, action string, ip, iface int64) loggedChange {
+	return ipOnType(id, minutes, action, ip, "dcim.interface", iface)
+}
+
+// ipMoved is change id: IP ip updated from dcim interface from to interface to
+// (0 is unassigned), minutes before scopedNow. NetBox records an update against
+// the interface the IP is on after it, so an IP unassigned has no related
+// object.
+func ipMoved(id, minutes int, ip, from, to int64) loggedChange {
+	on := func(iface int64) string {
+		if iface == 0 {
+			return unassigned
+		}
+		return assignedTo(scopedTypeIDs["dcim.interface"], iface)
+	}
+	c := ch(id, minutes, "ipam.ipaddress", ip).snapshots(on(from), on(to))
+	if to != 0 {
+		c = c.relatedTo("dcim.interface", to)
+	}
+	return c
+}
+
 // rangeSpec is leaf1 over [scopedNow-60m, scopedNow-10m].
 func rangeSpec() provider.ChangeSpec {
 	spec := nameScope("leaf1")
@@ -866,13 +902,15 @@ func TestCableEndReads_CancelledWhileWaitingForASlot(t *testing.T) {
 // A list the token may not read (401 or 403), or one over the cap, leaves only
 // its own type to the change log: the other members stand, and nothing is
 // cancelled. A refused module list still keeps the modules the interface
-// deletes name. The interface list refused fails, as it always has.
+// deletes name; a refused MAC list leaves no MACs, since no change names their
+// interface. The interface list refused fails, as it always has.
 func TestDescendantMembers_ListRefusedFailsOnlyItsType(t *testing.T) {
 	server := func() *scopedChangeServer {
 		s := newScopedChangeServer(
 			ch(1, 30, "dcim.interface", 105).relatedTo("dcim.device", 17).as("delete").snapshots(`{"device":17,"module":502}`, ""),
 		)
 		s.interfaces = []childRow{{id: 100, owner: 17}}
+		s.macs = []macRow{{id: 403, ct: "dcim.interface", iface: 100}}
 		s.modules = []childRow{{id: 500, owner: 17}, {id: 501, owner: 17}}
 		s.services = []serviceRow{{id: 600, parentType: "dcim.device", parent: 17}}
 		return s
@@ -882,6 +920,7 @@ func TestDescendantMembers_ListRefusedFailsOnlyItsType(t *testing.T) {
 		name     string
 		setup    func(*scopedChangeServer)
 		listCap  int
+		macs     map[int64]int64 // non-nil: MACs are wanted too, and these are found
 		modules  map[int64]int64
 		services map[int64]int64
 	}{
@@ -901,6 +940,22 @@ func TestDescendantMembers_ListRefusedFailsOnlyItsType(t *testing.T) {
 			listCap: 2,
 			modules: map[int64]int64{502: 17}, services: map[int64]int64{600: 17},
 		},
+		{
+			name: "MACs forbidden",
+			setup: func(s *scopedChangeServer) {
+				s.listStatusFor = map[string]int{"dcim/mac-addresses": http.StatusForbidden}
+			},
+			macs: map[int64]int64{}, modules: map[int64]int64{500: 17, 501: 17, 502: 17}, services: map[int64]int64{600: 17},
+		},
+		{
+			name: "MACs, modules and services forbidden",
+			setup: func(s *scopedChangeServer) {
+				s.listStatusFor = map[string]int{
+					"dcim/mac-addresses": http.StatusForbidden, "dcim/modules": http.StatusForbidden, "ipam/services": http.StatusForbidden,
+				}
+			},
+			macs: map[int64]int64{}, modules: map[int64]int64{502: 17}, services: map[int64]int64{},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := server()
@@ -908,6 +963,8 @@ func TestDescendantMembers_ListRefusedFailsOnlyItsType(t *testing.T) {
 			spec := rangeSpec()
 			p, scope, kind, ids := membersSetup(t, s, spec)
 			p.childListCapOverride = tc.listCap
+			want := want
+			want.macs = tc.macs != nil
 			var fails failLog
 			m, err := readMembersWith(p, spec, scope, kind, ids, want, &fails)
 			if err != nil {
@@ -918,6 +975,9 @@ func TestDescendantMembers_ListRefusedFailsOnlyItsType(t *testing.T) {
 			}
 			if n := fails.count(); n != 0 {
 				t.Errorf("fail called %d times (%v), want none", n, fails.errs)
+			}
+			if tc.macs != nil {
+				wantSet(t, "macs", m.macs, tc.macs)
 			}
 			wantSet(t, "modules", m.modules, tc.modules)
 			wantSet(t, "services", m.services, tc.services)
@@ -1017,6 +1077,322 @@ func TestDescendantMembers_CutListIsNotRefused(t *testing.T) {
 	})
 }
 
+// readsCarrying is the change-log requests that carry any of the type ids.
+func readsCarrying(s *scopedChangeServer, typeIDs ...int) []url.Values {
+	return slices.DeleteFunc(s.changeLog(), func(q url.Values) bool { return !carries(q, typeIDs...) })
+}
+
+// An IP's changes recorded against the scope's interfaces make it a member,
+// whenever they were made: the read has no start, so an IP created before From
+// is in. An interface deleted since From still counts. The read asks only for
+// IP changes, newest first, with no range.
+func TestDescendantMembers_IPHistory(t *testing.T) {
+	s := leaf1Children(
+		ipOn(10, 120, "create", 401, 100), // before From: the read has no start
+		ipMoved(11, 40, 402, 101, 101),    // an edit while on 101
+		ipOn(12, 20, "create", 403, 102),  // on leaf2's interface
+		ipOn(13, 35, "delete", 404, 105),  // on an interface deleted since
+	)
+	spec := rangeSpec()
+	p, scope, kind, ids := membersSetup(t, s, spec)
+	m := membersWith(t, p, spec, scope, kind, ids, descendantWants{ifaces: true, ips: true})
+	wantSet(t, "ips", m.ips, map[int64]int64{401: 17, 402: 17, 404: 17})
+
+	history := readsCarrying(s, 20)
+	if len(history) != 1 {
+		t.Fatalf("IP-history reads = %v, want one", history)
+	}
+	q := history[0]
+	if got := q["related_object_type"]; !reflect.DeepEqual(got, []string{"dcim.interface"}) {
+		t.Errorf("related_object_type = %v, want [dcim.interface]", got)
+	}
+	if got := q["changed_object_type_id"]; !reflect.DeepEqual(got, []string{"20"}) {
+		t.Errorf("changed_object_type_id = %v, want [20]", got)
+	}
+	if got := sortedInts(t, q["related_object_id"]); !reflect.DeepEqual(got, []int64{100, 101, 105, 106}) {
+		t.Errorf("related_object_id = %v, want [100 101 105 106]", got)
+	}
+	if got := q["ordering"]; !reflect.DeepEqual(got, []string{"-time"}) {
+		t.Errorf("ordering = %v, want [-time]", got)
+	}
+	if q.Has("time_after") || q.Has("time_before") {
+		t.Errorf("IP-history read %v: want no time_after and no time_before", q)
+	}
+	if len(m.reads) != 2 {
+		t.Fatalf("reads = %d, want 2 (the delete read and the IP-history read)", len(m.reads))
+	}
+	if r := m.reads[1]; len(r.rows) != 0 || !r.scan || !r.descendant {
+		t.Errorf("IP-history read: %d rows, scan %v, descendant %v; want no rows, scan and descendant", len(r.rows), r.scan, r.descendant)
+	}
+
+	// A VM's IPs are read against its VM interfaces, not dcim.interface.
+	t.Run("VM", func(t *testing.T) {
+		s := newScopedChangeServer(ipOnType(20, 20, "create", 410, "virtualization.vminterface", 500))
+		s.vms = []string{briefRow("virtualization/virtual-machines", 40, "name", "vm40", "vm40")}
+		s.vmInterfaces = []childRow{{id: 500, owner: 40}}
+		spec := idScope("40")
+		spec.ScopeType = "virtualization.virtualmachine"
+		p, scope, kind, ids := membersSetup(t, s, spec)
+		m := membersWith(t, p, spec, scope, kind, ids, descendantWants{ifaces: true, ips: true})
+		wantSet(t, "ips", m.ips, map[int64]int64{410: 40})
+
+		history := readsCarrying(s, 20)
+		if len(history) != 1 {
+			t.Fatalf("IP-history reads = %v, want one", history)
+		}
+		if got := history[0]["related_object_type"]; !reflect.DeepEqual(got, []string{"virtualization.vminterface"}) {
+			t.Errorf("related_object_type = %v, want [virtualization.vminterface]", got)
+		}
+		if got := history[0]["changed_object_type_id"]; !reflect.DeepEqual(got, []string{"20"}) {
+			t.Errorf("changed_object_type_id = %v, want [20]", got)
+		}
+	})
+}
+
+// A NetBox that ignores the related filters returns every IP change: each row
+// is checked by its own snapshot, the interface's type and id together. An IP
+// on leaf2's interface, or on a VM interface sharing leaf1's interface id,
+// isn't a member.
+func TestDescendantMembers_IPHistoryChecksTheSnapshot(t *testing.T) {
+	s := newScopedChangeServer(
+		ipOn(9, 19, "create", 401, 100),  // on leaf1's interface: kept
+		ipOn(10, 20, "create", 403, 102), // leaf2's
+		created(11, 21, "ipam.ipaddress", 405, assignedTo(31, 100)).relatedTo("virtualization.vminterface", 100),
+	)
+	s.ignoreRelatedQ = true
+	s.interfaces = []childRow{{id: 100, owner: 17}, {id: 102, owner: 18}}
+	spec := nameScope("leaf1")
+	p, scope, kind, ids := membersSetup(t, s, spec)
+	m := membersWith(t, p, spec, scope, kind, ids, descendantWants{ifaces: true, ips: true})
+	wantSet(t, "ips", m.ips, map[int64]int64{401: 17})
+}
+
+// Up to NetBox 4.4.3 related_object_type takes an id: the IP-history read
+// retries with the interface type's id, and its rows count.
+func TestDescendantMembers_IPHistoryRelatedTypeRetried(t *testing.T) {
+	s := newScopedChangeServer(ipOn(10, 20, "create", 401, 100))
+	s.relatedByID = true
+	s.interfaces = []childRow{{id: 100, owner: 17}}
+	spec := nameScope("leaf1")
+	p, scope, kind, ids := membersSetup(t, s, spec)
+	m := membersWith(t, p, spec, scope, kind, ids, descendantWants{ifaces: true, ips: true})
+	wantSet(t, "ips", m.ips, map[int64]int64{401: 17})
+
+	var forms []string
+	for _, q := range readsCarrying(s, 20) {
+		forms = append(forms, q.Get("related_object_type"))
+	}
+	if want := []string{"dcim.interface", "14"}; !reflect.DeepEqual(forms, want) {
+		t.Errorf("IP-history related_object_type = %v, want %v", forms, want)
+	}
+}
+
+// IP churn can't use up the cable ends' cap: the IP history and the cable ends
+// are read apart, each to its own cap.
+func TestDescendantMembers_IPHistoryApartFromCableEnds(t *testing.T) {
+	s := newScopedChangeServer(
+		ipOn(1, 1, "create", 401, 100),
+		ipOn(2, 2, "create", 402, 100),
+		ipOn(3, 3, "create", 403, 100),
+		cableEndChange(20, 4, "create", 100, 301, 14, 100),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17}}
+	spec := nameScope("leaf1")
+	p, scope, kind, ids := membersSetup(t, s, spec)
+	p.changeScanCapOverride = 2
+	m := membersWith(t, p, spec, scope, kind, ids, descendantWants{ifaces: true, ips: true, cables: true})
+	if _, ok := m.cables[301]; !ok {
+		t.Errorf("cables = %v, want 301: its end is past the IPs' cap", m.cables)
+	}
+	if history := readsCarrying(s, 20); len(history) == 0 {
+		t.Error("no IP-history read")
+	}
+	if len(m.ips) != 2 {
+		t.Errorf("ips = %v, want the 2 the capped history read", m.ips)
+	}
+	for _, q := range s.changeLog() {
+		if carries(q, 20) && carries(q, 24) {
+			t.Errorf("change-log read %v asks for IPs and cable ends together", q)
+		}
+	}
+}
+
+// The IP-history read has no start, so its cap can stop it past From. It read
+// every IP change in the range then, so it isn't a cut-off. Stopped before
+// From, it is, as any membership read is; and with no From there's none to
+// pass.
+func TestDescendantMembers_IPHistoryCapPastFrom(t *testing.T) {
+	from := scopedNow.Add(-60 * time.Minute)
+	for _, tc := range []struct {
+		name    string
+		from    time.Time
+		minutes []int
+		capped  bool
+		oldest  time.Time
+	}{
+		{"passed From", from, []int{30, 90, 120}, false, scopedNow.Add(-90 * time.Minute)},
+		{"stopped before From", from, []int{5, 20, 30}, true, scopedNow.Add(-20 * time.Minute)},
+		{"no From", time.Time{}, []int{30, 90, 120}, true, scopedNow.Add(-90 * time.Minute)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rows []loggedChange
+			for i, minutes := range tc.minutes {
+				rows = append(rows, ipOn(10+i, minutes, "create", int64(401+i), 100))
+			}
+			s := newScopedChangeServer(rows...)
+			s.interfaces = []childRow{{id: 100, owner: 17}}
+			spec := nameScope("leaf1")
+			spec.From = tc.from
+			p, scope, kind, ids := membersSetup(t, s, spec)
+			p.changeScanCapOverride = 2
+			m := membersWith(t, p, spec, scope, kind, ids, descendantWants{ifaces: true, ips: true})
+			if len(m.reads) != 2 {
+				t.Fatalf("reads = %d, want 2 (the delete read and the IP-history read)", len(m.reads))
+			}
+			if r := m.reads[1]; r.capped != tc.capped || !r.oldest.Equal(tc.oldest) {
+				t.Errorf("IP-history read capped %v, oldest %v; want %v, %v", r.capped, r.oldest, tc.capped, tc.oldest)
+			}
+			wantSet(t, "ips", m.ips, map[int64]int64{401: 17, 402: 17})
+		})
+	}
+}
+
+// The MAC list is filtered by assigned_object_id alone, a number on every
+// NetBox version. assigned_object_type takes an id up to 4.4.3 and a name from
+// 4.4.4, so it isn't sent, and each row's type string is checked here. The same
+// MACs are found on both, whether NetBox applied the filter or not: not a MAC
+// on a VM interface sharing an interface's id, nor one on leaf2's interface.
+func TestDescendantMembers_MACListAcrossVersions(t *testing.T) {
+	for _, byID := range []bool{false, true} {
+		for _, ignore := range []bool{false, true} {
+			t.Run(fmt.Sprintf("relatedByID %v, ignoreListFilter %v", byID, ignore), func(t *testing.T) {
+				s := leaf1Children()
+				s.macs = []macRow{
+					{id: 403, ct: "dcim.interface", iface: 101},
+					{id: 404, ct: "virtualization.vminterface", iface: 101},
+					{id: 405, ct: "dcim.interface", iface: 102},
+				}
+				s.relatedByID, s.ignoreListFilter = byID, ignore
+				// With no range, interface 107, deleted before From, would join.
+				spec := rangeSpec()
+				p, scope, kind, ids := membersSetup(t, s, spec)
+				m := membersWith(t, p, spec, scope, kind, ids, descendantWants{ifaces: true, macs: true})
+				wantSet(t, "macs", m.macs, map[int64]int64{403: 17})
+
+				lists := s.requestsTo("dcim/mac-addresses")
+				if len(lists) != 1 {
+					t.Fatalf("MAC lists = %v, want one", lists)
+				}
+				q := lists[0]
+				if q.Has("assigned_object_type") {
+					t.Errorf("MAC list %v: want no assigned_object_type", q)
+				}
+				if got := q["fields"]; !reflect.DeepEqual(got, []string{"id,assigned_object_type,assigned_object_id"}) {
+					t.Errorf("fields = %v, want [id,assigned_object_type,assigned_object_id]", got)
+				}
+				if got := sortedInts(t, q["assigned_object_id"]); !reflect.DeepEqual(got, []int64{100, 101, 105, 106}) {
+					t.Errorf("assigned_object_id = %v, want [100 101 105 106]", got)
+				}
+			})
+		}
+	}
+	t.Run("VM", func(t *testing.T) {
+		s := newScopedChangeServer()
+		s.vms = []string{briefRow("virtualization/virtual-machines", 40, "name", "vm40", "vm40")}
+		s.vmInterfaces = []childRow{{id: 500, owner: 40}}
+		s.macs = []macRow{{id: 406, ct: "virtualization.vminterface", iface: 500}, {id: 407, ct: "dcim.interface", iface: 500}}
+		spec := idScope("40")
+		spec.ScopeType = "virtualization.virtualmachine"
+		p, scope, kind, ids := membersSetup(t, s, spec)
+		m := membersWith(t, p, spec, scope, kind, ids, descendantWants{ifaces: true, macs: true})
+		wantSet(t, "macs", m.macs, map[int64]int64{406: 40})
+	})
+}
+
+// manyInterfaces is leaf1 (17) with 900 interfaces, 1000 to 1899.
+func manyInterfaces() *scopedChangeServer {
+	s := newScopedChangeServer()
+	for id := int64(1000); id < 1900; id++ {
+		s.interfaces = append(s.interfaces, childRow{id: id, owner: 17})
+	}
+	return s
+}
+
+// everyHundredth is interfaces 1000, 1100, ..., 1800 of manyInterfaces(): one
+// in every batch of its ids.
+func everyHundredth() []int64 {
+	var out []int64
+	for id := int64(1000); id < 1900; id += 100 {
+		out = append(out, id)
+	}
+	return out
+}
+
+// A scope with many interfaces lists its MACs in batches within the URL budget,
+// which together name every interface once.
+func TestDescendantMembers_MACListBatches(t *testing.T) {
+	s := manyInterfaces()
+	want := map[int64]int64{}
+	for i, iface := range everyHundredth() {
+		mac := int64(3000 + i)
+		s.macs = append(s.macs, macRow{id: mac, ct: "dcim.interface", iface: iface})
+		want[mac] = 17
+	}
+	spec := nameScope("leaf1")
+	p, scope, kind, ids := membersSetup(t, s, spec)
+	m := membersWith(t, p, spec, scope, kind, ids, descendantWants{ifaces: true, macs: true})
+	wantSet(t, "macs", m.macs, want)
+
+	raws := s.rawQueries("dcim/mac-addresses")
+	if len(raws) < 2 {
+		t.Errorf("MAC lists = %d, want more than one", len(raws))
+	}
+	var sent []string
+	for _, raw := range raws {
+		if len(raw) > chunkBudgetBytes {
+			t.Errorf("MAC list query is %d bytes, over the %d budget", len(raw), chunkBudgetBytes)
+		}
+		q, _ := url.ParseQuery(raw)
+		sent = append(sent, q["assigned_object_id"]...)
+	}
+	var all []int64
+	for id := int64(1000); id < 1900; id++ {
+		all = append(all, id)
+	}
+	if got := sortedInts(t, sent); !reflect.DeepEqual(got, all) {
+		t.Errorf("assigned_object_id across the lists = %d values, want each of the 900 interfaces once", len(got))
+	}
+}
+
+// Guard: every membership request, a list's or a change-log read's, takes a
+// slot of one semaphore, so no more than cableEndWorkers are answered at once.
+func TestDescendantChanges_MembershipTakesFourSlots(t *testing.T) {
+	s := manyInterfaces()
+	var creates []int
+	for i, iface := range everyHundredth() {
+		s.macs = append(s.macs, macRow{id: int64(3000 + i), ct: "dcim.interface", iface: iface})
+		s.changes = append(s.changes, ipOn(10+i, 1+i, "create", int64(2000+i), iface))
+		creates = append(creates, 10+i)
+	}
+	s.changeDelay, s.listDelay = 20*time.Millisecond, 20*time.Millisecond
+	results := descendantsOf(t, s.start(t), withDescendants(nameScope("leaf1")))
+	s.mu.Lock()
+	most := s.maxSlotInFlight
+	s.mu.Unlock()
+	if most < 2 || most > cableEndWorkers {
+		t.Errorf("at most %d slot-taking requests answered at once, want 2 to %d", most, cableEndWorkers)
+	}
+	seen := map[int]bool{}
+	for _, r := range results {
+		for _, d := range r.rows {
+			seen[d.oc.ID] = true
+		}
+	}
+	if got := slices.Sorted(maps.Keys(seen)); !reflect.DeepEqual(got, creates) {
+		t.Errorf("change ids = %v, want the IP creates %v", got, creates)
+	}
+}
+
 func TestSnapshotID(t *testing.T) {
 	data := map[string]json.RawMessage{}
 	for key, raw := range map[string]string{
@@ -1045,10 +1421,34 @@ func withDescendants(spec provider.ChangeSpec) provider.ChangeSpec {
 	return spec
 }
 
+// descendantsOf runs descendantChanges for spec on p, as Changes does, with
+// context.Background() and a limit of 50. An error, or a read that calls
+// fail, fails the test.
+func descendantsOf(t *testing.T, p *Provider, spec provider.ChangeSpec) []changeReadResult {
+	t.Helper()
+	scope := resolveOK(t, p, spec)
+	f, err := newChangeFilter(spec)
+	if err != nil {
+		t.Fatalf("newChangeFilter: %v", err)
+	}
+	var fails failLog
+	results, err := p.descendantChanges(context.Background(), fails.fail, spec, scope, normalizeObjectTypes(spec.ObjectTypes), f, 50)
+	if err != nil {
+		t.Fatalf("descendantChanges: %v", err)
+	}
+	if n := fails.count(); n != 0 {
+		t.Fatalf("descendantChanges called fail %d times (%v), want none", n, fails.errs)
+	}
+	return results
+}
+
 // assignedTo is an address snapshot assigned to interface type typeID's id.
 func assignedTo(typeID int, id int64) string {
 	return fmt.Sprintf(`{"assigned_object_type":%d,"assigned_object_id":%d}`, typeID, id)
 }
+
+// unassigned is an address snapshot on no interface.
+const unassigned = `{"assigned_object_type":null,"assigned_object_id":null}`
 
 // created is change id: ct objID created minutes before scopedNow, with post as
 // its after data.
@@ -1272,7 +1672,7 @@ func TestChanges_DescendantsNothingAttached(t *testing.T) {
 func TestChanges_DescendantsOffMakesTodaysRequests(t *testing.T) {
 	s := eachKindServer()
 	changesOK(t, s.start(t), scoped(nameScope("leaf1"), 50))
-	for _, path := range []string{"dcim/interfaces", "dcim/cables", "dcim/modules", "ipam/services", "virtualization/virtual-machines", "virtualization/interfaces"} {
+	for _, path := range []string{"dcim/interfaces", "dcim/cables", "dcim/mac-addresses", "dcim/modules", "ipam/services", "virtualization/virtual-machines", "virtualization/interfaces"} {
 		if lists := s.requestsTo(path); len(lists) != 0 {
 			t.Errorf("%s requests = %v, want none", path, lists)
 		}
@@ -1501,8 +1901,9 @@ func trackServer() *scopedChangeServer {
 	return s
 }
 
-// A failed descendant read drops every descendant row, the parts scan's that
-// succeeded included, and keeps the rest of the track, with a marker.
+// A failed descendant read drops every descendant row, the module list's that
+// succeeded included, and keeps the rest of the track, with a marker. The
+// IP-history read fails, so the scans never start.
 func TestChanges_DescendantReadFailureKeepsTheTrack(t *testing.T) {
 	s := trackServer()
 	s.failTypeID = 20
@@ -1513,8 +1914,8 @@ func TestChanges_DescendantReadFailureKeepsTheTrack(t *testing.T) {
 	if c := descendantsError(t, changes); !c.Time.Equal(spec.To) {
 		t.Errorf("descendants-error at %v, want at To %v", c.Time, spec.To)
 	}
-	if parts := scanReads(s, 22); len(parts) != 1 {
-		t.Errorf("parts scans = %v, want one: its rows are dropped, not unread", parts)
+	if lists := s.requestsTo("dcim/modules"); len(lists) != 1 {
+		t.Errorf("module lists = %v, want one: its members are dropped, not unread", lists)
 	}
 }
 
@@ -1569,9 +1970,10 @@ func TestChanges_DescendantsSlowDuringRetryBackoff(t *testing.T) {
 }
 
 // The caller's context ending is the query ending: an error, not a marker. It
-// is cancelled once the address scan is held. By then the own and related
-// reads have very likely finished, so it is a descendant read the cancel cuts;
-// if one of them hadn't, the query still fails, as it should.
+// is cancelled once a read of IP changes (the IP-history read or the address
+// scan) is held. By then the own and related reads have very likely finished,
+// so it is a descendant read the cancel cuts; if one of them hadn't, the query
+// still fails, as it should.
 func TestChanges_CallerCancelledFails(t *testing.T) {
 	s := trackServer()
 	s.delayTypeID, s.delayFor = 20, 5*time.Second
@@ -1579,7 +1981,7 @@ func TestChanges_CallerCancelledFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		for end := time.Now().Add(2 * time.Second); len(scanReads(s, 20)) == 0 && time.Now().Before(end); {
+		for end := time.Now().Add(2 * time.Second); len(readsCarrying(s, 20)) == 0 && time.Now().Before(end); {
 			time.Sleep(5 * time.Millisecond)
 		}
 		cancel()
@@ -1602,8 +2004,8 @@ func TestChanges_CallerCancelledFails(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Changes still blocked 3s after its context was cancelled")
 	}
-	if held := scanReads(s, 20); len(held) != 1 {
-		t.Errorf("address scans = %v, want the one the cancel cut", held)
+	if held := readsCarrying(s, 20); len(held) == 0 {
+		t.Error("no read of IP changes, want the one the cancel cut")
 	}
 }
 
@@ -1860,7 +2262,6 @@ func TestMatchers(t *testing.T) {
 	}
 	ifaces := map[int64]int64{100: 17, 200: 18}
 	scopeIDs := map[int64]bool{17: true}
-	unassigned := `{"assigned_object_type":null,"assigned_object_id":null}`
 	for _, tc := range []struct {
 		name      string
 		match     func(objectChange) (int64, bool)

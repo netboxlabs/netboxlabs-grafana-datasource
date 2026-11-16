@@ -152,15 +152,18 @@ func (c loggedChange) render(withRepr bool) string {
 //
 // The list paths Include descendants reads (dcim/interfaces,
 // virtualization/virtual-machines, virtualization/interfaces, dcim/cables,
-// dcim/modules and ipam/services) filter as NetBox does too: repeated values
-// OR, and each parameter narrows. device_id and virtual_machine_id are choice
-// filters on the interface, module and service lists, so an id that names no
-// device or VM is a 400 (on the service list, as on NetBox 4.2);
-// dcim/cables' device_id isn't. fields is recorded but not applied: every row
-// carries its whole shape.
+// dcim/mac-addresses, dcim/modules and ipam/services) filter as NetBox does
+// too: repeated values OR, and each parameter narrows. device_id and
+// virtual_machine_id are choice filters on the interface, module and service
+// lists, so an id that names no device or VM is a 400 (on the service list, as
+// on NetBox 4.2); dcim/cables' device_id isn't. The MAC list's
+// assigned_object_type keeps only its last value and takes what
+// related_object_type takes: an id up to 4.4.3 (relatedByID), where a name is a
+// 400, and a name from 4.4.4, where an id lists nothing. fields is recorded but
+// not applied: every row carries its whole shape.
 type scopedChangeServer struct {
 	changes        []loggedChange // newest first
-	relatedByID    bool           // related_object_type takes an id, as up to NetBox 4.4.3
+	relatedByID    bool           // related_object_type and the MAC list's assigned_object_type take an id, as up to NetBox 4.4.3
 	ignoreChangedQ bool           // changed_object_type(_id) and changed_object_id are ignored
 	ignoreRelatedQ bool           // related_object_type and related_object_id are ignored
 	ignoreActionQ  bool           // action is ignored
@@ -197,6 +200,7 @@ type scopedChangeServer struct {
 	vms              []string       // brief rows at virtualization/virtual-machines
 	vmInterfaces     []childRow     // virtualization/interfaces
 	cables           []cableRow     // dcim/cables
+	macs             []macRow       // dcim/mac-addresses
 	modules          []childRow     // dcim/modules, each on its owner device
 	services         []serviceRow   // ipam/services
 	servicesV42      bool           // service rows name their device or virtual_machine, as on NetBox 4.2, not a parent object
@@ -204,6 +208,7 @@ type scopedChangeServer struct {
 	listStatus       int            // non-zero: the list paths above answer this status
 	listStatusFor    map[string]int // a status per list path ("dcim/modules"), over listStatus; dcim/devices too, for the existence read
 	ignoreListFilter bool           // the list paths above ignore their filters
+	listDelay        time.Duration  // held before each answer on the list paths above; ends early when the request's context does
 
 	// Failing and slow change-log reads, picked by a changed_object_type_id the
 	// request carries. The first that applies, in this order, answers.
@@ -218,6 +223,12 @@ type scopedChangeServer struct {
 	headers     []string // X-NetBox-Branch of each recorded request
 	inFlight    int      // change-log requests being answered now
 	maxInFlight int      // the most inFlight has been
+	// slotInFlight is the requests being answered now that Include descendants
+	// makes under its semaphore: the list paths above, and change-log requests
+	// carrying changed_object_id or related_object_id. A descendant scan carries
+	// neither, and isn't counted.
+	slotInFlight    int
+	maxSlotInFlight int // the most slotInFlight has been
 }
 
 // childRow is an interface or VM interface on owner, the device or VM, with its
@@ -236,6 +247,14 @@ type cableRow struct {
 type cableEnd struct {
 	ct         string
 	id, device int64
+}
+
+// macRow is a MAC address assigned to interface iface of type ct
+// ("dcim.interface" or "virtualization.vminterface").
+type macRow struct {
+	id    int64
+	ct    string
+	iface int64
 }
 
 // serviceRow is a service on its parent, parentType ("dcim.device" or
@@ -363,7 +382,8 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 			rows := lookupMatches(s.devices, r.URL.Query())
 			writePage(w, len(rows), rows)
 		case "dcim/interfaces", "virtualization/virtual-machines", "virtualization/interfaces", "dcim/cables",
-			"dcim/modules", "ipam/services":
+			"dcim/mac-addresses", "dcim/modules", "ipam/services":
+			defer s.slotTaken()()
 			s.serveChildren(w, r, path)
 		case "core/object-changes":
 			s.mu.Lock()
@@ -375,6 +395,9 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 				s.inFlight--
 				s.mu.Unlock()
 			}()
+			if q := r.URL.Query(); q.Has(changedObjectIDParam) || q.Has(relatedObjectIDParam) {
+				defer s.slotTaken()()
+			}
 			time.Sleep(s.changeDelay)
 			types := r.URL.Query()["changed_object_type_id"]
 			picked := func(id int) bool { return id != 0 && slices.Contains(types, strconv.Itoa(id)) }
@@ -424,6 +447,30 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 	return New(srv.URL, "token", srv.Client())
 }
 
+// slotTaken counts a request Include descendants makes under its semaphore as
+// answered from now, and returns what counts it as done.
+func (s *scopedChangeServer) slotTaken() func() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.slotInFlight++
+	s.maxSlotInFlight = max(s.maxSlotInFlight, s.slotInFlight)
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.slotInFlight--
+	}
+}
+
+// scopedTypeName is the fixture's type whose id is v, or "".
+func scopedTypeName(v string) string {
+	for ct, id := range scopedTypeIDs {
+		if strconv.Itoa(id) == v {
+			return ct
+		}
+	}
+	return ""
+}
+
 func (s *scopedChangeServer) serveChanges(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	rows := slices.Clone(s.changes)
@@ -431,14 +478,6 @@ func (s *scopedChangeServer) serveChanges(w http.ResponseWriter, r *http.Request
 		rows = slices.DeleteFunc(rows, func(c loggedChange) bool { return !pred(c) })
 	}
 	hasID := func(vals []string, id int64) bool { return slices.Contains(vals, strconv.FormatInt(id, 10)) }
-	typeName := func(v string) string {
-		for ct, id := range scopedTypeIDs {
-			if strconv.Itoa(id) == v {
-				return ct
-			}
-		}
-		return ""
-	}
 	if !s.ignoreChangedQ {
 		if vals := q["changed_object_type_id"]; len(vals) > 0 {
 			keep(func(c loggedChange) bool { return slices.Contains(vals, strconv.Itoa(scopedTypeIDs[c.ct])) })
@@ -459,7 +498,7 @@ func (s *scopedChangeServer) serveChanges(w http.ResponseWriter, r *http.Request
 			_, _ = fmt.Fprintf(w, `{"related_object_type":["Select a valid choice. %s is not one of the available choices."]}`, v)
 			return
 		case s.relatedByID:
-			keep(func(c loggedChange) bool { return c.relType == typeName(v) })
+			keep(func(c loggedChange) bool { return c.relType == scopedTypeName(v) })
 		case isID:
 			keep(func(loggedChange) bool { return false })
 		default:
@@ -524,6 +563,9 @@ func writeOffsetPage(w http.ResponseWriter, r *http.Request, rows []string, size
 
 // serveChildren answers the list paths Include descendants reads.
 func (s *scopedChangeServer) serveChildren(w http.ResponseWriter, r *http.Request, path string) {
+	if !holdRequest(r, s.listDelay) {
+		return
+	}
 	status, ok := s.listStatusFor[path]
 	if !ok {
 		status = s.listStatus
@@ -614,6 +656,27 @@ func (s *scopedChangeServer) serveChildren(w http.ResponseWriter, r *http.Reques
 				}
 			}
 			rows = append(rows, fmt.Sprintf(`{"id":%d,"a_terminations":[%s],"b_terminations":[%s]}`, c.id, strings.Join(a, ","), strings.Join(b, ",")))
+		}
+	case "dcim/mac-addresses":
+		typ, typed := "", false
+		if vals := q["assigned_object_type"]; len(vals) > 0 {
+			typ, typed = vals[len(vals)-1], true
+			_, err := strconv.Atoi(typ)
+			switch isID := err == nil; {
+			case s.relatedByID && !isID:
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprintf(w, `{"assigned_object_type":["Select a valid choice. %s is not one of the available choices."]}`, typ)
+				return
+			case s.relatedByID:
+				typ = scopedTypeName(typ)
+			case isID:
+				typ = "" // matches no row
+			}
+		}
+		for _, c := range s.macs {
+			if in("assigned_object_id", c.iface) && (!typed || c.ct == typ) {
+				rows = append(rows, fmt.Sprintf(`{"id":%d,"assigned_object_type":%q,"assigned_object_id":%d}`, c.id, c.ct, c.iface))
+			}
 		}
 	case "dcim/modules":
 		if refuseUnknown("device_id", s.devices) {

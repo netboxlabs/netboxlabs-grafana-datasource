@@ -30,8 +30,9 @@ func (p *Provider) childListCap() int {
 	return ChildListCapRows
 }
 
-// cableEndWorkers is how many cable-end batches run at once: bounded, without
-// a long serial chain on a device with thousands of interfaces.
+// cableEndWorkers is how many membership requests (the lists, and the
+// cable-end, IP-history and MAC batches) run at once: bounded, without a long
+// serial chain on a device with thousands of interfaces.
 const cableEndWorkers = 4
 
 // maxDescendantsBudget caps the time the descendant reads get. They run in a
@@ -149,10 +150,12 @@ const (
 	cableList            = "dcim/cables"
 )
 
-// The lists a device's modules and a device's or VM's services are read from.
+// The lists a device's modules, a device's or VM's services and the scope's
+// interfaces' MACs are read from.
 const (
-	moduleList  = "dcim/modules"
-	serviceList = "ipam/services"
+	moduleList     = "dcim/modules"
+	serviceList    = "ipam/services"
+	macAddressList = "dcim/mac-addresses"
 )
 
 // The types the descendant scans read: addresses in one scan, the parts in
@@ -314,8 +317,9 @@ type members struct {
 	macs     map[int64]int64
 	modules  map[int64]int64
 	services map[int64]int64
-	// degraded: a module or service list was refused (401/403) or over its
-	// cap, so that type is left to its change-log members and the scan.
+	// degraded: a MAC, module or service list was refused (401/403) or over
+	// its cap, so that type is left to the members the change log names (a
+	// module's, from its interfaces' deletes) and the scan.
 	degraded bool
 	reads    []changeReadResult // membership reads, rows cleared, for the cut-off (membershipResult)
 }
@@ -323,27 +327,30 @@ type members struct {
 // descendantMembers finds the scope's children over [From, now], for the types
 // want names: the current ones from their lists, plus the ones the change log
 // names since From: interfaces deleted, the modules those interfaces were on,
-// and cables whose ends were on the scope's interfaces. The range runs to now,
-// not To, because a child that left after To still had its changes in the
-// range.
+// and cables whose ends were on the scope's interfaces. IPs are the ones with
+// a change recorded against the scope's interfaces at any time (ipHistoryReads),
+// and MACs the ones on them now (macMembers). The range runs to now, not To,
+// because a child that left after To still had its changes in the range.
 //
 // want.ifaces reads a device or VM scope's interfaces; an interface scope's are
 // its own objects, read or not. Each part type is read only where the kind has
 // it, whatever the caller wants: cables on devices and interfaces, modules on
-// devices, services on devices and VMs. A device's cable ends are found through
-// its interfaces, so a caller that wants a device's cables wants its interfaces
-// too.
+// devices, services on devices and VMs. A device's cable ends, and any scope's
+// IPs and MACs, are found through its interfaces, so a caller that wants them
+// wants its interfaces too.
 //
 // Stage 1 runs the interface list, the interface-delete read and the cable,
-// module and service lists at once; stage 2, the cable-end reads, needs the
-// interfaces stage 1 found. Every request runs under a slot of sem, and none
-// holds a slot while it waits for another, so no slot sits idle. Each read
-// fills its own variables and the sets are built after each stage's Wait, so
-// no map is written concurrently. Every list row and change-log row is checked
-// against the scope here, whatever NetBox did with the filters.
+// module and service lists at once. Stage 2 runs the reads keyed by the
+// interfaces stage 1 found at once: the cable ends, the IP history and the MAC
+// list. Every request runs under a slot of sem, and none holds a slot while it
+// waits for another, so no slot sits idle. Each read fills its own variables
+// and the sets are built after each stage's Wait, in a fixed order, so no map
+// is written concurrently and the owners don't depend on timing. Every list
+// row and change-log row is checked against the scope here, whatever NetBox
+// did with the filters.
 //
-// A module or service list refused (401 or 403) or over the cap leaves only
-// its own type short: members is degraded, with no error and no fail. Any
+// A MAC, module or service list refused (401 or 403) or over the cap leaves
+// only its own type short: members is degraded, with no error and no fail. Any
 // other failure is returned, the first in a fixed order, as it came, and each
 // read that fails calls fail as it does (descendantChanges).
 func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCauseFunc, sem chan struct{}, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, want descendantWants) (members, error) {
@@ -532,29 +539,71 @@ func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCau
 		}
 	}
 
-	ifaceTypeID, endTypeID := ids[interfaceType], ids[cableTerminationType]
-	if !wantCables || len(m.ifaces) == 0 || ifaceTypeID == 0 || endTypeID == 0 {
+	// Stage 2 reads by the interfaces. Without any it reads nothing: an empty
+	// id filter would ask for all of NetBox. Cables are only on devices and
+	// interfaces, whose interface type is dcim.interface. A type the map lacks
+	// is a model this NetBox doesn't have: nothing to read for it.
+	if len(m.ifaces) == 0 {
 		return m, nil
 	}
-	ends := p.cableEndReads(ctx, fail, sem, spec, ifaceTypeID, endTypeID, m.ifaces)
-	for _, r := range ends {
+	endIfaceTypeID, endTypeID := ids[interfaceType], ids[cableTerminationType]
+	ifaceTypeID, ipTypeID := ids[kind.ifaceType], ids[ipAddressType]
+	var (
+		ends, history []changeReadResult
+		listedMACs    map[int64]int64
+		macErr        error
+		macRefused    bool
+	)
+	if wantCables && endIfaceTypeID != 0 && endTypeID != 0 {
+		wg.Go(func() { ends = p.cableEndReads(ctx, fail, sem, spec, endIfaceTypeID, endTypeID, m.ifaces) })
+	}
+	if want.ips && ifaceTypeID != 0 && ipTypeID != 0 {
+		wg.Go(func() { history = p.ipHistoryReads(ctx, fail, sem, kind.ifaceType, ifaceTypeID, ipTypeID, m.ifaces) })
+	}
+	if want.macs && ids[macAddressType] != 0 {
+		wg.Go(func() {
+			macs, err := p.macMembers(ctx, sem, kind.ifaceType, m.ifaces)
+			listedMACs = macs
+			macRefused, macErr = ownRefusal(err)
+			failed(macErr)
+		})
+	}
+	wg.Wait()
+	for _, r := range slices.Concat(ends, history) {
 		if r.err != nil {
 			return members{}, r.err
 		}
 	}
+	if macErr != nil {
+		return members{}, macErr
+	}
+
 	for _, r := range ends {
 		for _, d := range r.rows {
 			// The after side first, so an end that moved names the interface
 			// it's on now. A cable the list found keeps the list's owner, which
 			// addMember leaves in place.
 			for _, data := range []map[string]json.RawMessage{d.oc.PostchangeData, d.oc.PrechangeData} {
-				if cable, owner, ok := cableEndMember(data, ifaceTypeID, m.ifaces); ok {
+				if cable, owner, ok := cableEndMember(data, endIfaceTypeID, m.ifaces); ok {
 					addMember(m.cables, cable, owner)
 				}
 			}
 		}
 		m.reads = append(m.reads, membershipResult(spec, r))
 	}
+	for _, r := range history {
+		for _, d := range r.rows {
+			// The row's own snapshot names the interface, type and id together,
+			// whatever NetBox did with related_object_id.
+			if owner, ok := matchAssigned(d.oc, ifaceTypeID, m.ifaces); ok && d.oc.ChangedObjectID > 0 {
+				addMember(m.ips, d.oc.ChangedObjectID, owner)
+			}
+		}
+		m.reads = append(m.reads, ipHistoryResult(spec, r))
+	}
+	// A refused list left listedMACs nil: no MACs, and the type degraded.
+	maps.Copy(m.macs, listedMACs)
+	m.degraded = m.degraded || macRefused
 	return m, nil
 }
 
@@ -706,30 +755,66 @@ func interfaceDeleteRead(spec provider.ChangeSpec, scope *resolvedScope, kind de
 
 // cableEndReads reads the cable ends recorded against ifaces since From: a
 // related read over the interfaces, not a scan of every cable end, since cable
-// ends are recorded against their port. The ids are sorted and batched to the
-// URL budget, and each batch runs under a slot of sem, which the other
-// membership reads share. The results are in batch order. A batch that fails,
-// or that ctx ends while it waits for a slot, calls fail with its error as it
-// does.
+// ends are recorded against their port. The results are in batch order
+// (ifaceRelatedReads).
 func (p *Provider) cableEndReads(ctx context.Context, fail context.CancelCauseFunc, sem chan struct{}, spec provider.ChangeSpec, ifaceTypeID, endTypeID int, ifaces map[int64]int64) []changeReadResult {
 	fixed := membershipQuery(spec)
 	fixed.Set(relatedObjectTypeParam, interfaceType)
 	fixed.Set(changedObjectTypeIDParam, strconv.Itoa(endTypeID))
-	batcher := newQueryBatcher(relatedObjectIDParam, fixed)
-	var values []string
-	for _, id := range slices.Sorted(maps.Keys(ifaces)) {
-		values = append(values, strconv.FormatInt(id, 10))
-	}
 	keep := func(oc objectChange) bool { return normalizeObjectType(oc.changedType()) == cableTerminationType }
+	return p.ifaceRelatedReads(ctx, fail, sem, fixed, keep, ifaceTypeID, ifaces)
+}
 
-	batches := batcher.chunk(values)
+// ipHistoryReads reads the IP changes recorded against ifaces, newest first and
+// with no start, batched over related_object_id like cableEndReads but as
+// separate requests, each taking a slot of sem: IP churn on an interface can't
+// use up the cap its cable ends are read to. NetBox records an IP's create and
+// edits against the interface it's on after them, and its delete against the
+// one it was on, so these rows name every IP that was on ifaces in the change
+// history NetBox keeps. There is no start because an IP moved off or
+// unassigned in the range is recorded against where it went, or nothing: only
+// its older changes name it. ifaceType is the scope's interface type, the form
+// related_object_type takes from NetBox 4.4.4, and ifaceTypeID the form it
+// takes up to 4.4.3, for the retry.
+func (p *Provider) ipHistoryReads(ctx context.Context, fail context.CancelCauseFunc, sem chan struct{}, ifaceType string, ifaceTypeID, ipTypeID int, ifaces map[int64]int64) []changeReadResult {
+	fixed := url.Values{}
+	fixed.Set(orderingParam, "-time")
+	fixed.Set(relatedObjectTypeParam, ifaceType)
+	fixed.Set(changedObjectTypeIDParam, strconv.Itoa(ipTypeID))
+	keep := func(oc objectChange) bool { return normalizeObjectType(oc.changedType()) == ipAddressType }
+	return p.ifaceRelatedReads(ctx, fail, sem, fixed, keep, ifaceTypeID, ifaces)
+}
+
+// ipHistoryResult is membershipResult, except that a read capped after passing
+// From (oldest strictly before a non-zero From) isn't capped: it read every IP
+// change recorded in the range, so in-range membership is complete, and only
+// older history is left to the scan. A read whose rows' times didn't parse
+// (oldest zero) hasn't shown it passed From, and stays capped.
+func ipHistoryResult(spec provider.ChangeSpec, r changeReadResult) changeReadResult {
+	if r.capped && !spec.From.IsZero() && !r.oldest.IsZero() && r.oldest.Before(spec.From) {
+		r.capped = false
+	}
+	return membershipResult(spec, r)
+}
+
+// ifaceRelatedReads reads the changes recorded against ifaces that fixed asks
+// for. The interface ids are sorted and batched to the URL budget with fixed
+// measured in it, so each read's own parameters are, and each batch is a
+// related read, walked to changeScanCap rows under a slot of sem, which the
+// other membership reads share. keep checks every row, and relatedTypeID is
+// the interface type's id, for the related-type retry. The results are in
+// batch order, each batch writing only its own. A batch that fails, or that
+// ctx ends while it waits for a slot, calls fail with its error as it does.
+func (p *Provider) ifaceRelatedReads(ctx context.Context, fail context.CancelCauseFunc, sem chan struct{}, fixed url.Values, keep func(objectChange) bool, relatedTypeID int, ifaces map[int64]int64) []changeReadResult {
+	batcher := newQueryBatcher(relatedObjectIDParam, fixed)
+	batches := batcher.chunk(sortedIDs(ifaces))
 	results := make([]changeReadResult, len(batches))
 	var wg sync.WaitGroup
 	for i, batch := range batches {
-		r := changeRead{q: batcher.query(batch), keep: keep, fromRelated: true, relatedTypeID: ifaceTypeID}
+		r := changeRead{q: batcher.query(batch), keep: keep, fromRelated: true, relatedTypeID: relatedTypeID}
 		wg.Go(func() {
 			// A batch ctx ended before it ran fails with ctx's cause: with no
-			// error, it would read as one that found no cable ends.
+			// error, it would read as one that found nothing.
 			if err := takeSlot(ctx, sem); err != nil {
 				results[i].err = err
 				fail(err)
@@ -746,10 +831,80 @@ func (p *Provider) cableEndReads(ctx context.Context, fail context.CancelCauseFu
 	return results
 }
 
-// membershipQuery is the part every membership read shares: newest first, from
-// From, and no end, since membership covers [From, now]. No Action is pushed:
-// the query's filters apply to what the track shows, not to who the children
-// are.
+// macMembers lists the MAC addresses on ifaces, batched over assigned_object_id,
+// fields=id,assigned_object_type,assigned_object_id, each batch a list under a
+// slot of sem: a MAC's changes are recorded against nothing, so its list is
+// the only index of which are on an interface. It keeps a row only when its
+// assigned_object_type string is ifaceType and its assigned_object_id is in
+// ifaces, owned by that interface's owner. assigned_object_type is never sent:
+// up to NetBox 4.4.3 it takes an id and a name is a 400, from 4.4.4 a name and
+// an id lists nothing, while assigned_object_id is a number on every version.
+//
+// Each batch writes only its own slot. Any batch's error fails the list, one
+// that isn't a refusal (listRefused) before one that is, so a refused batch
+// refuses the whole list, and a batch ctx ended before it ran fails it with
+// ctx's cause.
+func (p *Provider) macMembers(ctx context.Context, sem chan struct{}, ifaceType string, ifaces map[int64]int64) (map[int64]int64, error) {
+	batcher := newQueryBatcher("assigned_object_id", url.Values{"fields": {"id,assigned_object_type,assigned_object_id"}})
+	batches := batcher.chunk(sortedIDs(ifaces))
+	rows := make([][]json.RawMessage, len(batches))
+	errs := make([]error, len(batches))
+	var wg sync.WaitGroup
+	for i, batch := range batches {
+		q := batcher.query(batch)
+		wg.Go(func() {
+			if errs[i] = takeSlot(ctx, sem); errs[i] != nil {
+				return
+			}
+			defer func() { <-sem }()
+			rows[i], errs[i] = p.listChildren(ctx, macAddressList, q)
+		})
+	}
+	wg.Wait()
+	var refused error
+	for _, err := range errs {
+		switch {
+		case err == nil:
+		case !listRefused(err):
+			return nil, err
+		case refused == nil:
+			refused = err
+		}
+	}
+	if refused != nil {
+		return nil, refused
+	}
+	set := map[int64]int64{}
+	for _, batch := range rows {
+		for _, raw := range batch {
+			row := decodeObject(raw)
+			var typ string
+			id, ok := snapshotID(row, "id")
+			iface, assigned := snapshotID(row, "assigned_object_id")
+			if !ok || !assigned || json.Unmarshal(row["assigned_object_type"], &typ) != nil || normalizeObjectType(typ) != ifaceType {
+				continue
+			}
+			if owner, on := ifaces[iface]; on {
+				addMember(set, id, owner)
+			}
+		}
+	}
+	return set, nil
+}
+
+// sortedIDs is set's ids in order, as the values an id filter sends.
+func sortedIDs(set map[int64]int64) []string {
+	out := make([]string, 0, len(set))
+	for _, id := range slices.Sorted(maps.Keys(set)) {
+		out = append(out, strconv.FormatInt(id, 10))
+	}
+	return out
+}
+
+// membershipQuery is the part the membership reads share, the IP history
+// aside (ipHistoryReads): newest first, from From, and no end, since
+// membership covers [From, now]. No Action is pushed: the query's filters
+// apply to what the track shows, not to who the children are.
 func membershipQuery(spec provider.ChangeSpec) url.Values {
 	return changeLogQuery(provider.ChangeSpec{From: spec.From}, changeFilter{})
 }

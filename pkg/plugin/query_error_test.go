@@ -62,6 +62,20 @@ func TestQueryErrorMessage(t *testing.T) {
 	}
 }
 
+// An object type is free text too, and not always ASCII: its cut must not split
+// a character either.
+func TestQueryErrorMessage_LongNonASCIIObjectTypeCutOnACharacter(t *testing.T) {
+	// The leading byte puts a byte-count cut in the middle of an "é".
+	long := "x" + strings.Repeat("é", 5000)
+	got := queryErrorMessage(&netbox.UnknownObjectTypeError{Type: long, Known: 154}, false)
+	if !utf8.ValidString(got) || strings.Contains(got, `\x`) {
+		t.Errorf("message splits a character: %q", got)
+	}
+	if want := long[:maxUpstreamDetail-1] + "…"; !strings.Contains(got, want) {
+		t.Errorf("message (%d bytes) does not cut the type at the last whole character within %d bytes", len(got), maxUpstreamDetail)
+	}
+}
+
 // An unknown object type must reach the user as an actionable message AND as a
 // bad request: it is a typo in the annotation editor, and StatusInternal says
 // "our side broke, try again", which is the opposite of what the reader has to
@@ -136,10 +150,14 @@ func TestQueryErrorMessage_Annotation(t *testing.T) {
 				t.Errorf("message = %q, want %q", got, tc.want)
 			}
 			// An object-type list that couldn't be read is NetBox's side, often
-			// passing; every other refusal is the query's.
+			// passing, and a journal the token can't read is the token's, answered
+			// as a refused token is; every other refusal is the query's.
 			want := backend.StatusBadRequest
-			if tc.err.Reason == provider.AnnotationReasonObjectTypesUnreadable {
+			switch tc.err.Reason {
+			case provider.AnnotationReasonObjectTypesUnreadable:
 				want = backend.StatusInternal
+			case provider.AnnotationReasonJournalForbidden:
+				want = queryErrorStatus(&netbox.APIError{Status: 403})
 			}
 			if got := queryErrorStatus(tc.err); got != want {
 				t.Errorf("status = %v, want %v", got, want)

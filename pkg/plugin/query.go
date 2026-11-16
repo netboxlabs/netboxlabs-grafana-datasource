@@ -717,6 +717,20 @@ func proxyHop(err error) bool {
 // Grafana toast.
 const maxUpstreamDetail = 300
 
+// boundDetail cuts a user-supplied string for a user-facing error to
+// maxUpstreamDetail bytes, and marks the cut. The cut steps back to a
+// character's first byte, so a non-ASCII name isn't split into an escape.
+func boundDetail(s string) string {
+	if len(s) <= maxUpstreamDetail {
+		return s
+	}
+	n := maxUpstreamDetail
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
+}
+
 // transportCause names why a request never got an answer, in words that carry
 // no address, port, path or raw error text.
 //
@@ -859,12 +873,8 @@ func queryErrorMessage(err error, viaProxy bool) string {
 		case provider.ErrorKindUnknownObjectType:
 			// Bounded like every other echoed string here: the type is free text
 			// from the annotation editor and lands in the same toast.
-			name := u.ObjectType
-			if len(name) > maxUpstreamDetail {
-				name = name[:maxUpstreamDetail] + "…"
-			}
 			return fmt.Sprintf("NetBox has no object type %q — it isn't one of the %d types this instance reports. Annotations filter by app_label.model, singular (e.g. dcim.device, ipam.ipaddress).",
-				name, u.KnownTypes)
+				boundDetail(u.ObjectType), u.KnownTypes)
 		case provider.ErrorKindNotListable:
 			return "This object type can't be queried — the NetBox endpoint doesn't support listing (HTTP 405). It may be an action endpoint, not a queryable collection."
 		case provider.ErrorKindInvalidBranch:
@@ -902,16 +912,7 @@ func queryErrorMessage(err error, viaProxy bool) string {
 func annotationErrorMessage(u *provider.UpstreamError) string {
 	// Bounded like the object type above: the value is free text from the
 	// annotation editor or a dashboard variable, and lands in the same toast.
-	// The cut steps back to a character's first byte, so a non-ASCII name isn't
-	// split into an escape.
-	value := u.AnnotationValue
-	if len(value) > maxUpstreamDetail {
-		n := maxUpstreamDetail
-		for n > 0 && !utf8.RuneStart(value[n]) {
-			n--
-		}
-		value = value[:n] + "…"
-	}
+	value := boundDetail(u.AnnotationValue)
 	switch u.AnnotationReason {
 	case provider.AnnotationReasonEmptyScope:
 		return "The annotation's scope came out empty. Is its variable empty?"
@@ -979,10 +980,13 @@ func (d *Datasource) queryErrorResponse(err error) backend.DataResponse {
 // is a bad request, and saying otherwise tells the reader to retry something
 // only they can fix. object-types-unreadable is an annotation refusal, but of
 // a read that failed upstream, often in passing, so it is StatusInternal too.
+// journal-forbidden is the API token's permissions, not the query, so it gets
+// what a refused token (ErrorKindAuth) gets: StatusInternal.
 func queryErrorStatus(err error) backend.Status {
 	if u := provider.Classify(err); u != nil {
 		switch {
-		case u.Kind == provider.ErrorKindAnnotation && u.AnnotationReason == provider.AnnotationReasonObjectTypesUnreadable:
+		case u.Kind == provider.ErrorKindAnnotation && (u.AnnotationReason == provider.AnnotationReasonObjectTypesUnreadable ||
+			u.AnnotationReason == provider.AnnotationReasonJournalForbidden):
 			return backend.StatusInternal
 		case u.Kind == provider.ErrorKindUnknownObjectType, u.Kind == provider.ErrorKindAnnotation:
 			return backend.StatusBadRequest

@@ -1968,10 +1968,16 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	if c, capped := cutoffChange(results); capped && cutoffMayMiss(kept, limit, c.Time) {
 		cut, showCut = c, true
 		// A residual cut-off says what may be missing in the range, not where
-		// the scan stopped, so it sits at From, like the limit marker. Its
-		// reach is in Until.
-		if cut.Residual && !spec.From.IsZero() {
-			cut.Time = spec.From
+		// the scan stopped, so it sits at the end of the range: stable across
+		// refreshes like the left edge, and clear of the limit marker at From,
+		// which Grafana would show instead of it on hover. A descendants error
+		// sits there too, but it drops the descendant results, so no residual
+		// cut exists then. The reach is in Until.
+		if cut.Residual {
+			cut.Time = spec.To
+			if cut.Time.IsZero() {
+				cut.Time = time.Now()
+			}
 		}
 	}
 	if scope != nil {

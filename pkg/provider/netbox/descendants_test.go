@@ -2241,6 +2241,9 @@ func TestChanges_DescendantScanCapShowsCutoff(t *testing.T) {
 	wantIDs(t, changes, "#10", "cutoff")
 	if cut := changes[len(changes)-1]; !cut.Residual || !slices.Equal(cut.Types, []string{"ipam.ipaddress", "dcim.macaddress"}) {
 		t.Errorf("cut-off Residual %v Types %v, want a residual cut-off of the address scan's types", cut.Residual, cut.Types)
+	} else if want := scopedNow.Add(-3 * time.Minute); !cut.Time.Equal(want) || !cut.Until.Equal(want) {
+		// With no From the marker stays at the scan's reach, not at year 1.
+		t.Errorf("cut-off at %v until %v, want both at the reach %v", cut.Time, cut.Until, want)
 	}
 }
 
@@ -3046,6 +3049,9 @@ func TestChanges_ResidualCutoffModuleOnly(t *testing.T) {
 	spec.ObjectTypes = []string{"dcim.module"}
 	spec.From = scopedNow.Add(-60 * time.Minute)
 	changes := changesOK(t, p, spec)
+	if len(changes) == 0 {
+		t.Fatal("no changes, want a residual cut-off")
+	}
 	cut := changes[len(changes)-1]
 	if cut.Kind != provider.ChangeKindCutoff || !cut.Residual || !slices.Equal(cut.Types, []string{"dcim.module"}) {
 		t.Fatalf("last change = %+v, want a residual cut-off of dcim.module", cut)

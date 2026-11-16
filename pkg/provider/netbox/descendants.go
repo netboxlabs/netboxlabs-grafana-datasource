@@ -345,8 +345,9 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 	}
 	residual.Wait()
 	// The residual marker can describe a scan's misses only when every list was
-	// read: after a refused or over-cap one, the scan also stood in for what
-	// that list would have found, and the general text applies.
+	// read. This is deliberately conservative: any refused or over-cap list, a
+	// MAC list too when it is the parts scan that was cut, makes the marker the
+	// general one.
 	for i := range found {
 		found[i].residual = !m.degraded
 		found[i].types = scans[i].types

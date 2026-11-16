@@ -296,6 +296,9 @@ func cutoffMarker(c provider.Change) (title, text, tag string) {
 	return "NetBox change log", text, "netbox,cutoff"
 }
 
+// markerTimeLayout is the time format the limit and residual markers print.
+const markerTimeLayout = "2006-01-02 15:04:05 UTC"
+
 // residualText says which removals a cut residual scan may have missed, and
 // from when: the marker sits at From, so the time is in the text. A failed
 // scan has no reach to name, and checked nothing in the range.
@@ -304,7 +307,7 @@ func residualText(c provider.Change) string {
 	if c.Until.IsZero() {
 		return fmt.Sprintf("Removals not checked: %s taken off or deleted in this range may not show.", nouns)
 	}
-	return fmt.Sprintf("Removals before %s not checked: %s taken off or deleted earlier may not show.", c.Until.UTC().Format("2006-01-02 15:04:05 UTC"), nouns)
+	return fmt.Sprintf("Removals before %s not checked: %s taken off or deleted earlier may not show.", c.Until.UTC().Format(markerTimeLayout), nouns)
 }
 
 // residualNouns names object types for a sentence: "an IP address, MAC address,
@@ -342,7 +345,7 @@ func residualNouns(types []string) string {
 // names the largest too: Changes reads a Limit above it as the default, so a
 // user who set more sees the default here and needs to know why.
 func limitMarker(c provider.Change) (title, text, tag string) {
-	at := c.Until.UTC().Format("2006-01-02 15:04:05 UTC")
+	at := c.Until.UTC().Format(markerTimeLayout)
 	text = fmt.Sprintf("Limit reached: changes before %s in this range aren't shown. Raise Limit (now %d, at most %s), narrow the range, or narrow Object types.", at, c.Limit, thousands(netbox.MaxLimit))
 	if c.Limit >= netbox.MaxLimit {
 		text = fmt.Sprintf("Limit reached: changes before %s in this range aren't shown. Narrow the range or Object types.", at)

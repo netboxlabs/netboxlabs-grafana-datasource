@@ -2239,8 +2239,8 @@ func TestChanges_DescendantScanCapShowsCutoff(t *testing.T) {
 	p.residualRowsOverride = 3
 	changes := changesOK(t, p, withDescendants(nameScope("leaf1")))
 	wantIDs(t, changes, "#10", "cutoff")
-	if cut := changes[len(changes)-1]; !cut.DescendantsOnly {
-		t.Errorf("cut-off DescendantsOnly = false, want true: only the address scan was cut")
+	if cut := changes[len(changes)-1]; !cut.Residual || !slices.Equal(cut.Types, []string{"ipam.ipaddress", "dcim.macaddress"}) {
+		t.Errorf("cut-off Residual %v Types %v, want a residual cut-off of the address scan's types", cut.Residual, cut.Types)
 	}
 }
 
@@ -2745,6 +2745,10 @@ func TestChanges_ResidualTimeoutKeepsIndexedResults(t *testing.T) {
 			spec.From = scopedNow.Add(-60 * time.Minute)
 			changes, elapsed := changesWithin(t, p, spec, 4*time.Second)
 			wantIDs(t, changes, "#1", "#2", "#3", "cutoff")
+			cut := changes[len(changes)-1]
+			if all := []string{"ipam.ipaddress", "dcim.macaddress", "dcim.module", "ipam.service"}; !cut.Residual || !cut.Until.IsZero() || !cut.Time.Equal(spec.From) || !slices.Equal(cut.Types, all) {
+				t.Errorf("cut-off = Residual %v Until %v at %v Types %v; want residual, no reach, at From, all four types", cut.Residual, cut.Until, cut.Time, cut.Types)
+			}
 			if elapsed >= 1800*time.Millisecond {
 				t.Errorf("Changes took %v, want the residual scans given up at their own deadline, about 1s", elapsed)
 			}
@@ -2785,9 +2789,9 @@ func TestChanges_ResidualPageMatchedAfterSlowMembership(t *testing.T) {
 	spec.From = scopedNow.Add(-60 * time.Minute)
 	changes, _ := changesWithin(t, p, spec, 5*time.Second)
 	wantIDs(t, changes, "#1", "cutoff")
-	// The page's reach: an unchecked scan would sit at now.
-	if cut, want := changes[len(changes)-1], scopedNow.Add(-time.Minute); !cut.Time.Equal(want) {
-		t.Errorf("cut-off at %v, want the page's oldest row, %v", cut.Time, want)
+	// The page's reach: an unchecked scan would have none.
+	if cut, want := changes[len(changes)-1], scopedNow.Add(-time.Minute); !cut.Residual || !cut.Until.Equal(want) || !cut.Time.Equal(spec.From) {
+		t.Errorf("cut-off Residual %v until %v at %v, want residual, until the page's oldest row %v, at From", cut.Residual, cut.Until, cut.Time, want)
 	}
 }
 
@@ -3002,5 +3006,117 @@ func TestMatchers(t *testing.T) {
 				t.Errorf("= %d, %v; want %d, %v", owner, ok, tc.owner, tc.ok)
 			}
 		})
+	}
+}
+
+// A residual scan cut at its page makes a cut-off at From that names only the
+// types it scanned: the indexed reads covered the rest of the range.
+func TestChanges_ResidualCutoffAtFrom(t *testing.T) {
+	var rows []loggedChange
+	for i := 1; i <= 3; i++ {
+		rows = append(rows, ipOn(i, i, "create", int64(400+i), 200))
+	}
+	s := newestFirst(rows...)
+	s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+	p := s.start(t)
+	p.residualRowsOverride = 2
+	spec := withDescendants(nameScope("leaf1"))
+	spec.From = scopedNow.Add(-60 * time.Minute)
+	changes := changesOK(t, p, spec)
+	wantIDs(t, changes, "cutoff")
+	cut := changes[len(changes)-1]
+	if !cut.Residual || !cut.Time.Equal(spec.From) || !cut.Until.Equal(scopedNow.Add(-2*time.Minute)) {
+		t.Errorf("cut-off Residual %v at %v until %v; want residual, at From %v, until %v", cut.Residual, cut.Time, cut.Until, spec.From, scopedNow.Add(-2*time.Minute))
+	}
+	if want := []string{"ipam.ipaddress", "dcim.macaddress"}; !slices.Equal(cut.Types, want) {
+		t.Errorf("Types = %v, want %v", cut.Types, want)
+	}
+}
+
+// Object types narrow what the residual marker names, and the reads behind it.
+func TestChanges_ResidualCutoffModuleOnly(t *testing.T) {
+	var rows []loggedChange
+	for i := 1; i <= 3; i++ {
+		rows = append(rows, created(i, i, "dcim.module", int64(500+i), `{"device":18}`))
+	}
+	s := newestFirst(rows...)
+	p := s.start(t)
+	p.residualRowsOverride = 2
+	spec := withDescendants(nameScope("leaf1"))
+	spec.ObjectTypes = []string{"dcim.module"}
+	spec.From = scopedNow.Add(-60 * time.Minute)
+	changes := changesOK(t, p, spec)
+	cut := changes[len(changes)-1]
+	if cut.Kind != provider.ChangeKindCutoff || !cut.Residual || !slices.Equal(cut.Types, []string{"dcim.module"}) {
+		t.Fatalf("last change = %+v, want a residual cut-off of dcim.module", cut)
+	}
+	for _, path := range []string{"dcim/interfaces", "dcim/mac-addresses", "dcim/cables", "ipam/services"} {
+		if lists := s.requestsTo(path); len(lists) != 0 {
+			t.Errorf("%s requests = %v, want none", path, lists)
+		}
+	}
+	if lists := s.requestsTo("dcim/modules"); len(lists) != 1 {
+		t.Errorf("module lists = %v, want one", lists)
+	}
+	deletes := slices.DeleteFunc(s.changeLog(), func(q url.Values) bool { return !carries(q, 14) || q.Get("action") != "delete" })
+	if len(deletes) != 1 {
+		t.Errorf("interface-delete reads = %v, want one", deletes)
+	}
+	for _, q := range s.changeLog() {
+		if carries(q, 20, 21) {
+			t.Errorf("change-log read %v: want none for addresses", q)
+		}
+	}
+	if parts := scanReads(s, 22, 23); len(parts) != 1 || !reflect.DeepEqual(parts[0][changedObjectTypeIDParam], []string{"22"}) {
+		t.Errorf("parts scans = %v, want one with changed_object_type_id=[22]", parts)
+	}
+}
+
+// A refused list leaves the scans' misses undescribable by the residual
+// marker: it keeps the general text, at its reach.
+func TestChanges_ResidualCutoffGeneralWhenAListRefused(t *testing.T) {
+	var rows []loggedChange
+	for i := 1; i <= 3; i++ {
+		rows = append(rows, ipOn(i, i, "create", int64(400+i), 200))
+	}
+	s := newestFirst(rows...)
+	s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+	s.macs = []macRow{{id: 403, ct: "dcim.interface", iface: 100}}
+	s.listStatusFor = map[string]int{"dcim/mac-addresses": http.StatusForbidden}
+	p := s.start(t)
+	p.residualRowsOverride = 2
+	spec := withDescendants(nameScope("leaf1"))
+	spec.From = scopedNow.Add(-60 * time.Minute)
+	changes := changesOK(t, p, spec)
+	wantIDs(t, changes, "cutoff")
+	cut := changes[len(changes)-1]
+	if cut.Residual || !cut.DescendantsOnly || !cut.Time.Equal(scopedNow.Add(-2*time.Minute)) {
+		t.Errorf("cut-off Residual %v DescendantsOnly %v at %v; want general, descendants-only, at its reach %v", cut.Residual, cut.DescendantsOnly, cut.Time, scopedNow.Add(-2*time.Minute))
+	}
+}
+
+// The residual cut-off and the limit marker both sit at From, and each says
+// its own reach in Until.
+func TestChanges_ResidualAndLimitMarkers(t *testing.T) {
+	s := newestFirst(
+		ipOn(1, 1, "create", 400, 200),
+		ipOn(2, 2, "create", 401, 100),
+		ipOn(3, 3, "create", 402, 100),
+		ipOn(4, 4, "create", 403, 100),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+	p := s.start(t)
+	p.residualRowsOverride = 1
+	spec := withDescendants(nameScope("leaf1"))
+	spec.From = scopedNow.Add(-60 * time.Minute)
+	spec.Limit = 2
+	changes := changesOK(t, p, spec)
+	wantIDs(t, changes, "#2", "#3", "cutoff", "limit")
+	cut, lim := changes[2], changes[3]
+	if !cut.Residual || !cut.Time.Equal(spec.From) || !cut.Until.Equal(scopedNow.Add(-time.Minute)) {
+		t.Errorf("cut-off = Residual %v at %v until %v, want residual at From until %v", cut.Residual, cut.Time, cut.Until, scopedNow.Add(-time.Minute))
+	}
+	if !lim.Time.Equal(spec.From) || !lim.Until.Equal(scopedNow.Add(-3*time.Minute)) {
+		t.Errorf("limit marker at %v until %v, want at From until %v", lim.Time, lim.Until, scopedNow.Add(-3*time.Minute))
 	}
 }

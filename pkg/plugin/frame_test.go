@@ -604,3 +604,35 @@ func TestBuildFrame_DeclaredColumnTypeSurvivesAnEmptyColumn(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildAnnotationsFrame_ResidualCutoff(t *testing.T) {
+	until := time.Date(2026, 11, 9, 11, 30, 5, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		types []string
+		until time.Time
+		want  string
+	}{
+		{"all", []string{"ipam.ipaddress", "dcim.macaddress", "dcim.module", "ipam.service"}, until,
+			"Removals before 2026-11-09 11:30:05 UTC not checked: an IP address, MAC address, module or service taken off or deleted earlier may not show."},
+		{"module", []string{"dcim.module"}, until,
+			"Removals before 2026-11-09 11:30:05 UTC not checked: a module taken off or deleted earlier may not show."},
+		{"addresses", []string{"ipam.ipaddress", "dcim.macaddress"}, until,
+			"Removals before 2026-11-09 11:30:05 UTC not checked: an IP address or MAC address taken off or deleted earlier may not show."},
+		{"failed", []string{"dcim.module", "ipam.service"}, time.Time{},
+			"Removals not checked: a module or service taken off or deleted in this range may not show."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindCutoff, Residual: true, Types: tc.types, Until: tc.until, Scanned: 2500}})
+			if got := f.Fields[1].At(0).(string); got != "NetBox change log" {
+				t.Errorf("title = %q", got)
+			}
+			if got := f.Fields[2].At(0).(string); got != tc.want {
+				t.Errorf("text = %q, want %q", got, tc.want)
+			}
+			if got := f.Fields[3].At(0).(string); got != "netbox,cutoff" {
+				t.Errorf("tags = %q", got)
+			}
+		})
+	}
+}

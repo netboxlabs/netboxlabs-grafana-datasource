@@ -344,6 +344,13 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 		}
 	}
 	residual.Wait()
+	// The residual marker can describe a scan's misses only when every list was
+	// read: after a refused or over-cap one, the scan also stood in for what
+	// that list would have found, and the general text applies.
+	for i := range found {
+		found[i].residual = !m.degraded
+		found[i].types = scans[i].types
+	}
 	// ctx ended while only the residual scans were left: the caller's cancel, a
 	// failed own read's, or the descendants deadline just as membership
 	// succeeded, which the address scan's matcher may have seen first. A scan

@@ -1057,3 +1057,46 @@ func TestLimitReached(t *testing.T) {
 		})
 	}
 }
+
+// Residual scans that were cut make a residual cut-off, and only if every cut
+// scanning read is one. Its Types are the cut scans' types, and its Until the
+// newest of their reaches, zero when one was unchecked.
+func TestCutoffChange_Residual(t *testing.T) {
+	t1 := scopedNow.Add(-20 * time.Minute)
+	t2 := scopedNow.Add(-5 * time.Minute)
+	addr := changeReadResult{scan: true, descendant: true, residual: true, capped: true, oldest: t1, types: []string{"ipam.ipaddress", "dcim.macaddress"}}
+	parts := changeReadResult{scan: true, descendant: true, residual: true, capped: true, oldest: t2, types: []string{"dcim.module", "ipam.service"}}
+	all := []string{"ipam.ipaddress", "dcim.macaddress", "dcim.module", "ipam.service"}
+	partTypes := []string{"dcim.module", "ipam.service"}
+	with := func(r changeReadResult, mod func(*changeReadResult)) changeReadResult {
+		mod(&r)
+		return r
+	}
+	for _, tc := range []struct {
+		name      string
+		results   []changeReadResult
+		residual  bool
+		descOnly  bool
+		time      time.Time
+		until     time.Time
+		wantTypes []string
+	}{
+		{"both scans", []changeReadResult{addr, parts}, true, false, t2, t2, all},
+		{"an uncapped scan is left out", []changeReadResult{with(addr, func(r *changeReadResult) { r.capped = false }), parts}, true, false, t2, t2, partTypes},
+		{"an unchecked scan", []changeReadResult{with(addr, func(r *changeReadResult) { r.unchecked, r.oldest = true, scopedNow }), parts}, true, false, scopedNow, time.Time{}, all},
+		{"a capped by-id read", []changeReadResult{parts, {scan: true, descendant: true, capped: true, oldest: t1}}, false, true, t2, time.Time{}, nil},
+		{"a scan that isn't residual", []changeReadResult{with(parts, func(r *changeReadResult) { r.residual = false })}, false, true, t2, time.Time{}, nil},
+		{"a capped own read", []changeReadResult{parts, {scan: true, capped: true, oldest: t1}}, false, false, t2, time.Time{}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, capped := cutoffChange(tc.results)
+			if !capped {
+				t.Fatal("not capped")
+			}
+			if c.Residual != tc.residual || c.DescendantsOnly != tc.descOnly || !c.Time.Equal(tc.time) || !c.Until.Equal(tc.until) || !slices.Equal(c.Types, tc.wantTypes) {
+				t.Errorf("cutoff = Residual %v DescendantsOnly %v Time %v Until %v Types %v; want %v %v %v %v %v",
+					c.Residual, c.DescendantsOnly, c.Time, c.Until, c.Types, tc.residual, tc.descOnly, tc.time, tc.until, tc.wantTypes)
+			}
+		})
+	}
+}

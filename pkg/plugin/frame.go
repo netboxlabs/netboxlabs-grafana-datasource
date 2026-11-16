@@ -286,11 +286,55 @@ func journalMarker(c provider.Change) (title, text, tag string) {
 }
 
 func cutoffMarker(c provider.Change) (title, text, tag string) {
+	if c.Residual {
+		return "NetBox change log", residualText(c), "netbox,cutoff"
+	}
 	text = fmt.Sprintf("Older changes not checked: read %s change-log entries without reaching the start of the range.", thousands(c.Scanned))
 	if c.DescendantsOnly {
 		text = fmt.Sprintf("Older changes to what's attached not checked: read %s change-log entries without reaching the start of the range. The scope's own changes were all read.", thousands(c.Scanned))
 	}
 	return "NetBox change log", text, "netbox,cutoff"
+}
+
+// residualText says which removals a cut residual scan may have missed, and
+// from when: the marker sits at From, so the time is in the text. A failed
+// scan has no reach to name, and checked nothing in the range.
+func residualText(c provider.Change) string {
+	nouns := residualNouns(c.Types)
+	if c.Until.IsZero() {
+		return fmt.Sprintf("Removals not checked: %s taken off or deleted in this range may not show.", nouns)
+	}
+	return fmt.Sprintf("Removals before %s not checked: %s taken off or deleted earlier may not show.", c.Until.UTC().Format("2006-01-02 15:04:05 UTC"), nouns)
+}
+
+// residualNouns names object types for a sentence: "an IP address, MAC address,
+// module or service". An unknown type is named as given.
+func residualNouns(types []string) string {
+	names := map[string]string{
+		"ipam.ipaddress":  "IP address",
+		"dcim.macaddress": "MAC address",
+		"dcim.module":     "module",
+		"ipam.service":    "service",
+	}
+	nouns := make([]string, len(types))
+	for i, t := range types {
+		if n, ok := names[t]; ok {
+			nouns[i] = n
+		} else {
+			nouns[i] = t
+		}
+	}
+	var list string
+	if len(nouns) > 1 {
+		list = strings.Join(nouns[:len(nouns)-1], ", ") + " or " + nouns[len(nouns)-1]
+	} else {
+		list = strings.Join(nouns, "")
+	}
+	article := "a"
+	if len(nouns) > 0 && nouns[0] == "IP address" {
+		article = "an"
+	}
+	return article + " " + list
 }
 
 // limitMarker says the query's Limit hid older changes in the range, and from

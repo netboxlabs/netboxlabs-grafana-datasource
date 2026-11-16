@@ -637,15 +637,14 @@ func matchServiceParent(oc objectChange, scopeTypeID int, ownerField string, sco
 
 // descendantParent names the scope object a descendant row matched, for the
 // marker title's "on <name>": with one scope object it is that object, else
-// the one whose id is owner, else "".
-func descendantParent(scope *resolvedScope, owner int64) string {
+// the one whose id is owner, else "". objects is the scope's objects by id
+// (objectsByID).
+func descendantParent(scope *resolvedScope, objects map[int64]scopeObject, owner int64) string {
 	if len(scope.Objects) == 1 {
 		return scopeObjectName(scope, scope.Objects[0])
 	}
-	for _, o := range scope.Objects {
-		if o.ID == owner {
-			return scopeObjectName(scope, o)
-		}
+	if o, ok := objects[owner]; ok {
+		return scopeObjectName(scope, o)
 	}
 	return ""
 }

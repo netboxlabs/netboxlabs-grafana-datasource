@@ -1964,7 +1964,7 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		for i := range kept {
 			switch {
 			case kept[i].descendant:
-				kept[i].parent = descendantParent(scope, kept[i].owner)
+				kept[i].parent = descendantParent(scope, objects, kept[i].owner)
 			case kept[i].fromRelated:
 				kept[i].parent = relatedParent(scope, objects, kept[i].oc)
 			}

@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
@@ -176,9 +175,10 @@ const (
 // membership reads' results, then the by-id reads', then the residual scans',
 // every one with scan and descendant set. nil, nil when the scope type has no
 // descendantKinds row or no descendant type survives Object types. The first
-// error among the membership and by-id reads is returned, and each read that
-// fails calls fail with its error as it does, so the caller can stop the
-// others (Changes cancels ctx with it).
+// error among the membership and by-id reads is returned, or ctx's cause when
+// ctx ended once they had finished, and each read that fails calls fail with
+// its error as it does, so the caller can stop the others (Changes cancels ctx
+// with it).
 //
 // The descendant types are decided before anything is read, so a query whose
 // Object types leave none reads nothing, not even the type map. Children are
@@ -192,13 +192,16 @@ const (
 // IPs and MACs, the parts scan modules and services, one page each
 // (residualScan). They start at once, beside membership, under their own
 // deadline (residualContext) and without a slot of sem, and never fail the
-// others: one that fails or runs out of time is unchecked. The parts scan
-// matches a row by the scope objects alone. The address scan matches by the
-// scope's interfaces, so its page waits for membership, or for ctx ending;
-// not for its own deadline, so a page that came in time is matched however
-// long membership takes. The scans are waited for on every path, so none
-// outlives the call. A scope without interfaces drops the address scan's
-// result: no IP or MAC it could match exists, so it can't have missed one.
+// others: one that fails or runs out of its own time is unchecked. ctx ending
+// still ends them, and is then the call's error, though the other reads had
+// finished: a caller's cancel or the descendants deadline is never read as an
+// unchecked scan. The parts scan matches a row by the scope objects alone. The
+// address scan matches by the scope's interfaces, so its page waits for
+// membership, or for ctx ending; not for its own deadline, so a page that came
+// in time is matched however long membership takes. The scans are waited for
+// on every path, so none outlives the call. A scope without interfaces drops
+// the address scan's result: no IP or MAC it could match exists, so it can't
+// have missed one.
 //
 // Each read pushes its types as changed_object_type_id, and keeps a row only
 // when the row's own type and snapshot, or its cable id, tie it to the scope,
@@ -274,23 +277,16 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 		return byScope(oc)
 	}
 	// afterMembership is match once membership is known. ctx ending first
-	// matches nothing and sets gaveUp: membership has then failed or been cut,
-	// and the results are dropped, or it succeeded just as ctx ended, and the
-	// address scan is unchecked. ready is checked first, so once it is closed
-	// every row is matched, whatever ctx does.
-	var gaveUp atomic.Bool
+	// matches nothing: descendantChanges then returns an error, whether
+	// membership failed or ctx ended later, so the rows it gave up on are
+	// dropped with the rest.
 	afterMembership := func(oc objectChange) (int64, bool) {
 		select {
 		case <-ready:
-		default:
-			select {
-			case <-ready:
-			case <-ctx.Done():
-				gaveUp.Store(true)
-				return 0, false
-			}
+			return match(oc)
+		case <-ctx.Done():
+			return 0, false
 		}
-		return match(oc)
 	}
 
 	// The residual scans start now, beside membership. Their own deadline and
@@ -348,10 +344,13 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 		}
 	}
 	residual.Wait()
-	// ctx ended just as membership succeeded, before the address scan's matcher
-	// saw it had: the rows the matcher gave up on weren't checked.
-	if gaveUp.Load() {
-		found[0] = uncheckedResult(spec)
+	// ctx ended while only the residual scans were left: the caller's cancel, a
+	// failed own read's, or the descendants deadline just as membership
+	// succeeded, which the address scan's matcher may have seen first. A scan
+	// it cut reads as unchecked, as one its own deadline cut does, so ctx's
+	// cause is the error, as it is for any other read ctx cuts.
+	if ctx.Err() != nil {
+		return nil, context.Cause(ctx)
 	}
 	results := slices.Concat(m.reads, byID)
 	if len(addrTypes) > 0 && len(m.ifaces) > 0 {

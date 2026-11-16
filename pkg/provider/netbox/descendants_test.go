@@ -2236,7 +2236,7 @@ func TestChanges_DescendantScanCapShowsCutoff(t *testing.T) {
 	s := newScopedChangeServer(rows...)
 	s.interfaces = []childRow{{id: 100, owner: 17}}
 	p := s.start(t)
-	p.changeScanCapOverride, p.residualRowsOverride = 3, 3
+	p.residualRowsOverride = 3
 	changes := changesOK(t, p, withDescendants(nameScope("leaf1")))
 	wantIDs(t, changes, "#10", "cutoff")
 	if cut := changes[len(changes)-1]; !cut.DescendantsOnly {
@@ -2360,10 +2360,12 @@ func TestChanges_DescendantsSlowDuringRetryBackoff(t *testing.T) {
 }
 
 // The caller's context ending is the query ending: an error, not a marker. It
-// is cancelled once a read of IP changes (the IP-history read or the address
-// scan) is held. By then the own and related reads have very likely finished,
-// so it is a descendant read the cancel cuts; if one of them hadn't, the query
-// still fails, as it should.
+// is cancelled once a read of IP changes is held: most often the address scan,
+// which starts beside the own and related reads, else the IP-history read.
+// Every read of IP changes is held, the IP-history read included, so the
+// membership reads can't finish before the cancel, and the descendant reads
+// end with it, whether or not the own and related reads had finished; if they
+// hadn't, the query fails through them too, as it should.
 func TestChanges_CallerCancelledFails(t *testing.T) {
 	s := trackServer()
 	s.delayTypeID, s.delayFor = 20, 5*time.Second
@@ -2396,6 +2398,67 @@ func TestChanges_CallerCancelledFails(t *testing.T) {
 	}
 	if held := readsCarrying(s, 20); len(held) == 0 {
 		t.Error("no read of IP changes, want the one the cancel cut")
+	}
+}
+
+// The caller's context ending while only the residual scans are left still
+// ends the query: an error, not a track whose scans read as unchecked. The
+// scans are held; the caller cancels once the by-id read has been answered and
+// the two held scans are the only change-log requests left, well before the
+// residual deadline.
+func TestChanges_CallerCancelledDuringResidualScansFails(t *testing.T) {
+	s := newestFirst(
+		ch(1, 1, "dcim.device", 17),
+		ipOn(2, 2, "create", 401, 100),
+		ch(3, 3, "dcim.module", 500).snapshots(`{"device":17,"serial":"a"}`, `{"device":17,"serial":"b"}`),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17}}
+	s.modules = []childRow{{id: 500, owner: 17}}
+	s.scanHold = 5 * time.Second
+	p := s.start(t)
+	p.descendantsWaitOverride = 3 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	onlyScansLeft := func() bool {
+		s.mu.Lock()
+		inFlight := s.inFlight
+		s.mu.Unlock()
+		return inFlight == 2 && len(byIDRequests(s)) == 1
+	}
+	var reached atomic.Bool
+	go func() {
+		for end := time.Now().Add(time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+			if onlyScansLeft() {
+				reached.Store(true)
+				break
+			}
+		}
+		// Time for the by-id read's answer to reach descendantChanges.
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	type result struct {
+		changes []provider.Change
+		err     error
+	}
+	done := make(chan result, 1)
+	spec := withDescendants(nameScope("leaf1"))
+	spec.From = scopedNow.Add(-60 * time.Minute)
+	go func() {
+		changes, err := p.Changes(ctx, spec)
+		done <- result{changes, err}
+	}()
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, context.Canceled) {
+			t.Errorf("Changes = %v, %v; want the cancellation", changeIDs(got.changes), got.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Changes still blocked 3s after its context was cancelled")
+	}
+	if !reached.Load() {
+		t.Error("the cancel came before only the residual scans were left")
 	}
 }
 
@@ -2761,10 +2824,10 @@ func TestChanges_EarlyFailureIsNotSlow(t *testing.T) {
 	s.failDelay = 100 * time.Millisecond
 	s.delayTypeID, s.delayFor = scopedTypeIDs["dcim.cabletermination"], 5*time.Second
 	p := s.start(t)
-	// Long enough that the IP-history read fails well inside it, even on a
-	// loaded -race run.
-	p.descendantsWaitOverride = 500 * time.Millisecond
-	changes, _ := changesWithin(t, p, withDescendants(nameScope("leaf1")), 2*time.Second)
+	// Long enough that the IP-history read, held 100ms, fails well inside it,
+	// even on a loaded -race run on one CPU.
+	p.descendantsWaitOverride = time.Second
+	changes, _ := changesWithin(t, p, withDescendants(nameScope("leaf1")), 3*time.Second)
 	wantIDs(t, changes, "#1", "#2", "descendants-error")
 	c := descendantsError(t, changes)
 	if u := provider.Classify(c.Err); u != nil && u.AnnotationReason == provider.AnnotationReasonDescendantsSlow {

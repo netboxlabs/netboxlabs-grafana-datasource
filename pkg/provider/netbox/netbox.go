@@ -1238,13 +1238,22 @@ func (p *Provider) getListPageRetry(ctx context.Context, rawURL string) (listPag
 // page that succeeded on its third attempt cost the upstream three requests,
 // and reporting one understates the load precisely when the instance is
 // struggling, which is when that number is worth reading.
+//
+// A retry the context ends during its backoff returns the error it was waiting
+// to retry and the context's, both wrapped. The first is what NetBox answered,
+// and still classifies the failure (errors.As finds its *APIError). The second
+// says why there was no retry, for a caller that tells a context's end apart:
+// a descendant read its deadline cut mid backoff is slow, not the 503 it was
+// about to retry. It is the context's error, not its cause: a cause is a
+// sibling read's failure, or the utilization budget's, which marks only a
+// lookup the budget cut on the wire.
 func (p *Provider) getListPageRetryN(ctx context.Context, rawURL string) (listPage, int, error) {
 	requests := 1
 	page, err := p.client.getListPage(ctx, rawURL)
 	for attempt := 0; err != nil && retryable(ctx, err) && attempt < len(retryBackoff); attempt++ {
 		select {
 		case <-ctx.Done():
-			return listPage{}, requests, err
+			return listPage{}, requests, fmt.Errorf("%w (not retried: %w)", err, ctx.Err())
 		case <-time.After(retryBackoff[attempt]):
 		}
 		log.DefaultLogger.Warn("netbox: retrying list page after a transient upstream failure",
@@ -1847,9 +1856,10 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	wg.Wait()
 	// The read or the journal that failed first is the query's error. The
 	// others ended after its cancel, with context.Canceled or, when the cancel
-	// cut a retry's backoff, the stale error they were about to retry, so their
-	// errors are ignored. The cause is read before the caller's context is
-	// checked, so with that context live it can't be the caller's ending.
+	// cut a retry's backoff, the stale error they were about to retry wrapped
+	// with it, so their errors are ignored. The cause is read before the
+	// caller's context is checked, so with that context live it can't be the
+	// caller's ending.
 	if cause := context.Cause(readCtx); cause != nil && ctx.Err() == nil {
 		return nil, cause
 	}

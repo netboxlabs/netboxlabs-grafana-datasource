@@ -580,8 +580,8 @@ func TestFetchRows_DoesNotRetryClientErrors(t *testing.T) {
 
 // TestFetchRows_RetryStopsOnContextCancel: a closed dashboard or an expired
 // query deadline must not be held open by a backoff sleep. The original error
-// is returned rather than a context one, because the upstream failure is what
-// the operator needs to see.
+// is returned, with the context's beside it, because the upstream failure is
+// what the operator needs to see.
 func TestFetchRows_RetryStopsOnContextCancel(t *testing.T) {
 	saved := retryBackoff
 	retryBackoff = []time.Duration{time.Hour}
@@ -608,6 +608,37 @@ func TestFetchRows_RetryStopsOnContextCancel(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("requests = %d, want 1 (cancelled before the retry)", calls)
+	}
+}
+
+// A retry the context cuts short returns the error it was waiting to retry
+// and the context's, both: the read still classifies as NetBox's answer, and a
+// caller can still tell that the context ended it.
+func TestGetListPageRetry_CutRetryWrapsBothErrors(t *testing.T) {
+	saved := retryBackoff
+	retryBackoff = []time.Duration{time.Hour}
+	t.Cleanup(func() { retryBackoff = saved })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"detail":"upstream unavailable"}`))
+	}))
+	t.Cleanup(srv.Close)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := p.getListPageRetry(ctx, p.client.apiURL("dcim/devices", nil))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want it to match the context's deadline", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable {
+		t.Fatalf("err = %v, want the 503 it was waiting to retry", err)
+	}
+	got, want := provider.Classify(err), provider.Classify(apiErr)
+	if got == nil || *got != *want {
+		t.Errorf("Classify = %+v, want the 503's own %+v", got, want)
 	}
 }
 

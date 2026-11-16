@@ -1115,8 +1115,9 @@ func TestChanges_FailingJournalCancelsTheReads(t *testing.T) {
 }
 
 // A read cancelled while it waits to retry returns the error it was going to
-// retry, here a 503. That error is stale: the read whose failure cancelled it
-// is the query's error, though it holds the later slot.
+// retry, here a 503, wrapped with the cancel's. That error is stale: the read
+// whose failure cancelled it is the query's error, though it holds the later
+// slot.
 func TestChanges_StaleRetryErrorDoesNotOutrankTheCause(t *testing.T) {
 	saved := retryBackoff
 	retryBackoff = []time.Duration{2 * time.Second}

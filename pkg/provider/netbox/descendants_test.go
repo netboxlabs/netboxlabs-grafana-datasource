@@ -1087,6 +1087,26 @@ func TestChanges_DescendantsSlowKeepsTheTrack(t *testing.T) {
 	}
 }
 
+// A descendant read waiting out a retry's backoff when the descendants deadline
+// passes was cut by that deadline as much as a held one: descendants-slow, not
+// the 503 it was about to retry.
+func TestChanges_DescendantsSlowDuringRetryBackoff(t *testing.T) {
+	saved := retryBackoff
+	retryBackoff = []time.Duration{2 * time.Second}
+	t.Cleanup(func() { retryBackoff = saved })
+
+	s := trackServer()
+	s.unavailableTypeID = 20
+	p := s.start(t)
+	p.descendantsWaitOverride = 100 * time.Millisecond
+	changes, _ := changesWithin(t, p, withDescendants(nameScope("leaf1")), time.Second)
+	wantIDs(t, changes, "#1", "#2", "descendants-error")
+	c := descendantsError(t, changes)
+	if u := provider.Classify(c.Err); u == nil || u.AnnotationReason != provider.AnnotationReasonDescendantsSlow {
+		t.Errorf("Err = %v, want %s: the deadline cut the address scan's retry", c.Err, provider.AnnotationReasonDescendantsSlow)
+	}
+}
+
 // The caller's context ending is the query ending: an error, not a marker. It
 // is cancelled once the address scan is held. By then the own and related
 // reads have very likely finished, so it is a descendant read the cancel cuts;

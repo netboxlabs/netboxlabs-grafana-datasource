@@ -1737,7 +1737,9 @@ const changeReadWorkers = 4
 // journal authors) each wait their own namesWait. The waits on the cached
 // schema (the scope lookup's name-filter check, the Changed-fields check and
 // the diffs' relation lookup) share one schema budget per call
-// (budgetedSchema), so a cold schema costs one wait, not three.
+// (budgetedSchema), so a cold schema costs one wait, not three. The
+// Changed-fields check's read of the custom-field list waits its own
+// customFieldsWait, beside its schema wait rather than after it.
 func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]provider.Change, error) {
 	// One branch for every request and cache key this call makes (pinBranch).
 	// The resolved value is the schema id, which the marker links carry.

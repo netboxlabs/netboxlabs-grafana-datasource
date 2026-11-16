@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
@@ -435,28 +436,87 @@ func (f changeFilter) keep(d decodedChange) bool {
 	return slices.ContainsFunc(d.diff, func(c rawFieldChange) bool { return diffFieldMatches(c.Field, f.fields) })
 }
 
-// checkChangedFields refuses a Changed-fields name that no object type has, so a
-// typo is an error rather than a quiet track. Custom fields (cf_<name>, and
-// custom_fields for any of them) aren't checked, so a list of only those doesn't
-// read the schema. The names come from the cached schema, waited on within the
-// call's schema budget only (budgetedSchema): one that can't be read in time,
-// or lists no object types, skips the check rather than holding the query or
-// refusing what it can't judge.
+// checkChangedFields refuses a Changed-fields name this NetBox doesn't have, so
+// a typo is an error rather than a quiet track. A cf_<name> is checked against
+// the custom-field list (checkCustomFieldNames) and any other name against the
+// object types in the schema (checkSchemaFields); custom_fields, which means
+// any custom field, isn't checked. Each check reads only when it has names to
+// check, so a list of only custom fields doesn't read the schema. The two run
+// side by side, so a cold schema and a cold list cost one wait, not two. When
+// both refuse, the schema's refusal is the answer, so it doesn't depend on
+// which finishes first, and once the schema has refused the custom-field check
+// is stopped, since its answer can't change that. Each skips what it can't
+// judge rather than hold the query or refuse it.
 func (p *Provider) checkChangedFields(ctx context.Context, fields []string) error {
-	var check []string
+	var schemaNames, customNames []string
 	for _, n := range fields {
-		if n != customFieldsKey && !strings.HasPrefix(n, cfPrefix) {
-			check = append(check, n)
+		switch {
+		case n == customFieldsKey:
+		case strings.HasPrefix(n, cfPrefix):
+			customNames = append(customNames, n)
+		default:
+			schemaNames = append(schemaNames, n)
 		}
 	}
-	if len(check) == 0 {
+	customCtx, stopCustom := context.WithCancel(ctx)
+	defer stopCustom()
+	var customErr error
+	var wg sync.WaitGroup
+	if len(customNames) > 0 {
+		wg.Go(func() { customErr = p.checkCustomFieldNames(customCtx, customNames) })
+	}
+	err := p.checkSchemaFields(ctx, schemaNames)
+	if err != nil {
+		stopCustom()
+	}
+	wg.Wait()
+	if err != nil {
+		return err
+	}
+	return customErr
+}
+
+// checkCustomFieldNames refuses a cf_<name> that isn't one of this NetBox's
+// custom fields, judged on the cached list (customFieldTypes). A name the list
+// doesn't have rereads it (refreshCustomFieldTypes), so a field created since
+// the read passes, but only when the list is at least customFieldsRetryTTL
+// old, the guard declaredCustomFieldTypes applies to an unknown column: a typo
+// then doesn't reread the list each time the dashboard refreshes, at the cost
+// that a field created within that window of a read is refused until it
+// passes. The read and the reread share one customFieldsWait, so the check
+// never waits twice. A list that isn't complete (still being read past the
+// wait, unreadable, cut short by the walk's ceiling, or kept because a reread
+// failed) can't say a name is missing, so the check is skipped.
+func (p *Provider) checkCustomFieldNames(ctx context.Context, names []string) error {
+	ctx, cancel := context.WithTimeout(ctx, p.customFieldsWait())
+	defer cancel()
+	index := p.customFieldTypes(ctx)
+	// Reads index when called, so after a reread it asks the new list.
+	missing := func(n string) bool { return !index.knows(n) }
+	if index.complete() && time.Since(index.fetchedAt) >= customFieldsRetryTTL && slices.ContainsFunc(names, missing) {
+		index = p.refreshCustomFieldTypes(ctx, index)
+	}
+	if !index.complete() {
+		return nil
+	}
+	if i := slices.IndexFunc(names, missing); i >= 0 {
+		return &AnnotationError{Reason: provider.AnnotationReasonUnknownCustomField, Value: logSafe(names[i])}
+	}
+	return nil
+}
+
+// checkSchemaFields refuses a name no object type in the cached schema has. The
+// schema is waited on within the call's schema budget only (budgetedSchema):
+// one that can't be read in time, or lists no object types, skips the check.
+func (p *Provider) checkSchemaFields(ctx context.Context, names []string) error {
+	if len(names) == 0 {
 		return nil
 	}
 	entry, err := p.budgetedSchema(ctx)
 	if err != nil || len(entry.dims) == 0 {
 		return nil
 	}
-	for _, n := range check {
+	for _, n := range names {
 		known := false
 		for _, props := range entry.dims {
 			if _, known = props[n]; known {

@@ -176,6 +176,14 @@ type scopedChangeServer struct {
 	users         map[int64]string
 	usersDelay    time.Duration // held before each users/users answer
 
+	// The custom-field list at extras/custom-fields, read under mu so a test
+	// can change it between calls (defineCustomFields, failCustomFields,
+	// holdCustomFields).
+	customFields       []string      // Text fields by name; nil answers 404, so a cf_<name> isn't checked
+	customFieldsStatus int           // non-zero: the list answers this status
+	customFieldsCount  int           // non-zero: the count the list reports, above its rows for a truncated list
+	customFieldsHold   chan struct{} // non-nil: the list answers only once it is closed (holdCustomFields)
+
 	// NetBox 4.2's shape.
 	extrasServes bool                // extras/object-types answers rows without rest_api_endpoint; 404 otherwise
 	index        map[string][]string // non-nil: the API index for discovery, "dcim" -> ["devices"]
@@ -301,6 +309,36 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 				return
 			}
 			_, _ = fmt.Fprint(w, s.schema)
+		case "extras/custom-fields":
+			s.mu.Lock()
+			hold := s.customFieldsHold
+			s.mu.Unlock()
+			if hold != nil {
+				select {
+				case <-hold:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			s.mu.Lock()
+			names, status, count := s.customFields, s.customFieldsStatus, s.customFieldsCount
+			s.mu.Unlock()
+			if status != 0 {
+				refuse(status, `{"detail":"nope"}`)
+				return
+			}
+			if names == nil {
+				refuse(http.StatusNotFound, `{"detail":"Not found."}`)
+				return
+			}
+			rows := make([]string, len(names))
+			for i, n := range names {
+				rows[i] = fmt.Sprintf(`{"id":%d,"name":%q,"type":{"value":"text","label":"Text"},"object_types":["dcim.device"]}`, i+1, n)
+			}
+			if count == 0 {
+				count = len(rows)
+			}
+			writePage(w, count, rows)
 		case "dcim/devices":
 			time.Sleep(s.devicesDelay)
 			rows := lookupMatches(s.devices, r.URL.Query())
@@ -547,6 +585,30 @@ func (s *scopedChangeServer) serveChildren(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	writeOffsetPage(w, r, rows, max(size, 1))
+}
+
+// defineCustomFields sets the custom-field list to names, as Text fields.
+func (s *scopedChangeServer) defineCustomFields(names ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.customFields = append([]string{}, names...)
+}
+
+// failCustomFields makes the custom-field list answer status from now on.
+func (s *scopedChangeServer) failCustomFields(status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.customFieldsStatus = status
+}
+
+// holdCustomFields holds the custom-field list from now on, until the test
+// ends.
+func (s *scopedChangeServer) holdCustomFields(t *testing.T) {
+	hold := make(chan struct{})
+	s.mu.Lock()
+	s.customFieldsHold = hold
+	s.mu.Unlock()
+	t.Cleanup(func() { close(hold) })
 }
 
 // changeLog returns the query of every change-log request, in order.
@@ -1230,6 +1292,192 @@ func TestChanges_UnknownChangedFieldIsAnError(t *testing.T) {
 			t.Errorf("Changes: %v, want the check skipped", err)
 		}
 	})
+}
+
+// cfOwnerChange is an update of device 17's owner custom field.
+func cfOwnerChange() loggedChange {
+	c := ch(1, 1, "dcim.device", 17)
+	c.pre, c.post = `{"custom_fields":{"owner":"a"}}`, `{"custom_fields":{"owner":"b"}}`
+	return c
+}
+
+// A cf_<name> is checked against the instance's custom-field list, so a typo
+// after cf_ is an error rather than a quiet track, as one before it is.
+// custom_fields, which means any of them, isn't checked.
+func TestChanges_CustomFieldNamesChecked(t *testing.T) {
+	t.Run("defined", func(t *testing.T) {
+		s := newScopedChangeServer(cfOwnerChange())
+		s.defineCustomFields("owner")
+		p := s.start(t)
+		spec := provider.ChangeSpec{Limit: 10, ChangedFields: []string{"cf_owner"}}
+		wantIDs(t, changesOK(t, p, spec), "#1")
+		// A list old enough to reread isn't reread for a name it has.
+		ageIndex(t, p)
+		wantIDs(t, changesOK(t, p, spec), "#1")
+		if n := len(s.requestsTo(customFieldsEndpoint)); n != 1 {
+			t.Errorf("custom-field list reads = %d, want 1", n)
+		}
+	})
+	t.Run("undefined", func(t *testing.T) {
+		s := newScopedChangeServer(cfOwnerChange())
+		s.defineCustomFields("owner")
+		_, err := s.start(t).Changes(context.Background(), provider.ChangeSpec{Limit: 10, ChangedFields: []string{"cf_owner", "cf_ownr"}})
+		if ae := annotationErr(t, err, provider.AnnotationReasonUnknownCustomField); ae.Value != "cf_ownr" {
+			t.Errorf("value = %q, want cf_ownr", ae.Value)
+		}
+		if n := len(s.changeLog()); n != 0 {
+			t.Errorf("change-log requests = %d, want none", n)
+		}
+	})
+	t.Run("custom_fields", func(t *testing.T) {
+		s := newScopedChangeServer(cfOwnerChange())
+		s.defineCustomFields("owner")
+		wantIDs(t, changesOK(t, s.start(t), provider.ChangeSpec{Limit: 10, ChangedFields: []string{"custom_fields"}}), "#1")
+		if n := len(s.requestsTo(customFieldsEndpoint)); n != 0 {
+			t.Errorf("custom-field list reads = %d, want none for custom_fields", n)
+		}
+	})
+}
+
+// A field created after the list was cached passes once the list is old enough
+// to read again: a name it doesn't have rereads it, once.
+func TestChanges_CustomFieldCreatedAfterTheListWasRead(t *testing.T) {
+	c := ch(1, 1, "dcim.device", 17)
+	c.pre, c.post = `{"custom_fields":{"new":"a"}}`, `{"custom_fields":{"new":"b"}}`
+	s := newScopedChangeServer(c)
+	s.defineCustomFields("owner")
+	p := s.start(t)
+	changesOK(t, p, provider.ChangeSpec{Limit: 10, ChangedFields: []string{"cf_owner"}})
+	ageIndex(t, p)
+	s.defineCustomFields("owner", "new")
+
+	wantIDs(t, changesOK(t, p, provider.ChangeSpec{Limit: 10, ChangedFields: []string{"cf_new"}}), "#1")
+	if n := len(s.requestsTo(customFieldsEndpoint)); n != 2 {
+		t.Errorf("custom-field list reads = %d, want 2: the first and one reread", n)
+	}
+}
+
+// Within customFieldsRetryTTL of reading the list, a name it doesn't have is
+// judged on it: a typo doesn't reread the list each time the dashboard
+// refreshes.
+func TestChanges_MistypedCustomFieldDoesNotRereadAYoungList(t *testing.T) {
+	s := newScopedChangeServer(cfOwnerChange())
+	s.defineCustomFields("owner")
+	p := s.start(t)
+	for range 2 {
+		_, err := p.Changes(context.Background(), provider.ChangeSpec{Limit: 10, ChangedFields: []string{"cf_ownr"}})
+		annotationErr(t, err, provider.AnnotationReasonUnknownCustomField)
+	}
+	if n := len(s.requestsTo(customFieldsEndpoint)); n != 1 {
+		t.Errorf("custom-field list reads = %d, want 1", n)
+	}
+}
+
+// A list that can't say a name is missing skips the check rather than refuse
+// what it can't judge: one cut short by the walk's ceiling, one the token
+// can't read, and a reread that failed or didn't answer in time, whose answer
+// is the old list.
+func TestChanges_CustomFieldCheckSkippedWhenTheListCantJudge(t *testing.T) {
+	spec := provider.ChangeSpec{Limit: 10, ChangedFields: []string{"cf_ownr"}}
+	t.Run("truncated", func(t *testing.T) {
+		s := newScopedChangeServer(cfOwnerChange())
+		s.defineCustomFields("owner")
+		s.customFieldsCount = 5000
+		changesOK(t, s.start(t), spec)
+	})
+	t.Run("forbidden", func(t *testing.T) {
+		s := newScopedChangeServer(cfOwnerChange())
+		s.defineCustomFields("owner")
+		s.customFieldsStatus = http.StatusForbidden
+		changesOK(t, s.start(t), spec)
+	})
+	t.Run("reread failed", func(t *testing.T) {
+		s := newScopedChangeServer(cfOwnerChange())
+		s.defineCustomFields("owner")
+		p := s.start(t)
+		changesOK(t, p, provider.ChangeSpec{Limit: 10, ChangedFields: []string{"cf_owner"}})
+		ageIndex(t, p)
+		s.failCustomFields(http.StatusInternalServerError)
+		changesOK(t, p, spec)
+		if n := len(s.requestsTo(customFieldsEndpoint)); n != 2 {
+			t.Errorf("custom-field list reads = %d, want 2: the first and the failed reread", n)
+		}
+	})
+	t.Run("reread stalled", func(t *testing.T) {
+		s := newScopedChangeServer(cfOwnerChange())
+		s.defineCustomFields("owner")
+		p := s.start(t)
+		p.customFieldsWaitOverride = 100 * time.Millisecond
+		changesOK(t, p, provider.ChangeSpec{Limit: 10, ChangedFields: []string{"cf_owner"}})
+		ageIndex(t, p)
+		s.holdCustomFields(t)
+		changesOK(t, p, spec)
+	})
+}
+
+// When both checks refuse, the schema's refusal is the answer, whichever
+// finishes first. Here the custom-field list is cached and the schema is slow,
+// so the custom-field check finishes first.
+func TestChanges_UnknownFieldOutranksUnknownCustomField(t *testing.T) {
+	s := newScopedChangeServer(cfOwnerChange())
+	s.defineCustomFields("owner")
+	hold := make(chan struct{})
+	s.schemaHold = hold
+	p := s.start(t)
+	p.customFieldTypes(context.Background())
+	time.AfterFunc(100*time.Millisecond, func() { close(hold) })
+
+	_, err := p.Changes(context.Background(), provider.ChangeSpec{Limit: 10, ChangedFields: []string{"cf_ownr", "stauts"}})
+	if ae := annotationErr(t, err, provider.AnnotationReasonUnknownField); ae.Value != "stauts" {
+		t.Errorf("value = %q, want stauts", ae.Value)
+	}
+}
+
+// The custom-field list and the schema are waited on side by side: with both
+// held, the call waits about one wait, not one each, and both checks skip.
+func TestChanges_CustomFieldAndSchemaChecksWaitTogether(t *testing.T) {
+	s := newScopedChangeServer(cfOwnerChange())
+	s.defineCustomFields("owner")
+	s.schemaHold = make(chan struct{})
+	p := s.start(t)
+	// After start's, so they run first and the held handlers return before the
+	// server closes.
+	t.Cleanup(func() { close(s.schemaHold) })
+	s.holdCustomFields(t)
+	const wait = 400 * time.Millisecond
+	p.namesWaitOverride, p.customFieldsWaitOverride = wait, wait
+
+	_, elapsed := changesWithin(t, p, provider.ChangeSpec{Limit: 10, ChangedFields: []string{"stauts", "cf_ownr"}}, 10*time.Second)
+	if limit := wait * 3 / 2; elapsed > limit {
+		t.Errorf("Changes took %v behind a held schema and custom-field list, want under %v: one %v wait, not two",
+			elapsed, limit, wait)
+	}
+}
+
+// A schema refusal doesn't wait for the custom-field check, on its first read
+// of the list or on a reread: its answer can't change the refusal.
+func TestChanges_UnknownFieldDoesNotWaitOnTheCustomFieldList(t *testing.T) {
+	const wait = 2 * time.Second
+	for _, reread := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reread=%v", reread), func(t *testing.T) {
+			s := newScopedChangeServer(cfOwnerChange())
+			s.defineCustomFields("owner")
+			p := s.start(t)
+			p.customFieldsWaitOverride = wait
+			if reread {
+				changesOK(t, p, provider.ChangeSpec{Limit: 10, ChangedFields: []string{"cf_owner"}})
+				ageIndex(t, p)
+			}
+			s.holdCustomFields(t)
+
+			start := time.Now()
+			_, err := p.Changes(context.Background(), provider.ChangeSpec{Limit: 10, ChangedFields: []string{"stauts", "cf_ownr"}})
+			annotationErr(t, err, provider.AnnotationReasonUnknownField)
+			if elapsed, limit := time.Since(start), wait/4; elapsed > limit {
+				t.Errorf("refusal took %v behind a held custom-field list, want under %v", elapsed, limit)
+			}
+		})
+	}
 }
 
 // changesWithin runs Changes on its own goroutine and fails the test on its own

@@ -86,6 +86,9 @@ const (
 	// AnnotationReasonUnknownField is a Changed-fields name no object type has
 	// (AnnotationValue).
 	AnnotationReasonUnknownField = "unknown-field"
+	// AnnotationReasonUnknownCustomField is a Changed-fields cf_<name> that
+	// isn't one of the instance's custom fields (AnnotationValue).
+	AnnotationReasonUnknownCustomField = "unknown-custom-field"
 	// AnnotationReasonUnknownAction is an Actions value that isn't create,
 	// update or delete (AnnotationValue).
 	AnnotationReasonUnknownAction = "unknown-action"

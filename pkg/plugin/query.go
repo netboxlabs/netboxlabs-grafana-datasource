@@ -940,6 +940,11 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 			return allNotAValue
 		}
 		return fmt.Sprintf("%q isn't a field of any NetBox object type. Custom fields are written cf_<name>.", value)
+	case provider.AnnotationReasonUnknownCustomField:
+		if value == allFilterValue {
+			return allNotAValue
+		}
+		return fmt.Sprintf("%q isn't a custom field on this NetBox. Check the name after cf_.", value)
 	case provider.AnnotationReasonUnknownAction:
 		if value == allFilterValue {
 			return allNotAValue

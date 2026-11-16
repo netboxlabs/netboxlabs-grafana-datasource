@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"slices"
@@ -1011,6 +1012,37 @@ func TestQuery_AnnotationsDescendantsFlag(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fp := &fakeProvider{}
 			resp := newTestDatasource(fp).query(context.Background(), backend.DataQuery{
+				RefID: "Anno", JSON: []byte(tc.body),
+			}, consumerDashboard)
+			if resp.Error != nil {
+				t.Fatalf("query: %v", resp.Error)
+			}
+			if fp.lastChangeSpec.Descendants != tc.want {
+				t.Errorf("Descendants = %v, want %v", fp.lastChangeSpec.Descendants, tc.want)
+			}
+		})
+	}
+}
+
+// The data source's switch turns descendants off for every annotation on it,
+// whatever the annotation itself says; it never turns them on.
+func TestQuery_AnnotationsDatasourceSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name, setting, body string
+		want                bool
+	}{
+		{"off overrides an annotation that asks", `"off"`, `{"queryType":"annotations","includeDescendants":true}`, false},
+		{"off with the annotation absent", `false`, `{"queryType":"annotations"}`, false},
+		{"absent and the annotation absent", ``, `{"queryType":"annotations"}`, true},
+		{"on does not override the annotation's own off", `true`, `{"queryType":"annotations","includeDescendants":false}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProvider{}
+			d := newTestDatasource(fp)
+			if tc.setting != "" {
+				d.cfg.AnnotationDescendants = json.RawMessage(tc.setting)
+			}
+			resp := d.query(context.Background(), backend.DataQuery{
 				RefID: "Anno", JSON: []byte(tc.body),
 			}, consumerDashboard)
 			if resp.Error != nil {

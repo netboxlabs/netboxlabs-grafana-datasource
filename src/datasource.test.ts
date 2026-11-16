@@ -1,4 +1,4 @@
-import { DataSource, prepareAnnotationQuery, scopeFormat } from './datasource';
+import { DataSource, descendantsSettingOn, prepareAnnotationQuery, scopeFormat } from './datasource';
 import { NetBoxQuery } from './types';
 
 const mockReplace = jest.fn((s: string, _scopedVars?: unknown, format?: string | ((value: unknown) => string)) => {
@@ -352,5 +352,38 @@ describe('resource helpers', () => {
     const ds = makeDS();
     (ds as any).getResource = jest.fn().mockResolvedValue({});
     expect(await ds.getBranchingInstalled()).toBe(true);
+  });
+});
+
+// The same table as TestLoadPluginSettings_AnnotationDescendants in pkg/models:
+// on unless the value reads as off, so the editor and the backend agree.
+describe('descendantsSettingOn', () => {
+  it.each([
+    [undefined, true],
+    [null, true],
+    [true, true],
+    ['yes', true],
+    ['maybe', true],
+    [1, true],
+    [false, false],
+    ['off', false],
+    [' No ', false],
+    ['0', false],
+    [0, false],
+  ])('reads %p as %p', (value, want) => {
+    expect(descendantsSettingOn(value)).toBe(want);
+  });
+});
+
+describe('annotationDescendantsAllowed', () => {
+  const build = (jsonData: Record<string, unknown>) =>
+    new DataSource({ id: 1, uid: 'u', name: 'n', type: 't', jsonData, meta: {} } as any);
+
+  it('is on when the data source setting is absent', () => {
+    expect(build({}).annotationDescendantsAllowed()).toBe(true);
+  });
+
+  it('is off when the data source setting reads as off', () => {
+    expect(build({ annotationDescendants: 'off' }).annotationDescendantsAllowed()).toBe(false);
   });
 });

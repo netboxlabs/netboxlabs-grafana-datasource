@@ -176,7 +176,9 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			Actions:       qm.Actions,
 			ChangedFields: qm.ChangedFields,
 			Journal:       qm.Journal,
-			Descendants:   qm.IncludeDescendants == nil || *qm.IncludeDescendants,
+			// The datasource's switch only turns descendants off; the annotation's
+			// own switch cannot turn them back on.
+			Descendants: d.cfg.AnnotationDescendantsOn() && (qm.IncludeDescendants == nil || *qm.IncludeDescendants),
 		})
 		if err != nil {
 			// Every error also comes back as a marker at the range's end:

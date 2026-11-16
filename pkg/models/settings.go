@@ -51,8 +51,21 @@ type PluginSettings struct {
 	// regardless of this setting — for every rule, not only the ones whose query
 	// uses the Alert table shape.
 	FastPagingNoTotals bool `json:"fastPagingNoTotals"`
+	// AnnotationDescendants is the datasource-wide switch for annotations'
+	// Include descendants option. It is kept raw and read by
+	// AnnotationDescendantsOn, never decoded as a bool: Grafana reads
+	// provisioning files with yaml/v3, which keeps off and no as strings, and a
+	// strict bool would fail the whole settings load on them.
+	AnnotationDescendants json.RawMessage `json:"annotationDescendants"`
 
 	Secrets *SecretPluginSettings `json:"-"`
+}
+
+// AnnotationDescendantsOn reports whether annotations may include descendants
+// on this datasource. It is on unless the setting reads as off, so a value the
+// plugin does not recognise keeps the default rather than failing anything.
+func (s *PluginSettings) AnnotationDescendantsOn() bool {
+	return !readsAsOff(s.AnnotationDescendants)
 }
 
 // SecretPluginSettings holds values that are encrypted at rest by Grafana and
@@ -162,6 +175,30 @@ func readsAsOn(raw json.RawMessage) bool {
 	}
 	var n float64
 	return json.Unmarshal(raw, &n) == nil && n != 0
+}
+
+// readsAsOff is readsAsOn's mirror: whether a flag that is not a JSON boolean
+// was written to mean off — zero, or a string that strconv.ParseBool or YAML 1.1
+// reads as false, in any case. A JSON false reads as off too; absent, null and
+// anything unrecognised do not.
+func readsAsOff(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		return !b
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "false", "f", "0", "no", "n", "off":
+			return true
+		}
+		return false
+	}
+	var n float64
+	return json.Unmarshal(raw, &n) == nil && n == 0
 }
 
 func loadSecretPluginSettings(source map[string]string) *SecretPluginSettings {

@@ -9,6 +9,11 @@ import {
 } from '../hooks/useBranchingInstalled';
 import { DESCENDANT_SCOPE_TYPES, NetBoxQuery } from '../types';
 
+/** Tooltip for Include descendants when the data source's settings turn it off.
+ *  A constant so a test can assert the copy: Grafana mounts tooltip text only
+ *  on hover, which jsdom does not reproduce. */
+export const DESCENDANTS_OFF_IN_SETTINGS_TOOLTIP = 'Turned off in the data source settings.';
+
 interface Props {
   query: NetBoxQuery;
   onChange: (query: NetBoxQuery) => void;
@@ -73,7 +78,11 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
   const selected = (query.objectTypes ?? []).map((v) => ({ label: v, value: v }));
 
   const scopeType = (query.scopeType ?? '').trim().toLowerCase() || 'dcim.device';
-  const showDescendants = !!query.scope && DESCENDANT_SCOPE_TYPES.includes(scopeType);
+  // A variable in Scope type resolves only at query time, so the editor cannot
+  // tell what kind of object the scope is; it shows the option and the backend
+  // decides.
+  const showDescendants = !!query.scope && (DESCENDANT_SCOPE_TYPES.includes(scopeType) || scopeType.includes('$'));
+  const descendantsAllowed = datasource.annotationDescendantsAllowed?.() ?? true;
 
   return (
     <Stack gap={1} direction="column">
@@ -137,11 +146,16 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
         <InlineField
           label="Include descendants"
           labelWidth={20}
-          tooltip="Also show changes to what's attached: cables, IP and MAC addresses on its interfaces, modules and services. Uses more NetBox requests."
+          disabled={!descendantsAllowed}
+          tooltip={
+            descendantsAllowed
+              ? "Also show changes to what's attached: cables, IP and MAC addresses on its interfaces, modules and services. Uses more NetBox requests."
+              : DESCENDANTS_OFF_IN_SETTINGS_TOOLTIP
+          }
         >
           <InlineSwitch
             id="annotation-descendants"
-            value={query.includeDescendants ?? true}
+            value={descendantsAllowed && (query.includeDescendants ?? true)}
             onChange={(e) => onChange({ ...query, includeDescendants: e.currentTarget.checked })}
           />
         </InlineField>

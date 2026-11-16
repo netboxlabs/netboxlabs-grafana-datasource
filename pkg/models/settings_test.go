@@ -65,3 +65,36 @@ func TestLoadPluginSettings_SecureSocksProxyFields(t *testing.T) {
 		})
 	}
 }
+
+// The annotation descendants switch is read leniently: it can never fail the
+// settings load, because a datasource that stops loading takes every panel with
+// it. It is on unless the value reads as off — Grafana reads provisioning files
+// with yaml/v3, which keeps YAML 1.1's off and no as strings.
+func TestLoadPluginSettings_AnnotationDescendants(t *testing.T) {
+	for _, tc := range []struct {
+		name, jsonData string
+		want           bool
+	}{
+		{"absent", `{"url": "https://netbox.example.com"}`, true},
+		{"null", `{"annotationDescendants": null}`, true},
+		{"true", `{"annotationDescendants": true}`, true},
+		{"yes", `{"annotationDescendants": "yes"}`, true},
+		{"an unrecognised word", `{"annotationDescendants": "maybe"}`, true},
+		{"a non-zero number", `{"annotationDescendants": 1}`, true},
+		{"false", `{"annotationDescendants": false}`, false},
+		{"off", `{"annotationDescendants": "off"}`, false},
+		{"no, padded and capitalised", `{"annotationDescendants": " No "}`, false},
+		{"the string 0", `{"annotationDescendants": "0"}`, false},
+		{"the number 0", `{"annotationDescendants": 0}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := LoadPluginSettings(backend.DataSourceInstanceSettings{JSONData: []byte(tc.jsonData)})
+			if err != nil {
+				t.Fatalf("LoadPluginSettings: %v", err)
+			}
+			if got := s.AnnotationDescendantsOn(); got != tc.want {
+				t.Errorf("AnnotationDescendantsOn() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

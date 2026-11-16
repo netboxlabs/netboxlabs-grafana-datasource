@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import React from 'react';
-import { AnnotationQueryEditor } from './AnnotationQueryEditor';
+import { AnnotationQueryEditor, DESCENDANTS_OFF_IN_SETTINGS_TOOLTIP } from './AnnotationQueryEditor';
 
 // jsdom lacks IntersectionObserver, which @grafana/ui's Select menu needs to open.
 class IntersectionObserverStub {
@@ -106,6 +106,27 @@ describe('scope fields', () => {
 
   it('normalises the scope type before deciding to show Include descendants', async () => {
     const q = { refId: 'A', scope: 'x', scopeType: ' Virtualization.VMInterface ' } as any;
+    render(<AnnotationQueryEditor query={q} onChange={jest.fn()} datasource={dsMock} />);
+    expect(await screen.findByLabelText('Include descendants')).toBeInTheDocument();
+  });
+
+  // The data source's switch wins over the annotation's: the switch stays so the
+  // setting is visible, but it cannot be turned on. The tooltip text is asserted
+  // on the constant, as Grafana mounts it only on hover.
+  it('shows Include descendants disabled and off when the data source turns it off', async () => {
+    const ds = { ...dsMock, annotationDescendantsAllowed: () => false };
+    const q = { refId: 'A', scope: 'leaf1', includeDescendants: true } as any;
+    render(<AnnotationQueryEditor query={q} onChange={jest.fn()} datasource={ds} />);
+    const sw = await screen.findByLabelText('Include descendants');
+    expect(sw).toBeDisabled();
+    expect(sw).not.toBeChecked();
+    expect(DESCENDANTS_OFF_IN_SETTINGS_TOOLTIP).toBe('Turned off in the data source settings.');
+  });
+
+  // A variable's value is only known once it is resolved, so the editor cannot
+  // tell what kind of object the scope will be; the backend decides.
+  it('shows Include descendants while the scope type is a variable', async () => {
+    const q = { refId: 'A', scope: '$dev', scopeType: '$type' } as any;
     render(<AnnotationQueryEditor query={q} onChange={jest.fn()} datasource={dsMock} />);
     expect(await screen.findByLabelText('Include descendants')).toBeInTheDocument();
   });

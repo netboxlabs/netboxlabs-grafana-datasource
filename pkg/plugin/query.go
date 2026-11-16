@@ -931,7 +931,12 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 	case provider.AnnotationReasonNoEndpoint:
 		return "This NetBox doesn't say where this object type lives, so it can't be looked up by name. Set Match by to ID."
 	case provider.AnnotationReasonTooManyObjects:
-		return fmt.Sprintf("The scope covers %d objects; the limit is %d. Narrow the variable's selection. If All means every object, give the All option the custom value $__all.", u.AnnotationCount, netbox.MaxScopeObjects)
+		// A name lookup that stopped once past the limit knows only that much.
+		covers := fmt.Sprint(u.AnnotationCount)
+		if u.AnnotationCount == provider.CountPastLimit {
+			covers = fmt.Sprintf("more than %d", netbox.MaxScopeObjects)
+		}
+		return fmt.Sprintf("The scope covers %s objects; the limit is %d. Narrow the variable's selection. If All means every object, give the All option the custom value $__all.", covers, netbox.MaxScopeObjects)
 	case provider.AnnotationReasonUnknownField:
 		return fmt.Sprintf("%q isn't a field of any NetBox object type. Custom fields are written cf_<name>.", value)
 	case provider.AnnotationReasonUnknownCustomField:

@@ -81,7 +81,7 @@ const (
 	// endpoint the instance doesn't report.
 	AnnotationReasonNoEndpoint = "no-endpoint"
 	// AnnotationReasonTooManyObjects is a scope of more than 100 objects
-	// (AnnotationCount).
+	// (AnnotationCount, or CountPastLimit).
 	AnnotationReasonTooManyObjects = "too-many-objects"
 	// AnnotationReasonUnknownField is a Changed-fields name no object type has
 	// (AnnotationValue).
@@ -141,9 +141,15 @@ type UpstreamError struct {
 	// it is about one. It is free text from the query editor or a dashboard
 	// variable, so the plugin layer bounds it before display.
 	AnnotationValue string
-	// AnnotationCount is the object count for AnnotationReasonTooManyObjects.
+	// AnnotationCount is the object count for AnnotationReasonTooManyObjects,
+	// or CountPastLimit when only that it passes the limit is known.
 	AnnotationCount int
 }
+
+// CountPastLimit is the AnnotationCount of a too-many-objects refusal made as
+// soon as the scope passed the limit, before the rest of it was looked up: its
+// full count isn't known, only that it is more than the limit.
+const CountPastLimit = -1
 
 func (e *UpstreamError) Error() string {
 	if e.Status != 0 {

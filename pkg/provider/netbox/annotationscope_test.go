@@ -250,6 +250,7 @@ func TestAnnotationError_Error(t *testing.T) {
 	}{
 		{&AnnotationError{Reason: provider.AnnotationReasonNoMatch, Value: "leaf9"}, `annotation query refused: no-match "leaf9"`},
 		{&AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: 120}, "annotation query refused: too-many-objects (120 objects)"},
+		{&AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: provider.CountPastLimit}, "annotation query refused: too-many-objects (more than 100 objects)"},
 		{&AnnotationError{Reason: provider.AnnotationReasonDescendantsSlow, Count: 4}, "annotation query refused: descendants-slow (4 s)"},
 	} {
 		if got := tc.err.Error(); got != tc.want {
@@ -681,7 +682,8 @@ func TestAnnotationScope_TooManyObjects(t *testing.T) {
 	})
 
 	// Names long enough to take two lookups. The first lookup's names already
-	// cover more than the cap, so the second isn't made.
+	// cover more than the cap, so the second isn't made, and the count is only
+	// known to pass the cap.
 	t.Run("past the cap after one lookup", func(t *testing.T) {
 		s := newAnnoScopeServer()
 		var names []string
@@ -701,7 +703,9 @@ func TestAnnotationScope_TooManyObjects(t *testing.T) {
 		spec := nameScope(names...)
 		spec.ScopeType = "dcim.interface"
 		_, err := p.resolveAnnotationScope(context.Background(), spec)
-		annotationErr(t, err, provider.AnnotationReasonTooManyObjects)
+		if ae := annotationErr(t, err, provider.AnnotationReasonTooManyObjects); ae.Count != provider.CountPastLimit {
+			t.Errorf("count = %d, want CountPastLimit", ae.Count)
+		}
 		if lookups := s.queries("/api/dcim/interfaces/"); len(lookups) != 1 {
 			t.Errorf("interface lookups = %d, want 1", len(lookups))
 		}

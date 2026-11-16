@@ -101,10 +101,12 @@ func (e *AnnotationError) Error() string {
 		msg += fmt.Sprintf(" %q", e.Value)
 	}
 	// Count is seconds for a descendants read that ran past its budget, and an
-	// object count otherwise.
+	// object count otherwise, or CountPastLimit.
 	switch {
 	case e.Count != 0 && e.Reason == provider.AnnotationReasonDescendantsSlow:
 		msg += fmt.Sprintf(" (%d s)", e.Count)
+	case e.Count == provider.CountPastLimit:
+		msg += fmt.Sprintf(" (more than %d objects)", MaxScopeObjects)
 	case e.Count != 0:
 		msg += fmt.Sprintf(" (%d objects)", e.Count)
 	}
@@ -291,7 +293,8 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 	}
 	batcher := newQueryBatcher(field, url.Values{"brief": {"true"}})
 	seen := map[int64]bool{}
-	for _, chunk := range batcher.chunk(names) {
+	chunks := batcher.chunk(names)
+	for i, chunk := range chunks {
 		limit := len(chunk)*MaxNameMatches + 1
 		rows, _, err := p.fetchRows(ctx, endpoint, batcher.query(chunk), limit)
 		if err != nil {
@@ -333,9 +336,13 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 			}
 		}
 		// Past the cap the scope is refused whatever the other batches hold, so
-		// they aren't read. The count is then what the batches so far matched.
-		if len(scope.Objects) > MaxScopeObjects {
-			return &AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: len(scope.Objects)}
+		// they aren't read. With batches left unread, the count is only known to
+		// pass the cap.
+		if n := len(scope.Objects); n > MaxScopeObjects {
+			if i < len(chunks)-1 {
+				n = provider.CountPastLimit
+			}
+			return &AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: n}
 		}
 	}
 	return nil

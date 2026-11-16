@@ -119,6 +119,8 @@ func TestQueryErrorMessage_Annotation(t *testing.T) {
 			"This NetBox doesn't say where this object type lives, so it can't be looked up by name. Set Match by to ID."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: 120},
 			"The scope covers 120 objects; the limit is 100. Narrow the variable's selection. If All means every object, give the All option the custom value $__all."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: provider.CountPastLimit},
+			"The scope covers more than 100 objects; the limit is 100. Narrow the variable's selection. If All means every object, give the All option the custom value $__all."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonUnknownField, Value: "platfrom"},
 			`"platfrom" isn't a field of any NetBox object type. Custom fields are written cf_<name>.`},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonUnknownAction, Value: "deleted"},

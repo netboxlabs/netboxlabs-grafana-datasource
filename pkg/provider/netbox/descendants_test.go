@@ -3143,3 +3143,33 @@ func TestChanges_ResidualAndLimitMarkers(t *testing.T) {
 		t.Errorf("limit marker at %v until %v, want at From until %v", lim.Time, lim.Until, scopedNow.Add(-3*time.Minute))
 	}
 }
+
+// A residual page that is capped but yielded no row with a time checked
+// nothing: its marker is the not-checked form at the end of the range, and
+// stands even when the own reads fill Limit.
+func TestChanges_ResidualPageWithoutTimedRowsIsUnchecked(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+	}{
+		{"no rows", `{"count":9,"next":"http://x/api/core/object-changes/?offset=1","previous":null,"results":[]}`},
+		{"unparseable time", `{"count":9,"next":"http://x/api/core/object-changes/?offset=1","previous":null,"results":[{"id":99,"time":"garbage","action":{"value":"delete"},"changed_object_type":"ipam.ipaddress","changed_object_id":9}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newestFirst(ch(1, 1, "dcim.device", 17), ch(2, 2, "dcim.device", 17), ch(3, 3, "dcim.device", 17))
+			s.scanBody = tc.body
+			p := s.start(t)
+			spec := withDescendants(nameScope("leaf1"))
+			spec.From = scopedNow.Add(-60 * time.Minute)
+			spec.To = scopedNow.Add(time.Minute)
+			spec.Limit = 2
+			changes := changesOK(t, p, spec)
+			cut := changes[len(changes)-1]
+			if cut.Kind == provider.ChangeKindLimit && len(changes) > 1 {
+				cut = changes[len(changes)-2]
+			}
+			if cut.Kind != provider.ChangeKindCutoff || !cut.Residual || !cut.Until.IsZero() || !cut.Time.Equal(spec.To) {
+				t.Errorf("cut-off = Kind %v Residual %v Until %v at %v; want residual, no reach, at To %v", cut.Kind, cut.Residual, cut.Until, cut.Time, spec.To)
+			}
+		})
+	}
+}

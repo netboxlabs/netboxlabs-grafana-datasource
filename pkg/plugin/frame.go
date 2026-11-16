@@ -300,8 +300,8 @@ func cutoffMarker(c provider.Change) (title, text, tag string) {
 const markerTimeLayout = "2006-01-02 15:04:05 UTC"
 
 // residualText says which removals a cut residual scan may have missed, and
-// from when: the marker sits at From, so the time is in the text. A failed
-// scan has no reach to name, and checked nothing in the range.
+// from when. The marker sits at the end of the range, away from the reach, so
+// the time is in the text. A failed scan has no reach to name, and checked nothing in the range.
 func residualText(c provider.Change) string {
 	nouns := residualNouns(c.Types)
 	if c.Until.IsZero() {
@@ -310,21 +310,30 @@ func residualText(c provider.Change) string {
 	return fmt.Sprintf("Removals before %s not checked: %s taken off or deleted earlier may not show.", c.Until.UTC().Format(markerTimeLayout), nouns)
 }
 
+// residualNoun is an object type's noun with its article.
+type residualNoun struct{ article, name string }
+
+// residualNounByType names the types a residual scan covers.
+var residualNounByType = map[string]residualNoun{
+	"ipam.ipaddress":  {"an", "IP address"},
+	"dcim.macaddress": {"a", "MAC address"},
+	"dcim.module":     {"a", "module"},
+	"ipam.service":    {"a", "service"},
+}
+
 // residualNouns names object types for a sentence: "an IP address, MAC address,
-// module or service". An unknown type is named as given.
+// module or service". An unknown type is named as given, with "a".
 func residualNouns(types []string) string {
-	names := map[string]string{
-		"ipam.ipaddress":  "IP address",
-		"dcim.macaddress": "MAC address",
-		"dcim.module":     "module",
-		"ipam.service":    "service",
-	}
 	nouns := make([]string, len(types))
+	article := "a"
 	for i, t := range types {
-		if n, ok := names[t]; ok {
-			nouns[i] = n
-		} else {
-			nouns[i] = t
+		n, ok := residualNounByType[t]
+		if !ok {
+			n = residualNoun{"a", t}
+		}
+		nouns[i] = n.name
+		if i == 0 {
+			article = n.article
 		}
 	}
 	var list string
@@ -332,10 +341,6 @@ func residualNouns(types []string) string {
 		list = strings.Join(nouns[:len(nouns)-1], ", ") + " or " + nouns[len(nouns)-1]
 	} else {
 		list = strings.Join(nouns, "")
-	}
-	article := "a"
-	if len(nouns) > 0 && nouns[0] == "IP address" {
-		article = "an"
 	}
 	return article + " " + list
 }

@@ -1974,10 +1974,7 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		// sits there too, but it drops the descendant results, so no residual
 		// cut exists then. The reach is in Until.
 		if cut.Residual {
-			cut.Time = spec.To
-			if cut.Time.IsZero() {
-				cut.Time = time.Now()
-			}
+			cut.Time = rangeEnd(spec)
 		}
 	}
 	if scope != nil {
@@ -2019,11 +2016,7 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		changes = append(changes, provider.Change{Kind: provider.ChangeKindLimit, Time: at, Until: oldest, Limit: limit})
 	}
 	if descErr != nil {
-		at := spec.To
-		if at.IsZero() {
-			at = time.Now()
-		}
-		changes = append(changes, provider.Change{Kind: provider.ChangeKindDescendantsError, Time: at, Err: descErr})
+		changes = append(changes, provider.Change{Kind: provider.ChangeKindDescendantsError, Time: rangeEnd(spec), Err: descErr})
 	}
 	for i := range changes {
 		changes[i].URL = withBranchParam(changes[i].URL, branch)

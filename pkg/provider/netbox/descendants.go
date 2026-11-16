@@ -516,6 +516,11 @@ func (p *Provider) residualScan(ctx context.Context, spec provider.ChangeSpec, r
 		}
 	}
 	res.stop(scanned, more, limit)
+	if res.capped && res.oldest.IsZero() {
+		// A capped page with no row of a parsed time says nothing about where
+		// its reach ends: it checked nothing.
+		return uncheckedResult(spec)
+	}
 	return res
 }
 
@@ -523,11 +528,15 @@ func (p *Provider) residualScan(ctx context.Context, spec provider.ChangeSpec, r
 // descendant scan, unchecked and capped, with no rows and no error, and oldest
 // at To, or now with no To, since anything in the range may have been missed.
 func uncheckedResult(spec provider.ChangeSpec) changeReadResult {
-	oldest := spec.To
-	if oldest.IsZero() {
-		oldest = time.Now()
+	return changeReadResult{scan: true, descendant: true, capped: true, unchecked: true, oldest: rangeEnd(spec)}
+}
+
+// rangeEnd is where a query's range ends: To, or now with no To.
+func rangeEnd(spec provider.ChangeSpec) time.Time {
+	if spec.To.IsZero() {
+		return time.Now()
 	}
-	return changeReadResult{scan: true, descendant: true, capped: true, unchecked: true, oldest: oldest}
+	return spec.To
 }
 
 // descendantWants is which descendant types a query reads, after Object types,

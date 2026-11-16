@@ -303,8 +303,8 @@ type Change struct {
 
 	Limit           int       // limit only: the query's limit
 	Until           time.Time // limit: the oldest shown change's time; residual cutoff: removals before it weren't checked, zero when a residual scan failed
-	DescendantsOnly bool      // cutoff only: every cut read was a descendant read
-	Residual        bool      // cutoff only: every cut read was a residual scan, and every list was read: the marker sits at From and names Types
+	DescendantsOnly bool      // cutoff only: every cut read was a descendant read; false when Residual is set (residual scans are descendant reads, but the two are exclusive)
+	Residual        bool      // cutoff only: every cut read was a residual scan, and every list was read: the marker sits at the end of the range (To, or now with no To) and names Types
 	Types           []string  // residual cutoff only: the object types whose removals may be missing, e.g. "ipam.ipaddress"
 	Err             error     // descendants-error only; the plugin maps it to Message
 }

@@ -237,6 +237,7 @@ type scopedChangeServer struct {
 	// apply before the type-id cases above.
 	scanStatus   int           // non-zero: they answer this status
 	scanHold     time.Duration // they're held this long first, ending early when the request's context does
+	scanBody     string        // non-empty: they answer this body, 200, whatever the rows
 	scanPageSize int           // non-zero: their pages hold at most this many rows, with a next link while rows are left, as a NetBox MAX_PAGE_SIZE below the asked limit does
 
 	mu          sync.Mutex
@@ -431,6 +432,10 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 				}
 				if s.scanStatus != 0 {
 					refuse(s.scanStatus, `{"detail":"nope"}`)
+					return
+				}
+				if s.scanBody != "" {
+					_, _ = fmt.Fprint(w, s.scanBody)
 					return
 				}
 			}

@@ -191,13 +191,12 @@ func relatedID(v json.RawMessage) (int64, bool) {
 // side's snapshot data: field is <x>_id, and data holds <x>_type as a positive
 // plain integer (snapshotID), the object-type id of what <x>_id points at. A
 // custom field is never one.
-func genericPairType(data map[string]json.RawMessage, field string) (int, bool) {
+func genericPairType(data map[string]json.RawMessage, field string) (int64, bool) {
 	x, ok := strings.CutSuffix(field, "_id")
 	if !ok || x == "" || strings.HasPrefix(field, cfPrefix) {
 		return 0, false
 	}
-	id, ok := snapshotID(data, x+"_type")
-	return int(id), ok
+	return snapshotID(data, x+"_type")
 }
 
 // genericTypeField reports whether field is the type half of a generic relation
@@ -251,7 +250,7 @@ func (e nameEntry) label() string {
 // at, and the names of the related objects it looked up.
 type diffNames struct {
 	related    map[string]map[string]string   // changed type -> field -> related list endpoint
-	types      map[int]string                 // object-type id -> app_label.model
+	types      map[int64]string               // object-type id -> app_label.model
 	generic    map[string]string              // app_label.model -> list endpoint, for generic relations
 	byEndpoint map[string]map[int64]nameEntry // related list endpoint -> id -> name
 }
@@ -283,7 +282,7 @@ func (n diffNames) name(fields map[string]string, data map[string]json.RawMessag
 		return "", false
 	}
 	if genericTypeField(data, field) {
-		ct, ok := n.types[int(id)]
+		ct, ok := n.types[id]
 		return ct, ok
 	}
 	endpoint, generic, ok := n.lookup(fields, data, field)
@@ -325,7 +324,7 @@ func (p *Provider) displayNames(ctx context.Context, rows []decodedChange) diffN
 
 	var types []string                  // changed types with a plain candidate, in order of first appearance
 	candidates := map[string][]string{} // changed type -> plain candidate fields
-	var genericTypes []int              // object types generic relations point at, in order of first appearance
+	var genericTypes []int64            // object types generic relations point at, in order of first appearance
 	generic := false                    // a rendered field is half of a generic relation
 	for _, d := range rows {
 		ct := normalizeObjectType(d.oc.changedType())
@@ -393,9 +392,9 @@ func (p *Provider) displayNames(ctx context.Context, rows []decodedChange) diffN
 			log.DefaultLogger.Debug("netbox: could not read NetBox object-type ids; generic relations in diffs show ids",
 				"error", logSafe(err.Error()))
 		}
-		names.types = make(map[int]string, len(typeIDs))
+		names.types = make(map[int64]string, len(typeIDs))
 		for ct, id := range typeIDs {
-			names.types[id] = ct
+			names.types[int64(id)] = ct
 		}
 		for _, typeID := range genericTypes {
 			if ct, ok := names.types[typeID]; ok {

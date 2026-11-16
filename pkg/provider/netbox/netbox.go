@@ -407,7 +407,7 @@ func (p *Provider) urlMap(ctx context.Context, rawURL string) (map[string]string
 // Query executes an object query and returns flattened, joinable rows.
 func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provider.Result, error) {
 	// One branch for every request and cache key this call makes (pinBranch).
-	ctx, _ = p.client.pinBranch(ctx)
+	ctx, branch := p.client.pinBranch(ctx)
 	if spec.ObjectType == "" {
 		return nil, fmt.Errorf("objectType is required")
 	}
@@ -607,6 +607,17 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		}
 		rows, total = page.rows, page.total
 		columns, seen, flatRows, flatRaws = flattenRows(rows)
+	}
+
+	// A row that exists only in the branch is a 404 in NetBox's UI unless the
+	// link names the branch, as the annotation links do. Only the object's own
+	// display_url: a custom field that happens to hold a URL is the user's data.
+	if branch != "" {
+		for _, row := range flatRows {
+			if u, ok := row["display_url"].(string); ok {
+				row["display_url"] = withBranchParam(u, branch)
+			}
+		}
 	}
 
 	var notes, warnings []string

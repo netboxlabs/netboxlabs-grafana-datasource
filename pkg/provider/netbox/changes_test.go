@@ -951,18 +951,40 @@ func TestCutoffChange_OnlyScanningReadsCut(t *testing.T) {
 		{capped: true, scan: true, oldest: t2, scanned: 5},
 		{scanned: 3},
 	}
-	c, capped := cutoffChange(results)
+	c, capped := cutoffChange(results, t2.Add(time.Hour))
 	if !capped || !c.Time.Equal(t2) || c.Scanned != 8 || c.DescendantsOnly {
 		t.Fatalf("cutoff = %+v capped=%v, want capped at %v with 8 scanned and not descendants-only", c, capped, t2)
 	}
 
 	results[1].descendant = true
-	if c, _ := cutoffChange(results); !c.DescendantsOnly {
+	if c, _ := cutoffChange(results, t2.Add(time.Hour)); !c.DescendantsOnly {
 		t.Errorf("DescendantsOnly = false, want true when every capped read is a descendant read")
 	}
 
-	if _, capped := cutoffChange([]changeReadResult{{capped: true, oldest: t1}, {scanned: 3}}); capped {
+	if _, capped := cutoffChange([]changeReadResult{{capped: true, oldest: t1}, {scanned: 3}}, t2); capped {
 		t.Errorf("a capped read that doesn't scan cut the track")
+	}
+}
+
+// A capped scanning read with no row of a parsed time (oldest zero) counts as
+// reaching the end of the range: the cut-off sits there, not at time zero,
+// whether or not another capped read has a reach.
+func TestCutoffChange_UntimedReadReachesTheEnd(t *testing.T) {
+	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := t1.Add(time.Hour)
+	untimed := changeReadResult{capped: true, scan: true, descendant: true, scanned: 2}
+	for name, results := range map[string][]changeReadResult{
+		"alone":           {untimed},
+		"after a reach":   {{capped: true, scan: true, descendant: true, oldest: t1}, untimed},
+		"before a reach":  {untimed, {capped: true, scan: true, descendant: true, oldest: t1}},
+		"beside a reader": {untimed, {scanned: 3}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, capped := cutoffChange(results, end)
+			if !capped || !c.Time.Equal(end) || !c.DescendantsOnly {
+				t.Errorf("cutoff = %+v capped=%v, want capped at the end of the range %v, descendants-only", c, capped, end)
+			}
+		})
 	}
 }
 
@@ -1089,7 +1111,7 @@ func TestCutoffChange_Residual(t *testing.T) {
 		{"a capped own read", []changeReadResult{parts, {scan: true, capped: true, oldest: t1}}, false, false, t2, time.Time{}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, capped := cutoffChange(tc.results)
+			c, capped := cutoffChange(tc.results, scopedNow)
 			if !capped {
 				t.Fatal("not capped")
 			}

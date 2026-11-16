@@ -3371,3 +3371,34 @@ func TestChanges_NoRemovedHistoryReadWithoutNewIDs(t *testing.T) {
 		}
 	})
 }
+
+// A capped scanning read with no row of a parsed time has shown no reach: it
+// counts as reaching the end of the range, not time zero. The IP history, read
+// to the scan cap, stops at two rows whose times don't parse: its cut-off sits
+// at To, and a track the own read fills to Limit still shows it.
+func TestChanges_CappedReadWithoutTimedRowsCutsAtTheEnd(t *testing.T) {
+	for _, limit := range []int{50, 2} {
+		t.Run(fmt.Sprintf("limit %d", limit), func(t *testing.T) {
+			rows := []loggedChange{ch(1, 1, "dcim.device", 17), ch(2, 2, "dcim.device", 17), ch(3, 3, "dcim.device", 17)}
+			for i := range 3 {
+				rows = append(rows, ipOn(10+i, 120+i, "create", int64(400+i), 100).withoutTime())
+			}
+			s := newestFirst(rows...)
+			s.interfaces = []childRow{{id: 100, owner: 17}}
+			p := s.start(t)
+			p.changeScanCapOverride = 2
+			spec := withDescendants(nameScope("leaf1"))
+			spec.From = scopedNow.Add(-60 * time.Minute)
+			spec.To = scopedNow.Add(time.Minute)
+			spec.Limit = limit
+			changes := changesOK(t, p, spec)
+			i := slices.IndexFunc(changes, func(c provider.Change) bool { return c.Kind == provider.ChangeKindCutoff })
+			if i < 0 {
+				t.Fatalf("changes = %v, want a cut-off", changeIDs(changes))
+			}
+			if cut := changes[i]; cut.Residual || !cut.DescendantsOnly || !cut.Time.Equal(spec.To) {
+				t.Errorf("cut-off Residual %v DescendantsOnly %v at %v; want general, descendants-only, at To %v", cut.Residual, cut.DescendantsOnly, cut.Time, spec.To)
+			}
+		})
+	}
+}

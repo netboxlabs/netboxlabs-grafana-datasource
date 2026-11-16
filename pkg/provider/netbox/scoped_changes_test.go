@@ -70,6 +70,7 @@ type loggedChange struct {
 	relID         int64
 	changedObject string // raw JSON; "" is null
 	pre, post     string // raw JSON objects; "" is null
+	untimed       bool   // its time is rendered as text that doesn't parse; minutes still place it
 }
 
 // ch is change id, minutes before scopedNow: an update of ct objID's
@@ -114,6 +115,13 @@ func (c loggedChange) snapshots(pre, post string) loggedChange {
 
 func (c loggedChange) json() string { return c.render(true) }
 
+// withoutTime is c with a time that doesn't parse. The fixture still filters
+// and orders it by its minutes.
+func (c loggedChange) withoutTime() loggedChange {
+	c.untimed = true
+	return c
+}
+
 // render is the row as NetBox serves it. withRepr false leaves out object_repr,
 // which the change log only returns from NetBox 4.5.
 func (c loggedChange) render(withRepr bool) string {
@@ -128,8 +136,12 @@ func (c loggedChange) render(withRepr bool) string {
 	if withRepr {
 		repr = fmt.Sprintf(`"object_repr":"#%d",`, c.id)
 	}
+	at := scopedNow.Add(-time.Duration(c.minutes) * time.Minute).Format(time.RFC3339)
+	if c.untimed {
+		at = "not a time"
+	}
 	return fmt.Sprintf(`{"id":%d,"time":%q,"user_name":"admin","action":{"value":%q,"label":%q},"changed_object_type":%q,"changed_object_id":%d,%s"changed_object":%s,"prechange_data":%s,"postchange_data":%s}`,
-		c.id, scopedNow.Add(-time.Duration(c.minutes)*time.Minute).Format(time.RFC3339), c.action, label,
+		c.id, at, c.action, label,
 		c.ct, c.objID, repr, null(c.changedObject), null(c.pre), null(c.post))
 }
 

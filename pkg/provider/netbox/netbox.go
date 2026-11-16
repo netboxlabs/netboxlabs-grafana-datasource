@@ -1965,7 +1965,7 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	// decide it.
 	var cut provider.Change
 	showCut := false
-	if c, capped := cutoffChange(results); capped && cutoffMayMiss(kept, limit, c.Time) {
+	if c, capped := cutoffChange(results, rangeEnd(spec)); capped && cutoffMayMiss(kept, limit, c.Time) {
 		cut, showCut = c, true
 		// A residual cut-off says what may be missing in the range, not where
 		// the scan stopped, so it sits at the end of the range: stable across

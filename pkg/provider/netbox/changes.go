@@ -971,45 +971,50 @@ func scopeObjectName(scope *resolvedScope, o scopeObject) string {
 
 // cutoffChange is the marker for scanning reads that stopped at the scan cap
 // with rows left, if any did. It sits at the newest of those reads' oldest
-// scanned times: older than that, at least one read is incomplete. A read that
-// doesn't scan can't have missed a match, so its cap doesn't count. When every
-// capped read is a descendant read, DescendantsOnly is set: the scope's own
-// changes were all read. When every capped read is a residual scan, the
-// indexed reads covered the rest, and the cut-off is Residual instead: only
-// what a residual scan looks for, a removal, may be missing, in the types of
-// the scans that were cut, and Until says from when. It is zero when a scan
-// failed, since nothing it covers was checked. Scanned counts every read's
-// rows.
-func cutoffChange(results []changeReadResult) (provider.Change, bool) {
+// scanned times: older than that, at least one read is incomplete. A capped
+// read with no row of a parsed time (oldest zero) has shown no reach, so it
+// counts as reaching only end, the end of the range (rangeEnd): anything in
+// the range may lie past it. A read that doesn't scan can't have missed a
+// match, so its cap doesn't count. When every capped read is a descendant
+// read, DescendantsOnly is set: the scope's own changes were all read. When
+// every capped read is a residual scan, the indexed reads covered the rest,
+// and the cut-off is Residual instead: only what a residual scan looks for, a
+// removal, may be missing, in the types of the scans that were cut, and Until
+// says from when. It is zero when a scan failed, since nothing it covers was
+// checked. Scanned counts every read's rows.
+func cutoffChange(results []changeReadResult, end time.Time) (provider.Change, bool) {
 	c := provider.Change{Kind: provider.ChangeKindCutoff}
 	capped, allDescendant, allResidual, unchecked := false, true, true, false
 	for _, r := range results {
 		c.Scanned += r.scanned
-		if r.capped && r.scan {
-			if !capped || r.oldest.After(c.Time) {
-				c.Time = r.oldest
+		if !r.capped || !r.scan {
+			continue
+		}
+		at := r.oldest
+		if at.IsZero() {
+			at = end
+		}
+		if !capped || at.After(c.Time) {
+			c.Time = at
+		}
+		capped = true
+		allDescendant = allDescendant && r.descendant
+		allResidual = allResidual && r.residual
+		unchecked = unchecked || r.unchecked
+		for _, t := range r.types {
+			if !slices.Contains(c.Types, t) {
+				c.Types = append(c.Types, t)
 			}
-			capped = true
-			allDescendant = allDescendant && r.descendant
-			allResidual = allResidual && r.residual
-			unchecked = unchecked || r.unchecked
 		}
 	}
 	c.DescendantsOnly = capped && allDescendant && !allResidual
-	if capped && allResidual {
-		c.Residual = true
-		for _, r := range results {
-			if r.capped && r.scan {
-				for _, t := range r.types {
-					if !slices.Contains(c.Types, t) {
-						c.Types = append(c.Types, t)
-					}
-				}
-			}
-		}
-		if !unchecked {
-			c.Until = c.Time
-		}
+	if !capped || !allResidual {
+		c.Types = nil
+		return c, capped
+	}
+	c.Residual = true
+	if !unchecked {
+		c.Until = c.Time
 	}
 	return c, capped
 }

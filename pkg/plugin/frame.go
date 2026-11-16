@@ -336,13 +336,7 @@ func residualNouns(types []string) string {
 			article = n.article
 		}
 	}
-	var list string
-	if len(nouns) > 1 {
-		list = strings.Join(nouns[:len(nouns)-1], ", ") + " or " + nouns[len(nouns)-1]
-	} else {
-		list = strings.Join(nouns, "")
-	}
-	return article + " " + list
+	return article + " " + proseList(nouns, "or")
 }
 
 // limitMarker says the query's Limit hid older changes in the range, and from

@@ -572,9 +572,9 @@ func (p *Provider) computeUtilization(ctx context.Context, cost *utilCost, objec
 
 // wantsUtilization reports whether the requested fields include any util column.
 // andListNames renders column names as "a", "a and b", "a, b and c" for a
-// sentence a user reads. Deliberately a local copy of pkg/plugin's andList
-// rather than an import: this package is the seam a second, non-NetBox backend
-// plugs into and does not depend on the plugin layer.
+// sentence a user reads. Deliberately a local copy of pkg/plugin's proseList
+// with "and" rather than an import: this package is the seam a second,
+// non-NetBox backend plugs into and does not depend on the plugin layer.
 func andListNames(names []string) string {
 	switch len(names) {
 	case 0:

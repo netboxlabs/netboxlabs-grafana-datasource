@@ -405,17 +405,23 @@ func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCau
 		listedModules, listedServices                        map[int64]int64
 		deleted                                              changeReadResult
 		ifaceErr, deleteErr, cableErr, moduleErr, serviceErr error
+		moduleRefused, serviceRefused                        bool
 	)
 	failed := func(err error) {
 		if err != nil {
 			fail(err)
 		}
 	}
-	// A refused list fails only its own type, so it doesn't stop the others.
-	failedUnlessRefused := func(err error) {
-		if !listRefused(err) {
-			failed(err)
+	// ownRefusal splits a list's error into its own refusal, which fails only
+	// its type and so doesn't stop the others, and any other error. The refusal
+	// must come while ctx is live: once ctx has ended, a refusal-shaped error is
+	// its cause, another read's failure (the interface list's 403, or the
+	// scope's own read's 401) handed to a list it cut.
+	ownRefusal := func(err error) (bool, error) {
+		if listRefused(err) && ctx.Err() == nil {
+			return true, nil
 		}
+		return false, err
 	}
 	var wg sync.WaitGroup
 	if readIfaces {
@@ -453,35 +459,29 @@ func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCau
 	}
 	if wantModules {
 		wg.Go(func() {
-			moduleErr = listExisting(func(owners []string) (err error) {
+			moduleRefused, moduleErr = ownRefusal(listExisting(func(owners []string) (err error) {
 				listedModules, err = p.moduleMembers(ctx, owners, inScope)
 				return err
-			})
-			failedUnlessRefused(moduleErr)
+			}))
+			failed(moduleErr)
 		})
 	}
 	if wantServices {
 		wg.Go(func() {
-			serviceErr = listExisting(func(owners []string) (err error) {
+			serviceRefused, serviceErr = ownRefusal(listExisting(func(owners []string) (err error) {
 				listedServices, err = p.serviceMembers(ctx, scope.Type, kind, owners, inScope)
 				return err
-			})
-			failedUnlessRefused(serviceErr)
+			}))
+			failed(serviceErr)
 		})
 	}
 	wg.Wait()
-	for _, err := range []error{ifaceErr, deleteErr, cableErr} {
+	for _, err := range []error{ifaceErr, deleteErr, cableErr, moduleErr, serviceErr} {
 		if err != nil {
 			return members{}, err
 		}
 	}
-	for _, err := range []error{moduleErr, serviceErr} {
-		if listRefused(err) {
-			m.degraded = true
-		} else if err != nil {
-			return members{}, err
-		}
-	}
+	m.degraded = moduleRefused || serviceRefused
 
 	if ifaceScope {
 		for _, o := range scope.Objects {

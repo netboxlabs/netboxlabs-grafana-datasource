@@ -202,7 +202,7 @@ type scopedChangeServer struct {
 	servicesV42      bool           // service rows name their device or virtual_machine, as on NetBox 4.2, not a parent object
 	listPageSize     int            // non-zero: the list paths above serve at most this many rows a page
 	listStatus       int            // non-zero: the list paths above answer this status
-	listStatusFor    map[string]int // a status per list path ("dcim/modules"), over listStatus
+	listStatusFor    map[string]int // a status per list path ("dcim/modules"), over listStatus; dcim/devices too, for the existence read
 	ignoreListFilter bool           // the list paths above ignore their filters
 
 	// Failing and slow change-log reads, picked by a changed_object_type_id the
@@ -355,6 +355,10 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 			}
 			writePage(w, count, rows)
 		case "dcim/devices":
+			if status := s.listStatusFor[path]; status != 0 {
+				refuse(status, `{"detail":"nope"}`)
+				return
+			}
 			time.Sleep(s.devicesDelay)
 			rows := lookupMatches(s.devices, r.URL.Query())
 			writePage(w, len(rows), rows)

@@ -751,36 +751,76 @@ func TestDescendantMembers_ExistingScopeObjectsReadOnce(t *testing.T) {
 
 var errBoom = errors.New("boom")
 
+// endedWithBoom is a context cancelled with cause errBoom.
+func endedWithBoom() context.Context {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errBoom)
+	return ctx
+}
+
+// endsAfter is a context ended with errBoom whose Err reports it only after
+// its first live calls, and whose Done never closes: takeSlot's select can't
+// see it end, only its Err checks can, so each check is pinned on its own.
+type endsAfter struct {
+	context.Context // ended with errBoom, so context.Cause finds it
+	live            int32
+	calls           atomic.Int32
+}
+
+func (c *endsAfter) Err() error {
+	if c.calls.Add(1) <= c.live {
+		return nil
+	}
+	return context.Canceled
+}
+
+func (c *endsAfter) Done() <-chan struct{} { return nil }
+
 // takeSlot either holds a slot and returns nil, or holds none and returns the
-// context's cause. A free slot isn't taken once the context has ended, and a
+// context's cause. A free slot isn't kept once the context has ended, and a
 // full semaphore's slots stay with whoever holds them.
 func TestTakeSlot(t *testing.T) {
-	ended := func() context.Context {
-		ctx, cancel := context.WithCancelCause(context.Background())
-		cancel(errBoom)
-		return ctx
-	}
 	t.Run("free slot", func(t *testing.T) {
 		sem := make(chan struct{}, 1)
 		if err := takeSlot(context.Background(), sem); err != nil || len(sem) != 1 {
 			t.Errorf("takeSlot = %v, %d slots held; want nil, 1", err, len(sem))
 		}
 	})
-	// Repeated, since a select between a free slot and an ended context picks
-	// either.
 	t.Run("free slot, context ended", func(t *testing.T) {
-		for range 100 {
-			sem := make(chan struct{}, 1)
-			if err := takeSlot(ended(), sem); !errors.Is(err, errBoom) || len(sem) != 0 {
-				t.Fatalf("takeSlot = %v, %d slots held; want %v, none", err, len(sem), errBoom)
-			}
+		sem := make(chan struct{}, 1)
+		if err := takeSlot(endedWithBoom(), sem); !errors.Is(err, errBoom) || len(sem) != 0 {
+			t.Errorf("takeSlot = %v, %d slots held; want %v, none", err, len(sem), errBoom)
 		}
 	})
 	t.Run("full, context ended", func(t *testing.T) {
 		sem := make(chan struct{}, 1)
 		sem <- struct{}{}
-		if err := takeSlot(ended(), sem); !errors.Is(err, errBoom) || len(sem) != 1 {
+		if err := takeSlot(endedWithBoom(), sem); !errors.Is(err, errBoom) || len(sem) != 1 {
 			t.Errorf("takeSlot = %v, %d slots held; want %v, 1", err, len(sem), errBoom)
+		}
+	})
+	// The context ends between the first check and the select, which wins the
+	// free slot: the slot goes back.
+	t.Run("slot won as the context ended", func(t *testing.T) {
+		sem := make(chan struct{}, 1)
+		if err := takeSlot(&endsAfter{Context: endedWithBoom(), live: 1}, sem); !errors.Is(err, errBoom) || len(sem) != 0 {
+			t.Errorf("takeSlot = %v, %d slots held; want %v, none", err, len(sem), errBoom)
+		}
+	})
+	// Only the first check can return here: the select would wait on the full
+	// semaphore for good.
+	t.Run("full, ended before the select", func(t *testing.T) {
+		sem := make(chan struct{}, 1)
+		sem <- struct{}{}
+		done := make(chan error, 1)
+		go func() { done <- takeSlot(&endsAfter{Context: endedWithBoom()}, sem) }()
+		select {
+		case err := <-done:
+			if !errors.Is(err, errBoom) || len(sem) != 1 {
+				t.Errorf("takeSlot = %v, %d slots held; want %v, 1", err, len(sem), errBoom)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("takeSlot still waiting 1s after its context ended")
 		}
 	})
 }
@@ -894,6 +934,85 @@ func TestDescendantMembers_ListRefusedFailsOnlyItsType(t *testing.T) {
 		annotationErr(t, err, provider.AnnotationReasonDescendantsForbidden)
 		if n := fails.count(); n != 1 {
 			t.Errorf("fail called %d times (%v), want once", n, fails.errs)
+		}
+	})
+	// A Match-by-ID scope's existence read refused is refused for the lists it
+	// serves: with interfaces not wanted, the module and service lists.
+	t.Run("existence read forbidden", func(t *testing.T) {
+		s := server()
+		s.listStatusFor = map[string]int{"dcim/devices": http.StatusForbidden}
+		spec := idScope("17")
+		p, scope, kind, ids := membersSetup(t, s, spec)
+		var fails failLog
+		m, err := readMembersWith(p, spec, scope, kind, ids, descendantWants{modules: true, services: true}, &fails)
+		if err != nil {
+			t.Fatalf("descendantMembers: %v", err)
+		}
+		if !m.degraded {
+			t.Error("degraded = false, want true")
+		}
+		if n := fails.count(); n != 0 {
+			t.Errorf("fail called %d times (%v), want none", n, fails.errs)
+		}
+		wantSet(t, "modules", m.modules, map[int64]int64{502: 17})
+		wantSet(t, "services", m.services, map[int64]int64{})
+		for _, path := range []string{"dcim/modules", "ipam/services"} {
+			if lists := s.requestsTo(path); len(lists) != 0 {
+				t.Errorf("%s lists = %v, want none", path, lists)
+			}
+		}
+	})
+}
+
+// A list cut by ctx gets ctx's cause, which may look like a refusal: the
+// interface list's descendants-forbidden, handed to fail, or a 401 the scope's
+// own read hands to the caller's cancel. That isn't the list's own refusal: it
+// never ran, so its type isn't degraded, and the read fails.
+func TestDescendantMembers_CutListIsNotRefused(t *testing.T) {
+	for name, cause := range map[string]error{
+		"descendants-forbidden": &AnnotationError{Reason: provider.AnnotationReasonDescendantsForbidden},
+		"401":                   &APIError{Status: http.StatusUnauthorized},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newScopedChangeServer()
+			s.services = []serviceRow{{id: 600, parentType: "dcim.device", parent: 17}}
+			spec := nameScope("leaf1")
+			p, scope, kind, ids := membersSetup(t, s, spec)
+			// The one slot is held, so the service list waits for it.
+			sem := make(chan struct{}, 1)
+			sem <- struct{}{}
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			time.AfterFunc(20*time.Millisecond, func() { cancel(cause) })
+			m, err := p.descendantMembers(ctx, func(error) {}, sem, spec, scope, kind, ids, descendantWants{services: true})
+			if !errors.Is(err, cause) {
+				t.Errorf("err = %v, want the cut's cause %v", err, cause)
+			}
+			if m.degraded {
+				t.Error("degraded = true, want false: the list was cut, not refused")
+			}
+			if lists := s.requestsTo("ipam/services"); len(lists) != 0 {
+				t.Errorf("service lists = %v, want none", lists)
+			}
+		})
+	}
+	// Guard: as the query runs it, fail cancels ctx. The interface list's 403
+	// is the error, whatever the cancel cut.
+	t.Run("interface list forbidden, cancelling", func(t *testing.T) {
+		s := newScopedChangeServer()
+		s.interfaces = []childRow{{id: 100, owner: 17}}
+		s.modules = []childRow{{id: 500, owner: 17}}
+		s.services = []serviceRow{{id: 600, parentType: "dcim.device", parent: 17}}
+		s.listStatusFor = map[string]int{"dcim/interfaces": http.StatusForbidden}
+		spec := nameScope("leaf1")
+		p, scope, kind, ids := membersSetup(t, s, spec)
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		m, err := p.descendantMembers(ctx, cancel, make(chan struct{}, 1), spec, scope, kind, ids,
+			descendantWants{ifaces: true, modules: true, services: true})
+		annotationErr(t, err, provider.AnnotationReasonDescendantsForbidden)
+		if m.degraded {
+			t.Error("degraded = true, want false")
 		}
 	})
 }

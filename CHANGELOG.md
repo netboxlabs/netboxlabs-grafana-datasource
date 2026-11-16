@@ -5,8 +5,8 @@
 - **Change annotations can follow one object.** Scope an annotation to `$device`
   to see that device's changes, including its interfaces, cables, addresses,
   modules and services, each saying what changed. Journal entries can show
-  alongside them. What's attached is read by id, so a busy change log doesn't
-  hide it.
+  alongside them. Changes to what's still attached are read by id, so a busy
+  change log doesn't hide them; removals are checked in one page of it.
 - **Secure SOCKS proxy switch on the settings page.** On self-hosted Grafana
   with a secure SOCKS5 data source proxy, the datasource can be routed through
   it from the settings page. Grafana Cloud's PDC network selector appears once

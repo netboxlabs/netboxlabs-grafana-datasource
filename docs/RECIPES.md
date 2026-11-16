@@ -522,23 +522,29 @@ source settings (Annotations → Include descendants).
 What's attached is found from NetBox's indexes: interfaces, cables, modules,
 services and MAC addresses from their lists, IP addresses from the changes
 recorded against the interfaces, then the changes to each by id. So it doesn't
-depend on how big the change log is. It costs about eleven more NetBox requests
-per refresh on a small device (twelve with Match by ID), and a request more per
-two hundred or so interfaces for the MAC list, the IP history and the cable ends.
-The IP history can take up to five requests per two hundred interfaces when those
-interfaces have a long history of IP changes: it reads each batch's history newest
-first, up to 2,500 rows, with no start date.
+depend on how big the change log is. On a small device it costs ten more
+NetBox requests per refresh (eleven with Match by ID), plus one for each kind
+attached to it: cables, IP addresses, MAC addresses, modules and services. Add a
+request per two hundred or so interfaces for the MAC list, the IP history and
+the cable ends, and per two hundred or so attached objects of one kind. The IP
+history can take up to five requests per two hundred interfaces when those
+interfaces have a long history of IP changes: it reads each batch's history
+newest first, up to 2,500 rows, with no start date. In a test on a NetBox
+with 3 million change-log rows, a device's refresh took about 0.8 seconds with
+the switch on over 1 hour, 1.2 seconds over 24 hours and 2 seconds over 7 days,
+against about 0.15 seconds with it off.
 
 Something taken off the device or deleted leaves nothing to list. An IP address
 is still found from its history on the interfaces, while NetBox keeps that
 history. A MAC address, module or service, or an IP address whose history is
 gone, is looked for in one page of the change log: 500 rows of address changes
-and 500 of module and service changes. On a
-NetBox with 3 million change-log rows, that page reaches back about 16 minutes
-for addresses and about 2.4 hours for modules and services. When a page doesn't
-reach the start of the range, a marker at the end of the range says so: "Removals before
-`<time>` not checked: …". That's normal on a busy NetBox. "Removals not checked:
-…" means the page couldn't be read in time.
+and 500 of module and service changes. One removed within the page's reach also
+shows its earlier changes in the range, at a request more per kind. In the same
+test, the page reached back about 17 minutes for addresses and about 2.4 hours
+for modules and services. When a page doesn't reach the start of the range, a
+marker at the end of the range says so: "Removals before `<time>` not
+checked: …". That's normal on a busy NetBox. "Removals not checked: …" means
+the page couldn't be read.
 
 Listing needs the token to have view permission on MAC addresses, modules and
 services (`dcim.view_macaddress`, `dcim.view_module`, `ipam.view_service`).

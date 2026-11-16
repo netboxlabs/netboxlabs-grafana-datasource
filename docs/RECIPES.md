@@ -526,9 +526,11 @@ depend on how big the change log is. It costs about eleven more NetBox requests
 per refresh on a small device (twelve with Match by ID), and a request more per
 two hundred or so interfaces for the MAC list, the IP history and the cable ends.
 
-An IP address, MAC address, module or service taken off the device or deleted
-leaves nothing to list, so those are looked for in one page of the change log
-each: 500 rows of address changes and 500 of module and service changes. On a
+Something taken off the device or deleted leaves nothing to list. An IP address
+is still found from its history on the interfaces, while NetBox keeps that
+history. A MAC address, module or service, or an IP address whose history is
+gone, is looked for in one page of the change log: 500 rows of address changes
+and 500 of module and service changes. On a
 NetBox with 3 million change-log rows, that page reaches back about 16 minutes
 for addresses and about 2.4 hours for modules and services. When a page doesn't
 reach the start of the range, a marker at the start says so: "Removals before
@@ -536,10 +538,11 @@ reach the start of the range, a marker at the start says so: "Removals before
 …" means the page couldn't be read in time.
 
 Listing needs the token to have view permission on MAC addresses, modules and
-services (`dcim.view_macaddress`, `dcim.view_module`, `ipam.view_service`). Without
-one, that kind comes only from the one-page look, and on a busy NetBox the marker
-says older changes to what's attached weren't checked. Object permissions that hide some objects from
-the token do so silently, and those objects' changes come only from that page.
+services (`dcim.view_macaddress`, `dcim.view_module`, `ipam.view_service`).
+Without one, that kind comes only from the one-page look, and on a busy NetBox
+the marker says older changes to what's attached weren't checked. Object
+permissions that hide some objects from the token do so silently, and those
+objects' changes come only from that page.
 
 If the reads fail, or take longer than 8 seconds (or half the datasource's
 Timeout, if that's shorter), the rest of the track still shows, with a warning

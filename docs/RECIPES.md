@@ -486,6 +486,10 @@ what's attached to it. Each marker says what changed.
    too: narrow the variable's selection, or give its All option the custom value
    `$__all`. To type a name that contains a comma, write it as `\,`; variable values
    are escaped for you.
+
+   Scope type, Actions and Changed fields take dashboard variables. A variable with
+   no value leaves Actions or Changed fields unfiltered; Scope type needs exactly one
+   value.
 3. A marker reads like `Ethernet2 on NYC1-leaf-01`, then one `field: before → after`
    line per changed field (at most 5, then `+N more`), the change message if there is
    one, and `Updated by <user> · Open in NetBox`. Related objects show by name
@@ -493,11 +497,15 @@ what's attached to it. Each marker says what changed.
 
 Cut the noise with the other editor fields:
 
-- **Actions:** only created, updated or deleted changes. Empty means all.
+- **Actions:** only created, updated or deleted changes. Empty means all. Two
+  Actions are read exactly, one read each, so they cost twice the reads.
 - **Changed fields:** only updates that touch these top-level fields (`status`, `role`).
   Write a custom field as `cf_<name>`. Matching fields are listed first. Creates and
   deletes are governed by Actions alone. This filter scans up to 2,500 change rows
   per read; if the range holds more, a last marker says older changes weren't checked.
+  Custom fields are checked against NetBox's list. A token that sees only some custom
+  fields gets the others refused, and a field created in the last minute may be refused
+  briefly. A deleted custom field's history can only be filtered with `custom_fields`.
 - **Journal entries:** also show journal entries (for the scoped objects when a
   scope is set), tagged `journal`. The token needs permission to read them.
 
@@ -508,7 +516,8 @@ services. A virtual machine gets its addresses and services; an interface, its c
 and its addresses. A cable shows all its changes in the range, including from before
 it reached this device or after it left. A cable deleted from, or moved off, a console,
 power, front or rear port doesn't show. When Limit leaves changes out, a marker at the
-start of the range says so.
+start of the range says so. An admin can turn it off for every annotation in the data
+source settings (Annotations → Include descendants).
 
 It costs about seven more NetBox requests per refresh on a quiet NetBox. On a busy
 one, each of the two scans can take up to five pages, and a scope with hundreds of

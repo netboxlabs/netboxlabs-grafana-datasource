@@ -80,6 +80,7 @@ Add the data source (**Connections → Data sources → NetBox**) and set:
 | **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                      |
 | **Fast paging**     | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                |
 | **Secure Socks Proxy** | Shown only on self-hosted Grafana with a [secure SOCKS5 data source proxy](https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/proxy/) configured. **Enabled** routes this datasource through it. On Grafana Cloud, see [Grafana Cloud](#grafana-cloud). |
+| **Include descendants** | Annotations section. On by default; off turns the descendants read off for every annotation. See [Enrichment recipes](#enrichment-recipes). |
 
 Click **Save & test**. A healthy data source reports the connected NetBox version.
 
@@ -301,6 +302,9 @@ them. Objects, IP enrichment, topology, and annotation queries all honor the sel
 branch (annotation and variable queries each have their own Branch field), and the field /
 value-autocomplete pickers reload against it. Only the **object-type** list is always read
 from main (NetBox models are code-level and identical across branches).
+
+Links to NetBox carry the branch, and NetBox then stays on that branch in this browser until
+you pick Main in NetBox's branch menu; a main link from Grafana doesn't switch it back.
 
 The bundled demo ships the plugin already installed and a seeded `demo-branch` that adds a
 branch-only device, `AMS1-leaf-99`. To see branching in action, pick the dashboard's

@@ -480,7 +480,7 @@ func TestJournal_AuthorLookupFailureOmitsUser(t *testing.T) {
 	}
 }
 
-// Most tokens can't read users, so a failed author lookup is remembered, per
+// Most tokens can't read users, so a refused author lookup is remembered, per
 // branch, for objectTypeFailureTTL: a refresh within it doesn't ask again, and
 // its entries show no author, as the first's do. Past it, the lookup is tried
 // again.
@@ -519,6 +519,40 @@ func TestJournal_AuthorLookupFailureRemembered(t *testing.T) {
 	refresh(main)
 	if n := len(s.userReads()); n != 3 {
 		t.Errorf("users reads = %d after the failure expired, want 3", n)
+	}
+}
+
+// Only a refusal is remembered. A lookup that runs past the names wait, or
+// fails in passing, says nothing about whether the token can read users: the
+// next refresh asks again.
+func TestJournal_AuthorLookupOtherFailuresNotRemembered(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		handle func()
+	}{
+		{"past the names wait", 0, func() { time.Sleep(300 * time.Millisecond) }},
+		{"a 500", http.StatusInternalServerError, nil},
+		{"a 503", http.StatusServiceUnavailable, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &journalServer{
+				usersStatus: tc.status,
+				usersHandle: tc.handle,
+				users:       map[int64]string{7: "alice"},
+				rows:        []journalRow{{typ: "dcim.site", objID: 1, display: "s1", minutes: 1, by: 7}},
+			}
+			p := s.start(t)
+			p.namesWaitOverride = 100 * time.Millisecond
+			for range 2 {
+				if _, err := p.Changes(context.Background(), journalSpec()); err != nil {
+					t.Fatalf("Changes: %v", err)
+				}
+			}
+			if n := len(s.userReads()); n != 2 {
+				t.Errorf("users reads = %d after two refreshes, want 2: the failure isn't remembered", n)
+			}
+		})
 	}
 }
 

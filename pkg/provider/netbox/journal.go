@@ -192,11 +192,12 @@ func (p *Provider) journalRead(ctx context.Context, q url.Values, tr typeRead, s
 // The names are a hint like the diffs' related names: the lookup waits its own
 // namesWait, and past it or on any error the entries keep no author.
 //
-// A failed lookup is remembered per branch for objectTypeFailureTTL, as a
-// failed read of the object-type map is, and not asked again within it: most
-// API tokens can't read users, and a refused lookup on every refresh is a
-// request that can't succeed. A lookup the caller's context ended isn't
-// remembered: that says nothing about the users list.
+// A refused lookup (401 or 403) is remembered per branch for
+// objectTypeFailureTTL, as a failed read of the object-type map is, and not
+// asked again within it: most API tokens can't read users, and asking on every
+// refresh is a request that can't succeed. Any other failure, a lookup past
+// the names wait or a passing 5xx, says nothing about the token, and isn't
+// remembered.
 func (p *Provider) journalAuthors(ctx context.Context, entries []journalEntry) map[int64]string {
 	var ids []string
 	seen := map[int64]bool{}
@@ -222,7 +223,7 @@ func (p *Provider) journalAuthors(ctx context.Context, entries []journalEntry) m
 		if err != nil {
 			log.DefaultLogger.Debug("netbox: journal authors not resolved; the entries show no author",
 				"error", logSafe(err.Error()))
-			if ctx.Err() == nil {
+			if refused(err) {
 				p.rememberAuthorsFailure(branch)
 			}
 			break
@@ -240,15 +241,21 @@ func (p *Provider) journalAuthors(ctx context.Context, entries []journalEntry) m
 	return names
 }
 
-// authorsFailedRecently reports whether the author lookup failed on branch
-// within objectTypeFailureTTL.
+// refused reports whether NetBox refused the token: a 401 or a 403.
+func refused(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && (apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden)
+}
+
+// authorsFailedRecently reports whether the author lookup was refused on
+// branch within objectTypeFailureTTL.
 func (p *Provider) authorsFailedRecently(branch string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return time.Now().Before(p.authorsFailedUntil[branch])
 }
 
-// rememberAuthorsFailure records a failed author lookup on branch. Expired
+// rememberAuthorsFailure records a refused author lookup on branch. Expired
 // entries are dropped on the way, so the map holds only the branches whose
 // failure is still remembered.
 func (p *Provider) rememberAuthorsFailure(branch string) {

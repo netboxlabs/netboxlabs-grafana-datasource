@@ -49,7 +49,7 @@ const schemaTTL = 30 * time.Minute
 // recovered instance is picked up within a refresh or two, and the degraded path
 // it holds open still returns annotations (see objectTypeReads).
 //
-// A failed journal-author lookup is remembered for the same window
+// A refused journal-author lookup is remembered for the same window
 // (journalAuthors).
 //
 // A var, not a const, so tests can shorten it (as they do retryBackoff).
@@ -112,7 +112,7 @@ type Provider struct {
 	// customFieldsFlightByBranch is the in-progress definition fetch per branch,
 	// the sole writer of customFieldsByBranch (see customFieldsFlight).
 	customFieldsFlightByBranch map[string]*customFieldsFlight
-	// authorsFailedUntil is, per branch, when a failed journal-author lookup
+	// authorsFailedUntil is, per branch, when a refused journal-author lookup
 	// may be tried again (journalAuthors).
 	authorsFailedUntil map[string]time.Time
 	// customFieldsWaitOverride shortens customFieldsWaitBudget; tests only.

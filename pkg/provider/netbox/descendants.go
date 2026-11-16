@@ -36,8 +36,8 @@ func (p *Provider) childListCap() int {
 const cableEndWorkers = 4
 
 // maxDescendantsBudget caps the time the descendant reads get. They run in a
-// chain (lists, then cable ends, then scans), and a short dashboard refresh
-// must not lose the scope's own changes to them.
+// chain (lists, then the cable ends, IP history and MAC list, then scans), and
+// a short dashboard refresh must not lose the scope's own changes to them.
 const maxDescendantsBudget = 8 * time.Second
 
 // descendantsBudget is min(half the datasource Timeout, 8s), the Timeout being
@@ -562,10 +562,14 @@ func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCau
 	}
 	if want.macs && ids[macAddressType] != 0 {
 		wg.Go(func() {
-			macs, err := p.macMembers(ctx, sem, kind.ifaceType, m.ifaces)
+			macs, err := p.macMembers(ctx, fail, sem, kind.ifaceType, m.ifaces)
 			listedMACs = macs
 			macRefused, macErr = ownRefusal(err)
-			failed(macErr)
+			// A batch already failed any error that isn't a refusal. A refusal
+			// that isn't the list's own (ownRefusal) fails here.
+			if listRefused(macErr) {
+				fail(macErr)
+			}
 		})
 	}
 	wg.Wait()
@@ -843,8 +847,10 @@ func (p *Provider) ifaceRelatedReads(ctx context.Context, fail context.CancelCau
 // Each batch writes only its own slot. Any batch's error fails the list, one
 // that isn't a refusal (listRefused) before one that is, so a refused batch
 // refuses the whole list, and a batch ctx ended before it ran fails it with
-// ctx's cause.
-func (p *Provider) macMembers(ctx context.Context, sem chan struct{}, ifaceType string, ifaces map[int64]int64) (map[int64]int64, error) {
+// ctx's cause. A batch whose error isn't a refusal calls fail with it as it
+// gets it, as a cable-end batch does, so its siblings and the other reads stop
+// then, not once every batch has finished; a refusal never calls fail.
+func (p *Provider) macMembers(ctx context.Context, fail context.CancelCauseFunc, sem chan struct{}, ifaceType string, ifaces map[int64]int64) (map[int64]int64, error) {
 	batcher := newQueryBatcher("assigned_object_id", url.Values{"fields": {"id,assigned_object_type,assigned_object_id"}})
 	batches := batcher.chunk(sortedIDs(ifaces))
 	rows := make([][]json.RawMessage, len(batches))
@@ -853,11 +859,13 @@ func (p *Provider) macMembers(ctx context.Context, sem chan struct{}, ifaceType 
 	for i, batch := range batches {
 		q := batcher.query(batch)
 		wg.Go(func() {
-			if errs[i] = takeSlot(ctx, sem); errs[i] != nil {
-				return
+			if errs[i] = takeSlot(ctx, sem); errs[i] == nil {
+				rows[i], errs[i] = p.listChildren(ctx, macAddressList, q)
+				<-sem
 			}
-			defer func() { <-sem }()
-			rows[i], errs[i] = p.listChildren(ctx, macAddressList, q)
+			if errs[i] != nil && !listRefused(errs[i]) {
+				fail(errs[i])
+			}
 		})
 	}
 	wg.Wait()

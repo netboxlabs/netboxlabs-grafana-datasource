@@ -196,11 +196,17 @@ type scopedChangeServer struct {
 	noObjectRepr bool                // change rows carry no object_repr, as before NetBox 4.5
 
 	// What's attached, for Include descendants.
-	interfaces       []childRow     // dcim/interfaces
-	vms              []string       // brief rows at virtualization/virtual-machines
-	vmInterfaces     []childRow     // virtualization/interfaces
-	cables           []cableRow     // dcim/cables
-	macs             []macRow       // dcim/mac-addresses
+	interfaces   []childRow // dcim/interfaces
+	vms          []string   // brief rows at virtualization/virtual-machines
+	vmInterfaces []childRow // virtualization/interfaces
+	cables       []cableRow // dcim/cables
+	macs         []macRow   // dcim/mac-addresses
+	// A MAC list request whose assigned_object_id names a key of macStatusFor
+	// answers that status, and one naming a key of macHoldFor is held that long
+	// first, ending early when the request's context does. Each picks out one
+	// batch of a batched list.
+	macStatusFor     map[int64]int
+	macHoldFor       map[int64]time.Duration
 	modules          []childRow     // dcim/modules, each on its owner device
 	services         []serviceRow   // ipam/services
 	servicesV42      bool           // service rows name their device or virtual_machine, as on NetBox 4.2, not a parent object
@@ -658,6 +664,21 @@ func (s *scopedChangeServer) serveChildren(w http.ResponseWriter, r *http.Reques
 			rows = append(rows, fmt.Sprintf(`{"id":%d,"a_terminations":[%s],"b_terminations":[%s]}`, c.id, strings.Join(a, ","), strings.Join(b, ",")))
 		}
 	case "dcim/mac-addresses":
+		names := func(iface int64) bool {
+			return slices.Contains(r.URL.Query()["assigned_object_id"], strconv.FormatInt(iface, 10))
+		}
+		for iface, d := range s.macHoldFor {
+			if names(iface) && !holdRequest(r, d) {
+				return
+			}
+		}
+		for iface, status := range s.macStatusFor {
+			if names(iface) {
+				w.WriteHeader(status)
+				_, _ = fmt.Fprint(w, `{"detail":"nope"}`)
+				return
+			}
+		}
 		typ, typed := "", false
 		if vals := q["assigned_object_type"]; len(vals) > 0 {
 			typ, typed = vals[len(vals)-1], true

@@ -1149,17 +1149,18 @@ func TestDescendantMembers_IPHistory(t *testing.T) {
 	})
 }
 
-// A NetBox that ignores the related filters returns every IP change: each row
-// is checked by its own snapshot, the interface's type and id together. An IP
-// on leaf2's interface, or on a VM interface sharing leaf1's interface id,
-// isn't a member.
+// A NetBox that ignores the related and type filters returns every change:
+// each row is checked by its own type and snapshot, the interface's type and
+// id together. An IP on leaf2's interface, or on a VM interface sharing
+// leaf1's interface id, isn't a member, nor is a MAC on leaf1's interface.
 func TestDescendantMembers_IPHistoryChecksTheSnapshot(t *testing.T) {
 	s := newScopedChangeServer(
 		ipOn(9, 19, "create", 401, 100),  // on leaf1's interface: kept
 		ipOn(10, 20, "create", 403, 102), // leaf2's
 		created(11, 21, "ipam.ipaddress", 405, assignedTo(31, 100)).relatedTo("virtualization.vminterface", 100),
+		created(12, 22, "dcim.macaddress", 406, assignedTo(14, 100)).relatedTo("dcim.interface", 100),
 	)
-	s.ignoreRelatedQ = true
+	s.ignoreRelatedQ, s.ignoreChangedQ = true, true
 	s.interfaces = []childRow{{id: 100, owner: 17}, {id: 102, owner: 18}}
 	spec := nameScope("leaf1")
 	p, scope, kind, ids := membersSetup(t, s, spec)
@@ -1361,6 +1362,56 @@ func TestDescendantMembers_MACListBatches(t *testing.T) {
 	}
 	if got := sortedInts(t, sent); !reflect.DeepEqual(got, all) {
 		t.Errorf("assigned_object_id across the lists = %d values, want each of the 900 interfaces once", len(got))
+	}
+}
+
+// A MAC batch that fails stops the other reads as it fails, its held sibling
+// batch included, rather than once every MAC batch has finished: the track
+// ends at once, with the 500 on its marker, not descendants-slow.
+func TestChanges_MACBatchFailureStopsTheOthers(t *testing.T) {
+	s := manyInterfaces()
+	s.macStatusFor = map[int64]int{1000: http.StatusInternalServerError}
+	s.macHoldFor = map[int64]time.Duration{1899: 5 * time.Second}
+	p := s.start(t)
+	p.descendantsWaitOverride = 3 * time.Second
+	spec := withDescendants(nameScope("leaf1"))
+	spec.ObjectTypes = []string{"dcim.macaddress"}
+	changes, elapsed := changesWithin(t, p, spec, 5*time.Second)
+	if elapsed > time.Second {
+		t.Errorf("Changes took %v, want the held MAC batch stopped when its sibling failed", elapsed)
+	}
+	c := descendantsError(t, changes)
+	if u := provider.Classify(c.Err); u != nil && u.AnnotationReason == provider.AnnotationReasonDescendantsSlow {
+		t.Errorf("Err = %v, want the MAC batch's 500", c.Err)
+	}
+	var apiErr *APIError
+	if !errors.As(c.Err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("Err = %v, want the MAC batch's 500", c.Err)
+	}
+	held := slices.ContainsFunc(s.requestsTo("dcim/mac-addresses"), func(q url.Values) bool {
+		return slices.Contains(q["assigned_object_id"], "1899")
+	})
+	if !held {
+		t.Error("the held MAC batch was never sent")
+	}
+}
+
+// Among MAC batches, an error that isn't a refusal outranks a refusal, though
+// the refused batch comes first: the list fails with the 500, and only the
+// 500 calls fail.
+func TestDescendantMembers_MACBatchErrorOutranksRefusal(t *testing.T) {
+	s := manyInterfaces()
+	s.macStatusFor = map[int64]int{1000: http.StatusForbidden, 1899: http.StatusInternalServerError}
+	spec := nameScope("leaf1")
+	p, scope, kind, ids := membersSetup(t, s, spec)
+	var fails failLog
+	_, err := readMembersWith(p, spec, scope, kind, ids, descendantWants{ifaces: true, macs: true}, &fails)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("err = %v, want the 500", err)
+	}
+	if n := fails.count(); n != 1 || !errors.As(fails.errs[0], &apiErr) || apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("fail called with %v, want once, with the 500", fails.errs)
 	}
 }
 

@@ -1557,6 +1557,63 @@ func TestChanges_OneSchemaBudgetPerCall(t *testing.T) {
 	}
 }
 
+// The scope lookup and the Changed-fields check don't wait for each other. The
+// scope's by-ID name fill waits out its names wait on held devices while the
+// field check waits out the call's schema budget on a held schema: one wait,
+// not two.
+func TestChanges_ScopeAndChangedFieldsCheckWaitTogether(t *testing.T) {
+	own := ch(1, 1, "dcim.device", 17)
+	own.pre, own.post = `{"status":"active"}`, `{"status":"offline"}`
+	s := newScopedChangeServer(own)
+	s.schemaHold = make(chan struct{})
+	const wait = 400 * time.Millisecond
+	s.devicesDelay = 2 * wait
+	p := s.start(t)
+	t.Cleanup(func() { close(s.schemaHold) })
+	p.namesWaitOverride = wait
+
+	spec := scoped(idScope("17"), 10)
+	spec.ChangedFields = []string{"status"}
+	changes, elapsed := changesWithin(t, p, spec, 10*time.Second)
+	if limit := wait * 3 / 2; elapsed > limit {
+		t.Errorf("Changes took %v, want under %v: the two %v waits overlap", elapsed, limit, wait)
+	}
+	wantIDs(t, changes, "#1")
+}
+
+// When the scope lookup and the Changed-fields check both refuse, the scope's
+// refusal is the answer, though the field check refuses first.
+func TestChanges_ScopeRefusalOutranksChangedFields(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.devicesDelay = 200 * time.Millisecond
+	spec := scoped(nameScope("leaf9"), 10)
+	spec.ChangedFields = []string{"platfrom"}
+	_, err := s.start(t).Changes(context.Background(), spec)
+	if ae := annotationErr(t, err, provider.AnnotationReasonNoMatch); ae.Value != "leaf9" {
+		t.Errorf("value = %q, want leaf9", ae.Value)
+	}
+}
+
+// A scope refused before any request doesn't wait for the Changed-fields check
+// to give up on a held schema: its answer can't change the query's.
+func TestChanges_ScopeRefusalStopsTheChangedFieldsCheck(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.schemaHold = make(chan struct{})
+	p := s.start(t)
+	t.Cleanup(func() { close(s.schemaHold) })
+	p.namesWaitOverride = 2 * time.Second
+
+	spec := scoped(nameScope("leaf1"), 10)
+	spec.ScopeType, spec.ScopeTypeSet = "dcim.device,dcim.interface", true
+	spec.ChangedFields = []string{"status"}
+	start := time.Now()
+	_, err := p.Changes(context.Background(), spec)
+	annotationErr(t, err, provider.AnnotationReasonScopeTypeNotOne)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Changes took %v, want the refusal at once", elapsed)
+	}
+}
+
 // Custom-field names aren't checked against the schema, so a list of only those
 // doesn't read it.
 func TestChanges_CustomFieldOnlyChangedFieldsSkipTheSchema(t *testing.T) {

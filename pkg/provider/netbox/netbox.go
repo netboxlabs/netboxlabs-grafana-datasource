@@ -1759,7 +1759,8 @@ const changeReadWorkers = 4
 // the diffs' relation lookup) share one schema budget per call
 // (budgetedSchema), so a cold schema costs one wait, not three. The
 // Changed-fields check's read of the custom-field list waits its own
-// customFieldsWait, beside its schema wait rather than after it.
+// customFieldsWait, beside its schema wait rather than after it, and the
+// check as a whole runs beside the scope lookup rather than after it.
 func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]provider.Change, error) {
 	// One branch for every request and cache key this call makes (pinBranch).
 	// The resolved value is the schema id, which the marker links carry.
@@ -1783,16 +1784,30 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		return nil, err
 	}
 
+	// The scope lookup and the Changed-fields check need nothing of each other,
+	// so they run side by side, and on cold caches their waits overlap. When
+	// both refuse, the scope's refusal is the answer, so it doesn't depend on
+	// which finishes first, and once the scope has refused the check is
+	// stopped, since its answer can't change that.
+	fieldsCtx, stopFields := context.WithCancel(ctx)
+	defer stopFields()
+	var fieldsErr error
+	var checks sync.WaitGroup
+	checks.Go(func() { fieldsErr = p.checkChangedFields(fieldsCtx, filter.fields) })
 	scope, err := p.resolveAnnotationScope(ctx, spec)
 	if err != nil {
+		stopFields()
+	}
+	checks.Wait()
+	if err != nil {
 		return nil, err
+	}
+	if fieldsErr != nil {
+		return nil, fieldsErr
 	}
 	maxRows := limit
 	if filter.localScan() {
 		maxRows = p.changeScanCap()
-	}
-	if err := p.checkChangedFields(ctx, filter.fields); err != nil {
-		return nil, err
 	}
 	reads, err := p.changeReads(ctx, spec, scope, wanted, filter)
 	if err != nil {

@@ -42,7 +42,7 @@ func membersSetup(t *testing.T, s *scopedChangeServer, spec provider.ChangeSpec)
 
 // readMembers runs descendantMembers on a scope set up by membersSetup.
 func readMembers(p *Provider, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, wantIfaces, wantCables bool) (members, error) {
-	return p.descendantMembers(context.Background(), spec, scope, kind, ids, wantIfaces, wantCables)
+	return p.descendantMembers(context.Background(), func(error) {}, spec, scope, kind, ids, wantIfaces, wantCables)
 }
 
 func membersOK(t *testing.T, p *Provider, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, wantIfaces, wantCables bool) members {
@@ -1268,14 +1268,14 @@ func TestDescendantsDeadline(t *testing.T) {
 }
 
 // An error that came back before the descendants deadline keeps its own cause,
-// though the deadline then cut another read.
+// though another read was still held when it did.
 func TestChanges_EarlyFailureIsNotSlow(t *testing.T) {
 	s := trackServer()
 	s.failTypeID = 20
 	s.delayTypeID, s.delayFor = 22, 5*time.Second
 	p := s.start(t)
 	// Long enough that the membership reads finish well inside it, even on a
-	// loaded -race run: only the held parts scan is cut.
+	// loaded -race run: only the held parts scan is still running.
 	p.descendantsWaitOverride = 500 * time.Millisecond
 	changes, _ := changesWithin(t, p, withDescendants(nameScope("leaf1")), 2*time.Second)
 	wantIDs(t, changes, "#1", "#2", "descendants-error")
@@ -1285,6 +1285,26 @@ func TestChanges_EarlyFailureIsNotSlow(t *testing.T) {
 	}
 	var apiErr *APIError
 	if !errors.As(c.Err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("Err = %v, want the address scan's 500", c.Err)
+	}
+}
+
+// A descendant read that fails stops the other descendant reads rather than
+// leave them to the descendants deadline: the held parts scan is cancelled, and
+// the track ends at once, with the address scan's 500 on its marker.
+func TestChanges_DescendantFailureStopsTheOthers(t *testing.T) {
+	s := trackServer()
+	s.failTypeID = 20
+	s.delayTypeID, s.delayFor = 22, 5*time.Second
+	p := s.start(t)
+	p.descendantsWaitOverride = 3 * time.Second
+	changes, elapsed := changesWithin(t, p, withDescendants(nameScope("leaf1")), 5*time.Second)
+	if elapsed > time.Second {
+		t.Errorf("Changes took %v, want the parts scan stopped when the address scan failed", elapsed)
+	}
+	wantIDs(t, changes, "#1", "#2", "descendants-error")
+	var apiErr *APIError
+	if c := descendantsError(t, changes); !errors.As(c.Err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
 		t.Errorf("Err = %v, want the address scan's 500", c.Err)
 	}
 }

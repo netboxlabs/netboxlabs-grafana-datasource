@@ -580,8 +580,8 @@ func TestFetchRows_DoesNotRetryClientErrors(t *testing.T) {
 
 // TestFetchRows_RetryStopsOnContextCancel: a closed dashboard or an expired
 // query deadline must not be held open by a backoff sleep. The original error
-// is returned, with the context's beside it, because the upstream failure is
-// what the operator needs to see.
+// is returned rather than a context one, because the upstream failure is what
+// the operator needs to see.
 func TestFetchRows_RetryStopsOnContextCancel(t *testing.T) {
 	saved := retryBackoff
 	retryBackoff = []time.Duration{time.Hour}
@@ -611,17 +611,19 @@ func TestFetchRows_RetryStopsOnContextCancel(t *testing.T) {
 	}
 }
 
-// A retry the context cuts short returns the error it was waiting to retry
-// and the context's, both: the read still classifies as NetBox's answer, and a
-// caller can still tell that the context ended it.
-func TestGetListPageRetry_CutRetryWrapsBothErrors(t *testing.T) {
+// A retry the context cuts short returns the error it was waiting to retry,
+// as it came. Here that is a dropped connection: it still reads as one, not as
+// the context's end, for every caller that classifies it, and it unwraps one
+// cause at a time down to it.
+func TestGetListPageRetry_CutRetryKeepsTheTransportError(t *testing.T) {
 	saved := retryBackoff
 	retryBackoff = []time.Duration{time.Hour}
 	t.Cleanup(func() { retryBackoff = saved })
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"detail":"upstream unavailable"}`))
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			_ = conn.Close()
+		}
 	}))
 	t.Cleanup(srv.Close)
 	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
@@ -629,16 +631,17 @@ func TestGetListPageRetry_CutRetryWrapsBothErrors(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	_, err := p.getListPageRetry(ctx, p.client.apiURL("dcim/devices", nil))
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("err = %v, want it to match the context's deadline", err)
+	if err == nil {
+		t.Fatal("want the dropped connection's error")
 	}
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable {
-		t.Fatalf("err = %v, want the 503 it was waiting to retry", err)
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want the dropped connection's own error, not the context's", err)
 	}
-	got, want := provider.Classify(err), provider.Classify(apiErr)
-	if got == nil || *got != *want {
-		t.Errorf("Classify = %+v, want the 503's own %+v", got, want)
+	if !transientTransport(err) {
+		t.Errorf("err = %v, want it classified as a transport failure", err)
+	}
+	if errors.Unwrap(err) == nil {
+		t.Errorf("err = %v, want one cause to unwrap to", err)
 	}
 }
 

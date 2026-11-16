@@ -1240,20 +1240,16 @@ func (p *Provider) getListPageRetry(ctx context.Context, rawURL string) (listPag
 // struggling, which is when that number is worth reading.
 //
 // A retry the context ends during its backoff returns the error it was waiting
-// to retry and the context's, both wrapped. The first is what NetBox answered,
-// and still classifies the failure (errors.As finds its *APIError). The second
-// says why there was no retry, for a caller that tells a context's end apart:
-// a descendant read its deadline cut mid backoff is slow, not the 503 it was
-// about to retry. It is the context's error, not its cause: a cause is a
-// sibling read's failure, or the utilization budget's, which marks only a
-// lookup the budget cut on the wire.
+// to retry, as it came, so every caller classifies it by what NetBox or the
+// connection did. A caller that needs to know the context ended it asks the
+// context (see Changes' descendants deadline).
 func (p *Provider) getListPageRetryN(ctx context.Context, rawURL string) (listPage, int, error) {
 	requests := 1
 	page, err := p.client.getListPage(ctx, rawURL)
 	for attempt := 0; err != nil && retryable(ctx, err) && attempt < len(retryBackoff); attempt++ {
 		select {
 		case <-ctx.Done():
-			return listPage{}, requests, fmt.Errorf("%w (not retried: %w)", err, ctx.Err())
+			return listPage{}, requests, err
 		case <-time.After(retryBackoff[attempt]):
 		}
 		log.DefaultLogger.Warn("netbox: retrying list page after a transient upstream failure",
@@ -1745,14 +1741,14 @@ const changeReadWorkers = 4
 // also reads the changes to what's attached to it (descendantChanges),
 // alongside the other reads, and merges them in the same way. Those reads run
 // under their own deadline (descendantsDeadline), so a slow chain of them
-// can't hold the track past the caller's. While the caller's context is live,
-// a descendant read that fails or runs past that deadline doesn't fail the
-// query: the descendant rows are dropped and the track ends with one
-// descendants-error marker: the switch is on by default, and a slow or
-// refused read of what's attached mustn't blank the scope's own track. When
-// the descendant reads succeeded (they returned results and no error), the
-// track ends with a limit marker if the limit left a change out; every other
-// track is cut at the limit silently, as before.
+// can't hold the track past the caller's, and the first of them to fail stops
+// the others. While the caller's context is live, a descendant read that fails
+// or runs past that deadline doesn't fail the query: the descendant rows are
+// dropped and the track ends with one descendants-error marker: the switch is
+// on by default, and a slow or refused read of what's attached mustn't blank
+// the scope's own track. When the descendant reads succeeded (they returned
+// results and no error), the track ends with a limit marker if the limit left
+// a change out; every other track is cut at the limit silently, as before.
 //
 // The names the markers carry are best effort. The network name reads (the
 // by-ID name fill, the diffs' related names and the journal authors) each wait
@@ -1829,19 +1825,23 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 
 	// The descendant reads run under their own deadline, within readCtx, so a
 	// failed read cancels them too. Their own errors don't cancel readCtx: they
-	// become a marker, and the rest of the track stands.
+	// become a marker, and the rest of the track stands. The first of them to
+	// fail cancels the others through failDesc, with its error as dctx's cause,
+	// so whichever came first, the deadline or a failure, is the cause.
 	var (
 		desc            []changeReadResult
 		descErr         error
 		dctx            context.Context
+		failDesc        context.CancelCauseFunc
 		start, deadline time.Time
 	)
 	descendants := spec.Descendants && scope != nil
 	if descendants {
 		start, deadline = time.Now(), p.descendantsDeadline(ctx)
-		var cancel context.CancelFunc
-		dctx, cancel = context.WithDeadline(readCtx, deadline)
+		deadlineCtx, cancel := context.WithDeadline(readCtx, deadline)
 		defer cancel()
+		dctx, failDesc = context.WithCancelCause(deadlineCtx)
+		defer failDesc(nil)
 	}
 
 	// Each read owns its result slot, so no lock is needed. At most
@@ -1871,15 +1871,20 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		})
 	}
 	if descendants {
-		wg.Go(func() { desc, descErr = p.descendantChanges(dctx, spec, scope, wanted, filter, limit) })
+		wg.Go(func() {
+			// An error that isn't a read's, such as an unreadable type map, is the
+			// cause too, so a deadline that passes later can't relabel it.
+			if desc, descErr = p.descendantChanges(dctx, failDesc, spec, scope, wanted, filter, limit); descErr != nil {
+				failDesc(descErr)
+			}
+		})
 	}
 	wg.Wait()
 	// The read or the journal that failed first is the query's error. The
 	// others ended after its cancel, with context.Canceled or, when the cancel
-	// cut a retry's backoff, the stale error they were about to retry wrapped
-	// with it, so their errors are ignored. The cause is read before the
-	// caller's context is checked, so with that context live it can't be the
-	// caller's ending.
+	// cut a retry's backoff, the stale error they were about to retry, so their
+	// errors are ignored. The cause is read before the caller's context is
+	// checked, so with that context live it can't be the caller's ending.
 	if cause := context.Cause(readCtx); cause != nil && ctx.Err() == nil {
 		return nil, cause
 	}
@@ -1898,10 +1903,16 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		if ctx.Err() != nil {
 			return nil, descErr
 		}
-		// Slow only when the descendants deadline cut a read. An error that came
-		// back before it, such as a 500, keeps its own cause.
-		if errors.Is(descErr, context.DeadlineExceeded) && errors.Is(dctx.Err(), context.DeadlineExceeded) {
+		// Slow only when the descendants deadline ended the reads before any of
+		// them failed. Otherwise the first failure, the cause, is the marker's
+		// error: the others may have ended with its cancel. The cause is compared
+		// by identity: a read cut by the HTTP client's own timeout fails with an
+		// error that matches context.DeadlineExceeded too.
+		switch cause := context.Cause(dctx); {
+		case cause == context.DeadlineExceeded:
 			descErr = &AnnotationError{Reason: provider.AnnotationReasonDescendantsSlow, Count: max(1, int(deadline.Sub(start).Seconds()))}
+		case cause != nil:
+			descErr = cause
 		}
 		// The rest of the track stands, and a marker says what's missing.
 		desc = nil

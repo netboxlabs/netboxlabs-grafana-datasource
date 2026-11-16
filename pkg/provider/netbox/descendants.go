@@ -163,7 +163,8 @@ const (
 // membership reads' results, then the scans' results, every one with scan and
 // descendant set. nil, nil when the scope type has no descendantKinds row or no
 // descendant type survives Object types. The first error among its reads is
-// returned.
+// returned, and each read that fails calls fail with its error as it does, so
+// the caller can stop the others (Changes cancels ctx with it).
 //
 // The scan types are decided before anything is read, so a query whose Object
 // types leave none reads nothing, not even the type map. Children are read
@@ -172,7 +173,7 @@ const (
 // its types as changed_object_type_id, and keeps a row only when the row's own
 // snapshot, or its cable id, ties it to the scope, whatever NetBox did with
 // the filters.
-func (p *Provider) descendantChanges(ctx context.Context, spec provider.ChangeSpec, scope *resolvedScope, wanted []string, f changeFilter, limit int) ([]changeReadResult, error) {
+func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCauseFunc, spec provider.ChangeSpec, scope *resolvedScope, wanted []string, f changeFilter, limit int) ([]changeReadResult, error) {
 	kind, ok := descendantKinds[scope.Type]
 	if !ok {
 		return nil, nil
@@ -208,7 +209,7 @@ func (p *Provider) descendantChanges(ctx context.Context, spec provider.ChangeSp
 	// them read too.
 	wantCables := slices.Contains(partTypes, cableType)
 	wantIfaces := len(addrTypes) > 0 || (wantCables && scope.Type == "dcim.device")
-	m, err := p.descendantMembers(ctx, spec, scope, kind, ids, wantIfaces, wantCables)
+	m, err := p.descendantMembers(ctx, fail, spec, scope, kind, ids, wantIfaces, wantCables)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +260,9 @@ func (p *Provider) descendantChanges(ctx context.Context, spec provider.ChangeSp
 		wg.Go(func() {
 			found[i] = p.runChangeRead(ctx, r, f, limit, p.changeScanCap())
 			found[i].scan, found[i].descendant = true, true
+			if found[i].err != nil {
+				fail(found[i].err)
+			}
 		})
 	}
 	wg.Wait()
@@ -299,8 +303,9 @@ type members struct {
 // Each read fills its own variable and the sets are built after each stage's
 // Wait, so no map is written concurrently. Every list row and change-log row is
 // checked against the scope here, whatever NetBox did with the filters. The
-// first error, in that order, is returned as it came.
-func (p *Provider) descendantMembers(ctx context.Context, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, wantIfaces, wantCables bool) (members, error) {
+// first error, in that order, is returned as it came, and each read that fails
+// calls fail as it does (descendantChanges).
+func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCauseFunc, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, wantIfaces, wantCables bool) (members, error) {
 	m := members{ifaces: map[int64]int64{}, cables: map[int64]int64{}}
 	inScope, scopeIDs := scope.idSet(), scope.idStrings()
 	// changeReads refuses a scope without objects before this runs. Without ids
@@ -318,25 +323,37 @@ func (p *Provider) descendantMembers(ctx context.Context, spec provider.ChangeSp
 		deleted              changeReadResult
 		deleteRan            bool
 	)
+	failed := func(err error) {
+		if err != nil {
+			fail(err)
+		}
+	}
 	var wg sync.WaitGroup
 	if readIfaces {
-		wg.Go(func() { ifaceRows, ifaceErr = p.currentInterfaces(ctx, spec, kind, inScope, scopeIDs) })
+		wg.Go(func() {
+			ifaceRows, ifaceErr = p.currentInterfaces(ctx, spec, kind, inScope, scopeIDs)
+			failed(ifaceErr)
+		})
 		// A type the map lacks is a model this NetBox doesn't have: no deletes
 		// to read.
 		if typeID := ids[kind.ifaceType]; typeID != 0 {
 			deleteRan = true
 			r := interfaceDeleteRead(spec, scope, kind, ids, typeID, inScope, scopeIDs)
-			wg.Go(func() { deleted = p.runMembershipRead(ctx, r) })
+			wg.Go(func() {
+				deleted = p.runMembershipRead(ctx, r)
+				failed(deleted.err)
+			})
 		}
 	}
 	if wantCables {
 		wg.Go(func() {
 			if ifaceScope {
 				cableRows, cableErr = p.listChildren(ctx, interfaceList, briefQuery("id", scopeIDs))
-				return
+			} else {
+				q := url.Values{"device_id": slices.Clone(scopeIDs), "fields": {"id,a_terminations,b_terminations"}}
+				cableRows, cableErr = p.listChildren(ctx, cableList, q)
 			}
-			q := url.Values{"device_id": slices.Clone(scopeIDs), "fields": {"id,a_terminations,b_terminations"}}
-			cableRows, cableErr = p.listChildren(ctx, cableList, q)
+			failed(cableErr)
 		})
 	}
 	wg.Wait()
@@ -390,7 +407,7 @@ func (p *Provider) descendantMembers(ctx context.Context, spec provider.ChangeSp
 	if !wantCables || len(m.ifaces) == 0 || ifaceTypeID == 0 || endTypeID == 0 {
 		return m, nil
 	}
-	ends := p.cableEndReads(ctx, spec, ifaceTypeID, endTypeID, m.ifaces)
+	ends := p.cableEndReads(ctx, fail, spec, ifaceTypeID, endTypeID, m.ifaces)
 	for _, r := range ends {
 		if r.err != nil {
 			return members{}, r.err
@@ -464,8 +481,8 @@ func interfaceDeleteRead(spec provider.ChangeSpec, scope *resolvedScope, kind de
 // related read over the interfaces, not a scan of every cable end, since cable
 // ends are recorded against their port. The ids are sorted and batched to the
 // URL budget, and at most cableEndWorkers batches run at once. The results are
-// in batch order.
-func (p *Provider) cableEndReads(ctx context.Context, spec provider.ChangeSpec, ifaceTypeID, endTypeID int, ifaces map[int64]int64) []changeReadResult {
+// in batch order. A batch that fails calls fail with its error as it does.
+func (p *Provider) cableEndReads(ctx context.Context, fail context.CancelCauseFunc, spec provider.ChangeSpec, ifaceTypeID, endTypeID int, ifaces map[int64]int64) []changeReadResult {
 	fixed := membershipQuery(spec)
 	fixed.Set(relatedObjectTypeParam, interfaceType)
 	fixed.Set(changedObjectTypeIDParam, strconv.Itoa(endTypeID))
@@ -485,7 +502,9 @@ func (p *Provider) cableEndReads(ctx context.Context, spec provider.ChangeSpec, 
 		sem <- struct{}{}
 		wg.Go(func() {
 			defer func() { <-sem }()
-			results[i] = p.runMembershipRead(ctx, r)
+			if results[i] = p.runMembershipRead(ctx, r); results[i].err != nil {
+				fail(results[i].err)
+			}
 		})
 	}
 	wg.Wait()

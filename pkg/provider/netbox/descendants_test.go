@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1457,11 +1458,19 @@ func TestDescendantChanges_MembershipTakesFourSlots(t *testing.T) {
 	if n := len(byID); n <= cableEndWorkers {
 		t.Errorf("by-id reads = %d, want more batches than the %d slots", n, cableEndWorkers)
 	}
-	// Every batch asks for both member types, the IPs' and the MACs'.
+	// Every batch asks for one member type, and both are asked for: the IPs'
+	// and the MACs'.
+	types := map[string]bool{}
 	for _, q := range byID {
-		if got := q[changedObjectTypeIDParam]; !reflect.DeepEqual(got, []string{"20", "21"}) {
-			t.Errorf("by-id changed_object_type_id = %v, want [20 21] in every batch", got)
+		got := q[changedObjectTypeIDParam]
+		if len(got) != 1 {
+			t.Errorf("by-id changed_object_type_id = %v, want one type in every batch", got)
+			continue
 		}
+		types[got[0]] = true
+	}
+	if got := slices.Sorted(maps.Keys(types)); !reflect.DeepEqual(got, []string{"20", "21"}) {
+		t.Errorf("by-id reads ask for types %v, want [20 21]", got)
 	}
 	seen := map[int]bool{}
 	for _, r := range results {
@@ -1495,40 +1504,49 @@ func onLeaf1Interface(oc objectChange) (int64, bool) {
 	return matchAssigned(oc, 14, map[int64]int64{100: 17})
 }
 
-// A by-id read asks for its members' changes over the query's range, newest
-// first: every member type in ascending id order, and the members' ids. It
-// reads by what a change changed, so it sends no related filter.
+// A by-id read asks for one member type's changes over the query's range,
+// newest first: that type's id alone, and its members' ids. The types are read
+// in ascending id order. It reads by what a change changed, so it sends no
+// related filter.
 func TestByIDReads_Query(t *testing.T) {
 	s := newScopedChangeServer()
 	spec := rangeSpec()
 	p, _, _, ids := membersSetup(t, s, spec)
-	byIDReadsOf(t, p, spec, ids, map[string]map[int64]int64{
+	results := byIDReadsOf(t, p, spec, ids, map[string]map[int64]int64{
 		ipAddressType: {401: 17},
 		cableType:     {300: 17},
 	}, onLeaf1)
+	if len(results) != 2 {
+		t.Errorf("results = %d, want one per type", len(results))
+	}
 
 	reads := s.changeLog()
-	if len(reads) != 1 {
-		t.Fatalf("by-id reads = %v, want one", reads)
+	if len(reads) != 2 {
+		t.Fatalf("by-id reads = %v, want one per type", reads)
 	}
-	q := reads[0]
-	if got := q[changedObjectTypeIDParam]; !reflect.DeepEqual(got, []string{"17", "20"}) {
-		t.Errorf("changed_object_type_id = %v, want [17 20]", got)
-	}
-	if got := sortedInts(t, q[changedObjectIDParam]); !reflect.DeepEqual(got, []int64{300, 401}) {
-		t.Errorf("changed_object_id = %v, want [300 401]", got)
-	}
-	if got := q["ordering"]; !reflect.DeepEqual(got, []string{"-time"}) {
-		t.Errorf("ordering = %v, want [-time]", got)
-	}
-	if got, want := q.Get("time_after"), spec.From.UTC().Format(time.RFC3339); got != want {
-		t.Errorf("time_after = %q, want From %q", got, want)
-	}
-	if got, want := q.Get("time_before"), spec.To.UTC().Format(time.RFC3339); got != want {
-		t.Errorf("time_before = %q, want To %q", got, want)
-	}
-	if q.Has(relatedObjectTypeParam) || q.Has(relatedObjectIDParam) {
-		t.Errorf("by-id read %v: want no related_object_type and no related_object_id", q)
+	slices.SortFunc(reads, func(a, b url.Values) int {
+		return cmp.Compare(a.Get(changedObjectTypeIDParam), b.Get(changedObjectTypeIDParam))
+	})
+	for i, want := range []struct{ typeID, id string }{{"17", "300"}, {"20", "401"}} {
+		q := reads[i]
+		if got := q[changedObjectTypeIDParam]; !reflect.DeepEqual(got, []string{want.typeID}) {
+			t.Errorf("changed_object_type_id = %v, want [%s]", got, want.typeID)
+		}
+		if got := q[changedObjectIDParam]; !reflect.DeepEqual(got, []string{want.id}) {
+			t.Errorf("type %s: changed_object_id = %v, want [%s]", want.typeID, got, want.id)
+		}
+		if got := q["ordering"]; !reflect.DeepEqual(got, []string{"-time"}) {
+			t.Errorf("ordering = %v, want [-time]", got)
+		}
+		if got, want := q.Get("time_after"), spec.From.UTC().Format(time.RFC3339); got != want {
+			t.Errorf("time_after = %q, want From %q", got, want)
+		}
+		if got, want := q.Get("time_before"), spec.To.UTC().Format(time.RFC3339); got != want {
+			t.Errorf("time_before = %q, want To %q", got, want)
+		}
+		if q.Has(relatedObjectTypeParam) || q.Has(relatedObjectIDParam) {
+			t.Errorf("by-id read %v: want no related_object_type and no related_object_id", q)
+		}
 	}
 }
 
@@ -1577,7 +1595,7 @@ func TestByIDReads_KeepOnlyMembersThatMatch(t *testing.T) {
 }
 
 // Many members are read in batches within the URL budget. Each batch asks for
-// every member type, and the batches together name every member once.
+// their one type, and the batches together name every member once.
 func TestByIDReads_Batches(t *testing.T) {
 	s := newScopedChangeServer()
 	spec := rangeSpec()
@@ -1628,6 +1646,31 @@ func TestByIDReads_CapCountsForTheCutoff(t *testing.T) {
 	if r := results[0]; !r.capped || !r.scan || !r.descendant || len(r.rows) != 2 {
 		t.Errorf("by-id read: capped %v, scan %v, descendant %v, %d rows; want capped, scan, descendant, 2 rows",
 			r.capped, r.scan, r.descendant, len(r.rows))
+	}
+}
+
+// Each by-id request asks for one type's members. Module 401, on leaf2, shares
+// member IP 401's id and has more changes in range than the scan cap: read
+// with the IP, its rows would fill the IP's read. Read apart, the IP's read
+// and the module member's aren't capped, and the track has no cut-off.
+func TestChanges_ByIDReadsAreOneTypeEach(t *testing.T) {
+	rows := []loggedChange{
+		ipOn(1, 10, "create", 401, 100),
+		created(2, 11, "dcim.module", 500, `{"device":17}`),
+	}
+	for i := range 6 {
+		rows = append(rows, ch(10+i, 1+i, "dcim.module", 401).snapshots(`{"device":18,"serial":"a"}`, `{"device":18,"serial":"b"}`))
+	}
+	s := newestFirst(rows...)
+	s.interfaces = []childRow{{id: 100, owner: 17}}
+	s.modules = []childRow{{id: 500, owner: 17}}
+	p := s.start(t)
+	p.changeScanCapOverride = 3
+	spec := withDescendants(nameScope("leaf1"))
+	spec.From = scopedNow.Add(-60 * time.Minute)
+	wantIDs(t, changesOK(t, p, spec), "#1", "#2")
+	if got, want := byIDAsks(t, s), map[string][]string{"20": {"401"}, "22": {"500"}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("by-id reads ask for %v, want IP 401 under type 20 and module 500 under type 22", got)
 	}
 }
 
@@ -1738,6 +1781,22 @@ func byIDRequests(s *scopedChangeServer) []url.Values {
 	return slices.DeleteFunc(s.changeLog(), func(q url.Values) bool {
 		return !q.Has(changedObjectIDParam) || carries(q, scopedTypeIDs["dcim.device"])
 	})
+}
+
+// byIDAsks is what the by-id reads asked for: the changed_object_id values by
+// changed_object_type_id. A read with other than one type id fails the test.
+func byIDAsks(t *testing.T, s *scopedChangeServer) map[string][]string {
+	t.Helper()
+	got := map[string][]string{}
+	for _, q := range byIDRequests(s) {
+		types := q[changedObjectTypeIDParam]
+		if len(types) != 1 {
+			t.Errorf("by-id read %v: want one changed_object_type_id", q)
+			continue
+		}
+		got[types[0]] = append(got[types[0]], q[changedObjectIDParam]...)
+	}
+	return got
 }
 
 // descendantsError is the track's last change, which must be its one
@@ -1876,15 +1935,10 @@ func TestChanges_DescendantsFoundByIDPastTheScanCap(t *testing.T) {
 	wantIDs(t, changes, "#6", "#5", "#4", "#2", "#3", "#1", "cutoff")
 	wantParents(t, changes, "leaf1", "#1", "#2", "#3", "#4", "#5", "#6")
 
-	byID := byIDRequests(s)
-	if len(byID) != 1 {
-		t.Fatalf("by-id reads = %v, want one", byID)
-	}
-	if got := typeIDsOf(t, byID[0]); !reflect.DeepEqual(got, []int64{17, 20, 21, 22, 23}) {
-		t.Errorf("by-id changed_object_type_id = %v, want [17 20 21 22 23]", got)
-	}
-	if got := sortedInts(t, byID[0][changedObjectIDParam]); !reflect.DeepEqual(got, []int64{300, 401, 403, 500, 600}) {
-		t.Errorf("by-id changed_object_id = %v, want [300 401 403 500 600]", got)
+	// One read per member type, each with its own members.
+	want := map[string][]string{"17": {"300"}, "20": {"401"}, "21": {"403"}, "22": {"500"}, "23": {"600"}}
+	if got := byIDAsks(t, s); !reflect.DeepEqual(got, want) {
+		t.Errorf("by-id reads ask for %v, want %v", got, want)
 	}
 }
 
@@ -2406,9 +2460,9 @@ func TestChanges_CallerCancelledFails(t *testing.T) {
 
 // The caller's context ending while only the residual scans are left still
 // ends the query: an error, not a track whose scans read as unchecked. The
-// scans are held; the caller cancels once the by-id read has been answered and
-// the two held scans are the only change-log requests left, well before the
-// residual deadline.
+// scans are held; the caller cancels once the by-id reads, the IP's and the
+// module's, have been answered and the two held scans are the only change-log
+// requests left, well before the residual deadline.
 func TestChanges_CallerCancelledDuringResidualScansFails(t *testing.T) {
 	s := newestFirst(
 		ch(1, 1, "dcim.device", 17),
@@ -2426,7 +2480,7 @@ func TestChanges_CallerCancelledDuringResidualScansFails(t *testing.T) {
 		s.mu.Lock()
 		inFlight := s.inFlight
 		s.mu.Unlock()
-		return inFlight == 2 && len(byIDRequests(s)) == 1
+		return inFlight == 2 && len(byIDRequests(s)) == 2
 	}
 	var reached atomic.Bool
 	go func() {
@@ -2436,7 +2490,7 @@ func TestChanges_CallerCancelledDuringResidualScansFails(t *testing.T) {
 				break
 			}
 		}
-		// Time for the by-id read's answer to reach descendantChanges.
+		// Time for the by-id reads' answers to reach descendantChanges.
 		time.Sleep(100 * time.Millisecond)
 		cancel()
 	}()
@@ -3172,4 +3226,148 @@ func TestChanges_ResidualPageWithoutTimedRowsIsUnchecked(t *testing.T) {
 			}
 		})
 	}
+}
+
+// removedServer is leaf1 (17) with interface 100, and leaf2 (18) with
+// interface 200. Leaf1's MAC 403, module 500 and service 600 were deleted
+// (#3, #2, #1) after their creates (#4-#6). No list names them, and no history
+// is recorded against what they were on: only the residual pages find them.
+// Leaf2's newer IPs and modules fill those pages, three rows each, so the
+// creates lie past their reach: the parts page reaches back 6 minutes, the
+// address page 7. Leaf2's IPs aren't recorded against its interface, so no
+// IP history is read.
+func removedServer() *scopedChangeServer {
+	svc := `{"parent_object_type":12,"parent_object_id":17}`
+	rows := []loggedChange{
+		ch(1, 3, "ipam.service", 600).as("delete").snapshots(svc, ""),
+		ch(2, 4, "dcim.module", 500).as("delete").snapshots(`{"device":17}`, ""),
+		ch(3, 5, "dcim.macaddress", 403).as("delete").snapshots(assignedTo(14, 100), ""),
+		created(4, 30, "dcim.macaddress", 403, assignedTo(14, 100)),
+		created(5, 31, "dcim.module", 500, `{"device":17}`),
+		created(6, 32, "ipam.service", 600, svc),
+	}
+	for i := range 3 {
+		rows = append(rows,
+			created(10+i, 6+i, "ipam.ipaddress", int64(700+i), assignedTo(14, 200)),
+			created(20+i, 6+i, "dcim.module", int64(800+i), `{"device":18}`))
+	}
+	s := newestFirst(rows...)
+	s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+	return s
+}
+
+// removedSpec is leaf1 over the last hour, with Include descendants on.
+func removedSpec() provider.ChangeSpec {
+	spec := withDescendants(nameScope("leaf1"))
+	spec.From = scopedNow.Add(-60 * time.Minute)
+	return spec
+}
+
+// A MAC, a module and a service the residual pages found deleted show their
+// earlier changes in the range too, older than the pages' reach: a by-id read
+// follows the pages, one per type, for what they found that isn't a member.
+func TestChanges_RemovedObjectsShowTheirHistory(t *testing.T) {
+	s := removedServer()
+	p := s.start(t)
+	p.residualRowsOverride = 3
+	changes := changesOK(t, p, removedSpec())
+	wantIDs(t, changes, "#1", "#2", "#3", "#4", "#5", "#6", "cutoff")
+	wantParents(t, changes, "leaf1", "#1", "#2", "#3", "#4", "#5", "#6")
+	if cut := changes[len(changes)-1]; !cut.Residual {
+		t.Errorf("cut-off Residual = false, want the residual pages' cut-off")
+	}
+	want := map[string][]string{"21": {"403"}, "22": {"500"}, "23": {"600"}}
+	if got := byIDAsks(t, s); !reflect.DeepEqual(got, want) {
+		t.Errorf("by-id reads ask for %v, want %v", got, want)
+	}
+}
+
+// The read that follows the residual pages is best effort: one that fails
+// drops its own rows, and the track, the deletions in it, stands with no
+// descendants-error and no fail.
+func TestChanges_RemovedHistoryReadFailureKeepsTheTrack(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		failed []int
+		want   []string
+	}{
+		{"every type", []int{21, 22, 23}, []string{"#1", "#2", "#3", "cutoff"}},
+		{"the module's", []int{22}, []string{"#1", "#2", "#3", "#4", "#6", "cutoff"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := removedServer()
+			s.byIDStatusFor = map[int]int{}
+			for _, id := range tc.failed {
+				s.byIDStatusFor[id] = http.StatusInternalServerError
+			}
+			p := s.start(t)
+			p.residualRowsOverride = 3
+			wantIDs(t, changesOK(t, p, removedSpec()), tc.want...)
+
+			// descendantsOf fails the test on an error or a call to fail.
+			var kept []int
+			for _, r := range descendantsOf(t, p, removedSpec()) {
+				for _, d := range r.rows {
+					kept = append(kept, d.oc.ID)
+				}
+			}
+			slices.Sort(kept)
+			kept = slices.Compact(kept)
+			var wantKept []int
+			for _, id := range tc.want[:len(tc.want)-1] {
+				n, _ := strconv.Atoi(strings.TrimPrefix(id, "#"))
+				wantKept = append(wantKept, n)
+			}
+			if !reflect.DeepEqual(kept, wantKept) {
+				t.Errorf("descendant rows = %v, want %v", kept, wantKept)
+			}
+		})
+	}
+}
+
+// The read that follows the residual pages doesn't scan: stopped at the scan
+// cap, it makes no cut-off of its own, and the track's is the residual pages'.
+func TestChanges_RemovedHistoryCapMakesNoCutoff(t *testing.T) {
+	s := removedServer()
+	for i := range 4 {
+		s.changes = append(s.changes, ch(40+i, 40+i, "dcim.macaddress", 403).snapshots(assignedTo(14, 100), assignedTo(14, 100)))
+	}
+	p := s.start(t)
+	p.residualRowsOverride, p.changeScanCapOverride = 3, 2
+	changes := changesOK(t, p, removedSpec())
+	cut := changes[len(changes)-1]
+	if want := scopedNow.Add(-6 * time.Minute); cut.Kind != provider.ChangeKindCutoff || !cut.Residual || !cut.Until.Equal(want) {
+		t.Errorf("last change = Kind %v Residual %v Until %v, want the residual cut-off until the pages' reach %v",
+			cut.Kind, cut.Residual, cut.Until, want)
+	}
+}
+
+// Residual pages that found only members, or rows not on the scope, make no
+// read after them; nor do pages that read the whole range, which already hold
+// every change of what they found removed.
+func TestChanges_NoRemovedHistoryReadWithoutNewIDs(t *testing.T) {
+	t.Run("only members", func(t *testing.T) {
+		s := newestFirst(
+			ipOn(1, 1, "create", 401, 100),
+			created(2, 2, "dcim.module", 500, `{"device":17}`),
+			created(3, 3, "dcim.module", 501, `{"device":18}`),
+			ipOn(4, 4, "create", 402, 200),
+		)
+		s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+		s.modules = []childRow{{id: 500, owner: 17}, {id: 501, owner: 18}}
+		p := s.start(t)
+		p.residualRowsOverride = 1 // each page capped at its member's row
+		wantIDs(t, changesOK(t, p, removedSpec()), "#1", "#2", "cutoff")
+		want := map[string][]string{"20": {"401"}, "22": {"500"}}
+		if got := byIDAsks(t, s); !reflect.DeepEqual(got, want) {
+			t.Errorf("by-id reads ask for %v, want only the members' %v", got, want)
+		}
+	})
+	t.Run("pages that read the whole range", func(t *testing.T) {
+		s := removedServer()
+		wantIDs(t, changesOK(t, s.start(t), removedSpec()), "#1", "#2", "#3", "#4", "#5", "#6")
+		if byID := byIDRequests(s); len(byID) != 0 {
+			t.Errorf("by-id reads = %v, want none", byID)
+		}
+	})
 }

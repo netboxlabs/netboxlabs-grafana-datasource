@@ -231,6 +231,10 @@ type scopedChangeServer struct {
 	delayFor          time.Duration // ends early when the request's context does
 	changeHoldTypeID  int           // non-zero: requests carrying this type id answer only once changeHold is closed, or their context ends
 	changeHold        chan struct{}
+	// A by-id read, a request carrying changed_object_id, whose
+	// changed_object_type_id holds a key of byIDStatusFor answers that status,
+	// before the cases above.
+	byIDStatusFor map[int]int
 
 	// The residual scans: change-log requests carrying neither changed_object_id
 	// nor related_object_id (residualScanRequest). scanHold, then scanStatus,
@@ -441,6 +445,14 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 			}
 			types := r.URL.Query()["changed_object_type_id"]
 			picked := func(id int) bool { return id != 0 && slices.Contains(types, strconv.Itoa(id)) }
+			if r.URL.Query().Has(changedObjectIDParam) {
+				for id, status := range s.byIDStatusFor {
+					if picked(id) {
+						refuse(status, `{"detail":"boom"}`)
+						return
+					}
+				}
+			}
 			switch {
 			case picked(s.failTypeID):
 				if holdRequest(r, s.failDelay) {

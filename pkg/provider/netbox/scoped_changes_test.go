@@ -1376,20 +1376,37 @@ func TestChanges_MistypedCustomFieldDoesNotRereadAYoungList(t *testing.T) {
 // A list that can't say a name is missing skips the check rather than refuse
 // what it can't judge: one cut short by the walk's ceiling, one the token
 // can't read, and a reread that failed or didn't answer in time, whose answer
-// is the old list.
+// is the old list. A list that can't judge isn't reread for a name it doesn't
+// have either, however old it is: only a list that could refuse the name is
+// worth reading again before it does.
 func TestChanges_CustomFieldCheckSkippedWhenTheListCantJudge(t *testing.T) {
 	spec := provider.ChangeSpec{Limit: 10, ChangedFields: []string{"cf_ownr"}}
+	// notRereadWhenAged ages the cached list past customFieldsRetryTTL and
+	// checks that the name still passes without another read of the list.
+	notRereadWhenAged := func(t *testing.T, s *scopedChangeServer, p *Provider) {
+		t.Helper()
+		before := len(s.requestsTo(customFieldsEndpoint))
+		ageIndex(t, p)
+		changesOK(t, p, spec)
+		if n := len(s.requestsTo(customFieldsEndpoint)); n != before {
+			t.Errorf("custom-field list reads = %d after aging the list, want %d: a list that can't judge isn't reread", n, before)
+		}
+	}
 	t.Run("truncated", func(t *testing.T) {
 		s := newScopedChangeServer(cfOwnerChange())
 		s.defineCustomFields("owner")
 		s.customFieldsCount = 5000
-		changesOK(t, s.start(t), spec)
+		p := s.start(t)
+		changesOK(t, p, spec)
+		notRereadWhenAged(t, s, p)
 	})
 	t.Run("forbidden", func(t *testing.T) {
 		s := newScopedChangeServer(cfOwnerChange())
 		s.defineCustomFields("owner")
 		s.customFieldsStatus = http.StatusForbidden
-		changesOK(t, s.start(t), spec)
+		p := s.start(t)
+		changesOK(t, p, spec)
+		notRereadWhenAged(t, s, p)
 	})
 	t.Run("reread failed", func(t *testing.T) {
 		s := newScopedChangeServer(cfOwnerChange())
@@ -1402,6 +1419,7 @@ func TestChanges_CustomFieldCheckSkippedWhenTheListCantJudge(t *testing.T) {
 		if n := len(s.requestsTo(customFieldsEndpoint)); n != 2 {
 			t.Errorf("custom-field list reads = %d, want 2: the first and the failed reread", n)
 		}
+		notRereadWhenAged(t, s, p)
 	})
 	t.Run("reread stalled", func(t *testing.T) {
 		s := newScopedChangeServer(cfOwnerChange())
@@ -1444,7 +1462,9 @@ func TestChanges_CustomFieldAndSchemaChecksWaitTogether(t *testing.T) {
 	// server closes.
 	t.Cleanup(func() { close(s.schemaHold) })
 	s.holdCustomFields(t)
-	const wait = 400 * time.Millisecond
+	// Long enough that the rest of the call, on a slow runner, stays well
+	// inside the half-wait margin that tells one wait from two.
+	const wait = time.Second
 	p.namesWaitOverride, p.customFieldsWaitOverride = wait, wait
 
 	_, elapsed := changesWithin(t, p, provider.ChangeSpec{Limit: 10, ChangedFields: []string{"stauts", "cf_ownr"}}, 10*time.Second)

@@ -383,7 +383,7 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 			}
 			rows := make([]string, len(s.journal))
 			for i, row := range s.journal {
-				rows[i] = row.json()
+				rows[i] = row.json(i + 1)
 			}
 			writePage(w, len(rows), rows)
 		case "users/users":

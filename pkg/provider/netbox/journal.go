@@ -159,31 +159,33 @@ func (p *Provider) journalEntries(ctx context.Context, spec provider.ChangeSpec,
 }
 
 // journalRead reads one journal query, tr's, keeping the entries the read's
-// types and the scope allow. A 403 is journal-forbidden.
+// types and the scope allow. A 403 is journal-forbidden. It walks the pages as
+// the change-log reads do, so an entry written mid-read can't repeat a row at a
+// page boundary and push an older entry out of the limit.
 func (p *Provider) journalRead(ctx context.Context, q url.Values, tr typeRead, scope *resolvedScope, inScope map[int64]bool, limit int) ([]journalEntry, error) {
-	rows, _, err := p.fetchRows(ctx, journalEndpoint, q, limit)
+	var entries []journalEntry
+	_, _, err := p.walkRows(ctx, journalEndpoint, q, limit, func(raw json.RawMessage) bool {
+		var e journalEntry
+		if json.Unmarshal(raw, &e) != nil {
+			return true
+		}
+		// The read's types unscoped; the scope's type and objects scoped.
+		t := normalizeObjectType(e.AssignedType)
+		if !tr.keeps(t) {
+			return true
+		}
+		if scope != nil && (t != scope.Type || !inScope[e.AssignedID]) {
+			return true
+		}
+		entries = append(entries, e)
+		return true
+	})
 	if err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
 			return nil, &AnnotationError{Reason: provider.AnnotationReasonJournalForbidden}
 		}
 		return nil, err
-	}
-	var entries []journalEntry
-	for _, raw := range rows {
-		var e journalEntry
-		if json.Unmarshal(raw, &e) != nil {
-			continue
-		}
-		// The read's types unscoped; the scope's type and objects scoped.
-		t := normalizeObjectType(e.AssignedType)
-		if !tr.keeps(t) {
-			continue
-		}
-		if scope != nil && (t != scope.Type || !inScope[e.AssignedID]) {
-			continue
-		}
-		entries = append(entries, e)
 	}
 	return entries, nil
 }

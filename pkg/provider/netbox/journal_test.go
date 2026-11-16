@@ -29,7 +29,8 @@ type journalRow struct {
 	text    string
 }
 
-func (r journalRow) json() string {
+// json serves the row under id, as NetBox serves each entry under its own.
+func (r journalRow) json(id int) string {
 	obj := "null"
 	if r.display != "" {
 		obj = fmt.Sprintf(`{"id":%d,"display":%q}`, r.objID, r.display)
@@ -42,8 +43,8 @@ func (r journalRow) json() string {
 	if kind == "" {
 		kind = "info"
 	}
-	return fmt.Sprintf(`{"id":1,"assigned_object_type":%q,"assigned_object_id":%d,"assigned_object":%s,"created":%q,"created_by":%s,"kind":{"value":%q,"label":%q},"comments":%q,"display_url":"http://nb/extras/journal-entries/1/"}`,
-		r.typ, r.objID, obj, scopedNow.Add(-time.Duration(r.minutes)*time.Minute).Format(time.RFC3339), by, kind, kind, r.text)
+	return fmt.Sprintf(`{"id":%d,"assigned_object_type":%q,"assigned_object_id":%d,"assigned_object":%s,"created":%q,"created_by":%s,"kind":{"value":%q,"label":%q},"comments":%q,"display_url":"http://nb/extras/journal-entries/%d/"}`,
+		id, r.typ, r.objID, obj, scopedNow.Add(-time.Duration(r.minutes)*time.Minute).Format(time.RFC3339), by, kind, kind, r.text, id)
 }
 
 // journalServer serves the journal, the users, the object-type list and a
@@ -130,11 +131,11 @@ func (s *journalServer) start(t *testing.T) *Provider {
 				return
 			}
 			var rows []string
-			for _, row := range s.rows {
+			for i, row := range s.rows {
 				if vals := q["assigned_object_type"]; s.honorsTypeName && len(vals) > 0 && row.typ != vals[len(vals)-1] {
 					continue
 				}
-				rows = append(rows, row.json())
+				rows = append(rows, row.json(i+1))
 			}
 			total := len(rows)
 			if lim, err := strconv.Atoi(q.Get("limit")); err == nil && s.honorsTypeName && lim < len(rows) {
@@ -734,5 +735,69 @@ func TestJournal_AuthorLookupIsBounded(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("journalEntries still blocked after 2s: the author lookup is not bounded by namesWait (%v)", p.namesWaitOverride)
+	}
+}
+
+// Offset pages shift when entries are written mid-read, so a later page can start
+// with the row the page before ended on. The read must skip that repeat and keep
+// going until it has limit distinct entries, as the change-log reads do: a
+// duplicate marker would stand where an older entry belongs.
+func TestJournal_RepeatedRowAcrossShiftedPagesIsSkipped(t *testing.T) {
+	const total, limit = 1001, 1000
+	row := func(id int) string {
+		return fmt.Sprintf(`{"id":%d,"assigned_object_type":"dcim.device","assigned_object_id":17,"assigned_object":null,`+
+			`"created":%q,"created_by":null,"kind":{"value":"info","label":"Info"},"comments":"entry-%d","display_url":""}`,
+			id, scopedNow.Add(-time.Duration(total-id)*time.Second).Format(time.RFC3339), id)
+	}
+	var (
+		mu     sync.Mutex
+		served int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		mu.Lock()
+		served++
+		// Newest first. After the first page one more entry is written, so every
+		// later offset sees the list shifted by one.
+		newest := total
+		if served > 1 {
+			newest = total + 1
+		}
+		mu.Unlock()
+		var ids []int
+		for id := newest; id >= 1; id-- {
+			ids = append(ids, id)
+		}
+		lim, _ := strconv.Atoi(q.Get("limit"))
+		off, _ := strconv.Atoi(q.Get("offset"))
+		end := min(off+lim, len(ids))
+		var rows []string
+		for _, id := range ids[min(off, len(ids)):end] {
+			rows = append(rows, row(id))
+		}
+		next := "null"
+		if end < len(ids) {
+			q.Set("offset", strconv.Itoa(end))
+			next = strconv.Quote("http://" + r.Host + r.URL.Path + "?" + q.Encode())
+		}
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":%s,"previous":null,"results":[%s]}`, len(ids), next, strings.Join(rows, ","))
+	}))
+	t.Cleanup(srv.Close)
+	p := New(srv.URL, "token", srv.Client())
+
+	entries, err := p.journalEntries(context.Background(), provider.ChangeSpec{Journal: true}, nil, nil, limit)
+	if err != nil {
+		t.Fatalf("journalEntries: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, e := range entries {
+		if seen[e.Comments] {
+			t.Fatalf("entry %q shown twice", e.Comments)
+		}
+		seen[e.Comments] = true
+	}
+	if len(entries) != limit {
+		t.Errorf("got %d entries, want %d distinct", len(entries), limit)
 	}
 }

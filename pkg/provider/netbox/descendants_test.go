@@ -1367,11 +1367,14 @@ func TestDescendantMembers_MACListBatches(t *testing.T) {
 
 // A MAC batch that fails stops the other reads as it fails, its held sibling
 // batch included, rather than once every MAC batch has finished: the track
-// ends at once, with the 500 on its marker, not descendants-slow.
+// ends at once, with the 500 on its marker, not descendants-slow. The 500 is
+// answered only once the held batch's request has arrived, so the sibling is
+// in flight when it fails, whichever batch the scheduler sent first.
 func TestChanges_MACBatchFailureStopsTheOthers(t *testing.T) {
 	s := manyInterfaces()
 	s.macStatusFor = map[int64]int{1000: http.StatusInternalServerError}
 	s.macHoldFor = map[int64]time.Duration{1899: 5 * time.Second}
+	s.macHeld = make(chan struct{})
 	p := s.start(t)
 	p.descendantsWaitOverride = 3 * time.Second
 	spec := withDescendants(nameScope("leaf1"))

@@ -205,8 +205,14 @@ type scopedChangeServer struct {
 	// answers that status, and one naming a key of macHoldFor is held that long
 	// first, ending early when the request's context does. Each picks out one
 	// batch of a batched list.
-	macStatusFor     map[int64]int
-	macHoldFor       map[int64]time.Duration
+	macStatusFor map[int64]int
+	macHoldFor   map[int64]time.Duration
+	// macHeld, when non-nil, is closed once a request macHoldFor holds has
+	// arrived, and a macStatusFor answer waits for it first, ending early when
+	// its request's context does: a batch fails only once its held sibling is
+	// in flight, whichever the scheduler sent first.
+	macHeld          chan struct{}
+	macHeldOnce      sync.Once
 	modules          []childRow     // dcim/modules, each on its owner device
 	services         []serviceRow   // ipam/services
 	servicesV42      bool           // service rows name their device or virtual_machine, as on NetBox 4.2, not a parent object
@@ -707,12 +713,25 @@ func (s *scopedChangeServer) serveChildren(w http.ResponseWriter, r *http.Reques
 			return slices.Contains(r.URL.Query()["assigned_object_id"], strconv.FormatInt(iface, 10))
 		}
 		for iface, d := range s.macHoldFor {
-			if names(iface) && !holdRequest(r, d) {
+			if !names(iface) {
+				continue
+			}
+			if s.macHeld != nil {
+				s.macHeldOnce.Do(func() { close(s.macHeld) })
+			}
+			if !holdRequest(r, d) {
 				return
 			}
 		}
 		for iface, status := range s.macStatusFor {
 			if names(iface) {
+				if s.macHeld != nil {
+					select {
+					case <-s.macHeld:
+					case <-r.Context().Done():
+						return
+					}
+				}
 				w.WriteHeader(status)
 				_, _ = fmt.Fprint(w, `{"detail":"nope"}`)
 				return

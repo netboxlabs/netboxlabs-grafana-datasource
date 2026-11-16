@@ -539,12 +539,14 @@ is still found from its history on the interfaces, while NetBox keeps that
 history. A MAC address, module or service, or an IP address whose history is
 gone, is looked for in one page of the change log: 500 rows of address changes
 and 500 of module and service changes. One removed within the page's reach also
-shows its earlier changes in the range, at a request more per kind. In the same
-test, the page reached back about 17 minutes for addresses and about 2.4 hours
-for modules and services. When a page doesn't reach the start of the range, a
-marker at the end of the range says so: "Removals before `<time>` not
+shows its earlier changes in the range, for at most a request more per kind. In
+the same test, the page reached back about 17 minutes for addresses and about
+2.4 hours for modules and services. When a page doesn't reach the start of the
+range, a marker at the end of the range says so: "Removals before `<time>` not
 checked: …". That's normal on a busy NetBox. "Removals not checked: …" means
-the page couldn't be read.
+the page couldn't be read, in time or at all. A slow NetBox is the usual
+cause; if the datasource's Timeout is under 16 seconds, raising it gives the
+page more time.
 
 Listing needs the token to have view permission on MAC addresses, modules and
 services (`dcim.view_macaddress`, `dcim.view_module`, `ipam.view_service`).

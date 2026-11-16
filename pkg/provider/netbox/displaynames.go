@@ -106,7 +106,8 @@ func logSchemaBudgetSpent(b *schemaBudget) {
 }
 
 // resolveDiffs builds the provider rows, with each diff in display order and the
-// related-object ids in its rendered fields replaced by the objects' names.
+// related-object ids in its rendered fields replaced by the objects' names (a
+// generic relation's type by its app_label.model).
 //
 // rows are newest first, as Changes reads them, so when a lookup budget runs out
 // it is the older changes that keep their ids. preferred holds the Changed-fields
@@ -131,11 +132,9 @@ func (p *Provider) resolveDiffs(ctx context.Context, rows []decodedChange, prefe
 	var out []provider.Change
 	for _, d := range ordered {
 		fields := names.related[normalizeObjectType(d.oc.changedType())]
-		out = append(out, d.toChange(base, func(field string, v json.RawMessage) string {
-			if id, ok := relatedID(v); ok {
-				if name, ok := names.byEndpoint[fields[field]][id]; ok {
-					return name
-				}
+		out = append(out, d.toChange(base, func(field string, v json.RawMessage, after bool) string {
+			if name, ok := names.name(fields, d.snapshot(after), field, v); ok {
+				return name
 			}
 			return formatValue(v)
 		}))
@@ -187,38 +186,161 @@ func relatedID(v json.RawMessage) (int64, bool) {
 	return id, err == nil && id > 0
 }
 
+// genericPairType reads field as the id half of a generic relation in one
+// side's snapshot data: field is <x>_id, and data holds <x>_type as a positive
+// plain integer (snapshotID), the object-type id of what <x>_id points at. A
+// custom field is never one.
+func genericPairType(data map[string]json.RawMessage, field string) (int, bool) {
+	x, ok := strings.CutSuffix(field, "_id")
+	if !ok || x == "" || strings.HasPrefix(field, cfPrefix) {
+		return 0, false
+	}
+	id, ok := snapshotID(data, x+"_type")
+	return int(id), ok
+}
+
+// genericTypeField reports whether field is the type half of a generic relation
+// in one side's snapshot data: <x>_type with <x>_id beside it. A _type field
+// with no _id beside it is an ordinary field.
+func genericTypeField(data map[string]json.RawMessage, field string) bool {
+	x, ok := strings.CutSuffix(field, "_type")
+	if !ok || x == "" || strings.HasPrefix(field, cfPrefix) {
+		return false
+	}
+	_, ok = data[x+"_id"]
+	return ok
+}
+
+// snapshot is the row's snapshot on one side of the change: the prechange data
+// for a before value, the postchange data for an after value.
+func (d decodedChange) snapshot(after bool) map[string]json.RawMessage {
+	if after {
+		return d.oc.PostchangeData
+	}
+	return d.oc.PrechangeData
+}
+
+// value is the field's before or after value.
+func (f rawFieldChange) value(after bool) json.RawMessage {
+	if after {
+		return f.After
+	}
+	return f.Before
+}
+
+// nameEntry is what a brief lookup names an object by: its display, and its
+// parent's, the device or virtual machine its brief row nests ("" when it nests
+// neither). A plain foreign key shows the display alone. A generic relation
+// shows "display (parent)": its field says neither what kind of object it
+// points at nor whose, and an interface's display is only its own name.
+type nameEntry struct{ display, parent string }
+
 // diffNames is what displayNames found: which fields of which changed types are
-// relations, and the names of the related objects it looked up.
+// plain foreign keys, the object types and endpoints generic relations point
+// at, and the names of the related objects it looked up.
 type diffNames struct {
-	related    map[string]map[string]string // changed type -> field -> related list endpoint
-	byEndpoint map[string]map[int64]string  // related list endpoint -> id -> display
+	related    map[string]map[string]string   // changed type -> field -> related list endpoint
+	types      map[int]string                 // object-type id -> app_label.model
+	generic    map[string]string              // app_label.model -> list endpoint, for generic relations
+	byEndpoint map[string]map[int64]nameEntry // related list endpoint -> id -> name
+}
+
+// lookup is where one side's value of a diff field is looked up by id: the list
+// endpoint, and whether the field is a generic relation's id. data is that
+// side's snapshot, and fields the changed type's plain foreign keys. ok is false
+// when the value is not looked up. A generic relation's type never is: the
+// object-type map already names it.
+func (n diffNames) lookup(fields map[string]string, data map[string]json.RawMessage, field string) (endpoint string, generic, ok bool) {
+	if typeID, ok := genericPairType(data, field); ok {
+		endpoint, ok = n.generic[n.types[typeID]]
+		return endpoint, true, ok
+	}
+	if genericTypeField(data, field) {
+		return "", false, false
+	}
+	endpoint, ok = fields[field]
+	return endpoint, false, ok
+}
+
+// name renders one side's value of a diff field by name: a related object's id
+// as its display, with its parent's for a generic relation, and a generic
+// relation's type as its app_label.model. ok is false when there is no name,
+// and the value shows as it is.
+func (n diffNames) name(fields map[string]string, data map[string]json.RawMessage, field string, v json.RawMessage) (string, bool) {
+	id, ok := relatedID(v)
+	if !ok {
+		return "", false
+	}
+	if genericTypeField(data, field) {
+		ct, ok := n.types[int(id)]
+		return ct, ok
+	}
+	endpoint, generic, ok := n.lookup(fields, data, field)
+	if !ok {
+		return "", false
+	}
+	e, ok := n.byEndpoint[endpoint][id]
+	switch {
+	case !ok:
+		return "", false
+	case generic && e.parent != "":
+		return e.display + " (" + e.parent + ")", true
+	}
+	return e.display, true
 }
 
 // displayNames looks up the objects behind the ids in rows' rendered diff fields.
 //
-// Which fields are relations comes from the cached OpenAPI schema's dimension
-// index (dimension.go), which still answers for deleted objects. A field is only
-// a candidate when it is not a custom field and one of its values is an id, so
-// rows with no diff, or with only text, choices and lists in their rendered
-// lines, cost no request at all, not even the object-type or schema read.
+// A plain foreign key is known from the cached OpenAPI schema's dimension index
+// (dimension.go), which still answers for deleted objects. A generic relation
+// (assigned_object_id beside assigned_object_type) is known from the row's own
+// snapshot on that side (genericPairType), and the object type it points at
+// from the cached object-type map, by id. That needs no schema, so a generic
+// relation is named even when the schema can't be read or the call's schema
+// budget is spent; only the plain foreign keys then stay ids. Both share the
+// lookups, one per related endpoint within the same bounds, and the one names
+// wait.
 //
-// Every failure leaves the ids in place. Generic relations (assigned_object_id
-// beside assigned_object_type) are not dimRelated, so they stay ids too.
+// A field is only a candidate when it is not a custom field and one of its
+// values is an id, so rows with no diff, or with only text, choices and lists in
+// their rendered lines, cost no request at all, not even the object-type or
+// schema read. Every failure leaves the ids in place.
 func (p *Provider) displayNames(ctx context.Context, rows []decodedChange) diffNames {
-	names := diffNames{related: map[string]map[string]string{}, byEndpoint: map[string]map[int64]string{}}
+	names := diffNames{
+		related:    map[string]map[string]string{},
+		generic:    map[string]string{},
+		byEndpoint: map[string]map[int64]nameEntry{},
+	}
 
-	var types []string                  // changed types with a candidate, in order of first appearance
-	candidates := map[string][]string{} // changed type -> candidate fields
+	var types []string                  // changed types with a plain candidate, in order of first appearance
+	candidates := map[string][]string{} // changed type -> plain candidate fields
+	var genericTypes []int              // object types generic relations point at, in order of first appearance
+	generic := false                    // a rendered field is half of a generic relation
 	for _, d := range rows {
 		ct := normalizeObjectType(d.oc.changedType())
 		for _, f := range renderedDiff(d.diff) {
-			if strings.HasPrefix(f.Field, cfPrefix) || slices.Contains(candidates[ct], f.Field) {
+			if strings.HasPrefix(f.Field, cfPrefix) {
 				continue
 			}
-			if _, ok := relatedID(f.Before); !ok {
-				if _, ok := relatedID(f.After); !ok {
+			plain := false
+			for _, after := range []bool{false, true} {
+				data := d.snapshot(after)
+				if _, ok := relatedID(f.value(after)); !ok {
 					continue
 				}
+				if typeID, ok := genericPairType(data, f.Field); ok {
+					generic = true
+					if !slices.Contains(genericTypes, typeID) {
+						genericTypes = append(genericTypes, typeID)
+					}
+				} else if genericTypeField(data, f.Field) {
+					generic = true
+				} else {
+					plain = true
+				}
+			}
+			if !plain || slices.Contains(candidates[ct], f.Field) {
+				continue
 			}
 			if _, ok := candidates[ct]; !ok {
 				types = append(types, ct)
@@ -226,46 +348,54 @@ func (p *Provider) displayNames(ctx context.Context, rows []decodedChange) diffN
 			candidates[ct] = append(candidates[ct], f.Field)
 		}
 	}
-	if len(types) == 0 {
+	if len(types) == 0 && !generic {
 		return names
 	}
 
-	endpoints := map[string]string{} // changed type -> its list endpoint
-	for _, ct := range types {
+	discoveryFailed := false
+	endpointOf := func(ct string) (string, bool) {
+		if discoveryFailed {
+			return "", false
+		}
 		endpoint, found, err := p.contentTypeEndpoint(ctx, ct)
 		if err != nil {
 			// Stop at the first failure: ObjectTypes does not cache one, so
 			// every further type would repeat the failed discovery.
-			log.DefaultLogger.Debug("netbox: could not find a changed type's API endpoint; its diff shows ids",
+			discoveryFailed = true
+			log.DefaultLogger.Debug("netbox: could not find an object type's API endpoint; diffs show ids for it and the types after it",
 				"objectType", logSafe(ct), "error", logSafe(err.Error()))
-			break
+			return "", false
 		}
-		if found {
+		return endpoint, found
+	}
+
+	endpoints := map[string]string{} // changed type -> its list endpoint
+	for _, ct := range types {
+		if endpoint, found := endpointOf(ct); found {
 			endpoints[ct] = endpoint
 		}
 	}
-	if len(endpoints) == 0 {
-		return names
-	}
-	entry, err := p.budgetedSchema(ctx)
-	if err != nil || entry.dims == nil {
+	if generic {
+		// The cached map contentTypeEndpoint reads, so the two share one read.
+		typeIDs, err := p.objectTypeIDMap(ctx)
 		if err != nil {
-			log.DefaultLogger.Debug("netbox: OpenAPI schema unavailable; diffs show related objects as ids",
+			log.DefaultLogger.Debug("netbox: could not read NetBox object-type ids; generic relations in diffs show ids",
 				"error", logSafe(err.Error()))
 		}
-		return names
-	}
-	for ct, endpoint := range endpoints {
-		for _, field := range candidates[ct] {
-			// A diff field is a model field, never a column flattening derived,
-			// so only an exact property counts (base == field).
-			if dim, base, ok := entry.dims.resolve(endpoint, field); ok && base == field && dim.kind == dimRelated {
-				if names.related[ct] == nil {
-					names.related[ct] = map[string]string{}
+		names.types = make(map[int]string, len(typeIDs))
+		for ct, id := range typeIDs {
+			names.types[id] = ct
+		}
+		for _, typeID := range genericTypes {
+			if ct, ok := names.types[typeID]; ok {
+				if endpoint, found := endpointOf(ct); found {
+					names.generic[ct] = endpoint
 				}
-				names.related[ct][field] = dim.endpoint
 			}
 		}
+	}
+	if len(endpoints) > 0 {
+		names.related = p.plainRelations(ctx, endpoints, candidates)
 	}
 
 	var order []string          // related endpoints, in order of first appearance
@@ -274,12 +404,12 @@ func (p *Provider) displayNames(ctx context.Context, rows []decodedChange) diffN
 	for _, d := range rows {
 		fields := names.related[normalizeObjectType(d.oc.changedType())]
 		for _, f := range renderedDiff(d.diff) {
-			endpoint, ok := fields[f.Field]
-			if !ok {
-				continue
-			}
-			for _, v := range []json.RawMessage{f.Before, f.After} {
-				id, ok := relatedID(v)
+			for _, after := range []bool{false, true} {
+				id, ok := relatedID(f.value(after))
+				if !ok {
+					continue
+				}
+				endpoint, _, ok := names.lookup(fields, d.snapshot(after), f.Field)
 				if !ok {
 					continue
 				}
@@ -300,7 +430,7 @@ func (p *Provider) displayNames(ctx context.Context, rows []decodedChange) diffN
 	}
 
 	// Index-aligned, so each lookup owns its slot and no lock is needed.
-	looked := make([]map[int64]string, len(order))
+	looked := make([]map[int64]nameEntry, len(order))
 	var wg sync.WaitGroup
 	for i, endpoint := range order {
 		wg.Go(func() { looked[i] = p.lookupNames(ctx, endpoint, ids[endpoint]) })
@@ -312,11 +442,39 @@ func (p *Provider) displayNames(ctx context.Context, rows []decodedChange) diffN
 	return names
 }
 
+// plainRelations finds which candidate fields of each changed type are plain
+// foreign keys, from the schema's dimension index, waited on within the call's
+// schema budget (budgetedSchema): changed type -> field -> related list
+// endpoint. A schema that can't be read in time finds none.
+func (p *Provider) plainRelations(ctx context.Context, endpoints map[string]string, candidates map[string][]string) map[string]map[string]string {
+	related := map[string]map[string]string{}
+	entry, err := p.budgetedSchema(ctx)
+	if err != nil {
+		log.DefaultLogger.Debug("netbox: OpenAPI schema unavailable; diffs show plain foreign keys as ids",
+			"error", logSafe(err.Error()))
+		return related
+	}
+	for ct, endpoint := range endpoints {
+		for _, field := range candidates[ct] {
+			// A diff field is a model field, never a column flattening derived,
+			// so only an exact property counts (base == field).
+			if dim, base, ok := entry.dims.resolve(endpoint, field); ok && base == field && dim.kind == dimRelated {
+				if related[ct] == nil {
+					related[ct] = map[string]string{}
+				}
+				related[ct][field] = dim.endpoint
+			}
+		}
+	}
+	return related
+}
+
 // lookupNames reads the brief form of the objects with these ids from one list
-// endpoint, in one request, and returns id -> display. A failure is logged and
-// returns nil, so the caller shows the objects by id: a diff's related objects,
-// or an annotation scope's.
-func (p *Provider) lookupNames(ctx context.Context, endpoint string, ids []int64) map[int64]string {
+// endpoint, in one request, and returns id -> name: the object's display, and
+// the display of the device or virtual machine the brief row nests, as an
+// interface's does. A failure is logged and returns nil, so the caller shows
+// the objects by id: a diff's related objects, or an annotation scope's.
+func (p *Provider) lookupNames(ctx context.Context, endpoint string, ids []int64) map[int64]nameEntry {
 	q := url.Values{"brief": {"true"}}
 	for _, id := range ids {
 		q.Add("id", strconv.FormatInt(id, 10))
@@ -327,15 +485,33 @@ func (p *Provider) lookupNames(ctx context.Context, endpoint string, ids []int64
 			"endpoint", logSafe(endpoint), "ids", len(ids), "error", logSafe(err.Error()))
 		return nil
 	}
-	out := make(map[int64]string, len(rows))
+	out := make(map[int64]nameEntry, len(rows))
 	for _, raw := range rows {
 		var obj struct {
 			ID      int64  `json:"id"`
 			Display string `json:"display"`
+			// Raw, and read on their own below, so an odd value cannot cost the
+			// row its display.
+			Device         json.RawMessage `json:"device"`
+			VirtualMachine json.RawMessage `json:"virtual_machine"`
 		}
 		if json.Unmarshal(raw, &obj) == nil && obj.Display != "" {
-			out[obj.ID] = obj.Display
+			out[obj.ID] = nameEntry{display: obj.Display, parent: parentDisplay(obj.Device, obj.VirtualMachine)}
 		}
 	}
 	return out
+}
+
+// parentDisplay is the display of the first of these nested objects that has
+// one, or "".
+func parentDisplay(nested ...json.RawMessage) string {
+	for _, raw := range nested {
+		var obj struct {
+			Display string `json:"display"`
+		}
+		if json.Unmarshal(raw, &obj) == nil && obj.Display != "" {
+			return obj.Display
+		}
+	}
+	return ""
 }

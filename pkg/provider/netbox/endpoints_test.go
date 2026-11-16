@@ -27,6 +27,7 @@ type typeServer struct {
 	schema       string                      // /api/schema/; "" answers 403
 	schemaDelay  time.Duration               // held before /api/schema/ answers
 	objects      map[string]map[int64]string // list endpoint -> id -> display, served to ?id= lookups
+	briefExtra   map[string]map[int64]string // list endpoint -> id -> more members of that row, as JSON (`"device":{...}`)
 	failing      map[string]int              // list endpoint -> status it answers with
 	changes      []string                    // core/object-changes rows
 
@@ -93,7 +94,11 @@ func (s *typeServer) start(t *testing.T) *Provider {
 					return
 				}
 				if name, ok := s.objects[path][id]; ok {
-					rows = append(rows, fmt.Sprintf(`{"id":%d,"url":"http://nb/api/%s/%d/","display":%q}`, id, path, id, name))
+					row := fmt.Sprintf(`{"id":%d,"url":"http://nb/api/%s/%d/","display":%q`, id, path, id, name)
+					if extra := s.briefExtra[path][id]; extra != "" {
+						row += "," + extra
+					}
+					rows = append(rows, row+"}")
 				}
 			}
 			writePage(w, len(rows), rows)

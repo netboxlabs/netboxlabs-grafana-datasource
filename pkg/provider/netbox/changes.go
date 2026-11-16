@@ -317,8 +317,10 @@ func formatValue(v json.RawMessage) string {
 	}
 }
 
-// toChange builds the provider row. format renders a diff value for display.
-func (d decodedChange) toChange(base string, format func(field string, v json.RawMessage) string) provider.Change {
+// toChange builds the provider row. format renders a diff value for display,
+// told which side of the change it is from: a generic relation's id is read
+// beside its type in that side's snapshot.
+func (d decodedChange) toChange(base string, format func(field string, v json.RawMessage, after bool) string) provider.Change {
 	c := provider.Change{
 		Time:       d.at,
 		Action:     d.oc.actionLabel(),
@@ -333,8 +335,8 @@ func (d decodedChange) toChange(base string, format func(field string, v json.Ra
 	for _, f := range d.diff {
 		c.Diff = append(c.Diff, provider.FieldChange{
 			Field:  f.Field,
-			Before: format(f.Field, f.Before),
-			After:  format(f.Field, f.After),
+			Before: format(f.Field, f.Before, false),
+			After:  format(f.Field, f.After, true),
 		})
 	}
 	return c

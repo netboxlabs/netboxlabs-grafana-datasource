@@ -204,7 +204,7 @@ func (p *Provider) nameScopeIDs(ctx context.Context, scope *resolvedScope, ids [
 		log.DefaultLogger.Debug("netbox: could not find the annotation scope type's API endpoint; its objects go unnamed",
 			"objectType", logSafe(scope.Type), "error", logSafe(err.Error()))
 	}
-	var names map[int64]string
+	var names map[int64]nameEntry
 	if found {
 		scope.Endpoint = endpoint
 		lookupCtx, cancel := context.WithTimeout(ctx, p.namesWait())
@@ -212,7 +212,7 @@ func (p *Provider) nameScopeIDs(ctx context.Context, scope *resolvedScope, ids [
 		cancel()
 	}
 	for _, id := range ids {
-		scope.Objects = append(scope.Objects, scopeObject{ID: id, Name: names[id]})
+		scope.Objects = append(scope.Objects, scopeObject{ID: id, Name: names[id].display})
 	}
 }
 

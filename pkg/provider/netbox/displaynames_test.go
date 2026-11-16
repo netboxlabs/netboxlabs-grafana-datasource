@@ -277,8 +277,8 @@ func TestResolveDiffs_NoRelationsNoRequests(t *testing.T) {
 	}
 }
 
-// An integer that is not a relation, and NetBox's generic relations, keep their
-// values and are never looked up.
+// An integer that is not a relation, and a generic relation whose object type
+// the instance doesn't report, keep their values and are never looked up.
 func TestResolveDiffs_NonRelationsStayAsTheyAre(t *testing.T) {
 	s := nameServer()
 	p := s.start(t)
@@ -299,6 +299,215 @@ func TestResolveDiffs_NonRelationsStayAsTheyAre(t *testing.T) {
 	}
 	if got := diffField(t, changes[1], "assigned_object_id"); got.Before != "5" || got.After != "6" {
 		t.Errorf("assigned_object_id = %q → %q, want 5 → 6", got.Before, got.After)
+	}
+}
+
+// genericSchemaFixture is roleSchemaFixture plus a wireless link, whose
+// interface_a is a plain foreign key to dcim/interfaces.
+var genericSchemaFixture = strings.NewReplacer(
+	`"/api/dcim/sites/":   {"get": {`,
+	`"/api/wireless/wireless-links/": {"get": {"responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/PaginatedWirelessLinkList"}}}}}}},
+  "/api/dcim/sites/":   {"get": {`,
+	`"PaginatedSiteList":`,
+	`"PaginatedWirelessLinkList": {"properties": {"results": {"type": "array", "items": {"$ref": "#/components/schemas/WirelessLink"}}}},
+  "PaginatedSiteList":`,
+	`"Site":   {"properties"`,
+	`"WirelessLink": {"properties": {"interface_a": {"$ref": "#/components/schemas/BriefInterface"}}},
+  "Site":   {"properties"`,
+).Replace(roleSchemaFixture)
+
+// genericServer is nameServer with objects for NetBox's generic relations to
+// name: device interfaces (dcim.interface, type 14) nesting their device, and
+// virtual machine interfaces (virtualization.vminterface, type 31) nesting
+// their virtual machine, as their brief rows do. A wireless link's interface_a
+// points at the same device interfaces as a plain foreign key.
+func genericServer() *typeServer {
+	s := nameServer()
+	s.objectTypes = append(s.objectTypes,
+		objectTypeRow(14, "dcim.interface", "/api/dcim/interfaces/"),
+		objectTypeRow(31, "virtualization.vminterface", "/api/virtualization/interfaces/"),
+		objectTypeRow(120, "wireless.wirelesslink", "/api/wireless/wireless-links/"),
+	)
+	s.schema = genericSchemaFixture
+	s.objects["dcim/interfaces"] = map[int64]string{51: "eth2", 55: "eth3"}
+	s.objects["virtualization/interfaces"] = map[int64]string{7: "eth0"}
+	s.briefExtra = map[string]map[int64]string{
+		"dcim/interfaces": {
+			51: `"device":{"id":1,"url":"http://nb/api/dcim/devices/1/","display":"leaf-01"}`,
+			55: `"device":{"id":2,"url":"http://nb/api/dcim/devices/2/","display":"leaf-02"}`,
+		},
+		"virtualization/interfaces": {
+			7: `"virtual_machine":{"id":3,"url":"http://nb/api/virtualization/virtual-machines/3/","display":"vm-01"}`,
+		},
+	}
+	return s
+}
+
+// ipMove is an IP address's update moving it from one assigned object to
+// another, each given as its object-type id and object id.
+func ipMove(t *testing.T, n, fromType, fromID, toType, toID int) decodedChange {
+	t.Helper()
+	return updateRow(t, "ipam.ipaddress", n,
+		fmt.Sprintf(`{"assigned_object_type":%d,"assigned_object_id":%d}`, fromType, fromID),
+		fmt.Sprintf(`{"assigned_object_type":%d,"assigned_object_id":%d}`, toType, toID))
+}
+
+// A generic relation's id shows as the object's name with its device's, or its
+// virtual machine's. Each side reads its own snapshot's type, so an address
+// moved from a device interface to a VM interface names both.
+func TestResolveDiffs_GenericRelationNamesWithDevice(t *testing.T) {
+	s := genericServer()
+	p := s.start(t)
+
+	changes := p.resolveDiffs(context.Background(), []decodedChange{
+		ipMove(t, 0, 14, 51, 14, 55),
+		ipMove(t, 1, 14, 51, 31, 7),
+	}, nil)
+
+	if got := diffField(t, changes[0], "assigned_object_id"); got.Before != "eth2 (leaf-01)" || got.After != "eth3 (leaf-02)" {
+		t.Errorf("assigned_object_id = %q → %q, want eth2 (leaf-01) → eth3 (leaf-02)", got.Before, got.After)
+	}
+	if got := diffField(t, changes[1], "assigned_object_id"); got.Before != "eth2 (leaf-01)" || got.After != "eth0 (vm-01)" {
+		t.Errorf("assigned_object_id = %q → %q, want eth2 (leaf-01) → eth0 (vm-01)", got.Before, got.After)
+	}
+
+	// One batched brief lookup per related endpoint, as for a plain foreign key.
+	ifaces := s.queries("/api/dcim/interfaces/")
+	if len(ifaces) != 1 {
+		t.Fatalf("dcim/interfaces read %d times, want 1", len(ifaces))
+	}
+	if ifaces[0].Get("brief") != "true" {
+		t.Errorf("dcim/interfaces lookup brief = %q, want true", ifaces[0].Get("brief"))
+	}
+	if got := sortedInts(t, ifaces[0]["id"]); !reflect.DeepEqual(got, []int64{51, 55}) {
+		t.Errorf("dcim/interfaces ids = %v, want [51 55]", got)
+	}
+	if n := s.hits("/api/virtualization/interfaces/"); n != 1 {
+		t.Errorf("virtualization/interfaces read %d times, want 1", n)
+	}
+}
+
+// A generic relation's type shows as app_label.model. A _type field with no
+// _id beside it is not half of a generic relation, and keeps its value.
+func TestResolveDiffs_GenericTypeRendersAsName(t *testing.T) {
+	s := genericServer()
+	p := s.start(t)
+
+	changes := p.resolveDiffs(context.Background(), []decodedChange{
+		updateRow(t, "ipam.ipaddress", 0,
+			`{"assigned_object_type":14,"assigned_object_id":51,"peer_type":14}`,
+			`{"assigned_object_type":31,"assigned_object_id":7,"peer_type":31}`),
+	}, nil)
+
+	if got := diffField(t, changes[0], "assigned_object_type"); got.Before != "dcim.interface" || got.After != "virtualization.vminterface" {
+		t.Errorf("assigned_object_type = %q → %q, want dcim.interface → virtualization.vminterface", got.Before, got.After)
+	}
+	if got := diffField(t, changes[0], "peer_type"); got.Before != "14" || got.After != "31" {
+		t.Errorf("peer_type = %q → %q, want 14 → 31: no peer_id beside it", got.Before, got.After)
+	}
+}
+
+// A type the instance doesn't report names nothing: the id and the type keep
+// their values, and nothing is looked up.
+func TestResolveDiffs_GenericUnknownTypeStaysID(t *testing.T) {
+	s := genericServer()
+	p := s.start(t)
+
+	changes := p.resolveDiffs(context.Background(), []decodedChange{ipMove(t, 0, 77, 51, 78, 55)}, nil)
+
+	for _, req := range s.allRequests() {
+		path, _, _ := strings.Cut(req, "?")
+		if path != "/api/core/object-types/" && path != "/api/schema/" {
+			t.Errorf("unexpected request %s: the instance reports neither type", req)
+		}
+	}
+	if got := diffField(t, changes[0], "assigned_object_id"); got.Before != "51" || got.After != "55" {
+		t.Errorf("assigned_object_id = %q → %q, want the ids 51 → 55", got.Before, got.After)
+	}
+	if got := diffField(t, changes[0], "assigned_object_type"); got.Before != "77" || got.After != "78" {
+		t.Errorf("assigned_object_type = %q → %q, want 77 → 78", got.Before, got.After)
+	}
+}
+
+// A generic relation is named from the object-type map, not the schema, so a
+// schema that can't be read, or that the call's budget no longer waits for,
+// costs only the plain foreign keys their names.
+func TestResolveDiffs_GenericWithoutSchema(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(s *typeServer)
+		ctx   func(p *Provider) context.Context
+	}{
+		{"the schema answers 403", func(s *typeServer) { s.schema = "" },
+			func(*Provider) context.Context { return context.Background() }},
+		{"the schema budget is spent", func(*typeServer) {},
+			func(p *Provider) context.Context {
+				ctx := p.withSchemaBudget(context.Background())
+				ctx.Value(schemaBudgetKey{}).(*schemaBudget).left = 0
+				return ctx
+			}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := genericServer()
+			c.setup(s)
+			p := s.start(t)
+
+			changes := p.resolveDiffs(c.ctx(p), []decodedChange{
+				ipMove(t, 0, 14, 51, 14, 55),
+				updateRow(t, "dcim.device", 1, `{"role":3}`, `{"role":7}`),
+			}, nil)
+
+			if got := diffField(t, changes[0], "assigned_object_id"); got.Before != "eth2 (leaf-01)" || got.After != "eth3 (leaf-02)" {
+				t.Errorf("assigned_object_id = %q → %q, want eth2 (leaf-01) → eth3 (leaf-02)", got.Before, got.After)
+			}
+			if got := diffField(t, changes[1], "role"); got.Before != "3" || got.After != "7" {
+				t.Errorf("role = %q → %q, want the ids 3 → 7: a plain foreign key needs the schema", got.Before, got.After)
+			}
+		})
+	}
+}
+
+// A plain foreign key and a generic relation to the same endpoint share its one
+// lookup. Only the generic relation adds the device: a plain foreign key shows
+// the object's display, as it always has.
+func TestResolveDiffs_PlainAndGenericShareOneLookup(t *testing.T) {
+	s := genericServer()
+	p := s.start(t)
+
+	changes := p.resolveDiffs(context.Background(), []decodedChange{
+		updateRow(t, "wireless.wirelesslink", 0, `{"interface_a":51}`, `{"interface_a":55}`),
+		ipMove(t, 1, 14, 51, 14, 55),
+	}, nil)
+
+	if got := diffField(t, changes[0], "interface_a"); got.Before != "eth2" || got.After != "eth3" {
+		t.Errorf("interface_a = %q → %q, want eth2 → eth3", got.Before, got.After)
+	}
+	if got := diffField(t, changes[1], "assigned_object_id"); got.Before != "eth2 (leaf-01)" || got.After != "eth3 (leaf-02)" {
+		t.Errorf("assigned_object_id = %q → %q, want eth2 (leaf-01) → eth3 (leaf-02)", got.Before, got.After)
+	}
+	ifaces := s.queries("/api/dcim/interfaces/")
+	if len(ifaces) != 1 {
+		t.Fatalf("dcim/interfaces read %d times, want 1", len(ifaces))
+	}
+	if got := sortedInts(t, ifaces[0]["id"]); !reflect.DeepEqual(got, []int64{51, 55}) {
+		t.Errorf("dcim/interfaces ids = %v, want [51 55], each once", got)
+	}
+}
+
+// Beside a generic relation, a plain foreign key is still named, with no
+// suffix.
+func TestResolveDiffs_PlainFKUnchanged(t *testing.T) {
+	s := genericServer()
+	p := s.start(t)
+
+	changes := p.resolveDiffs(context.Background(), []decodedChange{
+		updateRow(t, "dcim.device", 0, `{"role":3}`, `{"role":7}`),
+		ipMove(t, 1, 14, 51, 14, 55),
+	}, nil)
+
+	if got := diffField(t, changes[0], "role"); got.Before != "Router" || got.After != "Distribution Switch" {
+		t.Errorf("role = %q → %q, want Router → Distribution Switch", got.Before, got.After)
 	}
 }
 

@@ -592,7 +592,7 @@ type changeRead struct {
 // changeLogQuery is the part of a change-log read every read shares: newest
 // first, the time range, and the Action NetBox is asked for when there is one.
 // Two can't share a query: changeReads makes each read once per Action, and the
-// descendant scans, which aren't doubled, filter the two here.
+// descendant scans and by-id reads, which aren't doubled, filter the two here.
 func changeLogQuery(spec provider.ChangeSpec, f changeFilter) url.Values {
 	q := url.Values{}
 	q.Set(orderingParam, "-time")
@@ -726,7 +726,7 @@ type changeReadResult struct {
 	// would have kept may lie past the cap. A read whose matches NetBox already
 	// narrowed to has nothing to miss.
 	scan bool
-	// descendant marks a membership read or a descendant scan.
+	// descendant marks a membership read, a by-id read or a descendant scan.
 	descendant bool
 	// full is a read that stopped at limit kept rows with rows left.
 	full bool

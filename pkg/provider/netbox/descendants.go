@@ -30,14 +30,16 @@ func (p *Provider) childListCap() int {
 	return ChildListCapRows
 }
 
-// cableEndWorkers is how many membership requests (the lists, and the
-// cable-end, IP-history and MAC batches) run at once: bounded, without a long
-// serial chain on a device with thousands of interfaces.
+// cableEndWorkers is how many membership and by-id requests (the lists, the
+// cable-end, IP-history and MAC batches, and the by-id batches) run at once:
+// bounded, without a long serial chain on a device with thousands of
+// interfaces.
 const cableEndWorkers = 4
 
 // maxDescendantsBudget caps the time the descendant reads get. They run in a
-// chain (lists, then the cable ends, IP history and MAC list, then scans), and
-// a short dashboard refresh must not lose the scope's own changes to them.
+// chain (lists, then the cable ends, IP history and MAC list, then the by-id
+// reads and the scans), and a short dashboard refresh must not lose the scope's
+// own changes to them.
 const maxDescendantsBudget = 8 * time.Second
 
 // descendantsBudget is min(half the datasource Timeout, 8s), the Timeout being
@@ -158,7 +160,8 @@ const (
 	macAddressList = "dcim/mac-addresses"
 )
 
-// The types the descendant scans read: addresses in one scan, the parts in
+// The descendant types. Every one is read by id, its members' changes. The
+// scans read all but cables: addresses in one scan, modules and services in
 // another, so address churn can't use up the cap the parts share.
 const (
 	ipAddressType  = "ipam.ipaddress"
@@ -169,19 +172,24 @@ const (
 )
 
 // descendantChanges reads the scope's descendant changes over [From, To]: the
-// membership reads' results, then the scans' results, every one with scan and
-// descendant set. nil, nil when the scope type has no descendantKinds row or no
-// descendant type survives Object types. The first error among its reads is
-// returned, and each read that fails calls fail with its error as it does, so
-// the caller can stop the others (Changes cancels ctx with it).
+// membership reads' results, then the by-id reads', then the scans', every one
+// with scan and descendant set. nil, nil when the scope type has no
+// descendantKinds row or no descendant type survives Object types. The first
+// error among its reads is returned, a by-id read's before a scan's, and each
+// read that fails calls fail with its error as it does, so the caller can stop
+// the others (Changes cancels ctx with it).
 //
-// The scan types are decided before anything is read, so a query whose Object
-// types leave none reads nothing, not even the type map. Children are read
-// only for the scans that need them, and a scan nothing can match is skipped:
-// no addresses without interfaces, no cables without cables. Each scan pushes
-// its types as changed_object_type_id, and keeps a row only when the row's own
-// snapshot, or its cable id, ties it to the scope, whatever NetBox did with
-// the filters.
+// The descendant types are decided before anything is read, so a query whose
+// Object types leave none reads nothing, not even the type map. Children are
+// read only for the types the query wants. Once they are known, the by-id
+// reads (byIDReads) ask for their changes, and the scans run beside them: the
+// address scan for IPs and MACs, the parts scan for modules and services.
+// Cables are read by id alone: a scanned cable change showed only when its
+// cable was already a member. A read nothing can match is skipped: no address
+// scan without interfaces, no by-id read without members. Each read pushes its
+// types as changed_object_type_id, and keeps a row only when the row's own
+// type and snapshot, or its cable id, tie it to the scope, whatever NetBox did
+// with the filters.
 func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCauseFunc, spec provider.ChangeSpec, scope *resolvedScope, wanted []string, f changeFilter, limit int) ([]changeReadResult, error) {
 	kind, ok := descendantKinds[scope.Type]
 	if !ok {
@@ -214,7 +222,7 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 		return nil, nil
 	}
 
-	// Membership is read for the types the scans read. A device's cable ends
+	// Membership is read for the types the query reads. A device's cable ends
 	// are read through its interfaces, so its cables need them read too.
 	want := descendantWants{
 		ips:      slices.Contains(addrTypes, ipAddressType),
@@ -224,16 +232,15 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 		services: slices.Contains(partTypes, serviceType),
 	}
 	want.ifaces = want.ips || want.macs || (want.cables && scope.Type == "dcim.device")
-	// One semaphore bounds every membership request, so a scope with many
-	// interfaces can't open more than cableEndWorkers at once.
+	// One semaphore bounds every membership and by-id request, so a scope with
+	// many interfaces or members can't open more than cableEndWorkers at once.
 	sem := make(chan struct{}, cableEndWorkers)
 	m, err := p.descendantMembers(ctx, fail, sem, spec, scope, kind, ids, want)
 	if err != nil {
 		return nil, err
 	}
-	if len(m.cables) == 0 {
-		partTypes = slices.DeleteFunc(partTypes, func(t string) bool { return t == cableType })
-	}
+	// Cables are read by id alone: the parts scan reads modules and services.
+	partTypes = slices.DeleteFunc(partTypes, func(t string) bool { return t == cableType })
 	if len(m.ifaces) == 0 {
 		addrTypes = nil
 	}
@@ -255,10 +262,15 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 		return 0, false
 	}
 
-	// The address scan, then the parts scan; each owns its result slot.
+	// The by-id reads, and beside them the address scan, then the parts scan;
+	// each owns its result slots.
+	var byID []changeReadResult
+	var wg sync.WaitGroup
+	if sets := memberSets(m, want); len(sets) > 0 {
+		wg.Go(func() { byID = p.byIDReads(ctx, fail, sem, spec, f, limit, ids, sets, match) })
+	}
 	scans := [][]string{addrTypes, partTypes}
 	found := make([]changeReadResult, len(scans))
-	var wg sync.WaitGroup
 	for i, types := range scans {
 		if len(types) == 0 {
 			continue
@@ -284,7 +296,12 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 		})
 	}
 	wg.Wait()
-	results := m.reads
+	for _, r := range byID {
+		if r.err != nil {
+			return nil, r.err
+		}
+	}
+	results := slices.Concat(m.reads, byID)
 	for i, types := range scans {
 		if len(types) == 0 {
 			continue
@@ -295,6 +312,93 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 		results = append(results, found[i])
 	}
 	return results, nil
+}
+
+// memberSets is what the by-id reads ask for: each wanted type with at least
+// one member, by type name (ipam.ipaddress, dcim.macaddress, dcim.cable,
+// dcim.module, ipam.service).
+func memberSets(m members, want descendantWants) map[string]map[int64]int64 {
+	sets := map[string]map[int64]int64{}
+	for _, s := range []struct {
+		wanted bool
+		typ    string
+		set    map[int64]int64
+	}{
+		{want.ips, ipAddressType, m.ips},
+		{want.macs, macAddressType, m.macs},
+		{want.cables, cableType, m.cables},
+		{want.modules, moduleType, m.modules},
+		{want.services, serviceType, m.services},
+	} {
+		if s.wanted && len(s.set) > 0 {
+			sets[s.typ] = s.set
+		}
+	}
+	return sets
+}
+
+// byIDReads reads the changes over [From, To] to the members in sets, through
+// the change log's index on what a change changed, so the changes to other
+// objects of these types can't use up a cap before them. Each request is
+// changeLogQuery's, which pushes the query's one Action but never its Changed
+// fields, plus every member type's id from ids, in ascending order, and its
+// batch of the members' ids. The ids of every type are sorted together and
+// batched to the URL budget, with the rest of the query measured in it, so
+// the type ids repeat in every batch.
+//
+// An id filter ORed with a type filter can return another type's object that
+// shares a member's id, and a NetBox may ignore either filter, so a row is
+// kept only when its own type and id are a member's, and then only when match,
+// the type's scope check, passes it and names its owner.
+//
+// Each batch is walked to limit rows kept or changeScanCap rows read, under a
+// slot of sem, which the membership reads share, and writes only its own
+// result. A result is a descendant read, and a scan: a batch that stops at the
+// cap may have missed rows past it, so it counts for the cut-off. A batch that
+// fails, or that ctx ends while it waits for a slot, calls fail with its error
+// as it does. The results are in batch order.
+func (p *Provider) byIDReads(ctx context.Context, fail context.CancelCauseFunc, sem chan struct{}, spec provider.ChangeSpec, f changeFilter, limit int, ids map[string]int, sets map[string]map[int64]int64, match func(objectChange) (int64, bool)) []changeReadResult {
+	fixed := changeLogQuery(spec, f)
+	typeIDs := make([]int, 0, len(sets))
+	// Every member's id, whatever its type: only the keys are sent.
+	all := map[int64]int64{}
+	for t, set := range sets {
+		typeIDs = append(typeIDs, ids[t])
+		maps.Copy(all, set)
+	}
+	slices.Sort(typeIDs)
+	for _, id := range typeIDs {
+		fixed.Add(changedObjectTypeIDParam, strconv.Itoa(id))
+	}
+	member := func(oc objectChange) (int64, bool) {
+		if _, ok := sets[normalizeObjectType(oc.changedType())][oc.ChangedObjectID]; !ok {
+			return 0, false
+		}
+		return match(oc)
+	}
+	batcher := newQueryBatcher(changedObjectIDParam, fixed)
+	batches := batcher.chunk(sortedIDs(all))
+	results := make([]changeReadResult, len(batches))
+	var wg sync.WaitGroup
+	for i, batch := range batches {
+		r := changeRead{q: batcher.query(batch), descendant: member}
+		wg.Go(func() {
+			// A batch ctx ended before it ran fails with ctx's cause: with no
+			// error, it would read as one that found nothing.
+			if err := takeSlot(ctx, sem); err != nil {
+				results[i].err = err
+			} else {
+				results[i] = p.runChangeRead(ctx, r, f, limit, p.changeScanCap())
+				<-sem
+			}
+			results[i].scan, results[i].descendant = true, true
+			if results[i].err != nil {
+				fail(results[i].err)
+			}
+		})
+	}
+	wg.Wait()
+	return results
 }
 
 // descendantWants is which descendant types a query reads, after Object types,

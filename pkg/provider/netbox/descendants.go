@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
@@ -38,8 +39,8 @@ const cableEndWorkers = 4
 
 // maxDescendantsBudget caps the time the descendant reads get. They run in a
 // chain (lists, then the cable ends, IP history and MAC list, then the by-id
-// reads and the scans), and a short dashboard refresh must not lose the scope's
-// own changes to them.
+// reads, with the residual scans beside them all), and a short dashboard
+// refresh must not lose the scope's own changes to them.
 const maxDescendantsBudget = 8 * time.Second
 
 // descendantsBudget is min(half the datasource Timeout, 8s), the Timeout being
@@ -161,8 +162,8 @@ const (
 )
 
 // The descendant types. Every one is read by id, its members' changes. The
-// scans read all but cables: addresses in one scan, modules and services in
-// another, so address churn can't use up the cap the parts share.
+// residual scans read all but cables: addresses in one scan, modules and
+// services in another, so address churn can't fill the page the parts share.
 const (
 	ipAddressType  = "ipam.ipaddress"
 	macAddressType = "dcim.macaddress"
@@ -172,24 +173,36 @@ const (
 )
 
 // descendantChanges reads the scope's descendant changes over [From, To]: the
-// membership reads' results, then the by-id reads', then the scans', every one
-// with scan and descendant set. nil, nil when the scope type has no
+// membership reads' results, then the by-id reads', then the residual scans',
+// every one with scan and descendant set. nil, nil when the scope type has no
 // descendantKinds row or no descendant type survives Object types. The first
-// error among its reads is returned, a by-id read's before a scan's, and each
-// read that fails calls fail with its error as it does, so the caller can stop
-// the others (Changes cancels ctx with it).
+// error among the membership and by-id reads is returned, and each read that
+// fails calls fail with its error as it does, so the caller can stop the
+// others (Changes cancels ctx with it).
 //
 // The descendant types are decided before anything is read, so a query whose
 // Object types leave none reads nothing, not even the type map. Children are
 // read only for the types the query wants. Once they are known, the by-id
-// reads (byIDReads) ask for their changes, and the scans run beside them: the
-// address scan for IPs and MACs, the parts scan for modules and services.
-// Cables are read by id alone: a scanned cable change showed only when its
-// cable was already a member. A read nothing can match is skipped: no address
-// scan without interfaces, no by-id read without members. Each read pushes its
-// types as changed_object_type_id, and keeps a row only when the row's own
-// type and snapshot, or its cable id, tie it to the scope, whatever NetBox did
-// with the filters.
+// reads (byIDReads) ask for their changes. Cables are read by id alone: a
+// scanned cable change showed only when its cable was already a member. No
+// by-id read is made without members.
+//
+// The residual scans look for what the by-id reads can miss: a child taken off
+// the scope or deleted before membership could name it. The address scan reads
+// IPs and MACs, the parts scan modules and services, one page each
+// (residualScan). They start at once, beside membership, under their own
+// deadline (residualContext) and without a slot of sem, and never fail the
+// others: one that fails or runs out of time is unchecked. The parts scan
+// matches a row by the scope objects alone. The address scan matches by the
+// scope's interfaces, so its page waits for membership, or for ctx ending;
+// not for its own deadline, so a page that came in time is matched however
+// long membership takes. The scans are waited for on every path, so none
+// outlives the call. A scope without interfaces drops the address scan's
+// result: no IP or MAC it could match exists, so it can't have missed one.
+//
+// Each read pushes its types as changed_object_type_id, and keeps a row only
+// when the row's own type and snapshot, or its cable id, tie it to the scope,
+// whatever NetBox did with the filters.
 func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCauseFunc, spec provider.ChangeSpec, scope *resolvedScope, wanted []string, f changeFilter, limit int) ([]changeReadResult, error) {
 	kind, ok := descendantKinds[scope.Type]
 	if !ok {
@@ -232,28 +245,17 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 		services: slices.Contains(partTypes, serviceType),
 	}
 	want.ifaces = want.ips || want.macs || (want.cables && scope.Type == "dcim.device")
-	// One semaphore bounds every membership and by-id request, so a scope with
-	// many interfaces or members can't open more than cableEndWorkers at once.
-	sem := make(chan struct{}, cableEndWorkers)
-	m, err := p.descendantMembers(ctx, fail, sem, spec, scope, kind, ids, want)
-	if err != nil {
-		return nil, err
-	}
-	// Cables are read by id alone: the parts scan reads modules and services.
-	partTypes = slices.DeleteFunc(partTypes, func(t string) bool { return t == cableType })
-	if len(m.ifaces) == 0 {
-		addrTypes = nil
-	}
 
 	inScope := scope.idSet()
 	ifaceTypeID, scopeTypeID := ids[kind.ifaceType], ids[scope.Type]
-	match := func(oc objectChange) (int64, bool) {
+	// m is assigned once, before ready is closed, and read only after: by the
+	// by-id reads, and by the address scan's matcher once ready is closed.
+	var m members
+	ready := make(chan struct{})
+	// byScope matches a module or service row by the scope objects alone, so
+	// the parts scan needs no membership.
+	byScope := func(oc objectChange) (int64, bool) {
 		switch normalizeObjectType(oc.changedType()) {
-		case ipAddressType, macAddressType:
-			return matchAssigned(oc, ifaceTypeID, m.ifaces)
-		case cableType:
-			owner, ok := m.cables[oc.ChangedObjectID]
-			return owner, ok
 		case moduleType:
 			return matchOwner(oc, "device", inScope)
 		case serviceType:
@@ -261,55 +263,102 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 		}
 		return 0, false
 	}
-
-	// The by-id reads, and beside them the address scan, then the parts scan;
-	// each owns its result slots.
-	var byID []changeReadResult
-	var wg sync.WaitGroup
-	if sets := memberSets(m, want); len(sets) > 0 {
-		wg.Go(func() { byID = p.byIDReads(ctx, fail, sem, spec, f, limit, ids, sets, match) })
+	match := func(oc objectChange) (int64, bool) {
+		switch normalizeObjectType(oc.changedType()) {
+		case ipAddressType, macAddressType:
+			return matchAssigned(oc, ifaceTypeID, m.ifaces)
+		case cableType:
+			owner, ok := m.cables[oc.ChangedObjectID]
+			return owner, ok
+		}
+		return byScope(oc)
 	}
-	scans := [][]string{addrTypes, partTypes}
+	// afterMembership is match once membership is known. ctx ending first
+	// matches nothing and sets gaveUp: membership has then failed or been cut,
+	// and the results are dropped, or it succeeded just as ctx ended, and the
+	// address scan is unchecked. ready is checked first, so once it is closed
+	// every row is matched, whatever ctx does.
+	var gaveUp atomic.Bool
+	afterMembership := func(oc objectChange) (int64, bool) {
+		select {
+		case <-ready:
+		default:
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				gaveUp.Store(true)
+				return 0, false
+			}
+		}
+		return match(oc)
+	}
+
+	// The residual scans start now, beside membership. Their own deadline and
+	// cancel end only them, and they are stopped and waited for on every path.
+	rctx, stopResidual := residualContext(ctx)
+	var residual sync.WaitGroup
+	defer func() {
+		stopResidual()
+		residual.Wait()
+	}()
+	// Cables are read by id alone: the parts scan reads modules and services.
+	partScan := slices.DeleteFunc(slices.Clone(partTypes), func(t string) bool { return t == cableType })
+	scans := []struct {
+		types []string
+		match func(objectChange) (int64, bool)
+	}{
+		{addrTypes, afterMembership},
+		{partScan, byScope},
+	}
 	found := make([]changeReadResult, len(scans))
-	for i, types := range scans {
-		if len(types) == 0 {
+	for i, scan := range scans {
+		if len(scan.types) == 0 {
 			continue
 		}
 		q := changeLogQuery(spec, f)
-		for _, t := range types {
+		for _, t := range scan.types {
 			q.Add(changedObjectTypeIDParam, strconv.Itoa(ids[t]))
 		}
 		r := changeRead{q: q, descendant: func(oc objectChange) (int64, bool) {
 			// A type the scan didn't ask for isn't kept, so a NetBox that ignores
 			// the type filter can't widen it.
-			if !slices.Contains(types, normalizeObjectType(oc.changedType())) {
+			if !slices.Contains(scan.types, normalizeObjectType(oc.changedType())) {
 				return 0, false
 			}
-			return match(oc)
+			return scan.match(oc)
 		}}
-		wg.Go(func() {
-			found[i] = p.runChangeRead(ctx, r, f, limit, p.changeScanCap())
-			found[i].scan, found[i].descendant = true, true
-			if found[i].err != nil {
-				fail(found[i].err)
-			}
-		})
+		residual.Go(func() { found[i] = p.residualScan(rctx, spec, r, f, limit) })
 	}
-	wg.Wait()
+
+	// One semaphore bounds every membership and by-id request, so a scope with
+	// many interfaces or members can't open more than cableEndWorkers at once.
+	sem := make(chan struct{}, cableEndWorkers)
+	m, err = p.descendantMembers(ctx, fail, sem, spec, scope, kind, ids, want)
+	close(ready)
+	if err != nil {
+		return nil, err
+	}
+	var byID []changeReadResult
+	if sets := memberSets(m, want); len(sets) > 0 {
+		byID = p.byIDReads(ctx, fail, sem, spec, f, limit, ids, sets, match)
+	}
 	for _, r := range byID {
 		if r.err != nil {
 			return nil, r.err
 		}
 	}
+	residual.Wait()
+	// ctx ended just as membership succeeded, before the address scan's matcher
+	// saw it had: the rows the matcher gave up on weren't checked.
+	if gaveUp.Load() {
+		found[0] = uncheckedResult(spec)
+	}
 	results := slices.Concat(m.reads, byID)
-	for i, types := range scans {
-		if len(types) == 0 {
-			continue
-		}
-		if found[i].err != nil {
-			return nil, found[i].err
-		}
-		results = append(results, found[i])
+	if len(addrTypes) > 0 && len(m.ifaces) > 0 {
+		results = append(results, found[0])
+	}
+	if len(partScan) > 0 {
+		results = append(results, found[1])
 	}
 	return results, nil
 }
@@ -403,6 +452,77 @@ func (p *Provider) byIDReads(ctx context.Context, fail context.CancelCauseFunc, 
 	return results
 }
 
+// residualRows is the page a residual scan reads: pageSize, unless a test has
+// lowered it.
+func (p *Provider) residualRows() int {
+	if p.residualRowsOverride > 0 {
+		return p.residualRowsOverride
+	}
+	return pageSize
+}
+
+// residualContext is ctx with a deadline halfway between now and ctx's own,
+// half the time left to the descendants deadline, or with only a cancel when
+// ctx has no deadline. Its deadline and its cancel end only the residual scans
+// under it, so the membership and by-id reads keep the other half, while ctx
+// ending (the descendants deadline, a failed read's cancel or the caller's)
+// still ends the scans.
+func residualContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	now := time.Now()
+	return context.WithDeadline(ctx, now.Add(deadline.Sub(now)/2))
+}
+
+// residualScan reads exactly one page of r under ctx, the residual context,
+// residualRows rows long, and never follows its next link, whatever the page's
+// size: NetBox's MAX_PAGE_SIZE may serve fewer rows than asked, and a second
+// fetch, made after r's matcher has waited for membership, could run under an
+// ended ctx and throw away a page already matched. Each row goes through
+// visit, as walkChangeRead's do, and the result is capped or full as theirs
+// are (stop), more being a next link, or rows left on the page when limit
+// stopped it. A scan that stops at limit is therefore full, not capped, which
+// the limit marker counts. oldest is the oldest row read.
+//
+// A page that came in time is matched however long r's matcher waits, and
+// stands even if ctx has ended by then. A fetch that failed, or that ctx ended
+// before the page came, checked nothing: the result is uncheckedResult's.
+// Either way it has no error and calls no fail: a residual scan doesn't fail
+// the descendant reads. The result is a scan and a descendant read.
+func (p *Provider) residualScan(ctx context.Context, spec provider.ChangeSpec, r changeRead, f changeFilter, limit int) changeReadResult {
+	q := url.Values{}
+	maps.Copy(q, r.q)
+	q.Set("limit", strconv.Itoa(p.residualRows()))
+	page, err := p.getListPageRetry(ctx, p.client.apiURL(changeLogEndpoint, q))
+	if err != nil {
+		return uncheckedResult(spec)
+	}
+	res := changeReadResult{scan: true, descendant: true}
+	scanned, more := 0, page.Next != nil && *page.Next != ""
+	for i, raw := range page.Results {
+		scanned++
+		if !res.visit(r, f, limit, raw) {
+			more = more || i < len(page.Results)-1
+			break
+		}
+	}
+	res.stop(scanned, more, limit)
+	return res
+}
+
+// uncheckedResult is a residual scan's result when it checked nothing: a
+// descendant scan, unchecked and capped, with no rows and no error, and oldest
+// at To, or now with no To, since anything in the range may have been missed.
+func uncheckedResult(spec provider.ChangeSpec) changeReadResult {
+	oldest := spec.To
+	if oldest.IsZero() {
+		oldest = time.Now()
+	}
+	return changeReadResult{scan: true, descendant: true, capped: true, unchecked: true, oldest: oldest}
+}
+
 // descendantWants is which descendant types a query reads, after Object types,
 // the scope kind and the type map.
 type descendantWants struct {
@@ -425,7 +545,7 @@ type members struct {
 	services map[int64]int64
 	// degraded: a MAC, module or service list was refused (401/403) or over
 	// its cap, so that type is left to the members the change log names (a
-	// module's, from its interfaces' deletes) and the scan.
+	// module's, from its interfaces' deletes) and the residual scan.
 	degraded bool
 	reads    []changeReadResult // membership reads, rows cleared, for the cut-off (membershipResult)
 }
@@ -898,8 +1018,8 @@ func (p *Provider) ipHistoryReads(ctx context.Context, fail context.CancelCauseF
 // ipHistoryResult is membershipResult, except that a read capped after passing
 // From (oldest strictly before a non-zero From) isn't capped: it read every IP
 // change recorded in the range, so in-range membership is complete, and only
-// older history is left to the scan. A read whose rows' times didn't parse
-// (oldest zero) hasn't shown it passed From, and stays capped.
+// older history is left to the address scan. A read whose rows' times didn't
+// parse (oldest zero) hasn't shown it passed From, and stays capped.
 func ipHistoryResult(spec provider.ChangeSpec, r changeReadResult) changeReadResult {
 	if r.capped && !spec.From.IsZero() && !r.oldest.IsZero() && r.oldest.Before(spec.From) {
 		r.capped = false

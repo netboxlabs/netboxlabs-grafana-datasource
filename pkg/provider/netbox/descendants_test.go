@@ -1419,7 +1419,7 @@ func TestDescendantMembers_MACBatchErrorOutranksRefusal(t *testing.T) {
 // slot of one semaphore, so no more than cableEndWorkers are answered at once.
 // Two MACs on every interface make more by-id batches than slots. The IP
 // creates come back only through the by-id read, since newer creates on an
-// interface that isn't leaf1's fill the address scan's cap, so every
+// interface that isn't leaf1's fill the address scan's page, so every
 // IP-history batch's IPs, one or more in each, must reach it.
 func TestDescendantChanges_MembershipTakesFourSlots(t *testing.T) {
 	s := manyInterfaces()
@@ -1438,7 +1438,7 @@ func TestDescendantChanges_MembershipTakesFourSlots(t *testing.T) {
 	}
 	s.changeDelay, s.listDelay = 20*time.Millisecond, 20*time.Millisecond
 	p := s.start(t)
-	p.changeScanCapOverride = 10
+	p.changeScanCapOverride, p.residualRowsOverride = 10, 10
 	results := descendantsOf(t, p, withDescendants(nameScope("leaf1")))
 	s.mu.Lock()
 	most := s.maxSlotInFlight
@@ -1840,8 +1840,8 @@ func TestChanges_DescendantIPMovedBetweenScopeObjectsShowsOnce(t *testing.T) {
 	}
 }
 
-// The scans stop at their cap short of everything attached; the by-id reads find
-// it: an IP's create and its move off, a MAC, a module, a service and a cable.
+// The scans' pages end short of everything attached; the by-id reads find it:
+// an IP's create and its move off, a MAC, a module, a service and a cable.
 func TestChanges_DescendantsFoundByIDPastTheScanCap(t *testing.T) {
 	svc := `{"parent_object_type":12,"parent_object_id":17}`
 	rows := []loggedChange{
@@ -1852,7 +1852,7 @@ func TestChanges_DescendantsFoundByIDPastTheScanCap(t *testing.T) {
 		ch(5, 20, "ipam.service", 600).snapshots(svc, svc),
 		ch(6, 15, "dcim.cable", 300),
 	}
-	// Leaf2's, newer than every target, and more than either scan's cap.
+	// Leaf2's, newer than every target, and more than either scan's page.
 	for i := range 11 {
 		rows = append(rows,
 			ipOn(100+i, 1, "create", int64(700+i), 200),
@@ -1866,7 +1866,7 @@ func TestChanges_DescendantsFoundByIDPastTheScanCap(t *testing.T) {
 	s.modules = []childRow{{id: 500, owner: 17}}
 	s.services = []serviceRow{{id: 600, parentType: "dcim.device", parent: 17}}
 	p := s.start(t)
-	p.changeScanCapOverride = 10
+	p.changeScanCapOverride, p.residualRowsOverride = 10, 10
 	spec := withDescendants(nameScope("leaf1"))
 	spec.From = scopedNow.Add(-60 * time.Minute)
 	changes := changesOK(t, p, spec)
@@ -1999,22 +1999,26 @@ func TestChanges_DescendantsInterfaceScope(t *testing.T) {
 	wantIDs(t, changesOK(t, s.start(t), spec), "#1", "#2", "#3")
 }
 
-// A device with nothing attached reads no addresses and nothing by id, and
-// scans only for modules and services: cables are only read by id. Its track
-// is today's.
+// A device with nothing attached reads nothing by id. Its residual scans start
+// before that's known, the address scan too, but a scope without interfaces
+// drops the address scan's result: no IP or MAC it could match exists, so its
+// capped page makes no cut-off, and the track is today's. The parts scan reads
+// modules and services: cables are only read by id.
 func TestChanges_DescendantsNothingAttached(t *testing.T) {
 	rows := []loggedChange{
 		ch(1, 1, "dcim.device", 17),
 		ch(2, 2, "dcim.interface", 5).relatedTo("dcim.device", 17),
+		created(3, 3, "ipam.ipaddress", 401, assignedTo(14, 200)),
+		created(4, 4, "ipam.ipaddress", 402, assignedTo(14, 200)),
 	}
 	s := newScopedChangeServer(rows...)
-	got := changesOK(t, s.start(t), withDescendants(nameScope("leaf1")))
+	p := s.start(t)
+	p.residualRowsOverride = 1
+	got := changesOK(t, p, withDescendants(nameScope("leaf1")))
 	sameRows(t, got, changesOK(t, newScopedChangeServer(rows...).start(t), scoped(nameScope("leaf1"), 50)))
 
-	for _, q := range s.changeLog() {
-		if carries(q, 20, 21) {
-			t.Errorf("change-log read %v: want no address scan", q)
-		}
+	if addr := scanReads(s, 20, 21); len(addr) != 1 {
+		t.Errorf("address scans = %v, want one", addr)
 	}
 	parts := scanReads(s, 17, 22, 23)
 	if len(parts) != 1 {
@@ -2218,8 +2222,8 @@ func TestChanges_TwoActionsDescendantScansFilterLocally(t *testing.T) {
 	}
 }
 
-// A scan that stops at the cap ends the track with a cut-off that says only
-// what's attached was cut.
+// A scan whose page ends with rows left ends the track with a cut-off that says
+// only what's attached was cut.
 func TestChanges_DescendantScanCapShowsCutoff(t *testing.T) {
 	var rows []loggedChange
 	for i := 1; i <= 5; i++ {
@@ -2229,7 +2233,7 @@ func TestChanges_DescendantScanCapShowsCutoff(t *testing.T) {
 	s := newScopedChangeServer(rows...)
 	s.interfaces = []childRow{{id: 100, owner: 17}}
 	p := s.start(t)
-	p.changeScanCapOverride = 3
+	p.changeScanCapOverride, p.residualRowsOverride = 3, 3
 	changes := changesOK(t, p, withDescendants(nameScope("leaf1")))
 	wantIDs(t, changes, "#10", "cutoff")
 	if cut := changes[len(changes)-1]; !cut.DescendantsOnly {
@@ -2285,7 +2289,8 @@ func trackServer() *scopedChangeServer {
 
 // A failed descendant read drops every descendant row, the module list's that
 // succeeded included, and keeps the rest of the track, with a marker. The
-// IP-history read fails, so the scans never start.
+// IP-history read fails, and the residual scans, which started beside
+// membership, are dropped with the rest.
 func TestChanges_DescendantReadFailureKeepsTheTrack(t *testing.T) {
 	s := trackServer()
 	s.failTypeID = 20
@@ -2347,7 +2352,7 @@ func TestChanges_DescendantsSlowDuringRetryBackoff(t *testing.T) {
 	wantIDs(t, changes, "#1", "#2", "descendants-error")
 	c := descendantsError(t, changes)
 	if u := provider.Classify(c.Err); u == nil || u.AnnotationReason != provider.AnnotationReasonDescendantsSlow {
-		t.Errorf("Err = %v, want %s: the deadline cut the address scan's retry", c.Err, provider.AnnotationReasonDescendantsSlow)
+		t.Errorf("Err = %v, want %s: the deadline cut the IP-history read's retry", c.Err, provider.AnnotationReasonDescendantsSlow)
 	}
 }
 
@@ -2512,15 +2517,249 @@ func TestDescendantsDeadline(t *testing.T) {
 	}
 }
 
+func TestResidualContext(t *testing.T) {
+	t.Run("half the time left", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		want := time.Now().Add(time.Second)
+		rctx, stop := residualContext(ctx)
+		defer stop()
+		if got, ok := rctx.Deadline(); !ok || got.Sub(want).Abs() > 250*time.Millisecond {
+			t.Errorf("deadline = now+%v (%v), want about now+1s", time.Until(got).Round(time.Millisecond), ok)
+		}
+	})
+	t.Run("no deadline", func(t *testing.T) {
+		rctx, stop := residualContext(context.Background())
+		defer stop()
+		if got, ok := rctx.Deadline(); ok {
+			t.Errorf("deadline = %v, want none", got)
+		}
+	})
+	t.Run("stop ends only it", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		rctx, stop := residualContext(ctx)
+		stop()
+		if rctx.Err() == nil || ctx.Err() != nil {
+			t.Errorf("after stop: residual Err %v, descendants Err %v; want ended, live", rctx.Err(), ctx.Err())
+		}
+	})
+}
+
+// holdChanges holds the change-log requests carrying typeID until the returned
+// open is called, which is safe to call more than once and is called when the
+// test ends. Call it after s.start, so the gate opens before the server closes.
+func holdChanges(t *testing.T, s *scopedChangeServer, typeID int) (open func()) {
+	t.Helper()
+	gate := make(chan struct{})
+	s.changeHoldTypeID, s.changeHold = typeID, gate
+	var once sync.Once
+	open = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(open)
+	return open
+}
+
+// The residual scans read one page each, of residualRows rows: 500 unless a
+// test lowers it.
+func TestChanges_ResidualScansReadOnePage(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override int
+		limit    string
+	}{
+		{"lowered", 2, "2"},
+		{"default", 0, "500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rows []loggedChange
+			for i := 1; i <= 5; i++ {
+				rows = append(rows,
+					created(i, i, "ipam.ipaddress", int64(400+i), assignedTo(14, 200)),
+					created(10+i, i, "dcim.module", int64(500+i), `{"device":18}`))
+			}
+			s := newestFirst(rows...)
+			s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+			p := s.start(t)
+			p.residualRowsOverride = tc.override
+			changesOK(t, p, withDescendants(nameScope("leaf1")))
+			for name, ids := range map[string][]int{"address": {20, 21}, "parts": {22, 23}} {
+				if scans := scanReads(s, ids...); len(scans) != 1 || scans[0].Get("limit") != tc.limit {
+					t.Errorf("%s scans = %v, want one with limit=%s", name, scans, tc.limit)
+				}
+			}
+		})
+	}
+}
+
+// One page, whatever its size: a page shorter than asked, with a next link,
+// isn't followed. The IP was unassigned in range from leaf1's interface, and
+// its history is gone: only the address scan can find it.
+func TestChanges_ResidualScanReadsOnePageWhateverItsSize(t *testing.T) {
+	rows := []loggedChange{ch(1, 1, "ipam.ipaddress", 401).snapshots(assignedTo(14, 100), unassigned)}
+	for i := 2; i <= 5; i++ {
+		rows = append(rows, created(i, i, "ipam.ipaddress", int64(400+i), assignedTo(14, 200)))
+	}
+	s := newestFirst(rows...)
+	s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+	s.scanPageSize = 2
+	changes := changesOK(t, s.start(t), withDescendants(nameScope("leaf1")))
+	for name, ids := range map[string][]int{"address": {20, 21}, "parts": {22, 23}} {
+		if scans := scanReads(s, ids...); len(scans) != 1 {
+			t.Errorf("%s scans = %v, want one", name, scans)
+		}
+	}
+	// The page was matched, and the address scan is capped at its two rows.
+	wantIDs(t, changes, "#1", "cutoff")
+	if cut, want := changes[len(changes)-1], scopedNow.Add(-2*time.Minute); !cut.Time.Equal(want) {
+		t.Errorf("cut-off at %v, want the page's oldest row, %v", cut.Time, want)
+	}
+}
+
+// The residual scans start with membership, and the address scan matches once
+// membership is known. The IP was unassigned in range, and its history is gone:
+// only the address scan can find it.
+func TestChanges_ResidualScansStartWithMembership(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 20, "ipam.ipaddress", 401).snapshots(assignedTo(14, 100), unassigned))
+	s.interfaces = []childRow{{id: 100, owner: 17}}
+	p := s.start(t)
+	open := holdChanges(t, s, scopedTypeIDs["dcim.interface"]) // the interface-delete read
+
+	type result struct {
+		changes []provider.Change
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		changes, err := p.Changes(context.Background(), withDescendants(nameScope("leaf1")))
+		done <- result{changes, err}
+	}()
+	started := func() bool { return len(scanReads(s, 20, 21)) == 1 && len(scanReads(s, 22, 23)) == 1 }
+	for end := time.Now().Add(2 * time.Second); !started(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(end) {
+			open()
+			t.Fatal("residual scans waited for membership")
+		}
+	}
+	open()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("Changes: %v", got.err)
+		}
+		wantIDs(t, got.changes, "#1")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Changes still blocked 5s after membership was let through")
+	}
+}
+
+// A residual scan held past its own deadline, or failing, leaves the indexed
+// results standing: the track doesn't wait for the descendants deadline, and
+// has no descendants-error.
+func TestChanges_ResidualTimeoutKeepsIndexedResults(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		hold   time.Duration
+		status int
+	}{
+		{"held past its deadline", 5 * time.Second, 0},
+		{"failed", 0, http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newestFirst(
+				ch(1, 1, "dcim.device", 17),
+				ipOn(2, 2, "create", 401, 100),
+				ch(3, 3, "dcim.module", 500).snapshots(`{"device":17,"serial":"a"}`, `{"device":17,"serial":"b"}`),
+			)
+			s.interfaces = []childRow{{id: 100, owner: 17}}
+			s.modules = []childRow{{id: 500, owner: 17}}
+			s.scanHold, s.scanStatus = tc.hold, tc.status
+			p := s.start(t)
+			p.descendantsWaitOverride = 2 * time.Second
+			spec := withDescendants(nameScope("leaf1"))
+			spec.From = scopedNow.Add(-60 * time.Minute)
+			changes, elapsed := changesWithin(t, p, spec, 4*time.Second)
+			wantIDs(t, changes, "#1", "#2", "#3", "cutoff")
+			if elapsed >= 1800*time.Millisecond {
+				t.Errorf("Changes took %v, want the residual scans given up at their own deadline, about 1s", elapsed)
+			}
+			if tc.hold == 0 {
+				return
+			}
+			ended := func() int {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				return s.scanHoldEnded
+			}
+			for end := time.Now().Add(time.Second); ended() != 2 && time.Now().Before(end); {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if n := ended(); n != 2 {
+				t.Errorf("held residual scans ended by their request's context = %d, want 2: cancelled, not abandoned", n)
+			}
+		})
+	}
+}
+
+// A page that arrived in time is matched once membership is known, even after
+// the residual deadline. The IP was unassigned in range with no history left:
+// only the address scan can find it.
+func TestChanges_ResidualPageMatchedAfterSlowMembership(t *testing.T) {
+	s := newestFirst(
+		ch(1, 1, "ipam.ipaddress", 401).snapshots(assignedTo(14, 100), unassigned),
+		created(2, 5, "ipam.ipaddress", 402, assignedTo(14, 200)),
+	)
+	s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+	p := s.start(t)
+	p.residualRowsOverride = 1
+	// The residual deadline is about 1.5s. The interface-delete read is let
+	// through at 2.2s: about 0.7s past it, and 0.8s before the descendants one.
+	p.descendantsWaitOverride = 3 * time.Second
+	time.AfterFunc(2200*time.Millisecond, holdChanges(t, s, scopedTypeIDs["dcim.interface"]))
+	spec := withDescendants(nameScope("leaf1"))
+	spec.From = scopedNow.Add(-60 * time.Minute)
+	changes, _ := changesWithin(t, p, spec, 5*time.Second)
+	wantIDs(t, changes, "#1", "cutoff")
+	// The page's reach: an unchecked scan would sit at now.
+	if cut, want := changes[len(changes)-1], scopedNow.Add(-time.Minute); !cut.Time.Equal(want) {
+		t.Errorf("cut-off at %v, want the page's oldest row, %v", cut.Time, want)
+	}
+}
+
+// Membership failing ends an address scan waiting for it, at once: the track
+// waits for neither deadline, and the failure is its marker's.
+func TestChanges_MembershipFailureEndsTheWaitingAddressScan(t *testing.T) {
+	s := trackServer()
+	s.failTypeID = scopedTypeIDs["dcim.interface"] // the interface-delete read
+	// So the address scan's page has arrived, and waits for membership.
+	s.failDelay = 200 * time.Millisecond
+	p := s.start(t)
+	p.descendantsWaitOverride = 3 * time.Second
+	changes, elapsed := changesWithin(t, p, withDescendants(nameScope("leaf1")), 5*time.Second)
+	if elapsed >= time.Second {
+		t.Errorf("Changes took %v, want the address scan ended when membership failed", elapsed)
+	}
+	var apiErr *APIError
+	if c := descendantsError(t, changes); !errors.As(c.Err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("Err = %v, want the interface-delete read's 500", c.Err)
+	}
+	if scans := scanReads(s, 20, 21); len(scans) != 1 {
+		t.Errorf("address scans = %v, want one", scans)
+	}
+}
+
 // An error that came back before the descendants deadline keeps its own cause,
-// though another read was still held when it did.
+// though another read was still held when it did: the IP-history read fails
+// beside the cable-end read, which is held past the deadline. Unless the
+// failure stops it as it comes, the deadline passes first.
 func TestChanges_EarlyFailureIsNotSlow(t *testing.T) {
 	s := trackServer()
 	s.failTypeID = 20
-	s.delayTypeID, s.delayFor = 22, 5*time.Second
+	// So the cable-end read is sent, and held, before the 500 comes.
+	s.failDelay = 100 * time.Millisecond
+	s.delayTypeID, s.delayFor = scopedTypeIDs["dcim.cabletermination"], 5*time.Second
 	p := s.start(t)
-	// Long enough that the membership reads finish well inside it, even on a
-	// loaded -race run: only the held parts scan is still running.
+	// Long enough that the IP-history read fails well inside it, even on a
+	// loaded -race run.
 	p.descendantsWaitOverride = 500 * time.Millisecond
 	changes, _ := changesWithin(t, p, withDescendants(nameScope("leaf1")), 2*time.Second)
 	wantIDs(t, changes, "#1", "#2", "descendants-error")
@@ -2530,27 +2769,36 @@ func TestChanges_EarlyFailureIsNotSlow(t *testing.T) {
 	}
 	var apiErr *APIError
 	if !errors.As(c.Err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
-		t.Errorf("Err = %v, want the address scan's 500", c.Err)
+		t.Errorf("Err = %v, want the IP-history read's 500", c.Err)
+	}
+	if ends := readsCarrying(s, scopedTypeIDs["dcim.cabletermination"]); len(ends) != 1 {
+		t.Errorf("cable-end reads = %v, want the one held beside the IP-history read", ends)
 	}
 }
 
 // A descendant read that fails stops the other descendant reads rather than
-// leave them to the descendants deadline: the held parts scan is cancelled, and
-// the track ends at once, with the address scan's 500 on its marker.
+// leave them to the descendants deadline, or the residual deadline: the parts
+// scan, held beside membership, is cancelled, and the track ends at once, with
+// the IP-history read's 500 on its marker.
 func TestChanges_DescendantFailureStopsTheOthers(t *testing.T) {
 	s := trackServer()
 	s.failTypeID = 20
+	// So the parts scan is sent, and held, before the 500 comes.
+	s.failDelay = 100 * time.Millisecond
 	s.delayTypeID, s.delayFor = 22, 5*time.Second
 	p := s.start(t)
 	p.descendantsWaitOverride = 3 * time.Second
 	changes, elapsed := changesWithin(t, p, withDescendants(nameScope("leaf1")), 5*time.Second)
 	if elapsed > time.Second {
-		t.Errorf("Changes took %v, want the parts scan stopped when the address scan failed", elapsed)
+		t.Errorf("Changes took %v, want the parts scan stopped when the IP-history read failed", elapsed)
 	}
 	wantIDs(t, changes, "#1", "#2", "descendants-error")
 	var apiErr *APIError
 	if c := descendantsError(t, changes); !errors.As(c.Err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
-		t.Errorf("Err = %v, want the address scan's 500", c.Err)
+		t.Errorf("Err = %v, want the IP-history read's 500", c.Err)
+	}
+	if parts := scanReads(s, 22, 23); len(parts) != 1 {
+		t.Errorf("parts scans = %v, want the one held beside membership", parts)
 	}
 }
 
@@ -2574,9 +2822,9 @@ func TestChanges_RequestTimeoutIsNotSlow(t *testing.T) {
 }
 
 // A query whose own read failed doesn't wait out the descendant reads: they
-// are cancelled, and the own read's error is the query's. The address scan is
-// held for longer than the test waits, with the descendants deadline left at
-// its 8s default.
+// are cancelled, and the own read's error is the query's. The reads of IP
+// changes, the IP-history read and the address scan, are held for longer than
+// the test waits, with the descendants deadline left at its 8s default.
 func TestChanges_FailedReadCancelsDescendants(t *testing.T) {
 	s := trackServer()
 	s.failTypeID = scopedTypeIDs["dcim.device"]

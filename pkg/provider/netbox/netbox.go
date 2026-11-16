@@ -121,6 +121,8 @@ type Provider struct {
 	namesWaitOverride time.Duration
 	// changeScanCapOverride lowers changeScanCapRows; tests only.
 	changeScanCapOverride int
+	// residualRowsOverride lowers the residual scans' page; tests only.
+	residualRowsOverride int
 	// childListCapOverride lowers ChildListCapRows; tests only.
 	childListCapOverride int
 	// descendantsWaitOverride replaces descendantsBudget; tests only.
@@ -1769,9 +1771,16 @@ const changeReadWorkers = 4
 // or runs past that deadline doesn't fail the query: the descendant rows are
 // dropped and the track ends with one descendants-error marker: the switch is
 // on by default, and a slow or refused read of what's attached mustn't blank
-// the scope's own track. When the descendant reads succeeded (they returned
-// results and no error), the track ends with a limit marker if the limit left
-// a change out; every other track is cut at the limit silently, as before.
+// the scope's own track. The two residual scans are the exception. They
+// read one page each, of IP and MAC changes and of module and service changes,
+// for what was taken off the scope or deleted before the indexed reads could
+// name it, under a shorter deadline of their own, half the descendants one
+// (residualContext). One that fails or runs past it fails nothing: what it
+// covers is left unchecked, the other descendant rows stand, and the track
+// ends with a cut-off marker. When the descendant reads succeeded (they
+// returned results and no error), the track ends with a limit marker if the
+// limit left a change out; every other track is cut at the limit silently, as
+// before.
 //
 // The names the markers carry are best effort. The network name reads (the
 // by-ID name fill, the diffs' related names and the journal authors) each wait

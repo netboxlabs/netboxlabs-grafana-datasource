@@ -730,7 +730,10 @@ type changeReadResult struct {
 	descendant bool
 	// full is a read that stopped at limit kept rows with rows left.
 	full bool
-	err  error
+	// unchecked is a residual scan that failed or ran out of time: nothing it
+	// covers was checked (residualScan).
+	unchecked bool
+	err       error
 }
 
 // runChangeRead walks one read to limit matches or maxRows rows. A related read
@@ -760,43 +763,60 @@ func relatedTypeRefused(err error) bool {
 }
 
 // walkChangeRead reads q, keeping each row that passes the read's own check
-// (its descendant matcher, when it has one) and the filter, until limit rows
-// are kept. A row's diff, which the filter's Changed fields and the track both
-// read, is worked out only once the read's own check has passed it. A row the
-// read already returned (offset pages shift as changes are logged) is skipped
-// by walkRows, and doesn't count toward maxRows.
+// and the filter (visit), until limit rows are kept. A row the read already
+// returned (offset pages shift as changes are logged) is skipped by walkRows,
+// and doesn't count toward maxRows.
 func (p *Provider) walkChangeRead(ctx context.Context, r changeRead, q url.Values, f changeFilter, limit, maxRows int) changeReadResult {
 	var res changeReadResult
 	scanned, more, err := p.walkRows(ctx, changeLogEndpoint, q, maxRows, func(raw json.RawMessage) bool {
-		d, ok := decodeChangeRow(raw)
+		return res.visit(r, f, limit, raw)
+	})
+	res.err = err
+	res.stop(scanned, more, limit)
+	return res
+}
+
+// visit reads one change-log row of r into res: it keeps the row when it
+// passes r's own check (its descendant matcher, when it has one) and the
+// filter, and reports whether r reads on, false once limit rows are kept. A
+// row's diff, which the filter's Changed fields and the track both read, is
+// worked out only once r's own check has passed it. oldest is the time of the
+// last row read with one, the oldest, since rows come newest first.
+func (res *changeReadResult) visit(r changeRead, f changeFilter, limit int, raw json.RawMessage) bool {
+	d, ok := decodeChangeRow(raw)
+	if !ok {
+		return true
+	}
+	if !d.at.IsZero() {
+		res.oldest = d.at
+	}
+	if r.descendant != nil {
+		owner, ok := r.descendant(d.oc)
 		if !ok {
 			return true
 		}
-		if !d.at.IsZero() {
-			res.oldest = d.at
-		}
-		if r.descendant != nil {
-			owner, ok := r.descendant(d.oc)
-			if !ok {
-				return true
-			}
-			d.descendant, d.owner = true, owner
-		} else if !r.keep(d.oc) {
-			return true
-		}
-		if d.diff = changeDiff(d.oc); !f.keep(d) {
-			return true
-		}
-		// Only once kept, so a scan's rejected rows don't pay for it.
-		d.oc.changedObject = onceChangedObject(d.oc.ChangedObject)
-		d.fromRelated = r.fromRelated
-		res.rows = append(res.rows, d)
-		return len(res.rows) < limit
-	})
-	res.scanned, res.err = scanned, err
+		d.descendant, d.owner = true, owner
+	} else if !r.keep(d.oc) {
+		return true
+	}
+	if d.diff = changeDiff(d.oc); !f.keep(d) {
+		return true
+	}
+	// Only once kept, so a scan's rejected rows don't pay for it.
+	d.oc.changedObject = onceChangedObject(d.oc.ChangedObject)
+	d.fromRelated = r.fromRelated
+	res.rows = append(res.rows, d)
+	return len(res.rows) < limit
+}
+
+// stop records how a read ended: scanned rows read, and more when it stopped
+// with rows or pages it hadn't read. Rows left short of limit kept rows make it
+// capped, since a row it would have kept may be among them; rows left at limit
+// make it full, a track the limit cut.
+func (res *changeReadResult) stop(scanned int, more bool, limit int) {
+	res.scanned = scanned
 	res.capped = more && len(res.rows) < limit
 	res.full = more && len(res.rows) == limit
-	return res
 }
 
 // mergeChanges merges the reads' rows newest first and keeps the newest limit.

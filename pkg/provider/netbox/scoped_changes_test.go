@@ -223,6 +223,15 @@ type scopedChangeServer struct {
 	unavailableTypeID int           // non-zero: requests carrying this type id answer 503
 	delayTypeID       int           // non-zero: requests carrying this type id are held delayFor
 	delayFor          time.Duration // ends early when the request's context does
+	changeHoldTypeID  int           // non-zero: requests carrying this type id answer only once changeHold is closed, or their context ends
+	changeHold        chan struct{}
+
+	// The residual scans: change-log requests carrying neither changed_object_id
+	// nor related_object_id (residualScanRequest). scanHold, then scanStatus,
+	// apply before the type-id cases above.
+	scanStatus   int           // non-zero: they answer this status
+	scanHold     time.Duration // they're held this long first, ending early when the request's context does
+	scanPageSize int           // non-zero: their pages hold at most this many rows, with a next link while rows are left, as a NetBox MAX_PAGE_SIZE below the asked limit does
 
 	mu          sync.Mutex
 	requests    []string // path?query
@@ -231,10 +240,11 @@ type scopedChangeServer struct {
 	maxInFlight int      // the most inFlight has been
 	// slotInFlight is the requests being answered now that Include descendants
 	// makes under its semaphore: the list paths above, and change-log requests
-	// carrying changed_object_id or related_object_id. A descendant scan carries
-	// neither, and isn't counted.
+	// carrying changed_object_id or related_object_id. A residual scan carries
+	// neither (residualScanRequest), and isn't counted.
 	slotInFlight    int
 	maxSlotInFlight int // the most slotInFlight has been
+	scanHoldEnded   int // the scanHold holds their request's context ended
 }
 
 // childRow is an interface or VM interface on owner, the device or VM, with its
@@ -401,10 +411,23 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 				s.inFlight--
 				s.mu.Unlock()
 			}()
-			if q := r.URL.Query(); q.Has(changedObjectIDParam) || q.Has(relatedObjectIDParam) {
+			residual := residualScanRequest(r.URL.Query())
+			if !residual {
 				defer s.slotTaken()()
 			}
 			time.Sleep(s.changeDelay)
+			if residual {
+				if !holdRequest(r, s.scanHold) {
+					s.mu.Lock()
+					s.scanHoldEnded++
+					s.mu.Unlock()
+					return
+				}
+				if s.scanStatus != 0 {
+					refuse(s.scanStatus, `{"detail":"nope"}`)
+					return
+				}
+			}
 			types := r.URL.Query()["changed_object_type_id"]
 			picked := func(id int) bool { return id != 0 && slices.Contains(types, strconv.Itoa(id)) }
 			switch {
@@ -418,6 +441,12 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 				return
 			case picked(s.delayTypeID):
 				if !holdRequest(r, s.delayFor) {
+					return
+				}
+			case picked(s.changeHoldTypeID):
+				select {
+				case <-s.changeHold:
+				case <-r.Context().Done():
 					return
 				}
 			}
@@ -535,7 +564,17 @@ func (s *scopedChangeServer) serveChanges(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		limit = 50
 	}
+	if s.scanPageSize > 0 && residualScanRequest(q) {
+		limit = min(limit, s.scanPageSize)
+	}
 	writeOffsetPage(w, r, out, limit)
+}
+
+// residualScanRequest reports a change-log request that is a residual scan: it
+// carries neither changed_object_id, as the own and by-id reads do, nor
+// related_object_id, as the related and membership reads do.
+func residualScanRequest(q url.Values) bool {
+	return !q.Has(changedObjectIDParam) && !q.Has(relatedObjectIDParam)
 }
 
 // holdRequest waits d before a fixture answers, or until the request's context

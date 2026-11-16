@@ -149,6 +149,12 @@ const (
 	cableList            = "dcim/cables"
 )
 
+// The lists a device's modules and a device's or VM's services are read from.
+const (
+	moduleList  = "dcim/modules"
+	serviceList = "ipam/services"
+)
+
 // The types the descendant scans read: addresses in one scan, the parts in
 // another, so address churn can't use up the cap the parts share.
 const (
@@ -205,11 +211,20 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 		return nil, nil
 	}
 
-	// A device's cable ends are read through its interfaces, so its cables need
-	// them read too.
-	wantCables := slices.Contains(partTypes, cableType)
-	wantIfaces := len(addrTypes) > 0 || (wantCables && scope.Type == "dcim.device")
-	m, err := p.descendantMembers(ctx, fail, spec, scope, kind, ids, wantIfaces, wantCables)
+	// Membership is read for the types the scans read. A device's cable ends
+	// are read through its interfaces, so its cables need them read too.
+	want := descendantWants{
+		ips:      slices.Contains(addrTypes, ipAddressType),
+		macs:     slices.Contains(addrTypes, macAddressType),
+		cables:   slices.Contains(partTypes, cableType),
+		modules:  slices.Contains(partTypes, moduleType),
+		services: slices.Contains(partTypes, serviceType),
+	}
+	want.ifaces = want.ips || want.macs || (want.cables && scope.Type == "dcim.device")
+	// One semaphore bounds every membership request, so a scope with many
+	// interfaces can't open more than cableEndWorkers at once.
+	sem := make(chan struct{}, cableEndWorkers)
+	m, err := p.descendantMembers(ctx, fail, sem, spec, scope, kind, ids, want)
 	if err != nil {
 		return nil, err
 	}
@@ -279,34 +294,63 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 	return results, nil
 }
 
-// members is who the scope's children are over [From, now]. Each child is
-// mapped to the scope object that owns it, which names it on the track.
-type members struct {
-	ifaces map[int64]int64    // interface id -> owning scope object id
-	cables map[int64]int64    // cable id -> owning scope object id
-	reads  []changeReadResult // membership reads, rows cleared, for the cut-off (membershipResult)
+// descendantWants is which descendant types a query reads, after Object types,
+// the scope kind and the type map.
+type descendantWants struct {
+	ifaces   bool // read the scope's interfaces (current and deleted since From): for addresses, and a device's cable ends
+	ips      bool
+	macs     bool
+	cables   bool
+	modules  bool
+	services bool
 }
 
-// descendantMembers finds the scope's interfaces and cables over [From, now]:
-// the current ones from their lists, plus the ones the change log names since
-// From: interfaces deleted, and cables whose ends were on the scope's
-// interfaces. The range runs to now, not To, because a child that left after
-// To still had its changes in the range.
+// members is who the scope's children are over [From, now]. Each set maps a
+// child's id to the scope object that owns it, which names it on the track.
+type members struct {
+	ifaces   map[int64]int64 // interface id -> owning scope object id
+	cables   map[int64]int64
+	ips      map[int64]int64
+	macs     map[int64]int64
+	modules  map[int64]int64
+	services map[int64]int64
+	// degraded: a module or service list was refused (401/403) or over its
+	// cap, so that type is left to its change-log members and the scan.
+	degraded bool
+	reads    []changeReadResult // membership reads, rows cleared, for the cut-off (membershipResult)
+}
+
+// descendantMembers finds the scope's children over [From, now], for the types
+// want names: the current ones from their lists, plus the ones the change log
+// names since From: interfaces deleted, the modules those interfaces were on,
+// and cables whose ends were on the scope's interfaces. The range runs to now,
+// not To, because a child that left after To still had its changes in the
+// range.
 //
-// wantIfaces reads a device or VM scope's interfaces; an interface scope's are
-// its own objects, read or not. wantCables reads a device or interface scope's
-// cables. A device's cable ends are found through its interfaces, so a caller
-// that wants a device's cables wants its interfaces too.
+// want.ifaces reads a device or VM scope's interfaces; an interface scope's are
+// its own objects, read or not. Each part type is read only where the kind has
+// it, whatever the caller wants: cables on devices and interfaces, modules on
+// devices, services on devices and VMs. A device's cable ends are found through
+// its interfaces, so a caller that wants a device's cables wants its interfaces
+// too.
 //
-// Stage 1 runs the interface list, the interface-delete read and the cable list
-// at once; stage 2, the cable-end reads, needs the interfaces stage 1 found.
-// Each read fills its own variable and the sets are built after each stage's
-// Wait, so no map is written concurrently. Every list row and change-log row is
-// checked against the scope here, whatever NetBox did with the filters. The
-// first error, in that order, is returned as it came, and each read that fails
-// calls fail as it does (descendantChanges).
-func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCauseFunc, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, wantIfaces, wantCables bool) (members, error) {
-	m := members{ifaces: map[int64]int64{}, cables: map[int64]int64{}}
+// Stage 1 runs the interface list, the interface-delete read and the cable,
+// module and service lists at once; stage 2, the cable-end reads, needs the
+// interfaces stage 1 found. Every request runs under a slot of sem, and none
+// holds a slot while it waits for another, so no slot sits idle. Each read
+// fills its own variables and the sets are built after each stage's Wait, so
+// no map is written concurrently. Every list row and change-log row is checked
+// against the scope here, whatever NetBox did with the filters.
+//
+// A module or service list refused (401 or 403) or over the cap leaves only
+// its own type short: members is degraded, with no error and no fail. Any
+// other failure is returned, the first in a fixed order, as it came, and each
+// read that fails calls fail as it does (descendantChanges).
+func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCauseFunc, sem chan struct{}, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, want descendantWants) (members, error) {
+	m := members{
+		ifaces: map[int64]int64{}, cables: map[int64]int64{}, ips: map[int64]int64{},
+		macs: map[int64]int64{}, modules: map[int64]int64{}, services: map[int64]int64{},
+	}
 	inScope, scopeIDs := scope.idSet(), scope.idStrings()
 	// changeReads refuses a scope without objects before this runs. Without ids
 	// every list and read here would ask for all of NetBox.
@@ -314,51 +358,127 @@ func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCau
 		return m, nil
 	}
 	ifaceScope := kind.ifaceList == ""
-	readIfaces := wantIfaces && !ifaceScope
-	wantCables = wantCables && kind.cables
+	readIfaces := want.ifaces && !ifaceScope
+	wantCables := want.cables && kind.cables
+	wantModules := want.modules && kind.modules
+	wantServices := want.services && kind.services
+	// The deletes name the interfaces, and the modules they were on. A type the
+	// map lacks is a model this NetBox doesn't have: no deletes to read.
+	readDeletes := (readIfaces || wantModules) && !ifaceScope && ids[kind.ifaceType] != 0
+
+	// slotted runs read under a slot of sem. A slot it can't take, because ctx
+	// ended, is read's error.
+	slotted := func(read func() error) error {
+		if err := takeSlot(ctx, sem); err != nil {
+			return err
+		}
+		defer func() { <-sem }()
+		return read()
+	}
+	// existing is the scope objects the device- and VM-keyed lists may name,
+	// read at most once for all of them. Only a Match-by-ID scope reads, so only
+	// it takes a slot; a list asks before it takes its own, so none holds one
+	// while it waits.
+	existing := sync.OnceValues(func() ([]string, error) {
+		if spec.ScopeMatch != scopeMatchID {
+			return scopeIDs, nil
+		}
+		var owners []string
+		err := slotted(func() (err error) {
+			owners, err = p.existingScopeIDs(ctx, spec, kind, inScope, scopeIDs)
+			return err
+		})
+		return owners, err
+	})
+	// listExisting runs list over the scope objects that exist, under a slot.
+	// With none, it lists nothing: an empty filter would list all of NetBox.
+	listExisting := func(list func(owners []string) error) error {
+		owners, err := existing()
+		if err != nil || len(owners) == 0 {
+			return err
+		}
+		return slotted(func() error { return list(owners) })
+	}
 
 	var (
-		ifaceRows, cableRows []json.RawMessage
-		ifaceErr, cableErr   error
-		deleted              changeReadResult
-		deleteRan            bool
+		ifaceRows, cableRows                                 []json.RawMessage
+		listedModules, listedServices                        map[int64]int64
+		deleted                                              changeReadResult
+		ifaceErr, deleteErr, cableErr, moduleErr, serviceErr error
 	)
 	failed := func(err error) {
 		if err != nil {
 			fail(err)
 		}
 	}
+	// A refused list fails only its own type, so it doesn't stop the others.
+	failedUnlessRefused := func(err error) {
+		if !listRefused(err) {
+			failed(err)
+		}
+	}
 	var wg sync.WaitGroup
 	if readIfaces {
 		wg.Go(func() {
-			ifaceRows, ifaceErr = p.currentInterfaces(ctx, spec, kind, inScope, scopeIDs)
+			ifaceErr = listExisting(func(owners []string) (err error) {
+				ifaceRows, err = p.currentInterfaces(ctx, kind, owners)
+				return err
+			})
 			failed(ifaceErr)
 		})
-		// A type the map lacks is a model this NetBox doesn't have: no deletes
-		// to read.
-		if typeID := ids[kind.ifaceType]; typeID != 0 {
-			deleteRan = true
-			r := interfaceDeleteRead(spec, scope, kind, ids, typeID, inScope, scopeIDs)
-			wg.Go(func() {
+	}
+	if readDeletes {
+		r := interfaceDeleteRead(spec, scope, kind, ids, ids[kind.ifaceType], inScope, scopeIDs)
+		wg.Go(func() {
+			deleteErr = slotted(func() error {
 				deleted = p.runMembershipRead(ctx, r)
-				failed(deleted.err)
+				return deleted.err
 			})
-		}
+			failed(deleteErr)
+		})
 	}
 	if wantCables {
 		wg.Go(func() {
-			if ifaceScope {
-				cableRows, cableErr = p.listChildren(ctx, interfaceList, briefQuery("id", scopeIDs))
-			} else {
-				q := url.Values{"device_id": slices.Clone(scopeIDs), "fields": {"id,a_terminations,b_terminations"}}
-				cableRows, cableErr = p.listChildren(ctx, cableList, q)
-			}
+			cableErr = slotted(func() (err error) {
+				if ifaceScope {
+					cableRows, err = p.listChildren(ctx, interfaceList, briefQuery("id", scopeIDs))
+				} else {
+					q := url.Values{"device_id": slices.Clone(scopeIDs), "fields": {"id,a_terminations,b_terminations"}}
+					cableRows, err = p.listChildren(ctx, cableList, q)
+				}
+				return err
+			})
 			failed(cableErr)
 		})
 	}
+	if wantModules {
+		wg.Go(func() {
+			moduleErr = listExisting(func(owners []string) (err error) {
+				listedModules, err = p.moduleMembers(ctx, owners, inScope)
+				return err
+			})
+			failedUnlessRefused(moduleErr)
+		})
+	}
+	if wantServices {
+		wg.Go(func() {
+			serviceErr = listExisting(func(owners []string) (err error) {
+				listedServices, err = p.serviceMembers(ctx, scope.Type, kind, owners, inScope)
+				return err
+			})
+			failedUnlessRefused(serviceErr)
+		})
+	}
 	wg.Wait()
-	for _, err := range []error{ifaceErr, deleted.err, cableErr} {
+	for _, err := range []error{ifaceErr, deleteErr, cableErr} {
 		if err != nil {
+			return members{}, err
+		}
+	}
+	for _, err := range []error{moduleErr, serviceErr} {
+		if listRefused(err) {
+			m.degraded = true
+		} else if err != nil {
 			return members{}, err
 		}
 	}
@@ -376,16 +496,25 @@ func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCau
 			addMember(m.ifaces, id, owner)
 		}
 	}
-	if deleteRan {
+	// The listed modules first, so a module the list found keeps the list's
+	// owner, which addMember leaves in place.
+	maps.Copy(m.modules, listedModules)
+	if readDeletes {
 		for _, d := range deleted.rows {
 			// keep checked the owner; a row without the interface's id names none.
 			owner, _ := snapshotID(d.oc.PrechangeData, kind.ownerField)
-			if d.oc.ChangedObjectID > 0 {
+			if readIfaces && d.oc.ChangedObjectID > 0 {
 				addMember(m.ifaces, d.oc.ChangedObjectID, owner)
+			}
+			// A module deleted along with its interfaces is gone from the list:
+			// only their deletes still name it.
+			if module, ok := snapshotID(d.oc.PrechangeData, "module"); ok && wantModules {
+				addMember(m.modules, module, owner)
 			}
 		}
 		m.reads = append(m.reads, membershipResult(spec, deleted))
 	}
+	maps.Copy(m.services, listedServices)
 	for _, raw := range cableRows {
 		row := decodeObject(raw)
 		if ifaceScope {
@@ -407,7 +536,7 @@ func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCau
 	if !wantCables || len(m.ifaces) == 0 || ifaceTypeID == 0 || endTypeID == 0 {
 		return m, nil
 	}
-	ends := p.cableEndReads(ctx, fail, spec, ifaceTypeID, endTypeID, m.ifaces)
+	ends := p.cableEndReads(ctx, fail, sem, spec, ifaceTypeID, endTypeID, m.ifaces)
 	for _, r := range ends {
 		if r.err != nil {
 			return members{}, r.err
@@ -429,30 +558,128 @@ func (p *Provider) descendantMembers(ctx context.Context, fail context.CancelCau
 	return m, nil
 }
 
-// currentInterfaces reads a device or VM scope's current interfaces. On a
-// Match-by-ID scope it first reads which scope objects exist, and lists only
-// those: the interface lists' device_id and virtual_machine_id are choice
-// filters, and one deleted id makes the list a 400. A deleted object's
-// interface deletes still come from the delete read.
-func (p *Provider) currentInterfaces(ctx context.Context, spec provider.ChangeSpec, kind descendantKind, inScope map[int64]bool, scopeIDs []string) ([]json.RawMessage, error) {
-	owners := scopeIDs
-	if spec.ScopeMatch == scopeMatchID {
-		rows, err := p.listChildren(ctx, kind.scopeList, briefQuery("id", scopeIDs))
-		if err != nil {
-			return nil, err
+// takeSlot takes a slot of sem, or returns context.Cause(ctx) once ctx has
+// ended. A non-nil return holds no slot: ctx is checked first, and a slot the
+// select won as ctx ended is given back. The caller stores a non-nil return
+// as its read's error, never a result with no rows and no error, and releases
+// the slot (<-sem) only after a nil return.
+func takeSlot(ctx context.Context, sem chan struct{}) error {
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	select {
+	case sem <- struct{}{}:
+		if ctx.Err() != nil {
+			<-sem
+			return context.Cause(ctx)
 		}
-		exists := map[string]bool{}
-		for _, raw := range rows {
-			if id, ok := snapshotID(decodeObject(raw), "id"); ok && inScope[id] {
-				exists[strconv.FormatInt(id, 10)] = true
-			}
-		}
-		owners = slices.DeleteFunc(slices.Clone(scopeIDs), func(id string) bool { return !exists[id] })
-		if len(owners) == 0 {
-			return nil, nil
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
+// listRefused reports a list error that fails only the list's own type: the
+// token may not read it (a 401, or listChildren's descendants-forbidden for a
+// 403), or it is over listChildren's cap. nil is not refused.
+func listRefused(err error) bool {
+	var annErr *AnnotationError
+	if errors.As(err, &annErr) {
+		return annErr.Reason == provider.AnnotationReasonDescendantsForbidden ||
+			annErr.Reason == provider.AnnotationReasonTooManyChildren
+	}
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized
+}
+
+// existingScopeIDs is the scope objects of scopeIDs that exist now. On a
+// Match-by-ID scope it reads them from the scope type's list: the device_id
+// and virtual_machine_id filters of the interface and module lists (and the
+// service list's, on NetBox 4.2) are choice filters, and one deleted id makes
+// the list a 400. A scope matched by name was just looked up, so its ids are
+// returned as they are. A deleted object's interface deletes, and the modules
+// they name, still come from the delete read.
+func (p *Provider) existingScopeIDs(ctx context.Context, spec provider.ChangeSpec, kind descendantKind, inScope map[int64]bool, scopeIDs []string) ([]string, error) {
+	if spec.ScopeMatch != scopeMatchID {
+		return scopeIDs, nil
+	}
+	rows, err := p.listChildren(ctx, kind.scopeList, briefQuery("id", scopeIDs))
+	if err != nil {
+		return nil, err
+	}
+	exists := map[string]bool{}
+	for _, raw := range rows {
+		if id, ok := snapshotID(decodeObject(raw), "id"); ok && inScope[id] {
+			exists[strconv.FormatInt(id, 10)] = true
 		}
 	}
+	return slices.DeleteFunc(slices.Clone(scopeIDs), func(id string) bool { return !exists[id] }), nil
+}
+
+// currentInterfaces lists the current interfaces of owners, the device or VM
+// scope objects that exist (existingScopeIDs).
+func (p *Provider) currentInterfaces(ctx context.Context, kind descendantKind, owners []string) ([]json.RawMessage, error) {
 	return p.listChildren(ctx, kind.ifaceList, briefQuery(kind.ownerParam, owners))
+}
+
+// moduleMembers lists the modules on owners, the scope devices that exist:
+// each module whose device is in the scope, owned by that device.
+func (p *Provider) moduleMembers(ctx context.Context, owners []string, inScope map[int64]bool) (map[int64]int64, error) {
+	q := url.Values{"device_id": slices.Clone(owners), "fields": {"id,device"}}
+	rows, err := p.listChildren(ctx, moduleList, q)
+	if err != nil {
+		return nil, err
+	}
+	set := map[int64]int64{}
+	for _, raw := range rows {
+		row := decodeObject(raw)
+		id, ok := snapshotID(row, "id")
+		owner, owned := refID(row, "device")
+		if ok && owned && inScope[owner] {
+			addMember(set, id, owner)
+		}
+	}
+	return set, nil
+}
+
+// serviceMembers lists the services on owners, the device or VM scope objects
+// that exist: each service whose parent is in the scope, owned by that parent.
+// fields names the parent in both shapes, NetBox 4.3's parent object and 4.2's
+// device and virtual_machine; NetBox leaves out a name its serializer doesn't
+// have.
+func (p *Provider) serviceMembers(ctx context.Context, scopeType string, kind descendantKind, owners []string, inScope map[int64]bool) (map[int64]int64, error) {
+	q := url.Values{kind.ownerParam: slices.Clone(owners), "fields": {"id,parent_object_type,parent_object_id,device,virtual_machine"}}
+	rows, err := p.listChildren(ctx, serviceList, q)
+	if err != nil {
+		return nil, err
+	}
+	set := map[int64]int64{}
+	for _, raw := range rows {
+		row := decodeObject(raw)
+		id, ok := snapshotID(row, "id")
+		owner, owned := serviceListOwner(row, scopeType, kind.ownerField, inScope)
+		if ok && owned {
+			addMember(set, id, owner)
+		}
+	}
+	return set, nil
+}
+
+// serviceListOwner is the scope object a service list row is on. From NetBox
+// 4.3 a row names its parent as parent_object_type, an app.model string that
+// must be scopeType, so a VM doesn't match a device that shares its id, and
+// parent_object_id. On 4.2 it nests its device or VM under ownerField.
+func serviceListOwner(row map[string]json.RawMessage, scopeType, ownerField string, inScope map[int64]bool) (int64, bool) {
+	var parentType string
+	if json.Unmarshal(row["parent_object_type"], &parentType) == nil && normalizeObjectType(parentType) == scopeType {
+		if id, ok := snapshotID(row, "parent_object_id"); ok && inScope[id] {
+			return id, true
+		}
+	}
+	if id, ok := refID(row, ownerField); ok && inScope[id] {
+		return id, true
+	}
+	return 0, false
 }
 
 // interfaceDeleteRead is the read of the scope's interfaces deleted since From:
@@ -480,9 +707,11 @@ func interfaceDeleteRead(spec provider.ChangeSpec, scope *resolvedScope, kind de
 // cableEndReads reads the cable ends recorded against ifaces since From: a
 // related read over the interfaces, not a scan of every cable end, since cable
 // ends are recorded against their port. The ids are sorted and batched to the
-// URL budget, and at most cableEndWorkers batches run at once. The results are
-// in batch order. A batch that fails calls fail with its error as it does.
-func (p *Provider) cableEndReads(ctx context.Context, fail context.CancelCauseFunc, spec provider.ChangeSpec, ifaceTypeID, endTypeID int, ifaces map[int64]int64) []changeReadResult {
+// URL budget, and each batch runs under a slot of sem, which the other
+// membership reads share. The results are in batch order. A batch that fails,
+// or that ctx ends while it waits for a slot, calls fail with its error as it
+// does.
+func (p *Provider) cableEndReads(ctx context.Context, fail context.CancelCauseFunc, sem chan struct{}, spec provider.ChangeSpec, ifaceTypeID, endTypeID int, ifaces map[int64]int64) []changeReadResult {
 	fixed := membershipQuery(spec)
 	fixed.Set(relatedObjectTypeParam, interfaceType)
 	fixed.Set(changedObjectTypeIDParam, strconv.Itoa(endTypeID))
@@ -495,14 +724,20 @@ func (p *Provider) cableEndReads(ctx context.Context, fail context.CancelCauseFu
 
 	batches := batcher.chunk(values)
 	results := make([]changeReadResult, len(batches))
-	sem := make(chan struct{}, cableEndWorkers)
 	var wg sync.WaitGroup
 	for i, batch := range batches {
 		r := changeRead{q: batcher.query(batch), keep: keep, fromRelated: true, relatedTypeID: ifaceTypeID}
-		sem <- struct{}{}
 		wg.Go(func() {
-			defer func() { <-sem }()
-			if results[i] = p.runMembershipRead(ctx, r); results[i].err != nil {
+			// A batch ctx ended before it ran fails with ctx's cause: with no
+			// error, it would read as one that found no cable ends.
+			if err := takeSlot(ctx, sem); err != nil {
+				results[i].err = err
+				fail(err)
+				return
+			}
+			results[i] = p.runMembershipRead(ctx, r)
+			<-sem
+			if results[i].err != nil {
 				fail(results[i].err)
 			}
 		})

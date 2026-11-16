@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,9 +41,49 @@ func membersSetup(t *testing.T, s *scopedChangeServer, spec provider.ChangeSpec)
 	return p, scope, kind, ids
 }
 
-// readMembers runs descendantMembers on a scope set up by membersSetup.
+// failLog records each error descendantMembers passes to fail.
+type failLog struct {
+	mu   sync.Mutex
+	errs []error
+}
+
+func (l *failLog) fail(err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.errs = append(l.errs, err)
+}
+
+func (l *failLog) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.errs)
+}
+
+// readMembers runs descendantMembers on a scope set up by membersSetup, wanting
+// its interfaces and cables as asked.
 func readMembers(p *Provider, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, wantIfaces, wantCables bool) (members, error) {
-	return p.descendantMembers(context.Background(), func(error) {}, spec, scope, kind, ids, wantIfaces, wantCables)
+	return readMembersWith(p, spec, scope, kind, ids, descendantWants{ifaces: wantIfaces, cables: wantCables}, &failLog{})
+}
+
+// readMembersWith runs descendantMembers on a scope set up by membersSetup,
+// wanting want, under a fresh semaphore of cableEndWorkers slots. fails records
+// what it passes to fail.
+func readMembersWith(p *Provider, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, want descendantWants, fails *failLog) (members, error) {
+	return p.descendantMembers(context.Background(), fails.fail, make(chan struct{}, cableEndWorkers), spec, scope, kind, ids, want)
+}
+
+// membersWith fails the test on an error, or on any fail call.
+func membersWith(t *testing.T, p *Provider, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, want descendantWants) members {
+	t.Helper()
+	var fails failLog
+	m, err := readMembersWith(p, spec, scope, kind, ids, want, &fails)
+	if err != nil {
+		t.Fatalf("descendantMembers: %v", err)
+	}
+	if n := fails.count(); n != 0 {
+		t.Fatalf("descendantMembers called fail %d times (%v), want none", n, fails.errs)
+	}
+	return m
 }
 
 func membersOK(t *testing.T, p *Provider, spec provider.ChangeSpec, scope *resolvedScope, kind descendantKind, ids map[string]int, wantIfaces, wantCables bool) members {
@@ -556,6 +597,307 @@ func TestDescendantMembers_NothingWantedNoRequests(t *testing.T) {
 	}
 }
 
+// A device's modules and services come from their lists, by the device. Each
+// row is checked here, whether NetBox honoured the lists' filters or not: a
+// module on leaf2, a service on VM 17 and one on leaf2 don't join. Interfaces
+// aren't listed for them, but their deletes are read, for the modules they
+// name.
+func TestDescendantMembers_ModulesAndServices(t *testing.T) {
+	for name, ignore := range map[string]bool{"filters honoured": false, "filters ignored": true} {
+		t.Run(name, func(t *testing.T) {
+			s := newScopedChangeServer()
+			s.modules = []childRow{{id: 500, owner: 17}, {id: 501, owner: 18}}
+			s.services = []serviceRow{
+				{id: 600, parentType: "dcim.device", parent: 17},
+				{id: 601, parentType: "virtualization.virtualmachine", parent: 17},
+				{id: 602, parentType: "dcim.device", parent: 18},
+			}
+			s.ignoreListFilter = ignore
+			spec := nameScope("leaf1")
+			p, scope, kind, ids := membersSetup(t, s, spec)
+			m := membersWith(t, p, spec, scope, kind, ids, descendantWants{modules: true, services: true})
+			wantSet(t, "modules", m.modules, map[int64]int64{500: 17})
+			wantSet(t, "services", m.services, map[int64]int64{600: 17})
+			if m.degraded {
+				t.Error("degraded = true, want false: no list was refused")
+			}
+
+			modules := s.requestsTo("dcim/modules")
+			if len(modules) != 1 || !reflect.DeepEqual(modules[0]["device_id"], []string{"17"}) ||
+				!reflect.DeepEqual(modules[0]["fields"], []string{"id,device"}) {
+				t.Errorf("module lists = %v, want one with device_id=17&fields=id,device", modules)
+			}
+			const serviceFields = "id,parent_object_type,parent_object_id,device,virtual_machine"
+			services := s.requestsTo("ipam/services")
+			if len(services) != 1 || !reflect.DeepEqual(services[0]["device_id"], []string{"17"}) ||
+				!reflect.DeepEqual(services[0]["fields"], []string{serviceFields}) {
+				t.Errorf("service lists = %v, want one with device_id=17&fields=%s", services, serviceFields)
+			}
+			if lists := s.requestsTo("dcim/interfaces"); len(lists) != 0 {
+				t.Errorf("interface lists = %v, want none: interfaces weren't wanted", lists)
+			}
+			reads := s.changeLog()
+			if len(reads) != 1 || reads[0].Get("action") != "delete" || reads[0].Get("changed_object_type_id") != "14" {
+				t.Errorf("change-log reads = %v, want the interface-delete read only", reads)
+			}
+		})
+	}
+}
+
+// NetBox 4.2's service rows name their device or VM instead of a parent
+// object. A VM's services are listed by virtual_machine_id, and a VM has no
+// modules to list, though the caller wants them.
+func TestDescendantMembers_Services42Shape(t *testing.T) {
+	t.Run("device", func(t *testing.T) {
+		s := newScopedChangeServer()
+		s.servicesV42 = true
+		s.ignoreListFilter = true
+		s.services = []serviceRow{
+			{id: 600, parentType: "dcim.device", parent: 17},
+			{id: 601, parentType: "virtualization.virtualmachine", parent: 17},
+		}
+		spec := nameScope("leaf1")
+		p, scope, kind, ids := membersSetup(t, s, spec)
+		m := membersWith(t, p, spec, scope, kind, ids, descendantWants{services: true})
+		wantSet(t, "services", m.services, map[int64]int64{600: 17})
+	})
+	t.Run("VM", func(t *testing.T) {
+		s := newScopedChangeServer()
+		s.servicesV42 = true
+		s.vms = []string{briefRow("virtualization/virtual-machines", 40, "name", "vm40", "vm40")}
+		s.services = []serviceRow{{id: 601, parentType: "virtualization.virtualmachine", parent: 40}}
+		spec := idScope("40")
+		spec.ScopeType = "virtualization.virtualmachine"
+		p, scope, kind, ids := membersSetup(t, s, spec)
+		m := membersWith(t, p, spec, scope, kind, ids, descendantWants{modules: true, services: true})
+		wantSet(t, "services", m.services, map[int64]int64{601: 40})
+		wantSet(t, "modules", m.modules, map[int64]int64{})
+
+		lists := s.requestsTo("ipam/services")
+		if len(lists) != 1 || !reflect.DeepEqual(lists[0]["virtual_machine_id"], []string{"40"}) || lists[0].Has("device_id") {
+			t.Errorf("service lists = %v, want one with virtual_machine_id=40 only", lists)
+		}
+		if lists := s.requestsTo("dcim/modules"); len(lists) != 0 {
+			t.Errorf("module lists = %v, want none: a VM has no modules", lists)
+		}
+	})
+}
+
+// A module deleted along with its interfaces is gone from the module list, but
+// their deletes' before data names it, on the device they were on. The delete
+// read runs for modules alone, and counts toward the cut-off; the interface
+// list doesn't run.
+func TestDescendantMembers_ModuleIDsFromInterfaceDeletes(t *testing.T) {
+	s := newScopedChangeServer(
+		ch(1, 30, "dcim.interface", 105).relatedTo("dcim.device", 17).as("delete").snapshots(`{"device":17,"module":502}`, ""),
+	)
+	spec := rangeSpec()
+	p, scope, kind, ids := membersSetup(t, s, spec)
+	m := membersWith(t, p, spec, scope, kind, ids, descendantWants{modules: true})
+	wantSet(t, "modules", m.modules, map[int64]int64{502: 17})
+	if len(m.reads) != 1 {
+		t.Errorf("reads = %d, want the delete read's", len(m.reads))
+	}
+	if lists := s.requestsTo("dcim/interfaces"); len(lists) != 0 {
+		t.Errorf("interface lists = %v, want none: interfaces weren't wanted", lists)
+	}
+}
+
+// A Match-by-ID scope may name a deleted device, which the interface and module
+// lists refuse with a 400 (the service list too, on NetBox 4.2). Which scope
+// devices exist is read once, for every list, and only those are listed. A
+// deleted device's modules still come from its interface deletes.
+func TestDescendantMembers_ExistingScopeObjectsReadOnce(t *testing.T) {
+	server := func() *scopedChangeServer {
+		s := newScopedChangeServer(
+			ch(1, 30, "dcim.interface", 105).relatedTo("dcim.device", 99).as("delete").snapshots(`{"device":99,"module":503}`, ""),
+		)
+		s.interfaces = []childRow{{id: 100, owner: 17}}
+		s.modules = []childRow{{id: 500, owner: 17}}
+		s.services = []serviceRow{{id: 600, parentType: "dcim.device", parent: 17}}
+		return s
+	}
+	want := descendantWants{ifaces: true, modules: true, services: true}
+	lists := []string{"dcim/interfaces", "dcim/modules", "ipam/services"}
+	t.Run("one of two deleted", func(t *testing.T) {
+		s := server()
+		spec := idScope("17", "99")
+		p, scope, kind, ids := membersSetup(t, s, spec)
+		m := membersWith(t, p, spec, scope, kind, ids, want)
+		wantSet(t, "modules", m.modules, map[int64]int64{500: 17, 503: 99})
+		wantSet(t, "services", m.services, map[int64]int64{600: 17})
+		if reads := s.requestsTo("dcim/devices"); len(reads) != 1 {
+			t.Errorf("device lists = %v, want one: the existence read, shared", reads)
+		}
+		for _, path := range lists {
+			if got := s.requestsTo(path); len(got) != 1 || !reflect.DeepEqual(got[0]["device_id"], []string{"17"}) {
+				t.Errorf("%s lists = %v, want one with device_id=17 only", path, got)
+			}
+		}
+	})
+	t.Run("only id deleted", func(t *testing.T) {
+		s := server()
+		spec := idScope("99")
+		p, scope, kind, ids := membersSetup(t, s, spec)
+		m := membersWith(t, p, spec, scope, kind, ids, want)
+		wantSet(t, "modules", m.modules, map[int64]int64{503: 99})
+		for _, path := range lists {
+			if got := s.requestsTo(path); len(got) != 0 {
+				t.Errorf("%s lists = %v, want none", path, got)
+			}
+		}
+	})
+}
+
+var errBoom = errors.New("boom")
+
+// takeSlot either holds a slot and returns nil, or holds none and returns the
+// context's cause. A free slot isn't taken once the context has ended, and a
+// full semaphore's slots stay with whoever holds them.
+func TestTakeSlot(t *testing.T) {
+	ended := func() context.Context {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(errBoom)
+		return ctx
+	}
+	t.Run("free slot", func(t *testing.T) {
+		sem := make(chan struct{}, 1)
+		if err := takeSlot(context.Background(), sem); err != nil || len(sem) != 1 {
+			t.Errorf("takeSlot = %v, %d slots held; want nil, 1", err, len(sem))
+		}
+	})
+	// Repeated, since a select between a free slot and an ended context picks
+	// either.
+	t.Run("free slot, context ended", func(t *testing.T) {
+		for range 100 {
+			sem := make(chan struct{}, 1)
+			if err := takeSlot(ended(), sem); !errors.Is(err, errBoom) || len(sem) != 0 {
+				t.Fatalf("takeSlot = %v, %d slots held; want %v, none", err, len(sem), errBoom)
+			}
+		}
+	})
+	t.Run("full, context ended", func(t *testing.T) {
+		sem := make(chan struct{}, 1)
+		sem <- struct{}{}
+		if err := takeSlot(ended(), sem); !errors.Is(err, errBoom) || len(sem) != 1 {
+			t.Errorf("takeSlot = %v, %d slots held; want %v, 1", err, len(sem), errBoom)
+		}
+	})
+}
+
+// A cable-end batch cut while it waits for a slot fails with the context's
+// cause: never no rows and no error, which would read as a batch that found
+// nothing. It sends nothing, and leaves the slot another read holds alone.
+func TestCableEndReads_CancelledWhileWaitingForASlot(t *testing.T) {
+	s := newScopedChangeServer()
+	p := s.start(t)
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	time.AfterFunc(20*time.Millisecond, func() { cancel(errBoom) })
+
+	done := make(chan []changeReadResult, 1)
+	go func() {
+		done <- p.cableEndReads(ctx, func(error) {}, sem, rangeSpec(), 14, 24, map[int64]int64{100: 17, 101: 17})
+	}()
+	var results []changeReadResult
+	select {
+	case results = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cableEndReads still blocked 2s after its context was cancelled")
+	}
+	if len(results) == 0 {
+		t.Fatal("no results, want one per batch")
+	}
+	for i, r := range results {
+		if !errors.Is(r.err, errBoom) {
+			t.Errorf("results[%d].err = %v, want %v", i, r.err, errBoom)
+		}
+	}
+	if len(sem) != 1 {
+		t.Errorf("%d slots held, want 1: the slot held before the call", len(sem))
+	}
+	if reads := s.changeLog(); len(reads) != 0 {
+		t.Errorf("change-log reads = %v, want none", reads)
+	}
+}
+
+// A list the token may not read (401 or 403), or one over the cap, leaves only
+// its own type to the change log: the other members stand, and nothing is
+// cancelled. A refused module list still keeps the modules the interface
+// deletes name. The interface list refused fails, as it always has.
+func TestDescendantMembers_ListRefusedFailsOnlyItsType(t *testing.T) {
+	server := func() *scopedChangeServer {
+		s := newScopedChangeServer(
+			ch(1, 30, "dcim.interface", 105).relatedTo("dcim.device", 17).as("delete").snapshots(`{"device":17,"module":502}`, ""),
+		)
+		s.interfaces = []childRow{{id: 100, owner: 17}}
+		s.modules = []childRow{{id: 500, owner: 17}, {id: 501, owner: 17}}
+		s.services = []serviceRow{{id: 600, parentType: "dcim.device", parent: 17}}
+		return s
+	}
+	want := descendantWants{ifaces: true, modules: true, services: true}
+	for _, tc := range []struct {
+		name     string
+		setup    func(*scopedChangeServer)
+		listCap  int
+		modules  map[int64]int64
+		services map[int64]int64
+	}{
+		{
+			name:    "services forbidden",
+			setup:   func(s *scopedChangeServer) { s.listStatusFor = map[string]int{"ipam/services": http.StatusForbidden} },
+			modules: map[int64]int64{500: 17, 501: 17, 502: 17}, services: map[int64]int64{},
+		},
+		{
+			name:    "modules unauthorized",
+			setup:   func(s *scopedChangeServer) { s.listStatusFor = map[string]int{"dcim/modules": http.StatusUnauthorized} },
+			modules: map[int64]int64{502: 17}, services: map[int64]int64{600: 17},
+		},
+		{
+			name:    "modules over the cap",
+			setup:   func(s *scopedChangeServer) { s.modules = append(s.modules, childRow{id: 504, owner: 17}) },
+			listCap: 2,
+			modules: map[int64]int64{502: 17}, services: map[int64]int64{600: 17},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := server()
+			tc.setup(s)
+			spec := rangeSpec()
+			p, scope, kind, ids := membersSetup(t, s, spec)
+			p.childListCapOverride = tc.listCap
+			var fails failLog
+			m, err := readMembersWith(p, spec, scope, kind, ids, want, &fails)
+			if err != nil {
+				t.Fatalf("descendantMembers: %v", err)
+			}
+			if !m.degraded {
+				t.Error("degraded = false, want true")
+			}
+			if n := fails.count(); n != 0 {
+				t.Errorf("fail called %d times (%v), want none", n, fails.errs)
+			}
+			wantSet(t, "modules", m.modules, tc.modules)
+			wantSet(t, "services", m.services, tc.services)
+			wantSet(t, "ifaces", m.ifaces, map[int64]int64{100: 17, 105: 17})
+		})
+	}
+	t.Run("interfaces forbidden", func(t *testing.T) {
+		s := server()
+		s.listStatusFor = map[string]int{"dcim/interfaces": http.StatusForbidden}
+		spec := rangeSpec()
+		p, scope, kind, ids := membersSetup(t, s, spec)
+		var fails failLog
+		_, err := readMembersWith(p, spec, scope, kind, ids, want, &fails)
+		annotationErr(t, err, provider.AnnotationReasonDescendantsForbidden)
+		if n := fails.count(); n != 1 {
+			t.Errorf("fail called %d times (%v), want once", n, fails.errs)
+		}
+	})
+}
+
 func TestSnapshotID(t *testing.T) {
 	data := map[string]json.RawMessage{}
 	for key, raw := range map[string]string{
@@ -811,7 +1153,7 @@ func TestChanges_DescendantsNothingAttached(t *testing.T) {
 func TestChanges_DescendantsOffMakesTodaysRequests(t *testing.T) {
 	s := eachKindServer()
 	changesOK(t, s.start(t), scoped(nameScope("leaf1"), 50))
-	for _, path := range []string{"dcim/interfaces", "dcim/cables", "virtualization/virtual-machines", "virtualization/interfaces"} {
+	for _, path := range []string{"dcim/interfaces", "dcim/cables", "dcim/modules", "ipam/services", "virtualization/virtual-machines", "virtualization/interfaces"} {
 		if lists := s.requestsTo(path); len(lists) != 0 {
 			t.Errorf("%s requests = %v, want none", path, lists)
 		}

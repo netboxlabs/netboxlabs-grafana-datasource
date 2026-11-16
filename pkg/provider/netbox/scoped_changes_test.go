@@ -151,10 +151,13 @@ func (c loggedChange) render(withRepr bool) string {
 // object_repr.
 //
 // The list paths Include descendants reads (dcim/interfaces,
-// virtualization/virtual-machines, virtualization/interfaces and dcim/cables)
-// filter as NetBox does too: repeated values OR, and each parameter narrows.
-// device_id and virtual_machine_id are choice filters on the interface lists,
-// so an id that names no device or VM is a 400; dcim/cables' device_id isn't.
+// virtualization/virtual-machines, virtualization/interfaces, dcim/cables,
+// dcim/modules and ipam/services) filter as NetBox does too: repeated values
+// OR, and each parameter narrows. device_id and virtual_machine_id are choice
+// filters on the interface, module and service lists, so an id that names no
+// device or VM is a 400 (on the service list, as on NetBox 4.2);
+// dcim/cables' device_id isn't. fields is recorded but not applied: every row
+// carries its whole shape.
 type scopedChangeServer struct {
 	changes        []loggedChange // newest first
 	relatedByID    bool           // related_object_type takes an id, as up to NetBox 4.4.3
@@ -190,13 +193,17 @@ type scopedChangeServer struct {
 	noObjectRepr bool                // change rows carry no object_repr, as before NetBox 4.5
 
 	// What's attached, for Include descendants.
-	interfaces       []childRow // dcim/interfaces
-	vms              []string   // brief rows at virtualization/virtual-machines
-	vmInterfaces     []childRow // virtualization/interfaces
-	cables           []cableRow // dcim/cables
-	listPageSize     int        // non-zero: the list paths above serve at most this many rows a page
-	listStatus       int        // non-zero: the list paths above answer this status
-	ignoreListFilter bool       // the list paths above ignore their filters
+	interfaces       []childRow     // dcim/interfaces
+	vms              []string       // brief rows at virtualization/virtual-machines
+	vmInterfaces     []childRow     // virtualization/interfaces
+	cables           []cableRow     // dcim/cables
+	modules          []childRow     // dcim/modules, each on its owner device
+	services         []serviceRow   // ipam/services
+	servicesV42      bool           // service rows name their device or virtual_machine, as on NetBox 4.2, not a parent object
+	listPageSize     int            // non-zero: the list paths above serve at most this many rows a page
+	listStatus       int            // non-zero: the list paths above answer this status
+	listStatusFor    map[string]int // a status per list path ("dcim/modules"), over listStatus
+	ignoreListFilter bool           // the list paths above ignore their filters
 
 	// Failing and slow change-log reads, picked by a changed_object_type_id the
 	// request carries. The first that applies, in this order, answers.
@@ -229,6 +236,14 @@ type cableRow struct {
 type cableEnd struct {
 	ct         string
 	id, device int64
+}
+
+// serviceRow is a service on its parent, parentType ("dcim.device" or
+// "virtualization.virtualmachine") id parent.
+type serviceRow struct {
+	id         int64
+	parentType string
+	parent     int64
 }
 
 func newScopedChangeServer(changes ...loggedChange) *scopedChangeServer {
@@ -343,7 +358,8 @@ func (s *scopedChangeServer) start(t *testing.T) *Provider {
 			time.Sleep(s.devicesDelay)
 			rows := lookupMatches(s.devices, r.URL.Query())
 			writePage(w, len(rows), rows)
-		case "dcim/interfaces", "virtualization/virtual-machines", "virtualization/interfaces", "dcim/cables":
+		case "dcim/interfaces", "virtualization/virtual-machines", "virtualization/interfaces", "dcim/cables",
+			"dcim/modules", "ipam/services":
 			s.serveChildren(w, r, path)
 		case "core/object-changes":
 			s.mu.Lock()
@@ -504,8 +520,12 @@ func writeOffsetPage(w http.ResponseWriter, r *http.Request, rows []string, size
 
 // serveChildren answers the list paths Include descendants reads.
 func (s *scopedChangeServer) serveChildren(w http.ResponseWriter, r *http.Request, path string) {
-	if s.listStatus != 0 {
-		w.WriteHeader(s.listStatus)
+	status, ok := s.listStatusFor[path]
+	if !ok {
+		status = s.listStatus
+	}
+	if status != 0 {
+		w.WriteHeader(status)
 		_, _ = fmt.Fprint(w, `{"detail":"nope"}`)
 		return
 	}
@@ -590,6 +610,40 @@ func (s *scopedChangeServer) serveChildren(w http.ResponseWriter, r *http.Reques
 				}
 			}
 			rows = append(rows, fmt.Sprintf(`{"id":%d,"a_terminations":[%s],"b_terminations":[%s]}`, c.id, strings.Join(a, ","), strings.Join(b, ",")))
+		}
+	case "dcim/modules":
+		if refuseUnknown("device_id", s.devices) {
+			return
+		}
+		for _, c := range s.modules {
+			if in("device_id", c.owner) {
+				rows = append(rows, fmt.Sprintf(`{"id":%d,"device":{"id":%d}}`, c.id, c.owner))
+			}
+		}
+	case "ipam/services":
+		if refuseUnknown("device_id", s.devices) || refuseUnknown("virtual_machine_id", s.vms) {
+			return
+		}
+		// Each filter keeps the services whose parent is one of its objects.
+		on := func(param, parentType string, c serviceRow) bool {
+			return !q.Has(param) || (c.parentType == parentType && in(param, c.parent))
+		}
+		ref := func(parentType string, c serviceRow) string {
+			if c.parentType != parentType {
+				return "null"
+			}
+			return fmt.Sprintf(`{"id":%d}`, c.parent)
+		}
+		for _, c := range s.services {
+			if !on("device_id", "dcim.device", c) || !on("virtual_machine_id", "virtualization.virtualmachine", c) {
+				continue
+			}
+			if s.servicesV42 {
+				rows = append(rows, fmt.Sprintf(`{"id":%d,"device":%s,"virtual_machine":%s}`,
+					c.id, ref("dcim.device", c), ref("virtualization.virtualmachine", c)))
+				continue
+			}
+			rows = append(rows, fmt.Sprintf(`{"id":%d,"parent_object_type":%q,"parent_object_id":%d}`, c.id, c.parentType, c.parent))
 		}
 	}
 	size := len(rows)

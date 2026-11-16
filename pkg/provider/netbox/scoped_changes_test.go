@@ -1925,19 +1925,23 @@ func TestBudgetedSchema_NoBudgetIsBounded(t *testing.T) {
 	}
 }
 
-// A Changed field of $__all is a custom All value that reached the backend
-// raw. It is refused before any request, so it doesn't wait on a schema that
-// may not answer (here, 403).
-func TestChanges_AllInChangedFieldsRefusedWithoutSchema(t *testing.T) {
-	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
-	_, err := s.start(t).Changes(context.Background(), provider.ChangeSpec{Limit: 10, ChangedFields: []string{"status", " $__all "}})
-	if ae := annotationErr(t, err, provider.AnnotationReasonUnknownField); ae.Value != "$__all" {
-		t.Errorf("value = %q, want $__all", ae.Value)
-	}
+// A custom All value in Actions or Changed fields filters nothing: every
+// change shows, no read asks NetBox for an action, and the schema isn't read
+// to check the other field names.
+func TestChanges_AllValueFiltersNothing(t *testing.T) {
+	s := newScopedChangeServer(
+		ch(1, 1, "dcim.device", 17).as("create"),
+		ch(2, 2, "dcim.device", 17),
+		ch(3, 3, "dcim.device", 17).as("delete"),
+	)
+	spec := provider.ChangeSpec{Limit: 10, Actions: []string{" $__all "}, ChangedFields: []string{"status", "$__all"}}
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1", "#2", "#3")
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.requests) != 0 {
-		t.Errorf("requests = %v, want none", s.requests)
+	for _, req := range s.requests {
+		if strings.HasPrefix(req, "/api/schema/") || strings.Contains(req, actionParam+"=") {
+			t.Errorf("request %s: want no schema read and no action filter", req)
+		}
 	}
 }
 

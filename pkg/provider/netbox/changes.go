@@ -381,9 +381,21 @@ var changeActions = []string{"create", "update", "delete"}
 // doesn't compare (untrackedField), whatever the schema says of it: either
 // would match no row, and the track would come up short with nothing to say
 // why. Both are refused here, before any request.
+//
+// A list holding a custom All value ($__all) is no filter, as an empty one
+// is: a variable whose All option has that value reaches the backend as
+// typed, and All means every action, or any field. The list's other entries
+// filter nothing then, so they aren't checked either.
 func newChangeFilter(spec provider.ChangeSpec) (changeFilter, error) {
 	var f changeFilter
-	for _, raw := range spec.Actions {
+	actions, fields := spec.Actions, spec.ChangedFields
+	if holdsAll(actions) {
+		actions = nil
+	}
+	if holdsAll(fields) {
+		fields = nil
+	}
+	for _, raw := range actions {
 		a := strings.ToLower(strings.TrimSpace(raw))
 		if a == "" {
 			continue
@@ -399,14 +411,9 @@ func newChangeFilter(spec provider.ChangeSpec) (changeFilter, error) {
 	if n := len(f.actions); n == 1 || n == 2 {
 		f.pushes = slices.Sorted(maps.Keys(f.actions))
 	}
-	for _, n := range spec.ChangedFields {
+	for _, n := range fields {
 		if n = strings.TrimSpace(n); n == "" || slices.Contains(f.fields, n) {
 			continue
-		}
-		// A custom All value that reached the backend raw. Refused here so it
-		// doesn't wait on a schema that may not answer.
-		if n == provider.AllValue {
-			return changeFilter{}, &AnnotationError{Reason: provider.AnnotationReasonUnknownField, Value: n}
 		}
 		if untrackedField(n) {
 			return changeFilter{}, &AnnotationError{Reason: provider.AnnotationReasonUntrackedField, Value: logSafe(n)}
@@ -414,6 +421,11 @@ func newChangeFilter(spec provider.ChangeSpec) (changeFilter, error) {
 		f.fields = append(f.fields, n)
 	}
 	return f, nil
+}
+
+// holdsAll reports whether a list holds the custom All value, padding aside.
+func holdsAll(list []string) bool {
+	return slices.ContainsFunc(list, func(v string) bool { return strings.TrimSpace(v) == provider.AllValue })
 }
 
 // localScan reports whether rows are discarded here that NetBox can't discard:

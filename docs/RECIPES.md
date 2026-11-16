@@ -488,8 +488,8 @@ what's attached to it. Each marker says what changed.
    are escaped for you.
 
    Scope type, Actions and Changed fields take dashboard variables. A variable with
-   no value leaves Actions or Changed fields unfiltered; Scope type needs exactly one
-   value.
+   no value, or All with the custom value `$__all`, leaves Actions or Changed fields
+   unfiltered; Scope type needs exactly one value.
 3. A marker reads like `Ethernet2 on NYC1-leaf-01`, then one `field: before → after`
    line per changed field (at most 5, then `+N more`), the change message if there is
    one, and `Updated by <user> · Open in NetBox`. Related objects show by name

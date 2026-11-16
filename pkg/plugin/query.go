@@ -510,10 +510,6 @@ func queryOrdering(ordering string, c consumer) string {
 // row whose value is exactly this means "do not filter on this field".
 const allFilterValue = provider.AllValue
 
-// allNotAValue is the refusal for an Actions or Changed-fields entry that is a
-// custom All value: those lists mean every one when empty.
-const allNotAValue = "All isn't a value here: leave the field empty to mean every one."
-
 // dropAllFilters removes the filter rows whose value is "All".
 //
 // It is opt-in, by whoever writes the query. Grafana expands All into every
@@ -936,19 +932,10 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 	case provider.AnnotationReasonTooManyObjects:
 		return fmt.Sprintf("The scope covers %d objects; the limit is %d. Narrow the variable's selection. If All means every object, give the All option the custom value $__all.", u.AnnotationCount, netbox.MaxScopeObjects)
 	case provider.AnnotationReasonUnknownField:
-		if value == allFilterValue {
-			return allNotAValue
-		}
 		return fmt.Sprintf("%q isn't a field of any NetBox object type. Custom fields are written cf_<name>.", value)
 	case provider.AnnotationReasonUnknownCustomField:
-		if value == allFilterValue {
-			return allNotAValue
-		}
 		return fmt.Sprintf("%q isn't a custom field on this NetBox. Check the name after cf_.", value)
 	case provider.AnnotationReasonUnknownAction:
-		if value == allFilterValue {
-			return allNotAValue
-		}
 		return fmt.Sprintf("%q isn't a change action. Use create, update or delete.", value)
 	case provider.AnnotationReasonUntrackedField:
 		return fmt.Sprintf("%q isn't compared between changes, so it can't filter them. Pick another field.", value)

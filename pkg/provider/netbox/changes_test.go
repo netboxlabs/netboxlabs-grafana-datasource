@@ -928,6 +928,21 @@ func TestNewChangeFilter_AllThreeActionsIsNoFilter(t *testing.T) {
 	}
 }
 
+// A variable whose All option has the custom value $__all reaches the backend
+// as typed. In Actions it means every action, and in Changed fields no filter,
+// as an empty list does, whatever else the list holds.
+func TestNewChangeFilter_AllValueIsNoFilter(t *testing.T) {
+	for _, list := range [][]string{{"$__all"}, {"create", " $__all "}, {"deleted", "$__all"}} {
+		f, err := newChangeFilter(provider.ChangeSpec{Actions: list, ChangedFields: list})
+		if err != nil {
+			t.Fatalf("%q: %v", list, err)
+		}
+		if f.actions != nil || f.pushes != nil || f.fields != nil || f.localScan() {
+			t.Errorf("%q: filter = %+v, want none", list, f)
+		}
+	}
+}
+
 func TestCutoffChange_OnlyScanningReadsCut(t *testing.T) {
 	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Hour)

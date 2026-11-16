@@ -315,7 +315,7 @@ describe('applyTemplateVariables scope type, actions and changed fields', () => 
     expect(out.actions).toEqual(['create', 'update', 'delete']);
   });
 
-  // guard: a custom All value reaches the backend as typed, which refuses it.
+  // guard: a custom All value reaches the backend as typed, which reads it as no filter.
   it('passes a custom All value through', () => {
     const out = makeDS().applyTemplateVariables(anno({ actions: ['$customAll'], changedFields: ['$customAll'] }), {});
     expect(out.actions).toEqual(['$__all']);

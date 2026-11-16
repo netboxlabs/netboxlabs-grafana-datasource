@@ -35,6 +35,8 @@ export interface NetBoxQuery extends DataQuery {
   branch?: string;
   /** Annotations: NetBox content type of the scope objects, e.g. 'dcim.device'. */
   scopeType?: string;
+  /** Annotations: set by applyTemplateVariables from the raw scopeType, never stored. */
+  scopeTypeSet?: boolean;
   /** Annotations: names, ids or a $variable selecting the objects to follow. */
   scope?: string;
   /** Annotations: set by applyTemplateVariables from the raw scope, never stored. */

@@ -140,4 +140,24 @@ describe('scope fields', () => {
     fireEvent.click(await screen.findByText('Updated'));
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ actions: ['update'] }));
   });
+
+  it('takes a variable typed into Actions', async () => {
+    const onChange = jest.fn();
+    render(<AnnotationQueryEditor query={{ refId: 'A' } as any} onChange={onChange} datasource={dsMock} />);
+    const input = await screen.findByLabelText('Actions');
+    fireEvent.change(input, { target: { value: '$act' } });
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 13 });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ actions: ['$act'] }));
+  });
+
+  it('shows a saved variable in Actions', async () => {
+    render(
+      <AnnotationQueryEditor
+        query={{ refId: 'A', actions: ['$act'] } as any}
+        onChange={jest.fn()}
+        datasource={dsMock}
+      />
+    );
+    expect(await screen.findByText('$act')).toBeInTheDocument();
+  });
 });

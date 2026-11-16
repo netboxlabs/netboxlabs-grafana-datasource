@@ -704,3 +704,61 @@ func TestAnnotationScope_CarriesBranch(t *testing.T) {
 		})
 	}
 }
+
+// A Scope type that was configured but came out empty must not fall back to
+// devices: that would follow the wrong objects without a word.
+func TestAnnotationScope_EmptyConfiguredTypeIsAnError(t *testing.T) {
+	for _, typ := range []string{"", "  "} {
+		s := newAnnoScopeServer()
+		p := s.start(t)
+		spec := nameScope("leaf1")
+		spec.ScopeType, spec.ScopeTypeSet = typ, true
+		_, err := p.resolveAnnotationScope(context.Background(), spec)
+		annotationErr(t, err, provider.AnnotationReasonEmptyScopeType)
+		if got := s.allRequests(); len(got) != 0 {
+			t.Errorf("type %q: requests = %v, want none", typ, got)
+		}
+	}
+}
+
+// A multi-value variable joins into the type. $__all holds no comma, but it is
+// not a type either, and says the same: one type.
+func TestAnnotationScope_TypeOfSeveralIsAnError(t *testing.T) {
+	for _, typ := range []string{"dcim.device,dcim.interface", "a,b", "$__all"} {
+		s := newAnnoScopeServer()
+		p := s.start(t)
+		spec := nameScope("leaf1")
+		spec.ScopeType, spec.ScopeTypeSet = typ, true
+		_, err := p.resolveAnnotationScope(context.Background(), spec)
+		if ae := annotationErr(t, err, provider.AnnotationReasonScopeTypeNotOne); ae.Value != typ {
+			t.Errorf("type %q: value = %q", typ, ae.Value)
+		}
+		if got := s.allRequests(); len(got) != 0 {
+			t.Errorf("type %q: requests = %v, want none", typ, got)
+		}
+	}
+}
+
+// guard: a type that was never set, or was typed blank, is still a device.
+func TestAnnotationScope_UnsetOrBlankTypeIsDevice(t *testing.T) {
+	for _, typ := range []string{"", "  "} {
+		s := newAnnoScopeServer()
+		p := s.start(t)
+		spec := nameScope("leaf1")
+		spec.ScopeType = typ
+		if scope := resolveOK(t, p, spec); scope.Type != "dcim.device" {
+			t.Errorf("type %q: scope type = %q, want dcim.device", typ, scope.Type)
+		}
+	}
+}
+
+// guard: an unscoped query never looks at its type, so an empty $type on an
+// annotation that follows nothing is no error.
+func TestAnnotationScope_UnscopedIgnoresEmptyType(t *testing.T) {
+	s := newAnnoScopeServer()
+	p := s.start(t)
+	scope, err := p.resolveAnnotationScope(context.Background(), provider.ChangeSpec{ScopeTypeSet: true})
+	if scope != nil || err != nil {
+		t.Errorf("resolveAnnotationScope = %+v, %v; want nil, nil", scope, err)
+	}
+}

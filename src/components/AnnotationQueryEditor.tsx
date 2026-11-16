@@ -169,7 +169,11 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
         <MultiSelect
           inputId="annotation-actions"
           options={ACTION_OPTIONS}
-          value={query.actions ?? []}
+          value={(query.actions ?? []).map((v) => ({
+            label: ACTION_OPTIONS.find((o) => o.value === v)?.label ?? v,
+            value: v,
+          }))}
+          allowCustomValue
           placeholder="All actions"
           onChange={(vals) => {
             const actions = vals.map((v) => v.value!).filter(Boolean);

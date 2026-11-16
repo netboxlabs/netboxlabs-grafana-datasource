@@ -1651,3 +1651,19 @@ func TestBudgetedSchema_NoBudgetIsBounded(t *testing.T) {
 		t.Fatal("budgetedSchema with no budget was still waiting after 5s")
 	}
 }
+
+// A Changed field of $__all is a custom All value that reached the backend
+// raw. It is refused before any request, so it doesn't wait on a schema that
+// may not answer (here, 403).
+func TestChanges_AllInChangedFieldsRefusedWithoutSchema(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	_, err := s.start(t).Changes(context.Background(), provider.ChangeSpec{Limit: 10, ChangedFields: []string{"status", " $__all "}})
+	if ae := annotationErr(t, err, provider.AnnotationReasonUnknownField); ae.Value != "$__all" {
+		t.Errorf("value = %q, want $__all", ae.Value)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.requests) != 0 {
+		t.Errorf("requests = %v, want none", s.requests)
+	}
+}

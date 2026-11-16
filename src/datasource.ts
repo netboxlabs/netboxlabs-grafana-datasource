@@ -153,9 +153,34 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
             scope: srv.replace(rawScope, scopedVars, scopeFormat),
             scopeSet: rawScope.trim() !== '',
           };
+    // csv so a multi-value variable arrives comma-joined. scopeTypeSet comes from
+    // the RAW type, so an empty variable is told from a type never configured.
+    const rawScopeType = query.scopeType == null ? undefined : String(query.scopeType);
+    const scopedType =
+      rawScopeType === undefined
+        ? {}
+        : { scopeType: srv.replace(rawScopeType, scopedVars, 'csv'), scopeTypeSet: rawScopeType.trim() !== '' };
+    // One entry may be a multi-value variable: expand, split, trim and dedupe.
+    const expand = (list?: string[]) => {
+      if (list === undefined) {
+        return undefined;
+      }
+      const out = [
+        ...new Set(
+          list
+            .flatMap((e) => srv.replace(e, scopedVars, 'csv').split(','))
+            .map((e) => e.trim())
+            .filter(Boolean)
+        ),
+      ];
+      return out.length ? out : undefined;
+    };
     return {
       ...query,
       ...scoped,
+      ...scopedType,
+      actions: expand(query.actions),
+      changedFields: expand(query.changedFields),
       filters,
       ips: query.ips === undefined ? undefined : srv.replace(query.ips, scopedVars, 'csv'),
       branch: query.branch === undefined ? undefined : srv.replace(query.branch, scopedVars),

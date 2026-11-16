@@ -13,6 +13,21 @@ const mockReplace = jest.fn((s: string, _scopedVars?: unknown, format?: string |
   if (s === '$acmes' && typeof format === 'function') {
     return format(['Acme, West', 'b\\c']);
   }
+  if (s === '$type') {
+    return 'dcim.interface';
+  }
+  if (s === '$types') {
+    return 'a,b';
+  }
+  if (s === '$fields') {
+    return 'role,status';
+  }
+  if (s === '$act') {
+    return 'create,delete';
+  }
+  if (s === '$customAll') {
+    return '$__all';
+  }
   if (s === '$site') {
     return 'dc1,dc2';
   }
@@ -244,6 +259,59 @@ describe('applyTemplateVariables scope', () => {
     const out = ds.applyTemplateVariables(q, {});
     expect(out.scope).toBe('17');
     expect(out.scopeSet).toBe(true);
+  });
+});
+
+describe('applyTemplateVariables scope type, actions and changed fields', () => {
+  const anno = (extra: Partial<NetBoxQuery>): NetBoxQuery => ({ refId: 'A', queryType: 'annotations', ...extra });
+
+  it('interpolates the scope type with csv and flags it as set', () => {
+    const ds = makeDS();
+    const scopedVars = {};
+    const out = ds.applyTemplateVariables(anno({ scope: 'x', scopeType: '$type' }), scopedVars);
+    expect(mockReplace).toHaveBeenCalledWith('$type', scopedVars, 'csv');
+    expect(out.scopeType).toBe('dcim.interface');
+    expect(out.scopeTypeSet).toBe(true);
+  });
+
+  it('joins a multi-value scope type, for the backend to refuse', () => {
+    const out = makeDS().applyTemplateVariables(anno({ scopeType: '$types' }), {});
+    expect(out.scopeType).toBe('a,b');
+  });
+
+  it('keeps an empty scope type variable set', () => {
+    const out = makeDS().applyTemplateVariables(anno({ scopeType: '$empty' }), {});
+    expect(out.scopeType).toBe('');
+    expect(out.scopeTypeSet).toBe(true);
+  });
+
+  it('leaves a blank or absent scope type unset', () => {
+    const ds = makeDS();
+    expect(ds.applyTemplateVariables(anno({ scopeType: '  ' }), {}).scopeTypeSet).toBe(false);
+    expect(ds.applyTemplateVariables(anno({}), {})).not.toHaveProperty('scopeTypeSet');
+  });
+
+  it('splits interpolated changed fields, trimmed and deduped', () => {
+    const out = makeDS().applyTemplateVariables(anno({ changedFields: ['$fields', ' status '] }), {});
+    expect(out.changedFields).toEqual(['role', 'status']);
+  });
+
+  it('splits interpolated actions', () => {
+    const out = makeDS().applyTemplateVariables(anno({ actions: ['$act'] }), {});
+    expect(out.actions).toEqual(['create', 'delete']);
+  });
+
+  it('drops an entry that interpolates to nothing, and the list when none is left', () => {
+    const ds = makeDS();
+    expect(ds.applyTemplateVariables(anno({ actions: ['$empty', 'update'] }), {}).actions).toEqual(['update']);
+    expect(ds.applyTemplateVariables(anno({ changedFields: ['$empty'] }), {}).changedFields).toBeUndefined();
+  });
+
+  // guard: a custom All value reaches the backend as typed, which refuses it.
+  it('passes a custom All value through', () => {
+    const out = makeDS().applyTemplateVariables(anno({ actions: ['$customAll'], changedFields: ['$customAll'] }), {});
+    expect(out.actions).toEqual(['$__all']);
+    expect(out.changedFields).toEqual(['$__all']);
   });
 });
 

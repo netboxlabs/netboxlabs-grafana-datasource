@@ -92,10 +92,13 @@ type queryModel struct {
 	// csv format. ScopeSet says a scope was configured before interpolation, so
 	// an empty variable is an error rather than all of NetBox. ScopeMatch is
 	// "name" (or empty) or "id".
-	ScopeType  string    `json:"scopeType"`
-	Scope      scopeText `json:"scope"`
-	ScopeSet   bool      `json:"scopeSet"`
-	ScopeMatch string    `json:"scopeMatch"`
+	ScopeType string `json:"scopeType"`
+	// ScopeTypeSet says a Scope type was configured before interpolation, so an
+	// empty variable is an error rather than the default type.
+	ScopeTypeSet bool      `json:"scopeTypeSet"`
+	Scope        scopeText `json:"scope"`
+	ScopeSet     bool      `json:"scopeSet"`
+	ScopeMatch   string    `json:"scopeMatch"`
 	// Actions, ChangedFields and Journal (for annotations) narrow the change
 	// markers to some actions and changed fields, and add journal entries.
 	Actions       []string `json:"actions"`
@@ -163,12 +166,13 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 	case queryTypeAnnotations:
 		scope, scopeAll := parseScope(string(qm.Scope))
 		changes, err := d.provider.Changes(ctx, provider.ChangeSpec{
-			From:        q.TimeRange.From,
-			To:          q.TimeRange.To,
-			ObjectTypes: qm.ObjectTypes,
-			Limit:       qm.Limit,
-			ScopeType:   qm.ScopeType,
-			Scope:       scope,
+			From:         q.TimeRange.From,
+			To:           q.TimeRange.To,
+			ObjectTypes:  qm.ObjectTypes,
+			Limit:        qm.Limit,
+			ScopeType:    qm.ScopeType,
+			ScopeTypeSet: qm.ScopeTypeSet,
+			Scope:        scope,
 			// A caller that sends a scope without scopeSet still configured one.
 			ScopeSet:      qm.ScopeSet || strings.TrimSpace(string(qm.Scope)) != "",
 			ScopeAll:      scopeAll,
@@ -505,6 +509,10 @@ func queryOrdering(ordering string, c consumer) string {
 // allFilterValue is Grafana's own token for a variable's "All" option. A filter
 // row whose value is exactly this means "do not filter on this field".
 const allFilterValue = "$__all"
+
+// allNotAValue is the refusal for an Actions or Changed-fields entry that is a
+// custom All value: those lists mean every one when empty.
+const allNotAValue = "All isn't a value here: leave the field empty to mean every one."
 
 // dropAllFilters removes the filter rows whose value is "All".
 //
@@ -911,6 +919,10 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 	switch u.AnnotationReason {
 	case provider.AnnotationReasonEmptyScope:
 		return "The annotation's scope came out empty. Is its variable empty?"
+	case provider.AnnotationReasonEmptyScopeType:
+		return "The annotation's Scope type came out empty. Is its variable empty?"
+	case provider.AnnotationReasonScopeTypeNotOne:
+		return fmt.Sprintf("Scope type takes one object type, not %q. Give its variable a single value.", value)
 	case provider.AnnotationReasonNoMatch:
 		return fmt.Sprintf("No NetBox object named %q for this annotation's scope. Check the name, or match by ID.", value)
 	case provider.AnnotationReasonTooManyMatches:
@@ -924,8 +936,14 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 	case provider.AnnotationReasonTooManyObjects:
 		return fmt.Sprintf("The scope covers %d objects; the limit is %d. Narrow the variable's selection. If All means every object, give the All option the custom value $__all.", u.AnnotationCount, netbox.MaxScopeObjects)
 	case provider.AnnotationReasonUnknownField:
+		if value == allFilterValue {
+			return allNotAValue
+		}
 		return fmt.Sprintf("%q isn't a field of any NetBox object type. Custom fields are written cf_<name>.", value)
 	case provider.AnnotationReasonUnknownAction:
+		if value == allFilterValue {
+			return allNotAValue
+		}
 		return fmt.Sprintf("%q isn't a change action. Use create, update or delete.", value)
 	case provider.AnnotationReasonUntrackedField:
 		return fmt.Sprintf("%q isn't compared between changes, so it can't filter them. Pick another field.", value)

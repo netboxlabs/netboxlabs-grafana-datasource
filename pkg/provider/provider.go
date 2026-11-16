@@ -307,6 +307,9 @@ type Change struct {
 	Err             error     // descendants-error only; the plugin maps it to Message
 }
 
+// AllValue is Grafana's custom All value as it reaches the backend uninterpolated.
+const AllValue = "$__all"
+
 // ChangeSpec bounds an annotation query.
 type ChangeSpec struct {
 	From        time.Time
@@ -315,6 +318,7 @@ type ChangeSpec struct {
 	Limit       int
 
 	ScopeType     string   // app_label.model; "" = dcim.device when scoped
+	ScopeTypeSet  bool     // a type was configured (even if it interpolated to nothing)
 	Scope         []string // split values; nil = unscoped
 	ScopeSet      bool     // a scope was configured (even if it interpolated to nothing)
 	ScopeAll      bool     // the scope was exactly $__all: unscoped on purpose

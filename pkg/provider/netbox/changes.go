@@ -402,6 +402,11 @@ func newChangeFilter(spec provider.ChangeSpec) (changeFilter, error) {
 		if n = strings.TrimSpace(n); n == "" || slices.Contains(f.fields, n) {
 			continue
 		}
+		// A custom All value that reached the backend raw. Refused here so it
+		// doesn't wait on a schema that may not answer.
+		if n == provider.AllValue {
+			return changeFilter{}, &AnnotationError{Reason: provider.AnnotationReasonUnknownField, Value: n}
+		}
 		if untrackedField(n) {
 			return changeFilter{}, &AnnotationError{Reason: provider.AnnotationReasonUntrackedField, Value: logSafe(n)}
 		}

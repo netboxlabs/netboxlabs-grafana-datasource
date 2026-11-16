@@ -57,6 +57,14 @@ const (
 	// AnnotationReasonEmptyScope is a scope that was configured but came out
 	// empty, usually an empty variable. It is never read as unscoped.
 	AnnotationReasonEmptyScope = "empty-scope"
+	// AnnotationReasonEmptyScopeType is a Scope type that was configured but
+	// came out empty, usually an empty variable. It is never read as the
+	// default type.
+	AnnotationReasonEmptyScopeType = "empty-scope-type"
+	// AnnotationReasonScopeTypeNotOne is a Scope type that isn't one object
+	// type: a multi-value variable joined with commas, or $__all
+	// (AnnotationValue).
+	AnnotationReasonScopeTypeNotOne = "scope-type-not-one"
 	// AnnotationReasonNoMatch is a scope name no object has (AnnotationValue).
 	AnnotationReasonNoMatch = "no-match"
 	// AnnotationReasonTooManyMatches is a scope name more than 20 objects share

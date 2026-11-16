@@ -947,11 +947,11 @@ func TestQuery_AnnotationsMapsScopeFields(t *testing.T) {
 	}
 
 	got := run(t, `{"queryType":"annotations","objectTypes":["dcim.interface"],"limit":20,
-		"scopeType":"dcim.device","scope":"leaf1, leaf2","scopeSet":true,"scopeMatch":"id",
+		"scopeType":"dcim.device","scopeTypeSet":true,"scope":"leaf1, leaf2","scopeSet":true,"scopeMatch":"id",
 		"actions":["create","update"],"changedFields":["status"],"journal":true,"includeDescendants":true}`)
 	want := provider.ChangeSpec{
 		From: from, To: to, ObjectTypes: []string{"dcim.interface"}, Limit: 20,
-		ScopeType: "dcim.device", Scope: []string{"leaf1", "leaf2"}, ScopeSet: true, ScopeMatch: "id",
+		ScopeType: "dcim.device", ScopeTypeSet: true, Scope: []string{"leaf1", "leaf2"}, ScopeSet: true, ScopeMatch: "id",
 		Actions: []string{"create", "update"}, ChangedFields: []string{"status"}, Journal: true,
 		Descendants: true,
 	}

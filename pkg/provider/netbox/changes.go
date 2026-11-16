@@ -805,15 +805,16 @@ func mergeChanges(results []changeReadResult, limit int) []decodedChange {
 // or a module can share an id with a scope device. A scope of unknown endpoint
 // can't be matched that way. A deleted object has no nested references, so when
 // that finds nothing the row's snapshots are read instead (snapshotParent).
-// Only a row that points at no scope object gives "".
-func relatedParent(scope *resolvedScope, oc objectChange) string {
+// Only a row that points at no scope object gives "". objects is the scope's
+// objects by id (objectsByID).
+func relatedParent(scope *resolvedScope, objects map[int64]scopeObject, oc objectChange) string {
 	if len(scope.Objects) == 1 {
 		return scopeObjectName(scope, scope.Objects[0])
 	}
-	if name, ok := nestedParent(scope, oc); ok {
+	if name, ok := nestedParent(scope, objects, oc); ok {
 		return name
 	}
-	if o, ok := snapshotParent(scope, oc); ok {
+	if o, ok := snapshotParent(scope, objects, oc); ok {
 		return scopeObjectName(scope, o)
 	}
 	return ""
@@ -821,13 +822,9 @@ func relatedParent(scope *resolvedScope, oc objectChange) string {
 
 // nestedParent finds the scope object a changed object's nested references
 // point at, by their API URLs.
-func nestedParent(scope *resolvedScope, oc objectChange) (string, bool) {
+func nestedParent(scope *resolvedScope, objects map[int64]scopeObject, oc objectChange) (string, bool) {
 	if scope.Endpoint == "" {
 		return "", false
-	}
-	byID := make(map[int64]scopeObject, len(scope.Objects))
-	for _, o := range scope.Objects {
-		byID[o.ID] = o
 	}
 	obj := oc.changedObjectMap()
 	for _, key := range slices.Sorted(maps.Keys(obj)) {
@@ -844,7 +841,7 @@ func nestedParent(scope *resolvedScope, oc objectChange) (string, bool) {
 			continue
 		}
 		id, err := strconv.ParseInt(u[i+1:], 10, 64)
-		o, ok := byID[id]
+		o, ok := objects[id]
 		if err != nil || !ok {
 			continue
 		}
@@ -873,15 +870,11 @@ var scopeParentFields = map[string]string{
 // (scopeParentFields) and then any generic <x>_type / <x>_id pair whose type is
 // the scope's. The id has to be a scope object's, so a field that names
 // another object is not mistaken for the parent.
-func snapshotParent(scope *resolvedScope, oc objectChange) (scopeObject, bool) {
-	byID := make(map[int64]scopeObject, len(scope.Objects))
-	for _, o := range scope.Objects {
-		byID[o.ID] = o
-	}
+func snapshotParent(scope *resolvedScope, objects map[int64]scopeObject, oc objectChange) (scopeObject, bool) {
 	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
 		if field, ok := scopeParentFields[scope.Type]; ok {
 			if id, ok := snapshotID(data, field); ok {
-				if o, ok := byID[id]; ok {
+				if o, ok := objects[id]; ok {
 					return o, true
 				}
 			}
@@ -898,7 +891,7 @@ func snapshotParent(scope *resolvedScope, oc objectChange) (scopeObject, bool) {
 				continue
 			}
 			if id, ok := snapshotID(data, x+"_id"); ok {
-				if o, ok := byID[id]; ok {
+				if o, ok := objects[id]; ok {
 					return o, true
 				}
 			}

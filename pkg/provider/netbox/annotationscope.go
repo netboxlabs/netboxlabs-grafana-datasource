@@ -55,6 +55,16 @@ func (s *resolvedScope) idSet() map[int64]bool {
 	return set
 }
 
+// objectsByID is the scope objects by id, for naming the parent of each row of
+// a call: built once, not once a row.
+func (s *resolvedScope) objectsByID() map[int64]scopeObject {
+	byID := make(map[int64]scopeObject, len(s.Objects))
+	for _, o := range s.Objects {
+		byID[o.ID] = o
+	}
+	return byID
+}
+
 // idStrings is the scope objects' ids in decimal, in scope order, for a
 // request parameter that repeats once per id.
 func (s *resolvedScope) idStrings() []string {

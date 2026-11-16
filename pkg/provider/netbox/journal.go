@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
@@ -98,32 +99,39 @@ func (p *Provider) journalEntries(ctx context.Context, spec provider.ChangeSpec,
 		}
 	}
 
-	var entries []journalEntry
-	for _, tr := range trs {
-		rows, _, err := p.fetchRows(ctx, journalEndpoint, tr.with(maps.Clone(q)), limit)
-		if err != nil {
-			var apiErr *APIError
-			if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
-				return nil, &AnnotationError{Reason: provider.AnnotationReasonJournalForbidden}
+	// The reads run at once, at most changeReadWorkers of them, as the change
+	// log's do. Each owns its slot, so the entries keep the reads' order, as
+	// when they ran one after another. The first to fail cancels the others
+	// rather than wait for them, and its error is the journal's; the others end
+	// with the cancel's.
+	readCtx, cancelReads := context.WithCancelCause(ctx)
+	defer cancelReads(nil)
+	found := make([][]journalEntry, len(trs))
+	errs := make([]error, len(trs))
+	sem := make(chan struct{}, changeReadWorkers)
+	var wg sync.WaitGroup
+	for i, tr := range trs {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if found[i], errs[i] = p.journalRead(readCtx, tr.with(maps.Clone(q)), tr, scope, inScope, limit); errs[i] != nil {
+				cancelReads(errs[i])
 			}
+		})
+	}
+	wg.Wait()
+	// With the caller's context live, a cause is a read's error. Past that, a
+	// failed read means the caller's context ended: any other failure would
+	// have set the cause.
+	if cause := context.Cause(readCtx); cause != nil && ctx.Err() == nil {
+		return nil, cause
+	}
+	for _, err := range errs {
+		if err != nil {
 			return nil, err
 		}
-		for _, raw := range rows {
-			var e journalEntry
-			if json.Unmarshal(raw, &e) != nil {
-				continue
-			}
-			// The read's types unscoped; the scope's type and objects scoped.
-			t := normalizeObjectType(e.AssignedType)
-			if !tr.keeps(t) {
-				continue
-			}
-			if scope != nil && (t != scope.Type || !inScope[e.AssignedID]) {
-				continue
-			}
-			entries = append(entries, e)
-		}
 	}
+	entries := slices.Concat(found...)
 	if len(trs) > 1 {
 		// Each read is newest first; the track is the newest limit of them all.
 		slices.SortStableFunc(entries, func(a, b journalEntry) int { return b.createdAt().Compare(a.createdAt()) })
@@ -148,6 +156,36 @@ func (p *Provider) journalEntries(ctx context.Context, spec provider.ChangeSpec,
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// journalRead reads one journal query, tr's, keeping the entries the read's
+// types and the scope allow. A 403 is journal-forbidden.
+func (p *Provider) journalRead(ctx context.Context, q url.Values, tr typeRead, scope *resolvedScope, inScope map[int64]bool, limit int) ([]journalEntry, error) {
+	rows, _, err := p.fetchRows(ctx, journalEndpoint, q, limit)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
+			return nil, &AnnotationError{Reason: provider.AnnotationReasonJournalForbidden}
+		}
+		return nil, err
+	}
+	var entries []journalEntry
+	for _, raw := range rows {
+		var e journalEntry
+		if json.Unmarshal(raw, &e) != nil {
+			continue
+		}
+		// The read's types unscoped; the scope's type and objects scoped.
+		t := normalizeObjectType(e.AssignedType)
+		if !tr.keeps(t) {
+			continue
+		}
+		if scope != nil && (t != scope.Type || !inScope[e.AssignedID]) {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries, nil
 }
 
 // journalAuthors resolves the entries' created_by ids to usernames, in batches.

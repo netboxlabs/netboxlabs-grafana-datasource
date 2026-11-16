@@ -2038,7 +2038,7 @@ func TestRelatedParent_FromSnapshot(t *testing.T) {
 		{"no matching field", devices, del(`{"name":"x"}`, ""), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := relatedParent(tc.scope, tc.oc); got != tc.want {
+			if got := relatedParent(tc.scope, tc.scope.objectsByID(), tc.oc); got != tc.want {
 				t.Errorf("relatedParent = %q, want %q", got, tc.want)
 			}
 		})

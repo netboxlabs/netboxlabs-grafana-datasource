@@ -2,6 +2,7 @@ package netbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -60,10 +61,18 @@ type journalServer struct {
 	// honorsTypeName makes the journal keep the last assigned_object_type and
 	// answer at most limit rows, as NetBox does, in place of ignoring both.
 	honorsTypeName bool
+	// journalHold is held before each journal answer; it ends early when the
+	// request's context does.
+	journalHold time.Duration
+	// failType non-empty: a journal read by that assigned_object_type answers
+	// 500, before the hold.
+	failType string
 
-	mu       sync.Mutex
-	requests []string // path?query
-	headers  []string
+	mu          sync.Mutex
+	requests    []string // path?query
+	headers     []string
+	inFlight    int // journal reads being answered now
+	maxInFlight int // the most inFlight has been
 }
 
 func (s *journalServer) start(t *testing.T) *Provider {
@@ -99,11 +108,27 @@ func (s *journalServer) start(t *testing.T) *Provider {
 			}
 			writePage(w, len(rows), rows)
 		case "extras/journal-entries":
+			q := r.URL.Query()
+			if s.failType != "" && q.Get("assigned_object_type") == s.failType {
+				refuse(http.StatusInternalServerError)
+				return
+			}
+			s.mu.Lock()
+			s.inFlight++
+			s.maxInFlight = max(s.maxInFlight, s.inFlight)
+			s.mu.Unlock()
+			defer func() {
+				s.mu.Lock()
+				s.inFlight--
+				s.mu.Unlock()
+			}()
+			if !holdRequest(r, s.journalHold) {
+				return
+			}
 			if s.journalStatus != 0 {
 				refuse(s.journalStatus)
 				return
 			}
-			q := r.URL.Query()
 			var rows []string
 			for _, row := range s.rows {
 				if vals := q["assigned_object_type"]; s.honorsTypeName && len(vals) > 0 && row.typ != vals[len(vals)-1] {
@@ -311,6 +336,55 @@ func TestJournal_DegradedMapReadsEachTypeToTheLimit(t *testing.T) {
 	}
 	if want := []string{"c3", "leaf1"}; !reflect.DeepEqual(titles, want) {
 		t.Errorf("titles = %v, want %v", titles, want)
+	}
+}
+
+// degradedTypes is more Object types than changeReadWorkers, each read by name
+// on its own without the object-type map.
+var degradedTypes = []string{"dcim.site", "dcim.device", "dcim.interface", "dcim.cable", "ipam.ipaddress", "dcim.module"}
+
+// The reads by name run at once, at most changeReadWorkers of them, as the
+// change log's do.
+func TestJournal_DegradedMapReadsRunTogether(t *testing.T) {
+	s := &journalServer{typesStatus: http.StatusForbidden, journalHold: 100 * time.Millisecond}
+	journalOf(t, s.start(t), journalSpec(), nil, degradedTypes...)
+	if n := len(s.journalReads()); n != len(degradedTypes) {
+		t.Errorf("journal reads = %d, want one per type, %d", n, len(degradedTypes))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.maxInFlight < 2 || s.maxInFlight > changeReadWorkers {
+		t.Errorf("most journal reads at once = %d, want 2 to %d", s.maxInFlight, changeReadWorkers)
+	}
+}
+
+// A 403 on the reads by name is journal-forbidden, as on the one read.
+func TestJournal_DegradedMapForbidden(t *testing.T) {
+	s := &journalServer{typesStatus: http.StatusForbidden, journalStatus: http.StatusForbidden}
+	_, err := s.start(t).journalEntries(context.Background(), journalSpec(), nil, normalizeObjectTypes(degradedTypes), 10)
+	annotationErr(t, err, provider.AnnotationReasonJournalForbidden)
+}
+
+// A read by name that fails ends the others rather than wait for them, and
+// its error is the journal's. No more types than run at once, so the failing
+// read starts whichever order the reads take their turns in.
+func TestJournal_DegradedMapFailureEndsTheOthers(t *testing.T) {
+	s := &journalServer{typesStatus: http.StatusForbidden, journalHold: 5 * time.Second, failType: "dcim.device"}
+	p := s.start(t)
+	types := normalizeObjectTypes(degradedTypes[:changeReadWorkers])
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.journalEntries(context.Background(), journalSpec(), nil, types, 10)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
+			t.Errorf("journalEntries error = %v, want the dcim.device read's 500", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("journalEntries still blocked 1s after a read failed")
 	}
 }
 

@@ -1720,7 +1720,8 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 // once. With the object-type map unreadable, each object type is a read of its
 // own (objectTypeReads), so a query with fifteen types would otherwise open
 // fifteen walks of the change log at once, and two Actions double that
-// (perAction). The journal and the descendant reads don't count toward it.
+// (perAction). The journal and the descendant reads don't count toward it; the
+// journal's own reads by type are capped at the same number, apart.
 const changeReadWorkers = 4
 
 // Changes returns change-log events within a time window for annotations.
@@ -1918,12 +1919,13 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		cut, showCut = c, true
 	}
 	if scope != nil {
+		objects := scope.objectsByID()
 		for i := range kept {
 			switch {
 			case kept[i].descendant:
 				kept[i].parent = descendantParent(scope, kept[i].owner)
 			case kept[i].fromRelated:
-				kept[i].parent = relatedParent(scope, kept[i].oc)
+				kept[i].parent = relatedParent(scope, objects, kept[i].oc)
 			}
 		}
 	}

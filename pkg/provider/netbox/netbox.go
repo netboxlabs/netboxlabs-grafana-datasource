@@ -321,6 +321,12 @@ func (p *Provider) ObjectTypes(ctx context.Context) ([]provider.ObjectType, erro
 // URLs NetBox wrote from the request as it arrived, which behind a proxy that
 // does not pass X-Forwarded-Proto/-Host name plain http or another host (see
 // nextPageURL). Queries already address object types by these keys.
+//
+// An app whose index can't be read is skipped, but not when ctx has ended: the
+// walk then failed for its caller, not for NetBox, and what it read so far is
+// no list of NetBox's types. It fails with ctx's error, so ObjectTypes caches
+// nothing and the next caller walks again; cached, a walk a short wait cut
+// would hide whole apps for cacheTTL.
 func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) {
 	root, err := p.urlMap(ctx, p.client.apiURL("", nil))
 	if err != nil {
@@ -334,10 +340,17 @@ func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) 
 		}
 		models, err := p.urlMap(ctx, p.client.apiURL(app, nil))
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("discover %s: %w", logSafe(app), ctx.Err())
+			}
 			continue // tolerate individual app discovery failures
 		}
 		if app == "plugins" {
-			types = append(types, p.discoverPlugins(ctx, models)...)
+			plugins, err := p.discoverPlugins(ctx, models)
+			if err != nil {
+				return nil, err
+			}
+			types = append(types, plugins...)
 			continue
 		}
 		for model := range models {
@@ -357,12 +370,16 @@ func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) 
 }
 
 // discoverPlugins enumerates plugin endpoints. Each entry under /api/plugins/ is
-// either a plugin sub-app (a URL map of its models) or a direct collection.
-func (p *Provider) discoverPlugins(ctx context.Context, plugins map[string]string) []provider.ObjectType {
+// either a plugin sub-app (a URL map of its models) or a direct collection. A
+// read ctx ended says neither, so it fails the walk, as in discover.
+func (p *Provider) discoverPlugins(ctx context.Context, plugins map[string]string) ([]provider.ObjectType, error) {
 	var types []provider.ObjectType
 	for plugin := range plugins {
 		sub, err := p.urlMap(ctx, p.client.apiURL("plugins/"+plugin, nil))
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("discover plugins/%s: %w", logSafe(plugin), ctx.Err())
+			}
 			// Direct collection (e.g. installed-plugins).
 			types = append(types, provider.ObjectType{
 				Value: "plugins/" + plugin,
@@ -381,7 +398,7 @@ func (p *Provider) discoverPlugins(ctx context.Context, plugins map[string]strin
 			})
 		}
 	}
-	return types
+	return types, nil
 }
 
 // urlMap fetches a JSON object and returns it as a map ONLY if every value is a

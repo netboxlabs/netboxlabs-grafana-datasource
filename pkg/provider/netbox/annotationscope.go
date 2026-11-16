@@ -332,9 +332,11 @@ func (p *Provider) lookupScopeNames(ctx context.Context, scope *resolvedScope, n
 				}
 			}
 		}
-	}
-	if len(scope.Objects) > MaxScopeObjects {
-		return &AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: len(scope.Objects)}
+		// Past the cap the scope is refused whatever the other batches hold, so
+		// they aren't read. The count is then what the batches so far matched.
+		if len(scope.Objects) > MaxScopeObjects {
+			return &AnnotationError{Reason: provider.AnnotationReasonTooManyObjects, Count: len(scope.Objects)}
+		}
 	}
 	return nil
 }

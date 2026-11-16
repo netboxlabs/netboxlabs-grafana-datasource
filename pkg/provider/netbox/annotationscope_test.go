@@ -679,6 +679,33 @@ func TestAnnotationScope_TooManyObjects(t *testing.T) {
 			t.Errorf("count = %d, want 120", ae.Count)
 		}
 	})
+
+	// Names long enough to take two lookups. The first lookup's names already
+	// cover more than the cap, so the second isn't made.
+	t.Run("past the cap after one lookup", func(t *testing.T) {
+		s := newAnnoScopeServer()
+		var names []string
+		for i := range MaxScopeObjects {
+			name := fmt.Sprintf("eth%03d-%s", i, strings.Repeat("x", 100))
+			names = append(names, name)
+			n := 1
+			if i < 6 {
+				n = MaxNameMatches
+			}
+			s.objects["dcim/interfaces"] = append(s.objects["dcim/interfaces"], interfaceRows(int64(100*(i+1)), n, name)...)
+		}
+		p := s.start(t)
+		if chunks := newQueryBatcher("name", url.Values{"brief": {"true"}}).chunk(names); len(chunks) < 2 {
+			t.Fatalf("names take %d lookups, want several", len(chunks))
+		}
+		spec := nameScope(names...)
+		spec.ScopeType = "dcim.interface"
+		_, err := p.resolveAnnotationScope(context.Background(), spec)
+		annotationErr(t, err, provider.AnnotationReasonTooManyObjects)
+		if lookups := s.queries("/api/dcim/interfaces/"); len(lookups) != 1 {
+			t.Errorf("interface lookups = %d, want 1", len(lookups))
+		}
+	})
 }
 
 func TestAnnotationScope_CarriesBranch(t *testing.T) {

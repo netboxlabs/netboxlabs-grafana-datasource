@@ -1483,13 +1483,14 @@ func TestDescendantChanges_MembershipTakesFourSlots(t *testing.T) {
 	}
 }
 
-// byIDReadsOf runs byIDReads on p over sets, with no filter, a limit of 50 and
-// a fresh semaphore of cableEndWorkers slots. A read that calls fail fails the
-// test.
+// byIDReadsOf runs byIDReads on p over sets' batches (byIDBatches), as scans,
+// with no filter, a limit of 50 and a fresh semaphore of cableEndWorkers
+// slots. A read that calls fail fails the test.
 func byIDReadsOf(t *testing.T, p *Provider, spec provider.ChangeSpec, ids map[string]int, sets map[string]map[int64]int64, match func(objectChange) (int64, bool)) []changeReadResult {
 	t.Helper()
 	var fails failLog
-	results := p.byIDReads(context.Background(), fails.fail, make(chan struct{}, cableEndWorkers), spec, changeFilter{}, 50, ids, sets, match)
+	batches := byIDBatches(spec, changeFilter{}, ids, sets, match)
+	results := p.byIDReads(context.Background(), fails.fail, true, make(chan struct{}, cableEndWorkers), changeFilter{}, 50, batches)
 	if n := fails.count(); n != 0 {
 		t.Fatalf("byIDReads called fail %d times (%v), want none", n, fails.errs)
 	}
@@ -3342,22 +3343,27 @@ func TestChanges_RemovedHistoryCapMakesNoCutoff(t *testing.T) {
 	}
 }
 
-// Residual pages that found only members, or rows not on the scope, make no
-// read after them; nor do pages that read the whole range, which already hold
-// every change of what they found removed.
+// Residual pages that found only members, or removals not on the scope, make
+// no read after them; nor do pages that read the whole range, which already
+// hold every change of what they found removed.
 func TestChanges_NoRemovedHistoryReadWithoutNewIDs(t *testing.T) {
-	t.Run("only members", func(t *testing.T) {
+	t.Run("members and removals off the scope", func(t *testing.T) {
+		// Two-row pages, each capped: the address page holds member IP 401's
+		// create and leaf2's IP 402's delete, the parts page member module 500's
+		// create and leaf2's module 501's delete.
 		s := newestFirst(
 			ipOn(1, 1, "create", 401, 100),
-			created(2, 2, "dcim.module", 500, `{"device":17}`),
-			created(3, 3, "dcim.module", 501, `{"device":18}`),
-			ipOn(4, 4, "create", 402, 200),
+			ipOn(2, 2, "delete", 402, 200),
+			created(3, 3, "dcim.module", 500, `{"device":17}`),
+			ch(4, 4, "dcim.module", 501).as("delete").snapshots(`{"device":18}`, ""),
+			ipOn(5, 5, "create", 403, 200),
+			created(6, 6, "dcim.module", 502, `{"device":18}`),
 		)
 		s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
-		s.modules = []childRow{{id: 500, owner: 17}, {id: 501, owner: 18}}
+		s.modules = []childRow{{id: 500, owner: 17}}
 		p := s.start(t)
-		p.residualRowsOverride = 1 // each page capped at its member's row
-		wantIDs(t, changesOK(t, p, removedSpec()), "#1", "#2", "cutoff")
+		p.residualRowsOverride = 2
+		wantIDs(t, changesOK(t, p, removedSpec()), "#1", "#3", "cutoff")
 		want := map[string][]string{"20": {"401"}, "22": {"500"}}
 		if got := byIDAsks(t, s); !reflect.DeepEqual(got, want) {
 			t.Errorf("by-id reads ask for %v, want only the members' %v", got, want)
@@ -3370,6 +3376,70 @@ func TestChanges_NoRemovedHistoryReadWithoutNewIDs(t *testing.T) {
 			t.Errorf("by-id reads = %v, want none", byID)
 		}
 	})
+}
+
+// An object whose create is on the page, newer than the page's oldest row, has
+// all its changes since on the page: no read follows for it. A create at the
+// page's oldest row may share its time with a change past the page, so one
+// does.
+func TestChanges_NoRemovedHistoryReadWhenTheCreateIsOnThePage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows int
+		want map[string][]string
+	}{
+		{"newer than the oldest row", 3, map[string][]string{}},
+		{"at the oldest row", 2, map[string][]string{"21": {"403"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newestFirst(
+				ch(1, 2, "dcim.macaddress", 403).as("delete").snapshots(assignedTo(14, 100), ""),
+				created(2, 3, "dcim.macaddress", 403, assignedTo(14, 100)),
+				created(3, 6, "ipam.ipaddress", 700, assignedTo(14, 200)),
+				created(4, 7, "ipam.ipaddress", 701, assignedTo(14, 200)),
+			)
+			s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+			p := s.start(t)
+			p.residualRowsOverride = tc.rows
+			wantIDs(t, changesOK(t, p, removedSpec()), "#1", "#2", "cutoff")
+			if got := byIDAsks(t, s); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("by-id reads ask for %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// With one Action read, create or delete, the row the page found is the only
+// one its object has: no read follows it. The delete page holds MAC 403's
+// delete, the create page MAC 403's create as its oldest row.
+func TestChanges_NoRemovedHistoryReadForOneCreateOrDeleteAction(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		want   []string
+	}{
+		{"delete", []string{"#1", "cutoff"}},
+		{"create", []string{"#4", "cutoff"}},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			s := newestFirst(
+				ch(1, 2, "dcim.macaddress", 403).as("delete").snapshots(assignedTo(14, 100), ""),
+				ch(2, 3, "ipam.ipaddress", 700).as("delete").snapshots(assignedTo(14, 200), ""),
+				ch(3, 4, "ipam.ipaddress", 701).as("delete").snapshots(assignedTo(14, 200), ""),
+				created(4, 30, "dcim.macaddress", 403, assignedTo(14, 100)),
+				created(5, 1, "ipam.ipaddress", 702, assignedTo(14, 200)),
+				created(6, 40, "ipam.ipaddress", 703, assignedTo(14, 200)),
+			)
+			s.interfaces = []childRow{{id: 100, owner: 17}, {id: 200, owner: 18}}
+			p := s.start(t)
+			p.residualRowsOverride = 2
+			spec := removedSpec()
+			spec.Actions = []string{tc.action}
+			wantIDs(t, changesOK(t, p, spec), tc.want...)
+			if byID := byIDRequests(s); len(byID) != 0 {
+				t.Errorf("by-id reads = %v, want none", byID)
+			}
+		})
+	}
 }
 
 // A capped scanning read with no row of a parsed time has shown no reach: it

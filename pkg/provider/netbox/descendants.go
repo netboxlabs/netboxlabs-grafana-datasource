@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
@@ -342,7 +344,7 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 	}
 	var byID []changeReadResult
 	if sets := memberSets(m, want); len(sets) > 0 {
-		byID = p.byIDReads(ctx, fail, sem, spec, f, limit, ids, sets, match)
+		byID = p.byIDReads(ctx, fail, true, sem, f, limit, byIDBatches(spec, f, ids, sets, match))
 	}
 	for _, r := range byID {
 		if r.err != nil {
@@ -365,7 +367,7 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 	if len(partScan) > 0 {
 		kept = append(kept, found[1])
 	}
-	removed := p.removedHistory(ctx, sem, spec, f, limit, ids, removedSets(m, kept), match)
+	removed := p.removedHistory(ctx, sem, spec, f, limit, ids, removedSets(m, kept, f), match)
 	// ctx ended while only the residual scans, or the read after them, were
 	// left: the caller's cancel, a failed own read's, or the descendants
 	// deadline just as membership succeeded, which the address scan's matcher
@@ -381,20 +383,38 @@ func (p *Provider) descendantChanges(ctx context.Context, fail context.CancelCau
 // removedSets is what the residual scans' kept rows name that isn't a member:
 // each object by type, as memberSets has them. An IP, MAC, module or service
 // there was taken off the scope or deleted before membership could name it.
-// Only a capped scan's rows count: a page that read every change of its types
-// in the range already holds each such object's changes, and one that stopped
-// at limit holds limit changes newer than any it left.
-func removedSets(m members, scans []changeReadResult) map[string]map[int64]int64 {
-	known := map[string]map[int64]int64{ipAddressType: m.ips, macAddressType: m.macs, moduleType: m.modules, serviceType: m.services}
-	sets := map[string]map[int64]int64{}
-	for _, r := range scans {
-		if !r.capped {
-			continue
+// Only what a read by id could add counts:
+//
+//   - only a capped scan's rows: a page that read every change of its types in
+//     the range already holds each such object's changes, and one that stopped
+//     at limit holds limit changes newer than any it left;
+//   - nothing when the query reads one Action, create or delete: an object has
+//     one row of either, and it is the one the page found;
+//   - no object whose create the page kept newer than its oldest row: every
+//     change to it since is newer still, so on the page. One at the oldest row
+//     may share its time with a change past the page.
+func removedSets(m members, scans []changeReadResult, f changeFilter) map[string]map[int64]int64 {
+	if len(f.actions) == 1 && !f.actions["update"] {
+		return nil
+	}
+	capped := slices.DeleteFunc(slices.Clone(scans), func(r changeReadResult) bool { return !r.capped })
+	type object struct {
+		typ string
+		id  int64
+	}
+	onPage := map[object]bool{}
+	for _, r := range capped {
+		for _, d := range r.rows {
+			if d.oc.Action.Value == "create" && d.at.After(r.oldest) {
+				onPage[object{normalizeObjectType(d.oc.changedType()), d.oc.ChangedObjectID}] = true
+			}
 		}
+	}
+	sets := map[string]map[int64]int64{}
+	for _, r := range capped {
 		for _, d := range r.rows {
 			t, id := normalizeObjectType(d.oc.changedType()), d.oc.ChangedObjectID
-			members, ok := known[t]
-			if _, member := members[id]; !ok || member || id <= 0 {
+			if _, member := m.set(t)[id]; member || id <= 0 || onPage[object{t, id}] {
 				continue
 			}
 			if sets[t] == nil {
@@ -415,55 +435,81 @@ func removedSets(m members, scans []changeReadResult) map[string]map[int64]int64
 //
 // It is best effort, under its own deadline (residualContext) so that running
 // out of time ends only it: a read that fails or that its context cuts is
-// dropped, rows and all, and calls no fail. Whatever it drops is history older
-// than the scan that found the removal, and the residual marker already says
-// that what lies past a scan's reach wasn't checked. For the same reason its
-// results aren't scans: a read stopped at the scan cap makes no cut-off. They
-// aren't residual either.
+// dropped, rows and all, and calls no fail. A warning logs it, unless ctx
+// ended, which fails the call anyway. Whatever it drops is history older than
+// the scan that found the removal, and the residual marker already says that
+// what lies past a scan's reach wasn't checked. For the same reason its reads
+// aren't scans: one stopped at the scan cap makes no cut-off. They aren't
+// residual either.
 func (p *Provider) removedHistory(ctx context.Context, sem chan struct{}, spec provider.ChangeSpec, f changeFilter, limit int, ids map[string]int, sets map[string]map[int64]int64, match func(objectChange) (int64, bool)) []changeReadResult {
 	if len(sets) == 0 {
 		return nil
 	}
 	hctx, stop := residualContext(ctx)
 	defer stop()
-	results := p.byIDReads(hctx, func(error) {}, sem, spec, f, limit, ids, sets, match)
-	results = slices.DeleteFunc(results, func(r changeReadResult) bool { return r.err != nil })
-	for i := range results {
-		results[i].scan = false
+	batches := byIDBatches(spec, f, ids, sets, match)
+	results := p.byIDReads(hctx, func(error) {}, false, sem, f, limit, batches)
+	kept := results[:0]
+	for i, r := range results {
+		if r.err == nil {
+			kept = append(kept, r)
+			continue
+		}
+		if ctx.Err() == nil {
+			log.DefaultLogger.Warn("netbox: history read of removed descendants failed; their older changes in the range don't show",
+				"objectType", batches[i].typ, "ids", batches[i].ids, "error", logSafe(r.err.Error()))
+		}
 	}
-	return results
+	return kept
+}
+
+// set is m's members of type t, a descendant type's name (ipam.ipaddress,
+// dcim.macaddress, dcim.cable, dcim.module, ipam.service), or nil for another.
+func (m members) set(t string) map[int64]int64 {
+	switch t {
+	case ipAddressType:
+		return m.ips
+	case macAddressType:
+		return m.macs
+	case cableType:
+		return m.cables
+	case moduleType:
+		return m.modules
+	case serviceType:
+		return m.services
+	}
+	return nil
 }
 
 // memberSets is what the by-id reads ask for: each wanted type with at least
-// one member, by type name (ipam.ipaddress, dcim.macaddress, dcim.cable,
-// dcim.module, ipam.service).
+// one member, by type name.
 func memberSets(m members, want descendantWants) map[string]map[int64]int64 {
+	wanted := map[string]bool{ipAddressType: want.ips, macAddressType: want.macs, cableType: want.cables, moduleType: want.modules, serviceType: want.services}
 	sets := map[string]map[int64]int64{}
-	for _, s := range []struct {
-		wanted bool
-		typ    string
-		set    map[int64]int64
-	}{
-		{want.ips, ipAddressType, m.ips},
-		{want.macs, macAddressType, m.macs},
-		{want.cables, cableType, m.cables},
-		{want.modules, moduleType, m.modules},
-		{want.services, serviceType, m.services},
-	} {
-		if s.wanted && len(s.set) > 0 {
-			sets[s.typ] = s.set
+	for t, ok := range wanted {
+		if set := m.set(t); ok && len(set) > 0 {
+			sets[t] = set
 		}
 	}
 	return sets
 }
 
-// byIDReads reads the changes over [From, To] to the members in sets, through
-// the change log's index on what a change changed, so the changes to other
-// objects of these types can't use up a cap before them. Each request is
-// changeLogQuery's, which pushes the query's one Action but never its Changed
-// fields, plus one member type's id from ids and a batch of that type's
-// members' ids, sorted and batched to the URL budget with the rest of the
-// query measured in it. The types are read in ascending id order.
+// byIDBatch is one by-id request: its read, and the type and number of the
+// members it asks for.
+type byIDBatch struct {
+	r   changeRead
+	typ string
+	ids int
+}
+
+// byIDBatches is the requests that read the changes over [From, To] to the
+// members in sets by id, through the change log's index on what a change
+// changed, so the changes to other objects of these types can't use up a cap
+// before them. Each request is changeLogQuery's, which pushes the query's one
+// Action but never its Changed fields, plus one member type's id from ids and
+// a batch of that type's members' ids, sorted and batched to the URL budget
+// with the rest of the query measured in it. The types come in ascending id
+// order.
 //
 // One type a request: NetBox ANDs the type filter with the id filter, so a
 // request with two types would also return the rows of an object of one type
@@ -472,17 +518,9 @@ func memberSets(m members, want descendantWants) map[string]map[int64]int64 {
 // so a row is kept only when its type is the request's and its id a member's,
 // and then only when match, the type's scope check, passes it and names its
 // owner.
-//
-// Each batch is walked to limit rows kept or changeScanCap rows read, under a
-// slot of sem, which the membership reads share, and writes only its own
-// result. A result is a descendant read, and a scan: a batch that stops at the
-// cap may have missed rows past it, so it counts for the cut-off. A batch that
-// fails, or that ctx ends while it waits for a slot, calls fail with its error
-// as it does. The results are in batch order.
-func (p *Provider) byIDReads(ctx context.Context, fail context.CancelCauseFunc, sem chan struct{}, spec provider.ChangeSpec, f changeFilter, limit int, ids map[string]int, sets map[string]map[int64]int64, match func(objectChange) (int64, bool)) []changeReadResult {
-	types := slices.SortedFunc(maps.Keys(sets), func(a, b string) int { return cmp.Compare(ids[a], ids[b]) })
-	var reads []changeRead
-	for _, t := range types {
+func byIDBatches(spec provider.ChangeSpec, f changeFilter, ids map[string]int, sets map[string]map[int64]int64, match func(objectChange) (int64, bool)) []byIDBatch {
+	var batches []byIDBatch
+	for _, t := range slices.SortedFunc(maps.Keys(sets), func(a, b string) int { return cmp.Compare(ids[a], ids[b]) }) {
 		set := sets[t]
 		fixed := changeLogQuery(spec, f)
 		fixed.Set(changedObjectTypeIDParam, strconv.Itoa(ids[t]))
@@ -494,22 +532,33 @@ func (p *Provider) byIDReads(ctx context.Context, fail context.CancelCauseFunc, 
 		}
 		batcher := newQueryBatcher(changedObjectIDParam, fixed)
 		for _, batch := range batcher.chunk(sortedIDs(set)) {
-			reads = append(reads, changeRead{q: batcher.query(batch), descendant: member})
+			batches = append(batches, byIDBatch{r: changeRead{q: batcher.query(batch), descendant: member}, typ: t, ids: len(batch)})
 		}
 	}
-	results := make([]changeReadResult, len(reads))
+	return batches
+}
+
+// byIDReads runs batches (byIDBatches), each walked to limit rows kept or
+// changeScanCap rows read, under a slot of sem, which the membership reads
+// share, and writing only its own result. A result is a descendant read, and a
+// scan when scan is set: a batch that stops at the cap may have missed rows
+// past it, so it counts for the cut-off. A batch that fails, or that ctx ends
+// while it waits for a slot, calls fail with its error as it does. The results
+// are in batch order.
+func (p *Provider) byIDReads(ctx context.Context, fail context.CancelCauseFunc, scan bool, sem chan struct{}, f changeFilter, limit int, batches []byIDBatch) []changeReadResult {
+	results := make([]changeReadResult, len(batches))
 	var wg sync.WaitGroup
-	for i, r := range reads {
+	for i, b := range batches {
 		wg.Go(func() {
 			// A batch ctx ended before it ran fails with ctx's cause: with no
 			// error, it would read as one that found nothing.
 			if err := takeSlot(ctx, sem); err != nil {
 				results[i].err = err
 			} else {
-				results[i] = p.runChangeRead(ctx, r, f, limit, p.changeScanCap())
+				results[i] = p.runChangeRead(ctx, b.r, f, limit, p.changeScanCap())
 				<-sem
 			}
-			results[i].scan, results[i].descendant = true, true
+			results[i].scan, results[i].descendant = scan, true
 			if results[i].err != nil {
 				fail(results[i].err)
 			}

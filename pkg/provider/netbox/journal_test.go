@@ -480,6 +480,48 @@ func TestJournal_AuthorLookupFailureOmitsUser(t *testing.T) {
 	}
 }
 
+// Most tokens can't read users, so a failed author lookup is remembered, per
+// branch, for objectTypeFailureTTL: a refresh within it doesn't ask again, and
+// its entries show no author, as the first's do. Past it, the lookup is tried
+// again.
+func TestJournal_AuthorLookupFailureRemembered(t *testing.T) {
+	saved := objectTypeFailureTTL
+	objectTypeFailureTTL = 300 * time.Millisecond
+	t.Cleanup(func() { objectTypeFailureTTL = saved })
+
+	s := &journalServer{
+		usersStatus: http.StatusForbidden,
+		rows:        []journalRow{{typ: "dcim.site", objID: 1, display: "s1", minutes: 1, by: 7}},
+		branches:    `{"count":1,"next":null,"results":[{"name":"br1","schema_id":"td5smq0f"}]}`,
+	}
+	p := s.start(t)
+	refresh := func(ctx context.Context) {
+		t.Helper()
+		got, err := p.Changes(ctx, journalSpec())
+		if err != nil {
+			t.Fatalf("Changes: %v", err)
+		}
+		if len(got) != 1 || got[0].User != "" {
+			t.Errorf("entries = %+v, want one with no author", got)
+		}
+	}
+	main, branch := context.Background(), provider.WithBranch(context.Background(), "br1")
+	refresh(main)
+	refresh(main)
+	if n := len(s.userReads()); n != 1 {
+		t.Errorf("users reads = %d after two refreshes, want 1", n)
+	}
+	refresh(branch)
+	if n := len(s.userReads()); n != 2 {
+		t.Errorf("users reads = %d after a refresh on another branch, want 2", n)
+	}
+	time.Sleep(objectTypeFailureTTL)
+	refresh(main)
+	if n := len(s.userReads()); n != 3 {
+		t.Errorf("users reads = %d after the failure expired, want 3", n)
+	}
+}
+
 func TestJournal_ForbiddenIsAnnotationError(t *testing.T) {
 	s := &journalServer{journalStatus: http.StatusForbidden}
 	_, err := s.start(t).Changes(context.Background(), journalSpec())

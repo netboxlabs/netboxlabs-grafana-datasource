@@ -66,21 +66,24 @@ func (o objectChange) changedObjectMap() map[string]json.RawMessage {
 	if o.changedObject != nil {
 		return o.changedObject()
 	}
-	return decodeChangedObject(o.ChangedObject)
+	return decodeObject(o.ChangedObject)
 }
 
-// onceChangedObject is decodeChangedObject of raw, run on first use and kept.
+// onceChangedObject is decodeObject of raw, run on first use and kept.
 func onceChangedObject(raw json.RawMessage) func() map[string]json.RawMessage {
-	return sync.OnceValue(func() map[string]json.RawMessage { return decodeChangedObject(raw) })
+	return sync.OnceValue(func() map[string]json.RawMessage { return decodeObject(raw) })
 }
 
-// decodeChangedObject decodes changed_object when it is an object, else nil.
-func decodeChangedObject(raw json.RawMessage) map[string]json.RawMessage {
-	var m map[string]json.RawMessage
+// decodeObject decodes a JSON object's keys, or returns nil for anything else:
+// null, a string, a list, or nothing. What isn't an object is told by its
+// first byte, without a decode; encoding/json never leaves a value it hands
+// back with leading space.
+func decodeObject(raw json.RawMessage) map[string]json.RawMessage {
 	if len(raw) == 0 || raw[0] != '{' {
 		return nil
 	}
-	if err := json.Unmarshal(raw, &m); err != nil {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
 		return nil
 	}
 	return m

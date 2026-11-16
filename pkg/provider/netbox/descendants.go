@@ -655,15 +655,6 @@ func briefQuery(param string, values []string) url.Values {
 	return url.Values{"brief": {"true"}, param: slices.Clone(values)}
 }
 
-// decodeObject decodes a JSON object's keys, or returns nil for anything else.
-func decodeObject(raw json.RawMessage) map[string]json.RawMessage {
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(raw, &obj) != nil {
-		return nil
-	}
-	return obj
-}
-
 // snapshotID reads an id from a change-log snapshot or a list row. It counts
 // only as a positive plain JSON integer: a string, an object, null, a fraction,
 // zero or a negative number names nothing, so it can't match a scope id by

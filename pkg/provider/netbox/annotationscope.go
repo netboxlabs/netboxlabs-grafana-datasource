@@ -27,8 +27,8 @@ const (
 // defaultScopeType is the scope type when the query names none.
 const defaultScopeType = "dcim.device"
 
-// scopeMatchID is the ChangeSpec.ScopeMatch of a scope given as ids. Any other
-// value matches by name.
+// scopeMatchID is the ChangeSpec.ScopeMatch of a scope given as ids, as
+// Changes normalises it (trimmed, lowercase). Any other value matches by name.
 const scopeMatchID = "id"
 
 // scopeObject is one object an annotation is scoped to. Name is its display, or

@@ -322,7 +322,7 @@ type ChangeSpec struct {
 	Scope         []string // split values; nil = unscoped
 	ScopeSet      bool     // a scope was configured (even if it interpolated to nothing)
 	ScopeAll      bool     // the scope was exactly $__all: unscoped on purpose
-	ScopeMatch    string   // "name" (default) | "id"
+	ScopeMatch    string   // "name" (default) | "id", in any case, padding aside
 	Actions       []string // subset of create|update|delete
 	ChangedFields []string
 	Journal       bool

@@ -1353,6 +1353,20 @@ func TestChanges_FailedReadCancelsDescendants(t *testing.T) {
 	}
 }
 
+// Match by is read whatever its case and padding: a provisioned "ID" matches by
+// ID, in the scope lookup and in the descendant reads, which list the
+// interfaces of only the ids that exist. By name, "17" and "99" match no
+// device, and the interface list would refuse the deleted device 99.
+func TestChanges_ScopeMatchIDIgnoresCaseAndPadding(t *testing.T) {
+	for _, match := range []string{"ID", " id "} {
+		t.Run(match, func(t *testing.T) {
+			spec := withDescendants(idScope("17", "99"))
+			spec.ScopeMatch = match
+			wantIDs(t, changesOK(t, trackServer().start(t), spec), "#1", "#2", "#3", "#4")
+		})
+	}
+}
+
 func TestChanges_DescendantsCarryBranch(t *testing.T) {
 	s := eachKindServer()
 	s.branches = `{"count":1,"next":null,"results":[{"name":"br1","schema_id":"td5smq0f"}]}`

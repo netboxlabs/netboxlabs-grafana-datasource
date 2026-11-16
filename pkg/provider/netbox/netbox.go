@@ -1768,6 +1768,9 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	ctx, branch := p.client.pinBranch(ctx)
 	// One schema budget for every schema wait this call makes.
 	ctx = p.withSchemaBudget(ctx)
+	// Match by is normalised once, for the scope lookup and the descendant
+	// reads both: a provisioned "ID" must match by ID, not quietly by name.
+	spec.ScopeMatch = strings.ToLower(strings.TrimSpace(spec.ScopeMatch))
 	limit := spec.Limit
 	if limit <= 0 || limit > MaxLimit {
 		limit = defaultLimit

@@ -1394,14 +1394,14 @@ func TestChanges_ForbiddenJournalIsAWarning(t *testing.T) {
 	annotationErr(t, got[1].Err, provider.AnnotationReasonJournalForbidden)
 }
 
-// A journal that hangs is cut at its own deadline, the descendants', rather
-// than holding the track to the caller's: the change shows, and the warning
-// says how long the journal had.
+// A journal that hangs is cut at its own deadline rather than holding the
+// track to the caller's: the change shows, and the warning says how long the
+// journal had.
 func TestChanges_SlowJournalIsAWarning(t *testing.T) {
 	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
 	s.journalHold = 5 * time.Second
 	p := s.start(t)
-	p.descendantsWaitOverride = 200 * time.Millisecond
+	p.journalWaitOverride = 200 * time.Millisecond
 	spec := splitSpec()
 	spec.Journal = true
 
@@ -1428,7 +1428,7 @@ func TestChanges_FastJournalFailureIsNotSlow(t *testing.T) {
 	s.journalStatus = http.StatusForbidden
 	s.delayTypeID, s.delayFor = scopedTypeIDs["dcim.device"], 400*time.Millisecond
 	p := s.start(t)
-	p.descendantsWaitOverride = 100 * time.Millisecond
+	p.journalWaitOverride = 100 * time.Millisecond
 	spec := splitSpec()
 	spec.Journal = true
 	got := changesOK(t, p, spec)
@@ -1436,6 +1436,21 @@ func TestChanges_FastJournalFailureIsNotSlow(t *testing.T) {
 		t.Fatalf("changes = %v, want the device change, then the journal-error marker", ids)
 	}
 	annotationErr(t, got[1].Err, provider.AnnotationReasonJournalForbidden)
+}
+
+// The journal's deadline is its own, the datasource Timeout, not the
+// descendants' shorter budget: a journal slower than that budget still shows.
+func TestChanges_JournalIsNotCutAtTheDescendantsBudget(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.journal = []journalRow{{typ: "dcim.device", objID: 17, display: "leaf1", minutes: 2, text: "note"}}
+	s.journalHold = 300 * time.Millisecond
+	p := s.start(t)
+	p.descendantsWaitOverride = 100 * time.Millisecond
+	spec := splitSpec()
+	spec.Journal = true
+	if ids := changeIDs(changesOK(t, p, spec)); !slices.Equal(ids, []string{"#1", "leaf1"}) {
+		t.Errorf("changes = %v, want the change and the journal entry", ids)
+	}
 }
 
 // With no To, the end-of-range markers still share one time, so the frame can

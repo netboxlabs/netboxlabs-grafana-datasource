@@ -23,10 +23,10 @@ import (
 // snapshot can't tell an interface's cable from a console or power port's, and
 // the cable-termination rows the related read has tie cables to interfaces.
 var allDescendantTypes = map[string][]string{
-	"dcim.device":                   {"dcim.cable", "ipam.ipaddress", "dcim.macaddress", "dcim.module", "ipam.service"},
-	"virtualization.virtualmachine": {"ipam.ipaddress", "dcim.macaddress", "ipam.service"},
-	"dcim.interface":                {"ipam.ipaddress", "dcim.macaddress"},
-	"virtualization.vminterface":    {"ipam.ipaddress", "dcim.macaddress"},
+	"dcim.device":                   {cableType, ipAddressType, macAddressType, moduleType, serviceType},
+	"virtualization.virtualmachine": {ipAddressType, macAddressType, serviceType},
+	"dcim.interface":                {ipAddressType, macAddressType},
+	"virtualization.vminterface":    {ipAddressType, macAddressType},
 }
 
 // allDescendants is which descendant types an All query reads: none without
@@ -59,7 +59,7 @@ func (p *Provider) allScopeReads(ctx context.Context, spec provider.ChangeSpec, 
 	var reads []changeRead
 
 	own := len(wanted) == 0 || slices.Contains(wanted, scope.Type)
-	desc, _ := allDescendants(scope, spec, wanted)
+	desc := scope.allDesc
 	if own || len(desc) > 0 {
 		q := changeLogQuery(spec, f)
 		if own {
@@ -110,14 +110,15 @@ func anyObject(int64) bool { return true }
 // type's, as far as its snapshots can tell: an IP or MAC address on the scope
 // kind's interface type, a service whose parent is of the scope type. These are
 // the scoped checks (assignedOwner, serviceParent) with any object accepted.
-// Cables and modules are kept by type: a device's cables are all attached to
-// it, and modules only exist on devices.
+// Cables and modules are kept by type: modules only exist on devices, and a
+// cable's snapshot names its ends by id alone, so a device track under All has
+// every cable, the rare one between two circuits included (RECIPES says so).
 func allDescendantMatch(oc objectChange, t string, scope *resolvedScope, kind descendantKind, ifaceTypeID int) bool {
 	switch t {
-	case "ipam.ipaddress", "dcim.macaddress":
+	case ipAddressType, macAddressType:
 		_, ok := assignedOwner(oc, ifaceTypeID, func(iface int64) (int64, bool) { return iface, true })
 		return ok
-	case "ipam.service":
+	case serviceType:
 		_, ok := serviceParent(oc, scope.TypeID, kind.ownerField, anyObject)
 		return ok
 	}

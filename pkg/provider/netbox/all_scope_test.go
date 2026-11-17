@@ -304,3 +304,12 @@ func TestChanges_AllScopeSkipsAnUntiableRelatedRead(t *testing.T) {
 		t.Errorf("reads = %v, want only the site type read, by name", reads)
 	}
 }
+
+// An All track with Include descendants holds descendant rows, so it says when
+// Limit left changes out, as a scoped track with descendants does.
+func TestChanges_AllScopeDrawsTheLimitMarker(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17), ch(2, 2, "dcim.device", 18), ch(3, 3, "dcim.device", 19))
+	spec := withDescendants(allScope(""))
+	spec.Limit = 2
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1", "#2", "limit")
+}

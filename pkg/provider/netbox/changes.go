@@ -974,15 +974,21 @@ func snapshotRef(scope *resolvedScope, oc objectChange, accept func(id int64) bo
 		if scope.TypeID == 0 {
 			continue
 		}
-		for _, key := range slices.Sorted(maps.Keys(data)) {
-			x, ok := strings.CutSuffix(key, "_type")
-			if !ok {
-				continue
+		// In key order, so the same snapshot always names the same object.
+		// Only the few <x>_type keys are sorted: an All scope's related read
+		// runs this on every row it scans.
+		var typed []string
+		for key := range data {
+			if strings.HasSuffix(key, "_type") {
+				typed = append(typed, key)
 			}
+		}
+		slices.Sort(typed)
+		for _, key := range typed {
 			if t, ok := snapshotID(data, key); !ok || t != int64(scope.TypeID) {
 				continue
 			}
-			if id, ok := snapshotID(data, x+"_id"); ok && accept(id) {
+			if id, ok := snapshotID(data, strings.TrimSuffix(key, "_type")+"_id"); ok && accept(id) {
 				return id, true
 			}
 		}

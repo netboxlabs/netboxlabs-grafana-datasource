@@ -50,6 +50,11 @@ type resolvedScope struct {
 	// typeIDs is the object-type map Type was resolved from, for an All
 	// scope's descendant types; nil when it couldn't be read (TypeID 0).
 	typeIDs map[string]int
+	// allDesc is the descendant types an All scope reads, and
+	// allDescUnreadable that some were wanted but couldn't be checked; Changes
+	// decides both once (allDescendants).
+	allDesc           []string
+	allDescUnreadable bool
 }
 
 // idSet is the scope objects' ids, for checking a row against the scope.

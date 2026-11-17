@@ -24,6 +24,7 @@ import (
 var scopedTypeIDs = map[string]int{
 	"dcim.site":                     6,
 	"dcim.device":                   12,
+	"dcim.devicetype":               13,
 	"dcim.interface":                14,
 	"dcim.cable":                    17,
 	"ipam.ipaddress":                20,

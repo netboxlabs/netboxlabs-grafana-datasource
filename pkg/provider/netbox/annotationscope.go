@@ -50,11 +50,9 @@ type resolvedScope struct {
 	// typeIDs is the object-type map Type was resolved from, for an All
 	// scope's descendant types; nil when it couldn't be read (TypeID 0).
 	typeIDs map[string]int
-	// allDesc is the descendant types an All scope reads, and allPartial that
-	// part of what it wanted couldn't be read without the type map; Changes
-	// decides both once.
-	allDesc    []string
-	allPartial bool
+	// allDesc is the descendant types an All scope reads; Changes decides it
+	// once (allDescendants).
+	allDesc []string
 }
 
 // idSet is the scope objects' ids, for checking a row against the scope.
@@ -126,7 +124,10 @@ func (e *AnnotationError) Error() string {
 
 // resolveAnnotationScope resolves an annotation's scope to the objects it names.
 // nil, nil means unscoped: no scope was configured. $__all is every object of
-// the Scope type: the type, with All set and no objects looked up.
+// the Scope type: the type, with All set and no objects looked up. Its reads
+// filter and check by type id, so it needs the object-type map: without it
+// the query is refused (object-types-unreadable), not answered by type name,
+// where a mistyped type would read as a quiet window.
 //
 // Nothing here widens the query. A configured scope that came out empty is an
 // error, not unscoped, and so is a name that matches nothing: either would
@@ -138,6 +139,9 @@ func (p *Provider) resolveAnnotationScope(ctx context.Context, spec provider.Cha
 		scope, err := p.scopeType(ctx, spec.ScopeType, spec.ScopeTypeSet)
 		if err != nil {
 			return nil, err
+		}
+		if scope.TypeID == 0 {
+			return nil, &AnnotationError{Reason: provider.AnnotationReasonObjectTypesUnreadable}
 		}
 		scope.All = true
 		return scope, nil

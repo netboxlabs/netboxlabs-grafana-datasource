@@ -31,29 +31,21 @@ var allDescendantTypes = map[string][]string{
 
 // allDescendants is which descendant types an All query reads: none without
 // Include descendants, else the scope type's, less those Object types leaves
-// out and those this NetBox doesn't have. Their checks need type ids, so
-// without the type map none are read, and unreadable reports that some were
-// wanted. Changes calls it once, for the reads and the warning both.
-func allDescendants(scope *resolvedScope, spec provider.ChangeSpec, wanted []string) (types []string, unreadable bool) {
+// out and those this NetBox doesn't have.
+func allDescendants(scope *resolvedScope, spec provider.ChangeSpec, wanted []string) []string {
 	if !spec.Descendants {
-		return nil, false
+		return nil
 	}
-	types = slices.DeleteFunc(slices.Clone(allDescendantTypes[scope.Type]), func(t string) bool {
-		return len(wanted) > 0 && !slices.Contains(wanted, t)
+	return slices.DeleteFunc(slices.Clone(allDescendantTypes[scope.Type]), func(t string) bool {
+		return (len(wanted) > 0 && !slices.Contains(wanted, t)) || scope.typeIDs[t] == 0
 	})
-	if len(types) == 0 {
-		return nil, false
-	}
-	if scope.typeIDs == nil {
-		return nil, true
-	}
-	return slices.DeleteFunc(types, func(t string) bool { return scope.typeIDs[t] == 0 }), false
 }
 
 // allScopeReads is an All query's change-log reads: the type read (the scope
 // type's own changes and the descendant types, in one read) and the related
 // read (the changes recorded against objects of the scope type). Both keep only
-// some of what NetBox returns, so both are scans.
+// some of what NetBox returns, so both are scans. resolveAnnotationScope has
+// made sure the type map was read.
 func (p *Provider) allScopeReads(ctx context.Context, spec provider.ChangeSpec, scope *resolvedScope, wanted []string, f changeFilter) ([]changeRead, error) {
 	var reads []changeRead
 
@@ -62,11 +54,7 @@ func (p *Provider) allScopeReads(ctx context.Context, spec provider.ChangeSpec, 
 	if own || len(desc) > 0 {
 		q := changeLogQuery(spec, f)
 		if own {
-			if scope.TypeID != 0 {
-				q.Add(changedObjectTypeIDParam, strconv.Itoa(scope.TypeID))
-			} else {
-				q.Set(changedObjectTypeParam, scope.Type)
-			}
+			q.Add(changedObjectTypeIDParam, strconv.Itoa(scope.TypeID))
 		}
 		for _, t := range desc {
 			q.Add(changedObjectTypeIDParam, strconv.Itoa(scope.typeIDs[t]))
@@ -82,24 +70,17 @@ func (p *Provider) allScopeReads(ctx context.Context, spec provider.ChangeSpec, 
 		}})
 	}
 
-	// Rows are kept only when a snapshot ties them to the scope type
-	// (tiedToScopeType). Without the type map only a device's or VM's rows can
-	// be, by the field naming them (their components'); the others' tie by a
-	// generic <x>_type pair, so the read isn't made, and the track says so
-	// (resolvedScope.allPartial).
-	if scope.TypeID != 0 || descendantKinds[scope.Type].ownerField != "" {
-		trs, err := p.objectTypeReads(ctx, wanted, changedObjectTypeIDParam, changedObjectTypeParam)
-		if err != nil {
-			return nil, err
-		}
-		for _, tr := range trs {
-			q := changeLogQuery(spec, f)
-			q.Set(relatedObjectTypeParam, scope.Type)
-			reads = append(reads, changeRead{q: tr.with(q), scan: true, fromRelated: true, relatedTypeID: scope.TypeID,
-				keep: func(oc objectChange) bool {
-					return tr.keeps(normalizeObjectType(oc.changedType())) && tiedToScopeType(scope, oc)
-				}})
-		}
+	trs, err := p.objectTypeReads(ctx, wanted, changedObjectTypeIDParam, changedObjectTypeParam)
+	if err != nil {
+		return nil, err
+	}
+	for _, tr := range trs {
+		q := changeLogQuery(spec, f)
+		q.Set(relatedObjectTypeParam, scope.Type)
+		reads = append(reads, changeRead{q: tr.with(q), scan: true, fromRelated: true, relatedTypeID: scope.TypeID,
+			keep: func(oc objectChange) bool {
+				return tr.keeps(normalizeObjectType(oc.changedType())) && tiedToScopeType(scope, oc)
+			}})
 	}
 	return perAction(reads, f.pushes), nil
 }
@@ -126,11 +107,19 @@ func allDescendantMatch(oc objectChange, t string, scope *resolvedScope, kind de
 	return true
 }
 
-// tiedToScopeType reports whether a related read's row names an object of the
-// scope type in a snapshot (snapshotRef, any object accepted). The change log
-// doesn't return the related object, so this is what keeps a NetBox that
-// ignored related_object_type from putting every change on the track.
+// tiedToScopeType reports whether a related read's row is the scope type's. The
+// change log doesn't return the related object, so for the types whose
+// children name them by a field of their own (scopeParentFields) a row must
+// name an object of the type in a snapshot (snapshotRef, any object accepted):
+// that keeps a NetBox that ignored related_object_type from putting every
+// change on a device track. Other types' children name them by fields this
+// can't know (an interface template's device_type, a tunnel termination's
+// tunnel), so their rows are left to NetBox's related_object_type filter, as a
+// scoped track's related read leaves them.
 func tiedToScopeType(scope *resolvedScope, oc objectChange) bool {
+	if _, named := scopeParentFields[scope.Type]; !named {
+		return true
+	}
 	_, ok := snapshotRef(scope, oc, anyObject)
 	return ok
 }

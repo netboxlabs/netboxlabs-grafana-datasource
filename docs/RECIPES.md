@@ -495,7 +495,8 @@ what's attached to it. Each marker says what changed.
    interface and services whose parent is of that type, and for devices every
    cable and module (a cable between two circuits too: a cable's change doesn't
    say what it connects). These are read by type, so the cost doesn't grow with
-   how many objects there are. To see every change in NetBox, leave Scope empty.
+   how many objects there are, and the token needs to read NetBox's object
+   types. To see every change in NetBox, leave Scope empty.
 
    Scope type, Actions and Changed fields take dashboard variables. A variable with
    no value, or All with the custom value `$__all`, leaves Actions or Changed fields

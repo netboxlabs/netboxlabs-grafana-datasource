@@ -1848,13 +1848,9 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		return nil, fieldsErr
 	}
 	// Which descendant types an All scope reads, decided once, for its reads
-	// and its markers both.
+	// and its limit marker both.
 	if scope != nil && scope.All {
-		scope.allDesc, scope.allPartial = allDescendants(scope, spec, wanted)
-		// The related read needs the type map too, unless only the scope
-		// type's own changes are wanted.
-		related := len(wanted) == 0 || slices.ContainsFunc(wanted, func(t string) bool { return t != scope.Type })
-		scope.allPartial = scope.allPartial || (scope.TypeID == 0 && related)
+		scope.allDesc = allDescendants(scope, spec, wanted)
 	}
 	reads, err := p.changeReads(ctx, spec, scope, wanted, filter)
 	if err != nil {
@@ -1962,12 +1958,6 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		descErr = descOpt.err(provider.AnnotationReasonDescendantsSlow)
 		// The rest of the track stands, and a marker says what's missing.
 		desc = nil
-	}
-	// An All scope ties related rows and checks descendant types by their type
-	// ids, so without the type map part of its track wasn't read (allScopeReads):
-	// the track says so.
-	if scope != nil && scope.All && scope.allPartial {
-		descErr = &AnnotationError{Reason: provider.AnnotationReasonObjectTypesUnreadable}
 	}
 	// Whether the track holds descendant rows: merged from the descendant
 	// reads, or read by type under All.
@@ -2577,12 +2567,9 @@ type optionalRead struct {
 	start, deadline time.Time
 }
 
-// newOptionalRead starts an optional read's context; a zero deadline is none.
 func newOptionalRead(parent context.Context, deadline time.Time) *optionalRead {
-	r := &optionalRead{start: time.Now(), deadline: deadline, cancel: func() {}}
-	if !deadline.IsZero() {
-		parent, r.cancel = context.WithDeadline(parent, deadline)
-	}
+	r := &optionalRead{start: time.Now(), deadline: deadline}
+	parent, r.cancel = context.WithDeadline(parent, deadline)
 	r.ctx, r.fail = context.WithCancelCause(parent)
 	return r
 }
@@ -2606,17 +2593,18 @@ func (r *optionalRead) err(slowReason string) error {
 	return cause
 }
 
-// journalDeadline is when the journal read is cut: four fifths of what's left
-// of the caller's deadline, so a slow journal leaves time to answer with the
-// change markers. Without a caller's deadline it is zero, no deadline of its
-// own: nothing can blank the track then, and each of its requests is bounded
-// by the datasource Timeout, whose error is the warning.
+// journalDeadline is when the journal read is cut: twice the datasource
+// Timeout from now, or four fifths of what's left of the caller's deadline
+// when that's sooner, so a slow journal leaves time to answer with the change
+// markers. Twice, so one hung request ends at its own Timeout first, with that
+// error on the warning, and a retry still fits; past it, a journal slow over
+// several pages is cut, and the warning says it was slow.
 func (p *Provider) journalDeadline(ctx context.Context) time.Time {
-	if p.journalWaitOverride > 0 {
-		return deadlineWithin(ctx, p.journalWaitOverride)
+	budget := p.journalWaitOverride
+	if budget <= 0 {
+		budget = 2 * p.objectTypeFetchBudget()
 	}
-	reserved, _ := reservedDeadline(ctx)
-	return reserved
+	return deadlineWithin(ctx, budget)
 }
 
 // deadlineWithin is budget from now, or four fifths of what's left of ctx's

@@ -9,6 +9,9 @@ import {
 } from '../hooks/useBranchingInstalled';
 import { DESCENDANT_SCOPE_TYPES, NetBoxQuery } from '../types';
 
+/** Wide enough for "Include descendants" and its tooltip icon on one line. */
+const LABEL_WIDTH = 24;
+
 interface Props {
   query: NetBoxQuery;
   onChange: (query: NetBoxQuery) => void;
@@ -82,7 +85,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
     <Stack gap={1} direction="column">
       <InlineField
         label="Object types"
-        labelWidth={20}
+        labelWidth={LABEL_WIDTH}
         grow
         tooltip="Restrict to these NetBox content types. Leave empty for all changes."
       >
@@ -96,7 +99,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
       </InlineField>
       <InlineField
         label="Scope type"
-        labelWidth={20}
+        labelWidth={LABEL_WIDTH}
         tooltip="NetBox content type of the objects to follow. Defaults to dcim.device when a scope is set. Leave Scope empty to show all changes."
       >
         <Select
@@ -112,7 +115,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
       </InlineField>
       <InlineField
         label="Scope"
-        labelWidth={20}
+        labelWidth={LABEL_WIDTH}
         tooltip="Names, ids or a dashboard variable selecting the objects whose changes to show."
       >
         <Input
@@ -129,7 +132,11 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
           }}
         />
       </InlineField>
-      <InlineField label="Match by" labelWidth={20} tooltip="Whether the scope values are object names or ids.">
+      <InlineField
+        label="Match by"
+        labelWidth={LABEL_WIDTH}
+        tooltip="Whether the scope values are object names or ids."
+      >
         <RadioButtonGroup
           options={SCOPE_MATCH_OPTIONS}
           value={query.scopeMatch ?? 'name'}
@@ -139,7 +146,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
       {showDescendants && (
         <InlineField
           label="Include descendants"
-          labelWidth={20}
+          labelWidth={LABEL_WIDTH}
           tooltip="Also show changes to what's attached: cables, IP and MAC addresses on its interfaces, modules and services. Uses more NetBox requests."
         >
           <InlineSwitch
@@ -151,7 +158,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
       )}
       <InlineField
         label="Actions"
-        labelWidth={20}
+        labelWidth={LABEL_WIDTH}
         grow
         tooltip="Restrict to these change actions. Leave empty for all."
       >
@@ -172,7 +179,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
       </InlineField>
       <InlineField
         label="Changed fields"
-        labelWidth={20}
+        labelWidth={LABEL_WIDTH}
         grow
         tooltip="Only updates that touched one of these fields; creates and deletes follow Actions. Custom fields are written cf_name."
       >
@@ -190,7 +197,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
       </InlineField>
       <InlineField
         label="Journal entries"
-        labelWidth={20}
+        labelWidth={LABEL_WIDTH}
         tooltip="Also show journal entries (for the scoped objects when a scope is set)."
       >
         <InlineSwitch
@@ -199,7 +206,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
           onChange={(e) => onChange({ ...query, journal: e.currentTarget.checked })}
         />
       </InlineField>
-      <InlineField label="Limit" labelWidth={20} tooltip="Maximum number of change events">
+      <InlineField label="Limit" labelWidth={LABEL_WIDTH} tooltip="Maximum number of change events">
         <Input
           width={20}
           type="number"
@@ -209,7 +216,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
       </InlineField>
       <InlineField
         label="Branch"
-        labelWidth={20}
+        labelWidth={LABEL_WIDTH}
         disabled={branchDisabled}
         tooltip={branchDisabled ? BRANCH_FIELD_DISABLED_TOOLTIP : BRANCH_FIELD_TOOLTIP}
       >

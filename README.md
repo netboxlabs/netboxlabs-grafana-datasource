@@ -169,7 +169,7 @@ datasources:
 | **Objects**       | A joinable table for any object type (with optional join keys) | Table, or Outer-join onto metrics |
 | **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`. Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
 | **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)     | Node Graph panel                  |
-| **Annotations**   | Change-log events (`time/title/text/tags`, `id` 0, read-only)  | Dashboard annotations             |
+| **Annotations**   | NetBox change-log events, optionally scoped to objects and what's attached, plus journal entries. Read-only (no Edit button) | Dashboard annotations |
 
 See [Demo](#demo) below for a one-command runnable stack (synthetic Prometheus + Loki
 labeled to match NetBox + a rich dashboard).

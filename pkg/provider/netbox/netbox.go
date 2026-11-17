@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -1945,7 +1944,7 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		select {
 		case <-journalDone:
 		case <-cut.C:
-			journalOpt.cutSlow()
+			journalOpt.cutSlow(journalDeadline)
 			<-journalDone
 		}
 		cut.Stop()
@@ -2598,9 +2597,10 @@ func newOptionalRead(parent context.Context, deadline time.Time) *optionalRead {
 	return r
 }
 
-// cutSlow ends the read as its deadline would, now.
-func (r *optionalRead) cutSlow() {
-	r.deadline = time.Now()
+// cutSlow ends the read now as a deadline would, the one it had: at, which
+// is what its warning counts, however long the other reads held it past that.
+func (r *optionalRead) cutSlow(at time.Time) {
+	r.deadline = at
 	r.fail(context.DeadlineExceeded)
 }
 
@@ -2617,10 +2617,12 @@ func (r *optionalRead) stop() {
 // context.DeadlineExceeded too.
 func (r *optionalRead) err(slowReason string) error {
 	cause := context.Cause(r.ctx)
-	if cause == context.DeadlineExceeded {
-		// Rounded: the deadline is computed just before start is stamped, so
-		// an 8 s budget measures a hair under 8 s.
-		return &AnnotationError{Reason: slowReason, Count: max(1, int(math.Round(r.deadline.Sub(r.start).Seconds())))}
+	if cause == context.DeadlineExceeded && !r.deadline.IsZero() {
+		// Whole seconds it had, so "took longer than" stays true. The deadline
+		// is computed a hair before start is stamped, so an 8 s budget
+		// measures just under 8 s: that gap is allowed for.
+		had := r.deadline.Sub(r.start) + 50*time.Millisecond
+		return &AnnotationError{Reason: slowReason, Count: max(1, int(had.Seconds()))}
 	}
 	return cause
 }

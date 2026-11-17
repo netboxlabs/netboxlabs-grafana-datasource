@@ -1472,15 +1472,44 @@ func TestChanges_JournalIsNotCutWhileTheReadsRun(t *testing.T) {
 	}
 }
 
-// A slow read's warning names the whole seconds it had, though its start is
-// stamped a hair after its deadline is computed.
+// A slow read's warning names the whole seconds it had: an 8 s budget whose
+// start was stamped a hair after its deadline is 8, and 7.6 s is 7, so "took
+// longer than" stays true.
 func TestOptionalRead_SlowCountsWholeSeconds(t *testing.T) {
-	r := newOptionalRead(context.Background(), time.Now())
+	for _, tc := range []struct {
+		had  time.Duration
+		want int
+	}{{8*time.Second - time.Microsecond, 8}, {7600 * time.Millisecond, 7}} {
+		r := newOptionalRead(context.Background(), time.Now())
+		<-r.ctx.Done()
+		r.start = r.deadline.Add(-tc.had)
+		if ae := annotationErr(t, r.err(provider.AnnotationReasonJournalSlow), provider.AnnotationReasonJournalSlow); ae.Count != tc.want {
+			t.Errorf("had %v: seconds = %d, want %d", tc.had, ae.Count, tc.want)
+		}
+		r.stop()
+	}
+}
+
+// A journal cut once the change reads are done counts the budget it had, not
+// how long the change reads held it.
+func TestOptionalRead_CutCountsTheBudget(t *testing.T) {
+	r := newOptionalRead(context.Background(), time.Time{})
 	defer r.stop()
-	<-r.ctx.Done()
-	r.start = r.deadline.Add(-8*time.Second + time.Microsecond)
-	if ae := annotationErr(t, r.err(provider.AnnotationReasonJournalSlow), provider.AnnotationReasonJournalSlow); ae.Count != 8 {
-		t.Errorf("seconds = %d, want 8", ae.Count)
+	r.start = time.Now().Add(-45 * time.Second)
+	r.cutSlow(r.start.Add(20 * time.Second))
+	if ae := annotationErr(t, r.err(provider.AnnotationReasonJournalSlow), provider.AnnotationReasonJournalSlow); ae.Count != 20 {
+		t.Errorf("seconds = %d, want the 20 s budget", ae.Count)
+	}
+}
+
+// A read with no deadline isn't slow: an error that happens to be
+// context.DeadlineExceeded is its own.
+func TestOptionalRead_NoDeadlineIsNeverSlow(t *testing.T) {
+	r := newOptionalRead(context.Background(), time.Time{})
+	defer r.stop()
+	r.fail(context.DeadlineExceeded)
+	if err := r.err(provider.AnnotationReasonJournalSlow); err != context.DeadlineExceeded {
+		t.Errorf("err = %v, want the read's own error", err)
 	}
 }
 

@@ -692,3 +692,16 @@ func TestBuildAnnotationsFrame_MergesNoticesWithoutAnError(t *testing.T) {
 		t.Errorf("tags = %q", got)
 	}
 }
+
+// Notices are grouped by the time they mark, so two far-apart times stay two
+// markers, the zero time included.
+func TestBuildAnnotationsFrame_KeepsNoticesAtOtherTimesApart(t *testing.T) {
+	far := time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC)
+	f := buildAnnotationsFrame([]provider.Change{
+		{Kind: provider.ChangeKindCutoff, Scanned: 2500},
+		{Kind: provider.ChangeKindLimit, Time: far, Until: far, Limit: 10},
+	})
+	if n := f.Fields[0].Len(); n != 2 {
+		t.Errorf("rows = %d, want 2", n)
+	}
+}

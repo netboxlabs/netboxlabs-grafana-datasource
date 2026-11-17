@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -1906,19 +1907,28 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 			}
 		})
 	}
+	// The journal has no deadline of its own while the other reads run: the
+	// query waits on them anyway. Once they're done it has until
+	// journalDeadline, and past that it is cut as slow (cutSlow), so a slow
+	// journal can't hold the track, and isn't cut while it holds nothing.
 	var (
-		journal    []provider.Change
-		journalErr error
-		journalOpt *optionalRead
+		journal         []provider.Change
+		journalErr      error
+		journalOpt      *optionalRead
+		journalDone     chan struct{}
+		journalDeadline time.Time
 	)
 	if spec.Journal {
-		journalOpt = newOptionalRead(readCtx, p.journalDeadline(ctx))
+		journalDeadline = p.journalDeadline(ctx)
+		journalOpt = newOptionalRead(readCtx, time.Time{})
 		defer journalOpt.stop()
-		wg.Go(func() {
+		journalDone = make(chan struct{})
+		go func() {
+			defer close(journalDone)
 			if journal, journalErr = p.journalEntries(journalOpt.ctx, spec, scope, wanted, limit); journalErr != nil {
 				journalOpt.fail(journalErr)
 			}
-		})
+		}()
 	}
 	if descendants {
 		wg.Go(func() {
@@ -1930,6 +1940,16 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		})
 	}
 	wg.Wait()
+	if journalDone != nil {
+		cut := time.NewTimer(time.Until(journalDeadline))
+		select {
+		case <-journalDone:
+		case <-cut.C:
+			journalOpt.cutSlow()
+			<-journalDone
+		}
+		cut.Stop()
+	}
 	// The read that failed first is the query's error. The others ended after
 	// its cancel, with context.Canceled or, when the cancel cut a retry's
 	// backoff, the stale error they were about to retry, so their errors are
@@ -2567,11 +2587,21 @@ type optionalRead struct {
 	start, deadline time.Time
 }
 
+// newOptionalRead starts an optional read's context; a zero deadline is none
+// (the journal's, which cutSlow ends instead).
 func newOptionalRead(parent context.Context, deadline time.Time) *optionalRead {
-	r := &optionalRead{start: time.Now(), deadline: deadline}
-	parent, r.cancel = context.WithDeadline(parent, deadline)
+	r := &optionalRead{start: time.Now(), deadline: deadline, cancel: func() {}}
+	if !deadline.IsZero() {
+		parent, r.cancel = context.WithDeadline(parent, deadline)
+	}
 	r.ctx, r.fail = context.WithCancelCause(parent)
 	return r
+}
+
+// cutSlow ends the read as its deadline would, now.
+func (r *optionalRead) cutSlow() {
+	r.deadline = time.Now()
+	r.fail(context.DeadlineExceeded)
 }
 
 // stop releases the read's contexts.
@@ -2588,7 +2618,9 @@ func (r *optionalRead) stop() {
 func (r *optionalRead) err(slowReason string) error {
 	cause := context.Cause(r.ctx)
 	if cause == context.DeadlineExceeded {
-		return &AnnotationError{Reason: slowReason, Count: max(1, int(r.deadline.Sub(r.start).Seconds()))}
+		// Rounded: the deadline is computed just before start is stamped, so
+		// an 8 s budget measures a hair under 8 s.
+		return &AnnotationError{Reason: slowReason, Count: max(1, int(math.Round(r.deadline.Sub(r.start).Seconds())))}
 	}
 	return cause
 }

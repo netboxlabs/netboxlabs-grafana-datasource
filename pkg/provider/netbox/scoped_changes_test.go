@@ -1456,6 +1456,34 @@ func TestChanges_JournalIsNotCutAtTheDescendantsBudget(t *testing.T) {
 	}
 }
 
+// The journal isn't cut while the change reads still hold the query: one that
+// finishes after its own deadline, but before them, shows.
+func TestChanges_JournalIsNotCutWhileTheReadsRun(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.journal = []journalRow{{typ: "dcim.device", objID: 17, display: "leaf1", minutes: 2, text: "note"}}
+	s.journalHold = 250 * time.Millisecond
+	s.delayTypeID, s.delayFor = scopedTypeIDs["dcim.device"], 500*time.Millisecond
+	p := s.start(t)
+	p.journalWaitOverride = 100 * time.Millisecond
+	spec := splitSpec()
+	spec.Journal = true
+	if ids := changeIDs(changesOK(t, p, spec)); !slices.Equal(ids, []string{"#1", "leaf1"}) {
+		t.Errorf("changes = %v, want the change and the journal entry", ids)
+	}
+}
+
+// A slow read's warning names the whole seconds it had, though its start is
+// stamped a hair after its deadline is computed.
+func TestOptionalRead_SlowCountsWholeSeconds(t *testing.T) {
+	r := newOptionalRead(context.Background(), time.Now())
+	defer r.stop()
+	<-r.ctx.Done()
+	r.start = r.deadline.Add(-8*time.Second + time.Microsecond)
+	if ae := annotationErr(t, r.err(provider.AnnotationReasonJournalSlow), provider.AnnotationReasonJournalSlow); ae.Count != 8 {
+		t.Errorf("seconds = %d, want 8", ae.Count)
+	}
+}
+
 // With no To, the end-of-range markers still share one time, so the frame can
 // show them as one marker: the descendants error and the journal error here.
 func TestChanges_EndOfRangeMarkersShareOneTime(t *testing.T) {

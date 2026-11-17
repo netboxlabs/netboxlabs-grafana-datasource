@@ -263,21 +263,18 @@ func mergeNotices(rows []annotationRow) []annotationRow {
 		rows []annotationRow
 	}
 	out := make([]annotationRow, 0, len(rows))
-	var groups map[int64]*group // by time; most tracks have none
+	var groups []*group // a track has a few notices at most
 	for _, r := range rows {
 		if !r.notice {
 			out = append(out, r)
 			continue
 		}
-		k := r.time.UnixNano()
-		if g, ok := groups[k]; ok {
-			g.rows = append(g.rows, r)
+		i := slices.IndexFunc(groups, func(g *group) bool { return g.rows[0].time.Equal(r.time) })
+		if i >= 0 {
+			groups[i].rows = append(groups[i].rows, r)
 			continue
 		}
-		if groups == nil {
-			groups = map[int64]*group{}
-		}
-		groups[k] = &group{at: len(out), rows: []annotationRow{r}}
+		groups = append(groups, &group{at: len(out), rows: []annotationRow{r}})
 		out = append(out, r)
 	}
 	for _, g := range groups {

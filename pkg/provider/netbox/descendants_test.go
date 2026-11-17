@@ -510,6 +510,52 @@ func TestDescendantMembers_ListPagesUnderTheCap(t *testing.T) {
 	}
 }
 
+// A child added between two page reads shifts NetBox's offset pages, so the
+// second page repeats the first one's last row. It is read once, and doesn't
+// count toward the cap: three children under a cap of three aren't too many.
+func TestListChildren_RepeatedRowAcrossPagesIsSkipped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("offset") == "" {
+			_, _ = fmt.Fprintf(w, `{"count":3,"next":"http://%s%s?offset=2","previous":null,"results":[{"id":1},{"id":2}]}`, r.Host, r.URL.Path)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"count":4,"next":null,"previous":null,"results":[{"id":2},{"id":3}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	p := New(srv.URL, "token", srv.Client())
+	p.childListCapOverride = 3
+	rows, err := p.listChildren(context.Background(), "dcim/interfaces", url.Values{"device_id": {"17"}})
+	if err != nil {
+		t.Fatalf("listChildren: %v", err)
+	}
+	var ids []string
+	for _, r := range rows {
+		ids = append(ids, string(r))
+	}
+	if got := strings.Join(ids, ","); got != `{"id":1},{"id":2},{"id":3}` {
+		t.Errorf("rows = %s, want each child once", got)
+	}
+}
+
+// A NetBox that ignores offset and serves the same page forever still ends:
+// its repeats are counted, and past the cap the list is refused, as one that
+// grows past it is.
+func TestListChildren_SamePageForeverIsRefused(t *testing.T) {
+	var pages atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages.Add(1)
+		_, _ = fmt.Fprintf(w, `{"count":null,"next":"http://%s%s?offset=2","previous":null,"results":[{"id":1},{"id":2}]}`, r.Host, r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	p := New(srv.URL, "token", srv.Client())
+	p.childListCapOverride = 2
+	_, err := p.listChildren(context.Background(), "dcim/interfaces", url.Values{"device_id": {"17"}})
+	annotationErr(t, err, provider.AnnotationReasonTooManyChildren)
+	if n := pages.Load(); n > 3 {
+		t.Errorf("pages read = %d, want the walk stopped within the cap's repeats", n)
+	}
+}
+
 // listChildren's rows decide too, for a NetBox that doesn't count.
 func TestListChildren_RowsOverCapWithoutCount(t *testing.T) {
 	var pages atomic.Int32

@@ -74,9 +74,15 @@ func (p *Provider) descendantsDeadline(ctx context.Context) time.Time {
 // links, failing the same way if the rows read pass the cap. A 403 on any page
 // is descendants-forbidden.
 //
-// The rows read are checked too because the count can be missing or wrong,
-// and because they bound the walk: a NetBox that ignores offset and serves the
-// same page forever stops at the cap.
+// The rows read are checked too because the count can be missing or wrong.
+//
+// Offset pages shift when a child is added mid-read, so a page can start with
+// a row the page before ended with. As in walkRows, a row whose id was already
+// read is skipped, and doesn't count toward the cap; a row without an id is
+// never a repeat. The repeats bound the walk instead: a NetBox that ignores
+// offset and serves the same page forever is refused once they pass the cap.
+// A child deleted mid-read shifts the pages the other way and can leave a row
+// unread, which skipping can't help; the next refresh reads it.
 func (p *Provider) listChildren(ctx context.Context, endpoint string, q url.Values) ([]json.RawMessage, error) {
 	limit := p.childListCap()
 	pq := url.Values{}
@@ -84,6 +90,8 @@ func (p *Provider) listChildren(ctx context.Context, endpoint string, q url.Valu
 	pq.Set("limit", strconv.Itoa(pageSize))
 	next := p.client.apiURL(endpoint, pq)
 	var rows []json.RawMessage
+	seen := map[int64]bool{}
+	repeats := 0
 	for first := true; next != ""; first = false {
 		page, err := p.getListPageRetry(ctx, next)
 		if err != nil {
@@ -96,8 +104,22 @@ func (p *Provider) listChildren(ctx context.Context, endpoint string, q url.Valu
 		if n, ok := page.total(); first && ok && n > limit {
 			return nil, &AnnotationError{Reason: provider.AnnotationReasonTooManyChildren}
 		}
-		if rows = append(rows, page.Results...); len(rows) > limit {
-			return nil, &AnnotationError{Reason: provider.AnnotationReasonTooManyChildren}
+		for _, raw := range page.Results {
+			var row struct {
+				ID int64 `json:"id"`
+			}
+			if json.Unmarshal(raw, &row) == nil && row.ID != 0 {
+				if seen[row.ID] {
+					if repeats++; repeats > limit {
+						return nil, &AnnotationError{Reason: provider.AnnotationReasonTooManyChildren}
+					}
+					continue
+				}
+				seen[row.ID] = true
+			}
+			if rows = append(rows, raw); len(rows) > limit {
+				return nil, &AnnotationError{Reason: provider.AnnotationReasonTooManyChildren}
+			}
 		}
 		// An empty page ends the list too, so a malformed next link can't loop.
 		if page.Next == nil || len(page.Results) == 0 {

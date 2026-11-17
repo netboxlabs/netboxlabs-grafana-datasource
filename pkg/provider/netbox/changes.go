@@ -601,6 +601,10 @@ type changeRead struct {
 	// related_object_type as an id; 0 when it's unknown.
 	fromRelated   bool
 	relatedTypeID int
+	// scan marks a read whose keep drops rows NetBox returns for the query, as
+	// an All scope's do: Changes walks it to the scan cap, not to limit, and a
+	// capped one draws the cut-off marker.
+	scan bool
 }
 
 // changeLogQuery is the part of a change-log read every read shares: newest
@@ -662,10 +666,14 @@ func (p *Provider) changeReads(ctx context.Context, spec provider.ChangeSpec, sc
 		}
 		return perAction(reads, f.pushes), nil
 	}
-	// resolveAnnotationScope never returns a scope without objects. If one got
-	// here, read 2 would go out with related_object_type and no related_object_id,
-	// and its only local check is the type: every change recorded against any
-	// object of the scope type. Refused before any request, as an empty scope is.
+	if scope.All {
+		return p.allScopeReads(ctx, spec, scope, wanted, f)
+	}
+	// resolveAnnotationScope never returns a scope without objects but All. If
+	// one got here, read 2 would go out with related_object_type and no
+	// related_object_id, and its only local check is the type: every change
+	// recorded against any object of the scope type. Refused before any
+	// request, as an empty scope is.
 	if len(scope.Objects) == 0 {
 		return nil, &AnnotationError{Reason: provider.AnnotationReasonEmptyScope}
 	}

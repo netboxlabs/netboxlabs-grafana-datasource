@@ -487,6 +487,16 @@ what's attached to it. Each marker says what changed.
    `$__all`. To type a name that contains a comma, write it as `\,`; variable values
    are escaped for you.
 
+   All with the custom value `$__all` follows every object of the Scope type in
+   NetBox, not only the variable's options: a device variable chained to one site
+   follows every site's devices. The track is the type's own changes and the
+   changes recorded against those objects, such as their interfaces'. With
+   Include descendants on, it also has every cable and module, IP and MAC
+   addresses on that kind of interface, and services whose parent is of that
+   type (an interface scope has no cables). These are read by type, so the cost
+   doesn't grow with how many objects there are. To see every change in NetBox,
+   leave Scope empty.
+
    Scope type, Actions and Changed fields take dashboard variables. A variable with
    no value, or All with the custom value `$__all`, leaves Actions or Changed fields
    unfiltered; Scope type needs exactly one value.
@@ -577,8 +587,8 @@ A bad scope shows up as a **NetBox annotation error** marker at the right edge o
 time range, and as the error in the annotation editor, since dashboards don't show
 annotation errors themselves. That covers an unknown name, an unknown type, an empty
 variable, and a variable set to **All** with no **Custom all value** when All covers more
-than 100 objects. Below that, All scopes to every object it covers. Only `$__all` means
-"no scope".
+than 100 objects. Below that, All scopes to every object it covers. `$__all` scopes to
+every object of the Scope type, and only an empty Scope means "no scope".
 
 ## Push recipe, no plugin
 

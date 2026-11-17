@@ -90,8 +90,11 @@ func (p *Provider) journalEntries(ctx context.Context, spec provider.ChangeSpec,
 		} else {
 			q.Set(assignedObjectTypeParam, scope.Type)
 		}
-		inScope = scope.idSet()
-		q[assignedObjectIDParam] = scope.idStrings()
+		// Under All, every object of the type: no ids.
+		if !scope.All {
+			inScope = scope.idSet()
+			q[assignedObjectIDParam] = scope.idStrings()
+		}
 	} else {
 		var err error
 		if trs, err = p.objectTypeReads(ctx, wanted, assignedObjectTypeIDParam, assignedObjectTypeParam); err != nil {
@@ -169,12 +172,13 @@ func (p *Provider) journalRead(ctx context.Context, q url.Values, tr typeRead, s
 		if json.Unmarshal(raw, &e) != nil {
 			return true
 		}
-		// The read's types unscoped; the scope's type and objects scoped.
+		// The read's types unscoped; the scope's type and objects scoped, the
+		// type alone under All.
 		t := normalizeObjectType(e.AssignedType)
 		if !tr.keeps(t) {
 			return true
 		}
-		if scope != nil && (t != scope.Type || !inScope[e.AssignedID]) {
+		if scope != nil && (t != scope.Type || (!scope.All && !inScope[e.AssignedID])) {
 			return true
 		}
 		entries = append(entries, e)

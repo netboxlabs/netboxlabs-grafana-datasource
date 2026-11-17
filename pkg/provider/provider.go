@@ -326,7 +326,7 @@ type ChangeSpec struct {
 	ScopeTypeSet  bool     // a type was configured (even if it interpolated to nothing)
 	Scope         []string // split values; nil = unscoped
 	ScopeSet      bool     // a scope was configured (even if it interpolated to nothing)
-	ScopeAll      bool     // the scope was exactly $__all: unscoped on purpose
+	ScopeAll      bool     // the scope was exactly $__all: every object of the scope type
 	ScopeMatch    string   // "name" (default) | "id", in any case, padding aside
 	Actions       []string // subset of create|update|delete
 	ChangedFields []string

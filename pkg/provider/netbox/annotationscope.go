@@ -39,12 +39,14 @@ type scopeObject struct {
 	Name string
 }
 
-// resolvedScope is an annotation's scope resolved to objects.
+// resolvedScope is an annotation's scope resolved to objects, or to every
+// object of its type (All, with no Objects).
 type resolvedScope struct {
 	Type     string // app_label.model
 	TypeID   int    // 0 when the object-type map couldn't be read
 	Endpoint string // "" when unknown (allowed under Match by ID)
 	Objects  []scopeObject
+	All      bool // the scope was $__all: every object of Type (allScopeReads)
 }
 
 // idSet is the scope objects' ids, for checking a row against the scope.
@@ -115,7 +117,8 @@ func (e *AnnotationError) Error() string {
 }
 
 // resolveAnnotationScope resolves an annotation's scope to the objects it names.
-// nil, nil means unscoped: no scope was configured, or it was $__all.
+// nil, nil means unscoped: no scope was configured. $__all is every object of
+// the Scope type: the type, with All set and no objects looked up.
 //
 // Nothing here widens the query. A configured scope that came out empty is an
 // error, not unscoped, and so is a name that matches nothing: either would
@@ -123,7 +126,15 @@ func (e *AnnotationError) Error() string {
 // before any request is made: how many there are, and under Match by ID that
 // each one is an id.
 func (p *Provider) resolveAnnotationScope(ctx context.Context, spec provider.ChangeSpec) (*resolvedScope, error) {
-	if spec.ScopeAll || (len(spec.Scope) == 0 && !spec.ScopeSet) {
+	if spec.ScopeAll {
+		scope, err := p.scopeType(ctx, spec.ScopeType, spec.ScopeTypeSet)
+		if err != nil {
+			return nil, err
+		}
+		scope.All = true
+		return scope, nil
+	}
+	if len(spec.Scope) == 0 && !spec.ScopeSet {
 		return nil, nil
 	}
 	values := scopeValues(spec.Scope)

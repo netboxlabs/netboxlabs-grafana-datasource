@@ -1844,10 +1844,6 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	if fieldsErr != nil {
 		return nil, fieldsErr
 	}
-	maxRows := limit
-	if filter.localScan() {
-		maxRows = p.changeScanCap()
-	}
 	reads, err := p.changeReads(ctx, spec, scope, wanted, filter)
 	if err != nil {
 		return nil, err
@@ -1874,7 +1870,8 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		failDesc        context.CancelCauseFunc
 		start, deadline time.Time
 	)
-	descendants := spec.Descendants && scope != nil
+	// An All scope reads the descendant types itself (allScopeReads).
+	descendants := spec.Descendants && scope != nil && !scope.All
 	if descendants {
 		start, deadline = time.Now(), p.descendantsDeadline(ctx)
 		deadlineCtx, cancel := context.WithDeadline(readCtx, deadline)
@@ -1893,8 +1890,14 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			// A read that drops rows NetBox returned walks to the scan cap.
+			scan := filter.localScan() || r.scan
+			maxRows := limit
+			if scan {
+				maxRows = p.changeScanCap()
+			}
 			results[i] = p.runChangeRead(readCtx, r, filter, limit, maxRows)
-			results[i].scan = filter.localScan()
+			results[i].scan = scan
 			if results[i].err != nil {
 				cancelReads(results[i].err)
 			}
@@ -1972,6 +1975,11 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		// The rest of the track stands, and a marker says what's missing.
 		desc = nil
 	}
+	// An All scope can't check the descendant types without the type map, so it
+	// didn't read them (allScopeReads): the track says so, as a scope's does.
+	if scope != nil && scope.All && scope.TypeID == 0 && len(wantedAllDescendants(scope, spec, wanted)) > 0 {
+		descErr = &AnnotationError{Reason: provider.AnnotationReasonDescendantTypesUnreadable}
+	}
 	descMerged := len(desc) > 0
 	results = append(results, desc...)
 
@@ -2005,6 +2013,8 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		objects := scope.objectsByID()
 		for i := range kept {
 			switch {
+			case scope.All:
+				kept[i].parent = allParent(scope, kept[i].oc)
 			case kept[i].descendant:
 				kept[i].parent = descendantParent(scope, objects, kept[i].owner)
 			case kept[i].fromRelated:

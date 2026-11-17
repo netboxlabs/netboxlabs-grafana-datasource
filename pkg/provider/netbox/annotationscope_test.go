@@ -273,16 +273,26 @@ func TestAnnotationScope_Unscoped(t *testing.T) {
 	}
 }
 
-func TestAnnotationScope_AllIsUnscoped(t *testing.T) {
-	s := newAnnoScopeServer()
-	p := s.start(t)
+// $__all is every object of the Scope type, devices by default: the type with
+// no objects, and no lookup of any.
+func TestAnnotationScope_AllIsTheScopeType(t *testing.T) {
+	p := newAnnoScopeServer().start(t)
 	scope, err := p.resolveAnnotationScope(context.Background(), provider.ChangeSpec{ScopeSet: true, ScopeAll: true})
-	if scope != nil || err != nil {
-		t.Errorf("resolveAnnotationScope($__all) = %+v, %v; want nil, nil", scope, err)
+	if err != nil {
+		t.Fatalf("resolveAnnotationScope($__all): %v", err)
 	}
-	if got := s.allRequests(); len(got) != 0 {
-		t.Errorf("requests = %v, want none for $__all", got)
+	if scope == nil || !scope.All || scope.Type != "dcim.device" || scope.TypeID == 0 || len(scope.Objects) != 0 {
+		t.Errorf("resolveAnnotationScope($__all) = %+v, want every device", scope)
 	}
+}
+
+// Scope type still takes one type under All: $__all there is refused, not
+// every type.
+func TestAnnotationScope_AllNeedsOneScopeType(t *testing.T) {
+	p := newAnnoScopeServer().start(t)
+	spec := provider.ChangeSpec{ScopeSet: true, ScopeAll: true, ScopeType: "$__all", ScopeTypeSet: true}
+	_, err := p.resolveAnnotationScope(context.Background(), spec)
+	annotationErr(t, err, provider.AnnotationReasonScopeTypeNotOne)
 }
 
 // A scope that was configured but interpolated to nothing must not widen the

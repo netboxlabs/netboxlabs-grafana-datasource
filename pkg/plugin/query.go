@@ -566,10 +566,10 @@ func dropAllFilters(filters []provider.Filter) []provider.Filter {
 // can hold a comma, so one written \, is part of its value, as is a backslash
 // written \\: the frontend escapes variable values so (scopeFormat), and a user
 // can type them. A backslash before anything else stays as it is, so a name
-// such as Gi0\1 reads as written. The whole value $__all is
-// unscoped on purpose (all), the token dropAllFilters honours. A list holding
-// $__all beside other values is malformed and stays a list of values: it must
-// not widen the query.
+// such as Gi0\1 reads as written. The whole value $__all is all: every object
+// of the Scope type, the token dropAllFilters honours as no filter. A list
+// holding $__all beside other values is malformed and stays a list of values:
+// it must not widen the query.
 func parseScope(raw string) (values []string, all bool) {
 	if strings.TrimSpace(raw) == allFilterValue {
 		return nil, true
@@ -956,7 +956,7 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 		if u.AnnotationCount == provider.CountPastLimit {
 			covers = fmt.Sprintf("more than %d", netbox.MaxScopeObjects)
 		}
-		return fmt.Sprintf("The scope covers %s objects; the limit is %d. Narrow the variable's selection. If All means every object, give the All option the custom value $__all.", covers, netbox.MaxScopeObjects)
+		return fmt.Sprintf("The scope covers %s objects; the limit is %d. Narrow the variable's selection. To follow every object of the Scope type in NetBox, give the All option the custom value $__all.", covers, netbox.MaxScopeObjects)
 	case provider.AnnotationReasonUnknownField:
 		return fmt.Sprintf("%q isn't a field of any NetBox object type. Custom fields are written cf_<name>.", value)
 	case provider.AnnotationReasonUnknownCustomField:

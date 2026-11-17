@@ -1513,6 +1513,23 @@ func TestOptionalRead_NoDeadlineIsNeverSlow(t *testing.T) {
 	}
 }
 
+// A journal whose filters NetBox ignored returns other objects' entries; the
+// read keeps scanning past them until it has Limit of the scope's, so newer
+// unrelated entries can't crowd them out. (The test server's journal ignores
+// every filter.)
+func TestChanges_JournalScansPastOtherObjectsEntries(t *testing.T) {
+	s := newScopedChangeServer()
+	s.journal = []journalRow{
+		{typ: "dcim.device", objID: 99, display: "leaf9", minutes: 1, text: "a"},
+		{typ: "dcim.device", objID: 99, display: "leaf9", minutes: 2, text: "b"},
+		{typ: "dcim.device", objID: 99, display: "leaf9", minutes: 3, text: "c"},
+		{typ: "dcim.device", objID: 17, display: "leaf1", minutes: 4, text: "d"},
+	}
+	spec := scoped(nameScope("leaf1"), 2)
+	spec.Journal = true
+	wantIDs(t, changesOK(t, s.start(t), spec), "leaf1")
+}
+
 // With no To, the end-of-range markers still share one time, so the frame can
 // show them as one marker: the descendants error and the journal error here.
 func TestChanges_EndOfRangeMarkersShareOneTime(t *testing.T) {

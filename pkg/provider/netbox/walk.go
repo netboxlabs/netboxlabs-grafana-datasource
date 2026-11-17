@@ -43,14 +43,22 @@ func (p *Provider) changeScanCap() int {
 // count; this visits rows as they arrive, so the caller can stop on what it has
 // found.
 func (p *Provider) walkRows(ctx context.Context, endpoint string, q url.Values, maxRows int, visit func(json.RawMessage) bool) (scanned int, more bool, err error) {
+	return p.walkRowsPaged(ctx, endpoint, q, pageSize, maxRows, visit)
+}
+
+// walkRowsPaged is walkRows with pages of at most pageRows rows: a walk that
+// expects to stop well before maxRows (visit returns false) asks for pages of
+// about what it expects to keep, not of the most it may read.
+func (p *Provider) walkRowsPaged(ctx context.Context, endpoint string, q url.Values, pageRows, maxRows int, visit func(json.RawMessage) bool) (scanned int, more bool, err error) {
 	if maxRows <= 0 {
 		return 0, false, nil
 	}
+	pageRows = max(1, min(pageRows, pageSize))
 	pq := url.Values{}
 	for k, vs := range q {
 		pq[k] = vs
 	}
-	pq.Set("limit", strconv.Itoa(min(pageSize, maxRows)))
+	pq.Set("limit", strconv.Itoa(min(pageRows, maxRows)))
 	next := p.client.apiURL(endpoint, pq)
 	seen := map[int64]bool{}
 	repeats := 0
@@ -85,7 +93,7 @@ func (p *Provider) walkRows(ctx context.Context, endpoint string, q url.Values, 
 		if next, err = p.client.nextPageURL(next, *page.Next); err != nil || next == "" {
 			return scanned, false, err
 		}
-		if next, err = withLimit(next, min(pageSize, maxRows-scanned)); err != nil {
+		if next, err = withLimit(next, min(pageRows, maxRows-scanned)); err != nil {
 			return scanned, false, err
 		}
 	}

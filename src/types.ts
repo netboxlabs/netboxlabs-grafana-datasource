@@ -142,11 +142,6 @@ export interface NetBoxDataSourceOptions extends DataSourceJsonData {
    * hundred thousand objects it buys nothing and the costs apply at every size.
    * Alerting is unaffected: count and alert-table queries never use it. */
   fastPagingNoTotals?: boolean;
-  /** Turns annotations' Include descendants option off for every annotation on
-   * this data source. On unless it reads as off. Typed wide because a
-   * provisioning file can hold off or no as a string; the backend and the
-   * editors read it the same way (pkg/models, descendantsSettingOn). */
-  annotationDescendants?: boolean | string | number;
   /** Route this datasource through Grafana's secure socks proxy: Private Data
    * Source Connect on Grafana Cloud, an admin-run SOCKS proxy when self-hosted.
    * The plugin SDK reads it when it builds the HTTP client and routes only for

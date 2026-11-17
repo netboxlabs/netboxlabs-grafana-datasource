@@ -3,7 +3,6 @@ import { InlineField, Input, SecretInput, InlineSwitch, FieldSet, SecureSocksPro
 import { DataSourcePluginOptionsEditorProps } from '@grafana/data';
 import { config } from '@grafana/runtime';
 import { NetBoxDataSourceOptions, NetBoxSecureJsonData } from '../types';
-import { descendantsSettingOn } from '../datasource';
 
 interface Props extends DataSourcePluginOptionsEditorProps<NetBoxDataSourceOptions, NetBoxSecureJsonData> {}
 
@@ -26,11 +25,6 @@ export const FAST_PAGING_TOOLTIP = [
   'Alert rules are unaffected; every evaluation asks for the real total and natural order.',
   'Leave it off below a few million records.',
 ].join(' ');
-
-/** Copy for the Annotations section's Include descendants switch. A constant
- *  for the same reason as FAST_PAGING_TOOLTIP. */
-export const ANNOTATION_DESCENDANTS_SETTING_TOOLTIP =
-  "Lets annotations scoped to a device, VM or interface also show changes to what's attached to it (cables, addresses, modules, services). Off stops those extra NetBox reads for every annotation on this data source; on leaves it to each annotation's own switch.";
 
 export function ConfigEditor(props: Props) {
   const { onOptionsChange, options } = props;
@@ -175,16 +169,6 @@ export function ConfigEditor(props: Props) {
             id="config-fast-paging"
             value={Boolean(jsonData.fastPagingNoTotals)}
             onChange={(e) => onJsonChange({ fastPagingNoTotals: e.currentTarget.checked })}
-          />
-        </InlineField>
-      </FieldSet>
-
-      <FieldSet label="Annotations">
-        <InlineField label="Include descendants" labelWidth={20} tooltip={ANNOTATION_DESCENDANTS_SETTING_TOOLTIP}>
-          <InlineSwitch
-            id="config-annotation-descendants"
-            value={descendantsSettingOn(jsonData.annotationDescendants)}
-            onChange={(e) => onJsonChange({ annotationDescendants: e.currentTarget.checked })}
           />
         </InlineField>
       </FieldSet>

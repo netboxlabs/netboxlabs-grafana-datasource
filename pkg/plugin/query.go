@@ -106,10 +106,9 @@ type queryModel struct {
 	ChangedFields []string `json:"changedFields"`
 	Journal       bool     `json:"journal"`
 	// IncludeDescendants (for annotations) adds changes to what is attached to
-	// the scope. Kept raw and read as the data source's switch is
-	// (models.ReadsAsOff): absent means on, so dashboards saved before the field
-	// existed get descendants, and a provisioned "off" is off rather than a
-	// query that fails to decode.
+	// the scope. Kept raw and read leniently (models.ReadsAsOff): absent means
+	// on, so dashboards saved before the field existed get descendants, and a
+	// provisioned "off" is off rather than a query that fails to decode.
 	IncludeDescendants json.RawMessage `json:"includeDescendants"`
 }
 
@@ -203,9 +202,7 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			Actions:       qm.Actions,
 			ChangedFields: qm.ChangedFields,
 			Journal:       qm.Journal,
-			// The datasource's switch only turns descendants off; the annotation's
-			// own switch cannot turn them back on.
-			Descendants: d.cfg.AnnotationDescendantsOn() && !models.ReadsAsOff(qm.IncludeDescendants),
+			Descendants:   !models.ReadsAsOff(qm.IncludeDescendants),
 		})
 		if err != nil {
 			return withAnnotationErrorMarker(d.queryErrorResponse(err), q)

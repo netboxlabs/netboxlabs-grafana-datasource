@@ -80,7 +80,6 @@ Add the data source (**Connections → Data sources → NetBox**) and set:
 | **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                      |
 | **Fast paging**     | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                |
 | **Secure Socks Proxy** | Shown only on self-hosted Grafana with a [secure SOCKS5 data source proxy](https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/proxy/) configured. **Enabled** routes this datasource through it. On Grafana Cloud, see [Grafana Cloud](#grafana-cloud). |
-| **Include descendants** | Annotations section. On by default. Off stops scoped annotations from following what's attached (cables, addresses, modules, services) for every annotation on this data source. See [the device recipe](docs/RECIPES.md#device-dashboard-with-change-markers). |
 
 Click **Save & test**. A healthy data source reports the connected NetBox version.
 

@@ -516,8 +516,7 @@ services. A virtual machine gets its addresses and services; an interface, its c
 and its addresses. A cable shows all its changes in the range, including from before
 it reached this device or after it left. A cable deleted from, or moved off, a console,
 power, front or rear port doesn't show. When Limit leaves changes out, a marker at the
-start of the range says so. An admin can turn it off for every annotation in the data
-source settings (Annotations → Include descendants).
+start of the range says so.
 
 What's attached is found from NetBox's indexes: interfaces, cables, modules,
 services and MAC addresses from their lists, IP addresses from the changes
@@ -557,8 +556,8 @@ objects' changes come only from that page.
 
 If the reads fail, or take longer than 8 seconds (or half the datasource's
 Timeout, if that's shorter), the rest of the track still shows, with a warning
-marker. The cost grows with the scope, so turn the switch off for very large
-ones, such as hundreds of devices in one scope. With it off, a deleted cable
+marker. The cost grows with the scope, so turn Include descendants off on an
+annotation whose scope is very large, such as hundreds of devices. With it off, a deleted cable
 shows at most as an interface update with no changed fields: NetBox records the
 deletion against the cable, not the device.
 

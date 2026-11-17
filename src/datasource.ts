@@ -40,26 +40,6 @@ export function prepareAnnotationQuery(anno: any): NetBoxQuery {
 }
 
 /**
- * Reads the data source's annotationDescendants setting: on unless it reads as
- * off — false, 0, or a string that reads as false (false, f, 0, no, n, off, in
- * any case). Grafana reads provisioning files with yaml/v3, which keeps off and
- * no as strings, so a plain boolean test would miss them. Mirrors
- * PluginSettings.AnnotationDescendantsOn in pkg/models.
- */
-export function descendantsSettingOn(v: unknown): boolean {
-  if (typeof v === 'boolean') {
-    return v;
-  }
-  if (typeof v === 'number') {
-    return v !== 0;
-  }
-  if (typeof v === 'string') {
-    return !['false', 'f', '0', 'no', 'n', 'off'].includes(v.trim().toLowerCase());
-  }
-  return true;
-}
-
-/**
  * Formats a variable's value(s) for an annotation scope. The backend splits the
  * scope on commas, and a NetBox name or cid can hold one ("Acme, West"), so each
  * value has its backslashes and commas escaped ("\\" and "\,") and the values
@@ -78,13 +58,8 @@ export function scopeFormat(value: unknown): string {
 }
 
 export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSourceOptions> {
-  // Read once from the settings the constructor is given: DataSourceApi does
-  // not keep instanceSettings as a property.
-  private readonly descendantsAllowed: boolean;
-
   constructor(instanceSettings: DataSourceInstanceSettings<NetBoxDataSourceOptions>) {
     super(instanceSettings);
-    this.descendantsAllowed = descendantsSettingOn(instanceSettings.jsonData?.annotationDescendants);
 
     // Query-driven dashboard variables (device/site/role/tenant dropdowns).
     this.variables = new NetBoxVariableSupport(this);
@@ -95,12 +70,6 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
       QueryEditor: AnnotationQueryEditor,
       prepareQuery: prepareAnnotationQuery,
     };
-  }
-
-  /** Whether this data source lets annotations include descendants; the
-   * annotation editor shows the option off when it does not. */
-  annotationDescendantsAllowed(): boolean {
-    return this.descendantsAllowed;
   }
 
   getDefaultQuery(_: CoreApp): Partial<NetBoxQuery> {

@@ -2,7 +2,6 @@ package plugin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"reflect"
 	"slices"
@@ -1008,8 +1007,8 @@ func TestQuery_AnnotationsDescendantsFlag(t *testing.T) {
 		{"absent", `{"queryType":"annotations"}`, true},
 		{"false", `{"queryType":"annotations","includeDescendants":false}`, false},
 		{"true", `{"queryType":"annotations","includeDescendants":true}`, true},
-		// Read as leniently as the data source's switch: a provisioned "off" is
-		// off, not a query that fails to decode.
+		// Read leniently: a provisioned "off" is off, not a query that fails to
+		// decode.
 		{"null", `{"queryType":"annotations","includeDescendants":null}`, true},
 		{"off", `{"queryType":"annotations","includeDescendants":"off"}`, false},
 		{"no, padded and capitalised", `{"queryType":"annotations","includeDescendants":" No "}`, false},
@@ -1020,41 +1019,12 @@ func TestQuery_AnnotationsDescendantsFlag(t *testing.T) {
 		{"yes", `{"queryType":"annotations","includeDescendants":"yes"}`, true},
 		{"an unrecognised word", `{"queryType":"annotations","includeDescendants":"maybe"}`, true},
 		{"a non-zero number", `{"queryType":"annotations","includeDescendants":1}`, true},
+		{"an object", `{"queryType":"annotations","includeDescendants":{}}`, true},
+		{"a list", `{"queryType":"annotations","includeDescendants":[]}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fp := &fakeProvider{}
 			resp := newTestDatasource(fp).query(context.Background(), backend.DataQuery{
-				RefID: "Anno", JSON: []byte(tc.body),
-			}, consumerDashboard)
-			if resp.Error != nil {
-				t.Fatalf("query: %v", resp.Error)
-			}
-			if fp.lastChangeSpec.Descendants != tc.want {
-				t.Errorf("Descendants = %v, want %v", fp.lastChangeSpec.Descendants, tc.want)
-			}
-		})
-	}
-}
-
-// The data source's switch turns descendants off for every annotation on it,
-// whatever the annotation itself says; it never turns them on.
-func TestQuery_AnnotationsDatasourceSwitch(t *testing.T) {
-	for _, tc := range []struct {
-		name, setting, body string
-		want                bool
-	}{
-		{"off overrides an annotation that asks", `"off"`, `{"queryType":"annotations","includeDescendants":true}`, false},
-		{"off with the annotation absent", `false`, `{"queryType":"annotations"}`, false},
-		{"absent and the annotation absent", ``, `{"queryType":"annotations"}`, true},
-		{"on does not override the annotation's own off", `true`, `{"queryType":"annotations","includeDescendants":false}`, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fp := &fakeProvider{}
-			d := newTestDatasource(fp)
-			if tc.setting != "" {
-				d.cfg.AnnotationDescendants = json.RawMessage(tc.setting)
-			}
-			resp := d.query(context.Background(), backend.DataQuery{
 				RefID: "Anno", JSON: []byte(tc.body),
 			}, consumerDashboard)
 			if resp.Error != nil {

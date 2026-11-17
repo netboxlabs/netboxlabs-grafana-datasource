@@ -247,34 +247,3 @@ describe('API token', () => {
     );
   });
 });
-
-describe('annotations setting', () => {
-  it('has Include descendants on for a datasource that has never set it', () => {
-    setup();
-    expect(screen.getByText('Annotations')).toBeInTheDocument();
-    expect(screen.getByRole('switch', { name: /include descendants/i })).toBeChecked();
-  });
-
-  it('writes annotationDescendants when toggled', () => {
-    const { onOptionsChange } = setup();
-    fireEvent.click(screen.getByRole('switch', { name: /include descendants/i }));
-    expect(onOptionsChange).toHaveBeenLastCalledWith(
-      expect.objectContaining({ jsonData: expect.objectContaining({ annotationDescendants: false }) })
-    );
-  });
-
-  it('writes true when switched back on', () => {
-    const { onOptionsChange } = setup({ annotationDescendants: false });
-    const sw = screen.getByRole('switch', { name: /include descendants/i });
-    expect(sw).not.toBeChecked();
-    fireEvent.click(sw);
-    expect(onOptionsChange).toHaveBeenLastCalledWith(
-      expect.objectContaining({ jsonData: expect.objectContaining({ annotationDescendants: true }) })
-    );
-  });
-
-  it('reads a provisioned "off" as off', () => {
-    setup({ annotationDescendants: 'off' });
-    expect(screen.getByRole('switch', { name: /include descendants/i })).not.toBeChecked();
-  });
-});

@@ -636,3 +636,59 @@ func TestBuildAnnotationsFrame_ResidualCutoff(t *testing.T) {
 		})
 	}
 }
+
+// Notices that share a time are one marker: Grafana's hover shows one of
+// several markers at one time. Errors come first, then the cut-off; the tags
+// are merged without repeats. A change at that time stays its own marker, and
+// a notice at another time isn't merged.
+func TestBuildAnnotationsFrame_MergesNoticesAtOneTime(t *testing.T) {
+	to := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	from := to.Add(-time.Hour)
+	f := buildAnnotationsFrame([]provider.Change{
+		{Time: to, Action: "Updated", ObjectRepr: "leaf1"},
+		{Kind: provider.ChangeKindCutoff, Time: to, Residual: true, Types: []string{"ipam.ipaddress"}},
+		{Kind: provider.ChangeKindLimit, Time: from, Until: from, Limit: 10},
+		{Kind: provider.ChangeKindDescendantsError, Time: to, Message: "D <b>"},
+		{Kind: provider.ChangeKindJournalError, Time: to, Message: "J"},
+	})
+	if n := f.Fields[0].Len(); n != 3 {
+		t.Fatalf("rows = %d, want 3: the change, the limit marker, one merged warning", n)
+	}
+	merged := -1
+	for i := range f.Fields[0].Len() {
+		if f.Fields[1].At(i).(string) == "NetBox annotation warning" {
+			merged = i
+		}
+	}
+	if merged < 0 {
+		t.Fatalf("no merged warning marker in %v", f.Fields[1])
+	}
+	if got := f.Fields[0].At(merged).(time.Time); !got.Equal(to) {
+		t.Errorf("merged time = %v, want %v", got, to)
+	}
+	want := "D &lt;b&gt;<br><br>J<br><br>Removals not checked: an IP address taken off or deleted in this range may not show."
+	if got := f.Fields[2].At(merged).(string); got != want {
+		t.Errorf("merged text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(merged).(string); got != "netbox,error,cutoff" {
+		t.Errorf("merged tags = %q", got)
+	}
+}
+
+// Notices without an error keep the change log's title when merged.
+func TestBuildAnnotationsFrame_MergesNoticesWithoutAnError(t *testing.T) {
+	at := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	f := buildAnnotationsFrame([]provider.Change{
+		{Kind: provider.ChangeKindCutoff, Time: at, Scanned: 2500},
+		{Kind: provider.ChangeKindLimit, Time: at, Until: at, Limit: 10},
+	})
+	if n := f.Fields[0].Len(); n != 1 {
+		t.Fatalf("rows = %d, want 1", n)
+	}
+	if got := f.Fields[1].At(0).(string); got != "NetBox change log" {
+		t.Errorf("title = %q", got)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,cutoff,limit" {
+		t.Errorf("tags = %q", got)
+	}
+}

@@ -557,23 +557,40 @@ func TestJournal_AuthorLookupOtherFailuresNotRemembered(t *testing.T) {
 	}
 }
 
-func TestJournal_ForbiddenIsAnnotationError(t *testing.T) {
-	s := &journalServer{journalStatus: http.StatusForbidden}
-	_, err := s.start(t).Changes(context.Background(), journalSpec())
-	ae, ok := err.(*AnnotationError)
-	if !ok || ae.Reason != provider.AnnotationReasonJournalForbidden {
-		t.Fatalf("err = %#v, want a journal-forbidden AnnotationError", err)
+// journalError is the journal-error marker a track ends with, failing the test
+// without exactly one, last.
+func journalError(t *testing.T, changes []provider.Change) provider.Change {
+	t.Helper()
+	n := len(changes)
+	if n == 0 || changes[n-1].Kind != provider.ChangeKindJournalError ||
+		slices.ContainsFunc(changes[:n-1], func(c provider.Change) bool { return c.Kind == provider.ChangeKindJournalError }) {
+		t.Fatalf("changes = %+v, want one journal-error marker, last", changes)
 	}
+	return changes[n-1]
 }
 
-func TestJournal_OtherErrorFailsTheQuery(t *testing.T) {
-	s := &journalServer{journalStatus: http.StatusInternalServerError}
-	_, err := s.start(t).Changes(context.Background(), journalSpec())
-	if err == nil {
-		t.Fatal("want an error")
+// A journal the token can't read doesn't fail the track: it ends with a
+// journal-error marker carrying the refusal.
+func TestJournal_ForbiddenIsAWarning(t *testing.T) {
+	s := &journalServer{journalStatus: http.StatusForbidden}
+	changes, err := s.start(t).Changes(context.Background(), journalSpec())
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
 	}
-	if _, ok := err.(*AnnotationError); ok {
-		t.Errorf("a 500 became an AnnotationError: %v", err)
+	annotationErr(t, journalError(t, changes).Err, provider.AnnotationReasonJournalForbidden)
+}
+
+// Any other journal failure is the same warning, carrying NetBox's error as it
+// came, not as a refusal.
+func TestJournal_OtherErrorIsAWarning(t *testing.T) {
+	s := &journalServer{journalStatus: http.StatusInternalServerError}
+	changes, err := s.start(t).Changes(context.Background(), journalSpec())
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	var apiErr *APIError
+	if err := journalError(t, changes).Err; !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("marker error = %v, want the journal's 500", err)
 	}
 }
 

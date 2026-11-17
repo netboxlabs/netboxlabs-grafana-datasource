@@ -275,6 +275,9 @@ const (
 	// ChangeKindDescendantsError marks that the descendants read failed while the
 	// scope's own changes were read in full.
 	ChangeKindDescendantsError ChangeKind = "descendants-error"
+	// ChangeKindJournalError marks that the journal read failed while the
+	// change-log reads were read in full.
+	ChangeKindJournalError ChangeKind = "journal-error"
 )
 
 // FieldChange is one changed field, formatted for display ("" = null/empty).
@@ -306,7 +309,7 @@ type Change struct {
 	DescendantsOnly bool      // cutoff only: every cut read was a descendant read; false when Residual is set (residual scans are descendant reads, but the two are exclusive)
 	Residual        bool      // cutoff only: every cut read was a residual scan, and every list was read: the marker sits at the end of the range (To, or now with no To) and names Types
 	Types           []string  // residual cutoff only: the object types whose removals may be missing, e.g. "ipam.ipaddress"
-	Err             error     // descendants-error only; the plugin maps it to Message
+	Err             error     // descendants-error and journal-error only; the plugin maps it to Message
 }
 
 // AllValue is Grafana's custom All value as it reaches the backend uninterpolated.

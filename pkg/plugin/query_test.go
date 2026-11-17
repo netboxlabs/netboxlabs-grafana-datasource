@@ -1110,3 +1110,50 @@ func TestQuery_AnnotationLinksUsePublicURL(t *testing.T) {
 		t.Errorf("text = %q, want the link unchanged without a public URL", got[0])
 	}
 }
+
+// A journal error is a warning beside the change markers, as a descendants
+// error is. A refusal already says what to do; any other failure gets the hint.
+func TestQuery_AnnotationsJournalErrorMarker(t *testing.T) {
+	to := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"refused", &netbox.AnnotationError{Reason: provider.AnnotationReasonJournalForbidden},
+			"Journal entries weren&#39;t read. The API token can&#39;t read journal entries. Turn off Journal entries, or let the token view them."},
+		{"slow", &netbox.AnnotationError{Reason: provider.AnnotationReasonJournalSlow, Count: 8},
+			"Journal entries weren&#39;t read. Reading journal entries took longer than 8 s. Narrow the range, or turn off Journal entries on a busy NetBox."},
+		{"failed", errors.New("boom"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDatasource(&fakeProvider{changes: []provider.Change{
+				{Time: to.Add(-time.Minute), Action: "Updated", ObjectRepr: "leaf1"},
+				{Kind: provider.ChangeKindJournalError, Time: to, Err: tc.err},
+			}})
+			resp := d.query(context.Background(), backend.DataQuery{
+				RefID:     "Anno",
+				TimeRange: backend.TimeRange{From: to.Add(-time.Hour), To: to},
+				JSON:      []byte(`{"queryType":"annotations","journal":true}`),
+			}, consumerDashboard)
+			if resp.Error != nil || len(resp.Frames) != 1 || resp.Frames[0].Fields[2].Len() != 2 {
+				t.Fatalf("query: %v, frames %d", resp.Error, len(resp.Frames))
+			}
+			f := resp.Frames[0]
+			text := f.Fields[2].At(1).(string)
+			switch {
+			case tc.want != "" && text != tc.want:
+				t.Errorf("text = %q, want %q", text, tc.want)
+			case tc.want == "" && (!strings.HasPrefix(text, "Journal entries weren&#39;t read. ") ||
+				!strings.HasSuffix(text, "If this keeps happening, turn off Journal entries.")):
+				t.Errorf("text = %q", text)
+			}
+			if got := f.Fields[1].At(1).(string); got != "NetBox annotation warning" {
+				t.Errorf("title = %q", got)
+			}
+			if got := f.Fields[3].At(1).(string); got != "netbox,error" {
+				t.Errorf("tags = %q", got)
+			}
+		})
+	}
+}

@@ -904,7 +904,7 @@ func changeIDs(changes []provider.Change) []string {
 	out := make([]string, 0, len(changes))
 	for _, c := range changes {
 		switch c.Kind {
-		case provider.ChangeKindCutoff, provider.ChangeKindLimit, provider.ChangeKindDescendantsError:
+		case provider.ChangeKindCutoff, provider.ChangeKindLimit, provider.ChangeKindDescendantsError, provider.ChangeKindJournalError:
 			out = append(out, string(c.Kind))
 		default:
 			out = append(out, c.ObjectRepr)
@@ -1353,31 +1353,91 @@ func TestChanges_FailingReadCancelsTheOthers(t *testing.T) {
 	}
 }
 
-// A journal that fails ends the query the same way: the change-log reads, held
-// for longer than the test waits, are cancelled, and the journal's error is
-// the query's.
-func TestChanges_FailingJournalCancelsTheReads(t *testing.T) {
+// A journal that fails doesn't fail the track. The change-log reads carry on:
+// the own read, held past the journal's failure, still shows its change. The
+// track ends with a journal-error marker carrying the journal's error.
+func TestChanges_FailingJournalKeepsTheTrack(t *testing.T) {
 	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
-	s.delayTypeID, s.delayFor = scopedTypeIDs["dcim.device"], 5*time.Second
+	s.delayTypeID, s.delayFor = scopedTypeIDs["dcim.device"], 300*time.Millisecond
 	s.journalStatus = http.StatusInternalServerError
 	p := s.start(t)
 	spec := splitSpec()
 	spec.Journal = true
 
-	done := make(chan error, 1)
-	go func() {
-		_, err := p.Changes(context.Background(), spec)
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		var apiErr *APIError
-		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError ||
-			!strings.Contains(apiErr.URL, journalEndpoint) {
-			t.Errorf("Changes error = %v, want the journal's 500", err)
+	got, err := p.Changes(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if ids := changeIDs(got); !slices.Equal(ids, []string{"#1", string(provider.ChangeKindJournalError)}) {
+		t.Fatalf("changes = %v, want the device change, then the journal-error marker", ids)
+	}
+	var apiErr *APIError
+	if err := got[1].Err; !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError ||
+		!strings.Contains(apiErr.URL, journalEndpoint) {
+		t.Errorf("marker error = %v, want the journal's 500", err)
+	}
+}
+
+// A journal the token can't read is the same warning, carrying the refusal.
+func TestChanges_ForbiddenJournalIsAWarning(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.journalStatus = http.StatusForbidden
+	spec := splitSpec()
+	spec.Journal = true
+	got, err := s.start(t).Changes(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if ids := changeIDs(got); !slices.Equal(ids, []string{"#1", string(provider.ChangeKindJournalError)}) {
+		t.Fatalf("changes = %v, want the device change, then the journal-error marker", ids)
+	}
+	annotationErr(t, got[1].Err, provider.AnnotationReasonJournalForbidden)
+}
+
+// A journal that hangs is cut at its own deadline, the descendants', rather
+// than holding the track to the caller's: the change shows, and the warning
+// says how long the journal had.
+func TestChanges_SlowJournalIsAWarning(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.journalHold = 5 * time.Second
+	p := s.start(t)
+	p.descendantsWaitOverride = 200 * time.Millisecond
+	spec := splitSpec()
+	spec.Journal = true
+
+	start := time.Now()
+	got, err := p.Changes(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("Changes took %v, want about the journal's 200ms deadline", took)
+	}
+	if ids := changeIDs(got); !slices.Equal(ids, []string{"#1", string(provider.ChangeKindJournalError)}) {
+		t.Fatalf("changes = %v, want the device change, then the journal-error marker", ids)
+	}
+	if ae := annotationErr(t, got[1].Err, provider.AnnotationReasonJournalSlow); ae.Count != 1 {
+		t.Errorf("slow journal count = %d s, want 1 (at least a second)", ae.Count)
+	}
+}
+
+// With no To, the end-of-range markers still share one time, so the frame can
+// show them as one marker: the descendants error and the journal error here.
+func TestChanges_EndOfRangeMarkersShareOneTime(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.coreStatus = http.StatusForbidden // the type map: the descendants can't run
+	s.journalStatus = http.StatusInternalServerError
+	spec := withDescendants(idScope("17"))
+	spec.Journal = true
+	got := changesOK(t, s.start(t), spec)
+	var times []time.Time
+	for _, c := range got {
+		if c.Kind == provider.ChangeKindDescendantsError || c.Kind == provider.ChangeKindJournalError {
+			times = append(times, c.Time)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Changes still blocked 1s after the journal failed")
+	}
+	if len(times) != 2 || !times[0].Equal(times[1]) {
+		t.Errorf("end-of-range marker times = %v, want two equal times (%v)", times, changeIDs(got))
 	}
 }
 

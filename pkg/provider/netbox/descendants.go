@@ -614,7 +614,7 @@ func (p *Provider) residualScan(ctx context.Context, spec provider.ChangeSpec, r
 	q.Set("limit", strconv.Itoa(p.residualRows()))
 	page, err := p.getListPageRetry(ctx, p.client.apiURL(changeLogEndpoint, q))
 	if err != nil {
-		return uncheckedResult(spec)
+		return uncheckedResult()
 	}
 	res := changeReadResult{scan: true, descendant: true}
 	scanned, more := 0, page.Next != nil && *page.Next != ""
@@ -629,16 +629,17 @@ func (p *Provider) residualScan(ctx context.Context, spec provider.ChangeSpec, r
 	if res.capped && res.oldest.IsZero() {
 		// A capped page with no row of a parsed time says nothing about where
 		// its reach ends: it checked nothing.
-		return uncheckedResult(spec)
+		return uncheckedResult()
 	}
 	return res
 }
 
 // uncheckedResult is a residual scan's result when it checked nothing: a
-// descendant scan, unchecked and capped, with no rows and no error, and oldest
-// at To, or now with no To, since anything in the range may have been missed.
-func uncheckedResult(spec provider.ChangeSpec) changeReadResult {
-	return changeReadResult{scan: true, descendant: true, capped: true, unchecked: true, oldest: rangeEnd(spec)}
+// descendant scan, unchecked and capped, with no rows and no error. Its oldest
+// is zero, which cutoffChange counts as reaching only the end of the range, the
+// one Changes computes, since anything in the range may have been missed.
+func uncheckedResult() changeReadResult {
+	return changeReadResult{scan: true, descendant: true, capped: true, unchecked: true}
 }
 
 // rangeEnd is where a query's range ends: To, or now with no To.

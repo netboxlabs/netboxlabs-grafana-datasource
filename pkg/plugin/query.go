@@ -208,13 +208,19 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 			return withAnnotationErrorMarker(d.queryErrorResponse(err), q)
 		}
 		for i := range changes {
-			if changes[i].Kind != provider.ChangeKindDescendantsError {
+			// These markers are warnings: the change log's own markers are all there.
+			kind := changes[i].Kind
+			if kind != provider.ChangeKindDescendantsError && kind != provider.ChangeKindJournalError {
 				continue
 			}
-			// The marker is a warning: the scope's own changes are all there.
 			err := changes[i].Err
 			if err == nil {
 				err = errors.New("unknown error")
+			}
+			if kind == provider.ChangeKindJournalError {
+				log.DefaultLogger.Warn("netbox journal error", "detail", sanitizeLog(err.Error()))
+				changes[i].Message = journalErrorText(err, d.viaProxy)
+				continue
 			}
 			log.DefaultLogger.Warn("netbox descendants error", "detail", sanitizeLog(err.Error()))
 			changes[i].Message = descendantsErrorText(err, d.viaProxy)
@@ -961,6 +967,8 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 		return fmt.Sprintf("%q isn't compared between changes, so it can't filter them. Pick another field.", value)
 	case provider.AnnotationReasonJournalForbidden:
 		return "The API token can't read journal entries. Turn off Journal entries, or let the token view them."
+	case provider.AnnotationReasonJournalSlow:
+		return fmt.Sprintf("Reading journal entries took longer than %d s. Narrow the range, or turn off Journal entries on a busy NetBox.", u.AnnotationCount)
 	case provider.AnnotationReasonObjectTypesUnreadable:
 		return "NetBox's object-type list couldn't be read, and this NetBox version needs it to find related changes. Check that the token can read object types."
 	case provider.AnnotationReasonTooManyChildren:
@@ -976,12 +984,23 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 }
 
 // descendantsErrorText is the warning marker's text for a failed descendants
-// read. The messages for an annotation refusal already name the switch, so only
-// other failures get the hint appended.
+// read.
 func descendantsErrorText(err error, viaProxy bool) string {
-	text := "Changes to what's attached weren't read. " + queryErrorMessage(err, viaProxy)
+	return warningText("Changes to what's attached weren't read.", "Include descendants", err, viaProxy)
+}
+
+// journalErrorText is the warning marker's text for a failed journal read.
+func journalErrorText(err error, viaProxy bool) string {
+	return warningText("Journal entries weren't read.", "Journal entries", err, viaProxy)
+}
+
+// warningText says what wasn't read, and why. The messages for an annotation
+// refusal already say what to do, so only other failures get the hint to turn
+// off the switch that asked for the read.
+func warningText(what, option string, err error, viaProxy bool) string {
+	text := what + " " + queryErrorMessage(err, viaProxy)
 	if u := provider.Classify(err); u == nil || u.Kind != provider.ErrorKindAnnotation {
-		text += " If this keeps happening, turn off Include descendants."
+		text += " If this keeps happening, turn off " + option + "."
 	}
 	return text
 }
@@ -999,13 +1018,10 @@ func (d *Datasource) queryErrorResponse(err error) backend.DataResponse {
 // is a bad request, and saying otherwise tells the reader to retry something
 // only they can fix. object-types-unreadable is an annotation refusal, but of
 // a read that failed upstream, often in passing, so it is StatusInternal too.
-// journal-forbidden is the API token's permissions, not the query, so it gets
-// what a refused token (ErrorKindAuth) gets: StatusInternal.
 func queryErrorStatus(err error) backend.Status {
 	if u := provider.Classify(err); u != nil {
 		switch {
-		case u.Kind == provider.ErrorKindAnnotation && (u.AnnotationReason == provider.AnnotationReasonObjectTypesUnreadable ||
-			u.AnnotationReason == provider.AnnotationReasonJournalForbidden):
+		case u.Kind == provider.ErrorKindAnnotation && u.AnnotationReason == provider.AnnotationReasonObjectTypesUnreadable:
 			return backend.StatusInternal
 		case u.Kind == provider.ErrorKindUnknownObjectType, u.Kind == provider.ErrorKindAnnotation:
 			return backend.StatusBadRequest

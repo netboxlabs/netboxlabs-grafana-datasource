@@ -99,6 +99,9 @@ const (
 	// AnnotationReasonJournalForbidden is a journal read the API token isn't
 	// allowed.
 	AnnotationReasonJournalForbidden = "journal-forbidden"
+	// AnnotationReasonJournalSlow is a journal read that ran past its time
+	// budget (AnnotationCount = seconds).
+	AnnotationReasonJournalSlow = "journal-slow"
 	// AnnotationReasonObjectTypesUnreadable is an object-type list that couldn't
 	// be read where its ids are needed to find related changes.
 	AnnotationReasonObjectTypesUnreadable = "object-types-unreadable"

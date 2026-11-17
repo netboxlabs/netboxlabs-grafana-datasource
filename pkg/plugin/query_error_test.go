@@ -135,6 +135,8 @@ func TestQueryErrorMessage_Annotation(t *testing.T) {
 			`"last_updated" isn't compared between changes, so it can't filter them. Pick another field.`},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonJournalForbidden},
 			"The API token can't read journal entries. Turn off Journal entries, or let the token view them."},
+		{&netbox.AnnotationError{Reason: provider.AnnotationReasonJournalSlow, Count: 8},
+			"Reading journal entries took longer than 8 s. Narrow the range, or turn off Journal entries on a busy NetBox."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonObjectTypesUnreadable},
 			"NetBox's object-type list couldn't be read, and this NetBox version needs it to find related changes. Check that the token can read object types."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonTooManyChildren},
@@ -152,14 +154,11 @@ func TestQueryErrorMessage_Annotation(t *testing.T) {
 				t.Errorf("message = %q, want %q", got, tc.want)
 			}
 			// An object-type list that couldn't be read is NetBox's side, often
-			// passing, and a journal the token can't read is the token's, answered
-			// as a refused token is; every other refusal is the query's.
+			// passing; every other refusal is the query's. The journal and
+			// descendants refusals reach a warning marker, not this status.
 			want := backend.StatusBadRequest
-			switch tc.err.Reason {
-			case provider.AnnotationReasonObjectTypesUnreadable:
+			if tc.err.Reason == provider.AnnotationReasonObjectTypesUnreadable {
 				want = backend.StatusInternal
-			case provider.AnnotationReasonJournalForbidden:
-				want = queryErrorStatus(&netbox.APIError{Status: 403})
 			}
 			if got := queryErrorStatus(tc.err); got != want {
 				t.Errorf("status = %v, want %v", got, want)

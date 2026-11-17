@@ -1757,10 +1757,13 @@ const changeReadWorkers = 4
 // scope objects when scoped) are read alongside the change-log reads and merged
 // in by time, under the same limit.
 //
-// A change-log read or the journal that fails fails the query. While the
-// caller's context is live, the first to fail cancels every other read, the
+// A change-log read that fails fails the query. While the caller's context is
+// live, the first to fail cancels every other read, the journal and the
 // descendant reads included, rather than wait for them, and its error is the
-// query's.
+// query's. The journal is optional and never fails the query: while the
+// caller's context is live, a journal read that fails, or runs past its own
+// deadline (the descendants' budget, descendantsDeadline), drops the journal
+// entries and ends the track with a journal-error marker.
 //
 // With Include descendants on, a device, VM, interface or VM-interface scope
 // also reads the changes to what's attached to it (descendantChanges),
@@ -1850,9 +1853,10 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		return nil, err
 	}
 
-	// Any change-log read or the journal failing fails the query, so the first
-	// to fail cancels the others through readCtx, with its error as the cause,
-	// rather than leave the query waiting on reads whose rows won't be shown.
+	// Any change-log read failing fails the query, so the first to fail cancels
+	// the others, the journal's included, through readCtx, with its error as
+	// the cause, rather than leave the query waiting on reads whose rows won't
+	// be shown. The journal doesn't cancel anything: it fails alone.
 	// A read the cancel ended calls cancelReads too, with the error the cancel
 	// caused, but readCtx has ended by then and keeps the cause it has.
 	readCtx, cancelReads := context.WithCancelCause(ctx)
@@ -1896,14 +1900,20 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 			}
 		})
 	}
-	var journal []provider.Change
-	var journalErr error
+	var (
+		journal                       []provider.Change
+		journalErr                    error
+		jctx                          context.Context
+		journalStart, journalDeadline time.Time
+	)
 	if spec.Journal {
-		wg.Go(func() {
-			if journal, journalErr = p.journalEntries(readCtx, spec, scope, wanted, limit); journalErr != nil {
-				cancelReads(journalErr)
-			}
-		})
+		// Its own deadline, within readCtx, so a hanging journal can't hold the
+		// track to the caller's deadline and blank it there.
+		journalStart, journalDeadline = time.Now(), p.descendantsDeadline(ctx)
+		var cancelJournal context.CancelFunc
+		jctx, cancelJournal = context.WithDeadline(readCtx, journalDeadline)
+		defer cancelJournal()
+		wg.Go(func() { journal, journalErr = p.journalEntries(jctx, spec, scope, wanted, limit) })
 	}
 	if descendants {
 		wg.Go(func() {
@@ -1915,23 +1925,33 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		})
 	}
 	wg.Wait()
-	// The read or the journal that failed first is the query's error. The
-	// others ended after its cancel, with context.Canceled or, when the cancel
-	// cut a retry's backoff, the stale error they were about to retry, so their
-	// errors are ignored. The cause is read before the caller's context is
-	// checked, so with that context live it can't be the caller's ending.
+	// The read that failed first is the query's error. The others ended after
+	// its cancel, with context.Canceled or, when the cancel cut a retry's
+	// backoff, the stale error they were about to retry, so their errors are
+	// ignored. The cause is read before the caller's context is checked, so
+	// with that context live it can't be the caller's ending.
 	if cause := context.Cause(readCtx); cause != nil && ctx.Err() == nil {
 		return nil, cause
 	}
-	// Past that, a failed read or journal means the caller's context ended:
-	// any other failure would have set the cause.
+	// Past that, a failed read means the caller's context ended: any other
+	// failure would have set the cause.
 	for _, r := range results {
 		if r.err != nil {
 			return nil, r.err
 		}
 	}
 	if journalErr != nil {
-		return nil, journalErr
+		// The caller's context ending ends the query, whatever the journal met
+		// before it did.
+		if ctx.Err() != nil {
+			return nil, context.Cause(ctx)
+		}
+		// Slow only when the journal's own deadline ended it. The cause is
+		// compared by identity, as for the descendants.
+		if context.Cause(jctx) == context.DeadlineExceeded {
+			journalErr = &AnnotationError{Reason: provider.AnnotationReasonJournalSlow, Count: max(1, int(journalDeadline.Sub(journalStart).Seconds()))}
+		}
+		journal = nil
 	}
 	if descErr != nil {
 		// The caller's context ending ends the query, as it does for any read.
@@ -1963,9 +1983,13 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	// matched, so it is the set such a row would have had to enter. Journal
 	// entries say nothing about which change-log rows were read, so they don't
 	// decide it.
+	// One end of the range for every marker placed there, so markers at the
+	// end share one time, which the frame shows as one marker: with no To,
+	// rangeEnd is now, and differs from call to call.
+	end := rangeEnd(spec)
 	var cut provider.Change
 	showCut := false
-	if c, capped := cutoffChange(results, rangeEnd(spec)); capped && cutoffMayMiss(kept, limit, c.Time) {
+	if c, capped := cutoffChange(results, end); capped && cutoffMayMiss(kept, limit, c.Time) {
 		cut, showCut = c, true
 		// A residual cut-off says what may be missing in the range, not where
 		// the scan stopped, so it sits at the end of the range: stable across
@@ -1974,7 +1998,7 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		// sits there too, but it drops the descendant results, so no residual
 		// cut exists then. The reach is in Until.
 		if cut.Residual {
-			cut.Time = rangeEnd(spec)
+			cut.Time = end
 		}
 	}
 	if scope != nil {
@@ -2016,7 +2040,10 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		changes = append(changes, provider.Change{Kind: provider.ChangeKindLimit, Time: at, Until: oldest, Limit: limit})
 	}
 	if descErr != nil {
-		changes = append(changes, provider.Change{Kind: provider.ChangeKindDescendantsError, Time: rangeEnd(spec), Err: descErr})
+		changes = append(changes, provider.Change{Kind: provider.ChangeKindDescendantsError, Time: end, Err: descErr})
+	}
+	if journalErr != nil {
+		changes = append(changes, provider.Change{Kind: provider.ChangeKindJournalError, Time: end, Err: journalErr})
 	}
 	for i := range changes {
 		changes[i].URL = withBranchParam(changes[i].URL, branch)

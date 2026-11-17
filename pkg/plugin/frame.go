@@ -3,6 +3,7 @@ package plugin
 import (
 	"fmt"
 	"html"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -200,34 +201,37 @@ const (
 // NetBox-supplied value is escaped. The id field is always 0: a marker with an
 // id makes Grafana's tooltip offer Edit, which would save a copy.
 func buildAnnotationsFrame(changes []provider.Change) *data.Frame {
-	times := make([]time.Time, 0, len(changes))
-	titles := make([]string, 0, len(changes))
-	texts := make([]string, 0, len(changes))
-	tags := make([]string, 0, len(changes))
-	ids := make([]int64, 0, len(changes))
-
+	rows := make([]annotationRow, 0, len(changes))
 	for _, c := range changes {
-		times = append(times, c.Time)
-		ids = append(ids, 0)
-		var title, text, tag string
+		r := annotationRow{time: c.Time, notice: true}
 		switch c.Kind {
 		case provider.ChangeKindJournal:
-			title, text, tag = journalMarker(c)
+			r.title, r.text, r.tag = journalMarker(c)
+			r.notice = false
 		case provider.ChangeKindCutoff:
-			title, text, tag = cutoffMarker(c)
+			r.title, r.text, r.tag = cutoffMarker(c)
 		case provider.ChangeKindLimit:
-			title, text, tag = limitMarker(c)
-		case provider.ChangeKindDescendantsError:
+			r.title, r.text, r.tag = limitMarker(c)
+		case provider.ChangeKindDescendantsError, provider.ChangeKindJournalError:
 			// The track around it is intact, so it isn't titled like a failed query.
-			title, text, tag = "NetBox annotation warning", html.EscapeString(c.Message), "netbox,error"
+			r.title, r.text, r.tag = warningTitle, html.EscapeString(c.Message), "netbox,error"
+			r.warning = true
 		default:
-			title, text, tag = changeMarker(c)
+			r.title, r.text, r.tag = changeMarker(c)
+			r.notice = false
 		}
-		titles = append(titles, title)
-		texts = append(texts, text)
-		tags = append(tags, tag)
+		rows = append(rows, r)
 	}
+	rows = mergeNotices(rows)
 
+	times := make([]time.Time, len(rows))
+	titles := make([]string, len(rows))
+	texts := make([]string, len(rows))
+	tags := make([]string, len(rows))
+	ids := make([]int64, len(rows))
+	for i, r := range rows {
+		times[i], titles[i], texts[i], tags[i] = r.time, r.title, r.text, r.tag
+	}
 	return data.NewFrame("netbox_changes",
 		data.NewField("time", nil, times),
 		data.NewField("title", nil, titles),
@@ -235,6 +239,75 @@ func buildAnnotationsFrame(changes []provider.Change) *data.Frame {
 		data.NewField("tags", nil, tags),
 		data.NewField("id", nil, ids),
 	)
+}
+
+// warningTitle titles a marker that says part of the track wasn't read.
+const warningTitle = "NetBox annotation warning"
+
+// annotationRow is one marker as rendered. notice marks the plugin's own
+// markers (cut-off, limit, warnings), not a change or a journal entry; warning
+// marks the warnings among them.
+type annotationRow struct {
+	time             time.Time
+	title, text, tag string
+	notice, warning  bool
+}
+
+// mergeNotices makes the notices that share a time one marker, in the first
+// one's place: Grafana's hover shows only one of several markers at one time,
+// and the end of the range can hold a cut-off and two warnings. Changes and
+// journal entries are never merged.
+func mergeNotices(rows []annotationRow) []annotationRow {
+	out := make([]annotationRow, 0, len(rows))
+	at := map[int64]int{}               // a notice time's marker in out
+	groups := map[int][]annotationRow{} // the notices each of those holds
+	for _, r := range rows {
+		if !r.notice {
+			out = append(out, r)
+			continue
+		}
+		k := r.time.UnixNano()
+		if i, ok := at[k]; ok {
+			groups[i] = append(groups[i], r)
+			continue
+		}
+		at[k] = len(out)
+		groups[len(out)] = []annotationRow{r}
+		out = append(out, r)
+	}
+	for i, g := range groups {
+		if len(g) > 1 {
+			out[i] = mergeRows(g)
+		}
+	}
+	return out
+}
+
+// mergeRows is one marker for notices at one time: the warnings first, their
+// texts as rendered, a blank line apart, and their tags without repeats. It is
+// titled as a warning when one is among them.
+func mergeRows(g []annotationRow) annotationRow {
+	slices.SortStableFunc(g, func(a, b annotationRow) int {
+		switch {
+		case a.warning == b.warning:
+			return 0
+		case a.warning:
+			return -1
+		}
+		return 1
+	})
+	m := annotationRow{time: g[0].time, title: g[0].title, notice: true, warning: g[0].warning}
+	var texts, tags []string
+	for _, r := range g {
+		texts = append(texts, r.text)
+		for _, t := range strings.Split(r.tag, ",") {
+			if !slices.Contains(tags, t) {
+				tags = append(tags, t)
+			}
+		}
+	}
+	m.text, m.tag = strings.Join(texts, "<br><br>"), strings.Join(tags, ",")
+	return m
 }
 
 func changeMarker(c provider.Change) (title, text, tag string) {

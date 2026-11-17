@@ -1335,18 +1335,28 @@ func addMember(set map[int64]int64, child, owner int64) {
 }
 
 // matchAssigned matches an address row to one of ifaces: its assigned_object_type
-// is the interface type's id and its assigned_object_id is in ifaces. The after
-// side is read first, so an address moved between two scope objects is on the
-// one it moved to. The owner is the interface's.
+// is the interface type's id and its assigned_object_id is in ifaces. The owner
+// is the interface's.
 func matchAssigned(oc objectChange, ifaceTypeID int, ifaces map[int64]int64) (owner int64, ok bool) {
+	return assignedOwner(oc, ifaceTypeID, func(iface int64) (int64, bool) {
+		owner, ok := ifaces[iface]
+		return owner, ok
+	})
+}
+
+// assignedOwner matches an address row whose assigned_object_type is the
+// interface type's id and whose assigned_object_id owner accepts, and returns
+// the owner it gives. The after side is read first, so an address moved
+// between two interfaces is on the one it moved to.
+func assignedOwner(oc objectChange, ifaceTypeID int, owner func(iface int64) (int64, bool)) (int64, bool) {
 	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
 		typ, typed := snapshotID(data, "assigned_object_type")
 		id, identified := snapshotID(data, "assigned_object_id")
 		if !typed || !identified || typ != int64(ifaceTypeID) {
 			continue
 		}
-		if owner, ok = ifaces[id]; ok {
-			return owner, true
+		if o, ok := owner(id); ok {
+			return o, true
 		}
 	}
 	return 0, false
@@ -1370,16 +1380,21 @@ func matchOwner(oc objectChange, field string, scopeIDs map[int64]bool) (owner i
 // object. The after side first, then the before, so a moved service is on its
 // new parent.
 func matchServiceParent(oc objectChange, scopeTypeID int, ownerField string, scopeIDs map[int64]bool) (owner int64, ok bool) {
+	return serviceParent(oc, scopeTypeID, ownerField, func(id int64) bool { return scopeIDs[id] })
+}
+
+// serviceParent is matchServiceParent with the parent's id checked by accept.
+func serviceParent(oc objectChange, scopeTypeID int, ownerField string, accept func(id int64) bool) (owner int64, ok bool) {
 	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
 		typ, typed := snapshotID(data, "parent_object_type")
 		id, identified := snapshotID(data, "parent_object_id")
-		if typed && identified && typ == int64(scopeTypeID) && scopeIDs[id] {
+		if typed && identified && typ == int64(scopeTypeID) && accept(id) {
 			return id, true
 		}
 		if ownerField == "" {
 			continue
 		}
-		if id, named := snapshotID(data, ownerField); named && scopeIDs[id] {
+		if id, named := snapshotID(data, ownerField); named && accept(id) {
 			return id, true
 		}
 	}

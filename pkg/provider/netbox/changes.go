@@ -948,18 +948,27 @@ var scopeParentFields = map[string]string{
 }
 
 // snapshotParent finds the scope object a change's snapshots point at, for a
-// deleted object, which has no nested references to match. It reads the
-// postchange data first, then the prechange data, taking the type's own field
-// (scopeParentFields) and then any generic <x>_type / <x>_id pair whose type is
-// the scope's. The id has to be a scope object's, so a field that names
-// another object is not mistaken for the parent.
+// deleted object, which has no nested references to match (snapshotRef). The
+// id has to be a scope object's, so a field that names another object is not
+// mistaken for the parent.
 func snapshotParent(scope *resolvedScope, objects map[int64]scopeObject, oc objectChange) (scopeObject, bool) {
+	id, ok := snapshotRef(scope, oc, func(id int64) bool {
+		_, ok := objects[id]
+		return ok
+	})
+	return objects[id], ok
+}
+
+// snapshotRef finds an object of the scope type a change's snapshots name,
+// whose id accept takes. It reads the postchange data first, then the
+// prechange data, taking the type's own field (scopeParentFields) and then any
+// generic <x>_type / <x>_id pair whose type is the scope's; the generic pairs
+// need the type's id, so they're skipped without the type map.
+func snapshotRef(scope *resolvedScope, oc objectChange, accept func(id int64) bool) (int64, bool) {
 	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
 		if field, ok := scopeParentFields[scope.Type]; ok {
-			if id, ok := snapshotID(data, field); ok {
-				if o, ok := objects[id]; ok {
-					return o, true
-				}
+			if id, ok := snapshotID(data, field); ok && accept(id) {
+				return id, true
 			}
 		}
 		if scope.TypeID == 0 {
@@ -973,14 +982,12 @@ func snapshotParent(scope *resolvedScope, objects map[int64]scopeObject, oc obje
 			if t, ok := snapshotID(data, key); !ok || t != int64(scope.TypeID) {
 				continue
 			}
-			if id, ok := snapshotID(data, x+"_id"); ok {
-				if o, ok := objects[id]; ok {
-					return o, true
-				}
+			if id, ok := snapshotID(data, x+"_id"); ok && accept(id) {
+				return id, true
 			}
 		}
 	}
-	return scopeObject{}, false
+	return 0, false
 }
 
 // scopeObjectName is a scope object's display, or "<type> #<id>" without one.

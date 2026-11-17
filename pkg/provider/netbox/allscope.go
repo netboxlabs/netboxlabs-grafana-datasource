@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"slices"
 	"strconv"
-	"strings"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
@@ -30,42 +29,37 @@ var allDescendantTypes = map[string][]string{
 	"virtualization.vminterface":    {"ipam.ipaddress", "dcim.macaddress"},
 }
 
-// wantedAllDescendants is which descendant types an All query reads: none
-// without Include descendants, else the scope type's, less those Object types
-// leaves out.
-func wantedAllDescendants(scope *resolvedScope, spec provider.ChangeSpec, wanted []string) []string {
+// allDescendants is which descendant types an All query reads: none without
+// Include descendants, else the scope type's, less those Object types leaves
+// out and those this NetBox doesn't have. Their checks need type ids, so
+// without the type map none are read, and unreadable reports that some were
+// wanted: Changes says so with the descendants warning. It is the one place
+// both decide from.
+func allDescendants(scope *resolvedScope, spec provider.ChangeSpec, wanted []string) (types []string, unreadable bool) {
 	if !spec.Descendants {
-		return nil
+		return nil, false
 	}
-	types := slices.Clone(allDescendantTypes[scope.Type])
-	if len(wanted) > 0 {
-		types = slices.DeleteFunc(types, func(t string) bool { return !slices.Contains(wanted, t) })
+	types = slices.DeleteFunc(slices.Clone(allDescendantTypes[scope.Type]), func(t string) bool {
+		return len(wanted) > 0 && !slices.Contains(wanted, t)
+	})
+	if len(types) == 0 {
+		return nil, false
 	}
-	return types
+	if scope.typeIDs == nil {
+		return nil, true
+	}
+	return slices.DeleteFunc(types, func(t string) bool { return scope.typeIDs[t] == 0 }), false
 }
 
 // allScopeReads is an All query's change-log reads: the type read (the scope
 // type's own changes and the descendant types, in one read) and the related
 // read (the changes recorded against objects of the scope type). Both keep only
-// some of what NetBox returns, so both are scans. Without the type map
-// (TypeID 0) the descendant types can't be checked and aren't read; Changes
-// says so with the descendants warning.
+// some of what NetBox returns, so both are scans.
 func (p *Provider) allScopeReads(ctx context.Context, spec provider.ChangeSpec, scope *resolvedScope, wanted []string, f changeFilter) ([]changeRead, error) {
 	var reads []changeRead
 
 	own := len(wanted) == 0 || slices.Contains(wanted, scope.Type)
-	var desc []string
-	ids := map[string]int{}
-	if scope.TypeID != 0 {
-		if desc = wantedAllDescendants(scope, spec, wanted); len(desc) > 0 {
-			var err error
-			if ids, err = p.objectTypeIDMap(ctx); err != nil {
-				return nil, err
-			}
-			// A type this NetBox doesn't have can't change.
-			desc = slices.DeleteFunc(desc, func(t string) bool { return ids[t] == 0 })
-		}
-	}
+	desc, _ := allDescendants(scope, spec, wanted)
 	if own || len(desc) > 0 {
 		q := changeLogQuery(spec, f)
 		if own {
@@ -76,10 +70,10 @@ func (p *Provider) allScopeReads(ctx context.Context, spec provider.ChangeSpec, 
 			}
 		}
 		for _, t := range desc {
-			q.Add(changedObjectTypeIDParam, strconv.Itoa(ids[t]))
+			q.Add(changedObjectTypeIDParam, strconv.Itoa(scope.typeIDs[t]))
 		}
 		kind := descendantKinds[scope.Type]
-		ifaceTypeID := ids[kind.ifaceType]
+		ifaceTypeID := scope.typeIDs[kind.ifaceType]
 		reads = append(reads, changeRead{q: q, scan: true, keep: func(oc objectChange) bool {
 			t := normalizeObjectType(oc.changedType())
 			if t == scope.Type {
@@ -89,120 +83,72 @@ func (p *Provider) allScopeReads(ctx context.Context, spec provider.ChangeSpec, 
 		}})
 	}
 
-	trs, err := p.objectTypeReads(ctx, wanted, changedObjectTypeIDParam, changedObjectTypeParam)
-	if err != nil {
-		return nil, err
-	}
-	for _, tr := range trs {
-		q := changeLogQuery(spec, f)
-		q.Set(relatedObjectTypeParam, scope.Type)
-		reads = append(reads, changeRead{q: tr.with(q), scan: true, fromRelated: true, relatedTypeID: scope.TypeID,
-			keep: func(oc objectChange) bool {
-				return tr.keeps(normalizeObjectType(oc.changedType())) && tiedToScopeType(scope, oc)
-			}})
+	// Rows are kept only when a snapshot ties them to the scope type
+	// (tiedToScopeType). A type with no field of its own needs the type map for
+	// that, and without it no row could be kept: the read isn't made.
+	if _, named := scopeParentFields[scope.Type]; named || scope.TypeID != 0 {
+		trs, err := p.objectTypeReads(ctx, wanted, changedObjectTypeIDParam, changedObjectTypeParam)
+		if err != nil {
+			return nil, err
+		}
+		for _, tr := range trs {
+			q := changeLogQuery(spec, f)
+			q.Set(relatedObjectTypeParam, scope.Type)
+			reads = append(reads, changeRead{q: tr.with(q), scan: true, fromRelated: true, relatedTypeID: scope.TypeID,
+				keep: func(oc objectChange) bool {
+					return tr.keeps(normalizeObjectType(oc.changedType())) && tiedToScopeType(scope, oc)
+				}})
+		}
 	}
 	return perAction(reads, f.pushes), nil
 }
 
+// anyObject accepts any object id: under All every object of the type counts.
+func anyObject(int64) bool { return true }
+
 // allDescendantMatch reports whether a row of a descendant type t is the scope
 // type's, as far as its snapshots can tell: an IP or MAC address on the scope
-// kind's interface type, a service whose parent is of the scope type (or, on
-// NetBox 4.2, names one in the kind's owner field). Cables and modules are kept
-// by type: a device's cables are all attached to it, and modules only exist on
-// devices.
+// kind's interface type, a service whose parent is of the scope type. These are
+// the scoped checks (assignedOwner, serviceParent) with any object accepted.
+// Cables and modules are kept by type: a device's cables are all attached to
+// it, and modules only exist on devices.
 func allDescendantMatch(oc objectChange, t string, scope *resolvedScope, kind descendantKind, ifaceTypeID int) bool {
 	switch t {
 	case "ipam.ipaddress", "dcim.macaddress":
-		return snapshotTypeIs(oc, "assigned_object_type", ifaceTypeID)
+		_, ok := assignedOwner(oc, ifaceTypeID, func(iface int64) (int64, bool) { return iface, true })
+		return ok
 	case "ipam.service":
-		return snapshotTypeIs(oc, "parent_object_type", scope.TypeID) ||
-			(kind.ownerField != "" && snapshotNames(oc, kind.ownerField))
+		_, ok := serviceParent(oc, scope.TypeID, kind.ownerField, anyObject)
+		return ok
 	}
 	return true
 }
 
-// snapshotTypeIs reports whether either snapshot's key holds the object-type
-// id typeID. An unknown id (0) matches nothing.
-func snapshotTypeIs(oc objectChange, key string, typeID int) bool {
-	if typeID == 0 {
-		return false
-	}
-	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
-		if id, ok := snapshotID(data, key); ok && id == int64(typeID) {
-			return true
-		}
-	}
-	return false
-}
-
-// snapshotNames reports whether either snapshot's field holds an id.
-func snapshotNames(oc objectChange, field string) bool {
-	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
-		if _, ok := snapshotID(data, field); ok {
-			return true
-		}
-	}
-	return false
-}
-
 // tiedToScopeType reports whether a related read's row names an object of the
-// scope type in a snapshot: the type's own field (scopeParentFields) holding an
-// id, or a generic <x>_type / <x>_id pair whose type is the scope's. The change
-// log doesn't return the related object, so this is what keeps a NetBox that
-// ignored related_object_type from putting every change on the track. A row
-// that can't be tied (no named field, and the type map unreadable) is dropped.
+// scope type in a snapshot (snapshotRef, any object accepted). The change log
+// doesn't return the related object, so this is what keeps a NetBox that
+// ignored related_object_type from putting every change on the track.
 func tiedToScopeType(scope *resolvedScope, oc objectChange) bool {
-	field, named := scopeParentFields[scope.Type]
-	for _, data := range []map[string]json.RawMessage{oc.PostchangeData, oc.PrechangeData} {
-		if _, ok := snapshotID(data, field); named && ok {
-			return true
-		}
-		if scope.TypeID == 0 {
-			continue
-		}
-		for key := range data {
-			x, ok := strings.CutSuffix(key, "_type")
-			if !ok {
-				continue
-			}
-			if t, ok := snapshotID(data, key); ok && t == int64(scope.TypeID) {
-				if _, ok := snapshotID(data, x+"_id"); ok {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	_, ok := snapshotRef(scope, oc, anyObject)
+	return ok
 }
 
 // allParent names the device or VM a row under an All scope belongs to, for
-// the marker's "on <name>", from the changed object's nested references: its
-// owner field (an interface's device, a module's), the owner of the object it's
-// assigned to (an IP's interface's device), or a service's parent. There is no
-// object list to check them against, so the reference's display is the name.
-// The scope type's own rows, interface scopes, and deleted objects (no nested
-// references) get none.
+// the marker's "on <name>": the display of the changed object's nested owner
+// reference, as an interface's or a module's brief row carries its device.
+// There is no object list to check it against. The scope type's own rows,
+// interface scopes, rows whose brief row names no owner (an IP or MAC address,
+// a service) and deleted objects (no nested references) get none.
 func allParent(scope *resolvedScope, oc objectChange) string {
 	kind := descendantKinds[scope.Type]
 	if kind.ownerField == "" || normalizeObjectType(oc.changedType()) == scope.Type {
 		return ""
 	}
-	obj := oc.changedObjectMap()
-	refs := []json.RawMessage{obj[kind.ownerField]}
-	var assigned map[string]json.RawMessage
-	if json.Unmarshal(obj["assigned_object"], &assigned) == nil {
-		refs = append(refs, assigned[kind.ownerField])
+	var ref struct {
+		Display string `json:"display"`
 	}
-	if normalizeObjectType(oc.changedType()) == "ipam.service" {
-		refs = append(refs, obj["parent"])
+	if json.Unmarshal(oc.changedObjectMap()[kind.ownerField], &ref) != nil {
+		return ""
 	}
-	for _, raw := range refs {
-		var ref struct {
-			Display string `json:"display"`
-		}
-		if json.Unmarshal(raw, &ref) == nil && ref.Display != "" {
-			return ref.Display
-		}
-	}
-	return ""
+	return ref.Display
 }

@@ -1911,12 +1911,20 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	)
 	if spec.Journal {
 		// Its own deadline, within readCtx, so a hanging journal can't hold the
-		// track to the caller's deadline and blank it there.
+		// track to the caller's deadline and blank it there. A journal that
+		// fails records its error as jctx's cause, so the deadline passing
+		// later, while the change reads finish, can't relabel it as slow.
 		journalStart, journalDeadline = time.Now(), p.descendantsDeadline(ctx)
-		var cancelJournal context.CancelFunc
-		jctx, cancelJournal = context.WithDeadline(readCtx, journalDeadline)
+		deadlineCtx, cancelJournal := context.WithDeadline(readCtx, journalDeadline)
 		defer cancelJournal()
-		wg.Go(func() { journal, journalErr = p.journalEntries(jctx, spec, scope, wanted, limit) })
+		var failJournal context.CancelCauseFunc
+		jctx, failJournal = context.WithCancelCause(deadlineCtx)
+		defer failJournal(nil)
+		wg.Go(func() {
+			if journal, journalErr = p.journalEntries(jctx, spec, scope, wanted, limit); journalErr != nil {
+				failJournal(journalErr)
+			}
+		})
 	}
 	if descendants {
 		wg.Go(func() {
@@ -1976,9 +1984,11 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		desc = nil
 	}
 	// An All scope can't check the descendant types without the type map, so it
-	// didn't read them (allScopeReads): the track says so, as a scope's does.
-	if scope != nil && scope.All && scope.TypeID == 0 && len(wantedAllDescendants(scope, spec, wanted)) > 0 {
-		descErr = &AnnotationError{Reason: provider.AnnotationReasonDescendantTypesUnreadable}
+	// didn't read them (allDescendants): the track says so, as a scope's does.
+	if scope != nil && scope.All {
+		if _, unreadable := allDescendants(scope, spec, wanted); unreadable {
+			descErr = &AnnotationError{Reason: provider.AnnotationReasonDescendantTypesUnreadable}
+		}
 	}
 	descMerged := len(desc) > 0
 	results = append(results, desc...)

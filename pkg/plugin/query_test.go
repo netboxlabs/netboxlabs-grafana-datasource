@@ -1121,9 +1121,9 @@ func TestQuery_AnnotationsJournalErrorMarker(t *testing.T) {
 		want string
 	}{
 		{"refused", &netbox.AnnotationError{Reason: provider.AnnotationReasonJournalForbidden},
-			"Journal entries weren&#39;t read. The API token can&#39;t read journal entries. Turn off Journal entries, or let the token view them."},
+			"Journal entries weren&#39;t read: the API token can&#39;t read them. Let the token view journal entries, or turn off Journal entries."},
 		{"slow", &netbox.AnnotationError{Reason: provider.AnnotationReasonJournalSlow, Count: 8},
-			"Journal entries weren&#39;t read. Reading journal entries took longer than 8 s. Narrow the range, or turn off Journal entries on a busy NetBox."},
+			"Journal entries weren&#39;t read: reading them took longer than 8 s. Narrow the range, or turn off Journal entries on a busy NetBox."},
 		{"failed", errors.New("boom"), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

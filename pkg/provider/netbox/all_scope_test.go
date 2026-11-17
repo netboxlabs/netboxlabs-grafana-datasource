@@ -122,7 +122,8 @@ func TestChanges_AllScopeRelatedTypeRetriesAsAnID(t *testing.T) {
 // type's snapshot says decides whether the row is a device's.
 func allDescendantRows() []loggedChange {
 	ipOnIface := snap(11, 2, "ipam.ipaddress", 39, `{"assigned_object_type":14,"assigned_object_id":100}`)
-	ipOnIface.changedObject = `{"id":39,"display":"10.0.0.1/24","assigned_object":{"id":100,"display":"eth0","device":{"id":17,"display":"leaf1"}}}`
+	// NetBox serves the changed object brief: an IP's names no interface or device.
+	ipOnIface.changedObject = `{"id":39,"display":"10.0.0.1/24","family":4,"address":"10.0.0.1/24"}`
 	module := snap(14, 5, "dcim.module", 3, `{"device":17}`)
 	module.changedObject = `{"id":3,"display":"Slot 1","device":{"id":17,"display":"leaf1"}}`
 	unassigned := loggedChange{id: 18, minutes: 9, action: "update", ct: "ipam.ipaddress", objID: 40,
@@ -152,8 +153,8 @@ func TestChanges_AllScopeDescendantTypes(t *testing.T) {
 	for _, c := range changes {
 		parents[c.ObjectRepr] = c.Parent
 	}
-	if parents["#11"] != "leaf1" || parents["#14"] != "leaf1" {
-		t.Errorf("parents = %v, want leaf1 for the IP (its interface's device) and the module", parents)
+	if parents["#14"] != "leaf1" || parents["#11"] != "" {
+		t.Errorf("parents = %v, want leaf1 for the module (its brief row's device) and none for the IP (its brief row names none)", parents)
 	}
 
 	var typeReads [][]string
@@ -288,5 +289,18 @@ func TestAllDescendantTypesMatchDescendantKinds(t *testing.T) {
 	got := slices.Sorted(maps.Keys(allDescendantTypes))
 	if want := slices.Sorted(maps.Keys(descendantKinds)); !slices.Equal(got, want) {
 		t.Errorf("allDescendantTypes covers %v, descendantKinds %v", got, want)
+	}
+}
+
+// A type with no field of its own can only be tied to its rows by the type map.
+// Without it the related read could keep nothing, so it isn't made, rather than
+// scan to its cap and draw a cut-off.
+func TestChanges_AllScopeSkipsAnUntiableRelatedRead(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.site", 5))
+	s.coreStatus = http.StatusForbidden
+	wantIDs(t, changesOK(t, s.start(t), allScope("dcim.site")), "#1")
+	reads := s.changeLog()
+	if len(reads) != 1 || reads[0].Get(changedObjectTypeParam) != "dcim.site" || reads[0].Has(relatedObjectTypeParam) {
+		t.Errorf("reads = %v, want only the site type read, by name", reads)
 	}
 }

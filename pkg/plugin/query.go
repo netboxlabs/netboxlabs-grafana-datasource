@@ -965,10 +965,6 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 		return fmt.Sprintf("%q isn't a change action. Use create, update or delete.", value)
 	case provider.AnnotationReasonUntrackedField:
 		return fmt.Sprintf("%q isn't compared between changes, so it can't filter them. Pick another field.", value)
-	case provider.AnnotationReasonJournalForbidden:
-		return "The API token can't read journal entries. Turn off Journal entries, or let the token view them."
-	case provider.AnnotationReasonJournalSlow:
-		return fmt.Sprintf("Reading journal entries took longer than %d s. Narrow the range, or turn off Journal entries on a busy NetBox.", u.AnnotationCount)
 	case provider.AnnotationReasonObjectTypesUnreadable:
 		return "NetBox's object-type list couldn't be read, and this NetBox version needs it to find related changes. Check that the token can read object types."
 	case provider.AnnotationReasonTooManyChildren:
@@ -989,8 +985,18 @@ func descendantsErrorText(err error, viaProxy bool) string {
 	return warningText("Changes to what's attached weren't read.", "Include descendants", err, viaProxy)
 }
 
-// journalErrorText is the warning marker's text for a failed journal read.
+// journalErrorText is the warning marker's text for a failed journal read: a
+// refused or slow journal says why and what to do, any other failure says what
+// NetBox answered.
 func journalErrorText(err error, viaProxy bool) string {
+	if u := provider.Classify(err); u != nil && u.Kind == provider.ErrorKindAnnotation {
+		switch u.AnnotationReason {
+		case provider.AnnotationReasonJournalForbidden:
+			return "Journal entries weren't read: the API token can't read them. Let the token view journal entries, or turn off Journal entries."
+		case provider.AnnotationReasonJournalSlow:
+			return fmt.Sprintf("Journal entries weren't read: reading them took longer than %d s. Narrow the range, or turn off Journal entries on a busy NetBox.", u.AnnotationCount)
+		}
+	}
 	return warningText("Journal entries weren't read.", "Journal entries", err, viaProxy)
 }
 

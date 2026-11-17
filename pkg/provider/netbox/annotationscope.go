@@ -47,6 +47,9 @@ type resolvedScope struct {
 	Endpoint string // "" when unknown (allowed under Match by ID)
 	Objects  []scopeObject
 	All      bool // the scope was $__all: every object of Type (allScopeReads)
+	// typeIDs is the object-type map Type was resolved from, for an All
+	// scope's descendant types; nil when it couldn't be read (TypeID 0).
+	typeIDs map[string]int
 }
 
 // idSet is the scope objects' ids, for checking a row against the scope.
@@ -103,10 +106,10 @@ func (e *AnnotationError) Error() string {
 	if e.Value != "" {
 		msg += fmt.Sprintf(" %q", e.Value)
 	}
-	// Count is seconds for a descendants read that ran past its budget, and an
-	// object count otherwise, or CountPastLimit.
+	// Count is seconds for a descendants or journal read that ran past its
+	// budget, and an object count otherwise, or CountPastLimit.
 	switch {
-	case e.Count != 0 && e.Reason == provider.AnnotationReasonDescendantsSlow:
+	case e.Count != 0 && (e.Reason == provider.AnnotationReasonDescendantsSlow || e.Reason == provider.AnnotationReasonJournalSlow):
 		msg += fmt.Sprintf(" (%d s)", e.Count)
 	case e.Count == provider.CountPastLimit:
 		msg += fmt.Sprintf(" (more than %d objects)", MaxScopeObjects)
@@ -220,7 +223,7 @@ func (p *Provider) scopeType(ctx context.Context, raw string, set bool) (*resolv
 		// logSafe because the type is free text from the annotation editor.
 		return nil, &UnknownObjectTypeError{Type: logSafe(typ), Known: len(ids)}
 	}
-	return &resolvedScope{Type: typ, TypeID: id}, nil
+	return &resolvedScope{Type: typ, TypeID: id, typeIDs: ids}, nil
 }
 
 // nameScopeIDs puts a scope given as ids into scope.Objects, with names filled

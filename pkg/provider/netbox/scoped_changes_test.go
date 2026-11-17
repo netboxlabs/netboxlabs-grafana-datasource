@@ -1421,6 +1421,23 @@ func TestChanges_SlowJournalIsAWarning(t *testing.T) {
 	}
 }
 
+// A journal refused at once keeps its reason when the change reads finish after
+// its deadline: the deadline passing later doesn't make it slow.
+func TestChanges_FastJournalFailureIsNotSlow(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
+	s.journalStatus = http.StatusForbidden
+	s.delayTypeID, s.delayFor = scopedTypeIDs["dcim.device"], 400*time.Millisecond
+	p := s.start(t)
+	p.descendantsWaitOverride = 100 * time.Millisecond
+	spec := splitSpec()
+	spec.Journal = true
+	got := changesOK(t, p, spec)
+	if ids := changeIDs(got); !slices.Equal(ids, []string{"#1", string(provider.ChangeKindJournalError)}) {
+		t.Fatalf("changes = %v, want the device change, then the journal-error marker", ids)
+	}
+	annotationErr(t, got[1].Err, provider.AnnotationReasonJournalForbidden)
+}
+
 // With no To, the end-of-range markers still share one time, so the frame can
 // show them as one marker: the descendants error and the journal error here.
 func TestChanges_EndOfRangeMarkersShareOneTime(t *testing.T) {

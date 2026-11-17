@@ -33,6 +33,12 @@ func TestChangeTitle_FallbackChain(t *testing.T) {
 		{"postchange name", `{"changed_object_type":"dcim.device","changed_object":null,"postchange_data":{"name":"leaf3"},"prechange_data":{"name":"old"}}`, "leaf3"},
 		{"prechange name on delete", `{"changed_object_type":"dcim.device","postchange_data":null,"prechange_data":{"name":"leaf4"}}`, "leaf4"},
 		{"circuit cid", `{"changed_object_type":"circuits.circuit","postchange_data":{"cid":"CID-1","name":"nope"}}`, "CID-1"},
+		{"deleted IP address", `{"changed_object_type":"ipam.ipaddress","changed_object_id":39,"postchange_data":null,"prechange_data":{"address":"10.250.0.10/32"}}`, "10.250.0.10/32"},
+		{"deleted MAC address", `{"changed_object_type":"dcim.macaddress","changed_object_id":5,"postchange_data":null,"prechange_data":{"mac_address":"02:00:00:51:40:01"}}`, "02:00:00:51:40:01"},
+		{"prefix", `{"changed_object_type":"ipam.prefix","changed_object_id":7,"postchange_data":{"prefix":"10.1.0.0/24"}}`, "10.1.0.0/24"},
+		{"aggregate", `{"changed_object_type":"ipam.aggregate","changed_object_id":8,"postchange_data":{"prefix":"10.0.0.0/8"}}`, "10.0.0.0/8"},
+		{"cable label", `{"changed_object_type":"dcim.cable","changed_object_id":24,"postchange_data":null,"prechange_data":{"label":"demo-uplink"}}`, "demo-uplink"},
+		{"cable without a label", `{"changed_object_type":"dcim.cable","changed_object_id":24,"postchange_data":null,"prechange_data":{"label":""}}`, "dcim.cable #24"},
 		{"type and id", `{"changed_object_type":"dcim.device","changed_object_id":42,"postchange_data":{"serial":"s"}}`, "dcim.device #42"},
 	}
 	for _, tc := range tests {

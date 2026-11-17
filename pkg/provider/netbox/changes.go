@@ -104,6 +104,17 @@ func (o objectChange) deepLink(base string) string {
 	return base
 }
 
+// titleFields are the snapshot fields NetBox names these objects by (their
+// __str__), for types that have no name. Without them a deleted IP address,
+// MAC address or cable is titled by type and id before NetBox 4.5.
+var titleFields = map[string]string{
+	"ipam.ipaddress":  "address",
+	"dcim.macaddress": "mac_address",
+	"ipam.prefix":     "prefix",
+	"ipam.aggregate":  "prefix",
+	"dcim.cable":      "label",
+}
+
 // title names the changed object. NetBox only returns object_repr from 4.5, so
 // older versions fall back through what the record does carry.
 func (o objectChange) title() string {
@@ -121,7 +132,10 @@ func (o objectChange) title() string {
 			return s
 		}
 	}
-	field := lookupField(o.ChangedType)
+	field, ok := titleFields[normalizeObjectType(o.ChangedType)]
+	if !ok {
+		field = lookupField(o.ChangedType)
+	}
 	for _, data := range []map[string]json.RawMessage{o.PostchangeData, o.PrechangeData} {
 		if s := formatValue(data[field]); s != "" {
 			return s

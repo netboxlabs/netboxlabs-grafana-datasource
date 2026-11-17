@@ -37,3 +37,17 @@ reason = "react-router 6.x pinned transitively by @grafana/ui (13.3.0, the lates
 id = "GHSA-gcqx-w48m-w2h4"
 ignoreUntil = 2026-11-30
 reason = "deepmerge 4.3.1 is the latest release and has no fix; dev-only via fork-ts-checker-webpack-plugin and jest-config merging their own config, not shipped. Re-review 2026-11-30."
+
+# picomatch <= 4.0.7: a glob with a single-branch repeated extglob, such as
+# +(*), backtracks exponentially against short crafted strings
+# (GHSA-fc5q-39xc-vjpf, rated high). No fixed release exists; 4.0.7
+# (2026-08-24) is the latest. It is a development dependency only: 2.3.2
+# through eslint-webpack-plugin and webpack-livereload-plugin, 4.0.4 through
+# copy-webpack-plugin and sass, 4.0.7 through jest. The attack needs the
+# attacker to supply the glob; these tools match the globs in the repo's own
+# build and test config, and picomatch is not in the shipped plugin. ignoreUntil
+# is a re-review date: drop this entry when picomatch ships a fix.
+[[IgnoredVulns]]
+id = "GHSA-fc5q-39xc-vjpf"
+ignoreUntil = 2026-12-17
+reason = "picomatch 4.0.7 is the latest release and has no fix; dev-only via webpack plugins, sass and jest matching the repo's own globs, not attacker input, and not shipped. Re-review 2026-12-17."

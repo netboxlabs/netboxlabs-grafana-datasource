@@ -1530,6 +1530,23 @@ func TestChanges_JournalScansPastOtherObjectsEntries(t *testing.T) {
 	wantIDs(t, changesOK(t, s.start(t), spec), "leaf1")
 }
 
+// The scan's room past Limit doesn't shrink as Limit grows: with Limit above
+// the scan cap, one rejected entry still can't push a wanted one out.
+func TestChanges_JournalScanRoomIsBeyondLimit(t *testing.T) {
+	s := newScopedChangeServer()
+	s.journal = []journalRow{
+		{typ: "dcim.device", objID: 99, display: "leaf9", minutes: 1, text: "a"},
+		{typ: "dcim.device", objID: 17, display: "leaf1", minutes: 2, text: "b"},
+		{typ: "dcim.device", objID: 17, display: "leaf1", minutes: 3, text: "c"},
+		{typ: "dcim.device", objID: 17, display: "leaf1", minutes: 4, text: "d"},
+	}
+	p := s.start(t)
+	p.changeScanCapOverride = 2
+	spec := scoped(nameScope("leaf1"), 3)
+	spec.Journal = true
+	wantIDs(t, changesOK(t, p, spec), "leaf1", "leaf1", "leaf1")
+}
+
 // With no To, the end-of-range markers still share one time, so the frame can
 // show them as one marker: the descendants error and the journal error here.
 func TestChanges_EndOfRangeMarkersShareOneTime(t *testing.T) {

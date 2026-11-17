@@ -165,13 +165,13 @@ func (p *Provider) journalEntries(ctx context.Context, spec provider.ChangeSpec,
 // types and the scope allow. A 403 is journal-forbidden. It walks the pages as
 // the change-log reads do, so an entry written mid-read can't repeat a row at a
 // page boundary and push an older entry out of the limit. It stops at limit
-// kept entries, not limit rows, up to the scan cap: entries a filter NetBox
-// ignored let through are rejected here, and mustn't crowd out the ones asked
-// for. Its pages are limit rows, as when it stopped at limit rows, so the
+// kept entries, not limit rows, with room for the scan cap's rows past limit:
+// entries a filter NetBox ignored let through are rejected here, and mustn't
+// crowd out the ones asked for. Its pages are limit rows, as when it stopped at limit rows, so the
 // usual read, which rejects nothing, asks for no more than it did.
 func (p *Provider) journalRead(ctx context.Context, q url.Values, tr typeRead, scope *resolvedScope, inScope map[int64]bool, limit int) ([]journalEntry, error) {
 	var entries []journalEntry
-	_, _, err := p.walkRowsPaged(ctx, journalEndpoint, q, limit, max(limit, p.changeScanCap()), func(raw json.RawMessage) bool {
+	_, _, err := p.walkRowsPaged(ctx, journalEndpoint, q, limit, limit+p.changeScanCap(), func(raw json.RawMessage) bool {
 		var e journalEntry
 		if json.Unmarshal(raw, &e) != nil {
 			return true

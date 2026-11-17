@@ -518,9 +518,9 @@ Cut the noise with the other editor fields:
   briefly. A deleted custom field's history can only be filtered with `custom_fields`.
 - **Journal entries:** also show journal entries (for the scoped objects when a
   scope is set), tagged `journal`. The token needs permission to read them
-  (`extras.view_journalentry`). If they can't be read, or take longer than the
-  datasource's Timeout, the change markers still show, and a warning marker at
-  the end of the range says why.
+  (`extras.view_journalentry`). If they can't be read, or NetBox takes too long
+  to return them, the change markers still show, and a warning marker at the
+  end of the range says why.
 
 **Include descendants** is on by default when a scope is set. It adds what NetBox
 doesn't record against the device: its cables (edits and deletions too), IP and MAC

@@ -209,13 +209,13 @@ func TestChanges_AllScopeCappedScanDrawsTheCutoff(t *testing.T) {
 
 // Without the type map, the descendant types can't be checked, so they aren't
 // read: the scope type's own changes are read by name, and the track ends with
-// the descendants warning, as a scoped track's does.
+// a warning that the object-type list couldn't be read.
 func TestChanges_AllScopeTypeMapUnreadable(t *testing.T) {
 	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17), ch(10, 2, "dcim.cable", 24))
 	s.coreStatus = http.StatusForbidden
 	changes := changesOK(t, s.start(t), withDescendants(allScope("")))
 	wantIDs(t, changes, "#1", "descendants-error")
-	annotationErr(t, descendantsError(t, changes).Err, provider.AnnotationReasonDescendantTypesUnreadable)
+	annotationErr(t, descendantsError(t, changes).Err, provider.AnnotationReasonObjectTypesUnreadable)
 	for _, q := range s.changeLog() {
 		if q.Get(changedObjectTypeParam) == "dcim.cable" || slices.Contains(q[changedObjectTypeIDParam], "17") {
 			t.Errorf("read %v asks for cables, which can't be checked without the type map", q)
@@ -292,16 +292,47 @@ func TestAllDescendantTypesMatchDescendantKinds(t *testing.T) {
 	}
 }
 
-// A type with no field of its own can only be tied to its rows by the type map.
-// Without it the related read could keep nothing, so it isn't made, rather than
-// scan to its cap and draw a cut-off.
+// Only a device's or VM's related rows can be tied without the type map, by
+// the field naming them; the others tie by a generic <x>_type pair. So without
+// the map their related read isn't made, rather than scan to its cap and draw
+// a cut-off, and the track says the object-type list couldn't be read.
 func TestChanges_AllScopeSkipsAnUntiableRelatedRead(t *testing.T) {
-	s := newScopedChangeServer(ch(1, 1, "dcim.site", 5))
+	for _, typ := range []string{"dcim.site", "dcim.interface"} {
+		t.Run(typ, func(t *testing.T) {
+			s := newScopedChangeServer(ch(1, 1, typ, 5))
+			s.coreStatus = http.StatusForbidden
+			changes := changesOK(t, s.start(t), allScope(typ))
+			wantIDs(t, changes, "#1", "descendants-error")
+			annotationErr(t, descendantsError(t, changes).Err, provider.AnnotationReasonObjectTypesUnreadable)
+			reads := s.changeLog()
+			if len(reads) != 1 || reads[0].Get(changedObjectTypeParam) != typ || reads[0].Has(relatedObjectTypeParam) {
+				t.Errorf("reads = %v, want only the type read, by name", reads)
+			}
+		})
+	}
+}
+
+// Object types that ask only for the scope type's own changes need nothing
+// the type map gives: no warning without it.
+func TestChanges_AllScopeOwnChangesNeedNoTypeMap(t *testing.T) {
+	s := newScopedChangeServer(ch(1, 1, "dcim.device", 17))
 	s.coreStatus = http.StatusForbidden
-	wantIDs(t, changesOK(t, s.start(t), allScope("dcim.site")), "#1")
-	reads := s.changeLog()
-	if len(reads) != 1 || reads[0].Get(changedObjectTypeParam) != "dcim.site" || reads[0].Has(relatedObjectTypeParam) {
-		t.Errorf("reads = %v, want only the site type read, by name", reads)
+	spec := allScope("")
+	spec.ObjectTypes = []string{"dcim.device"}
+	wantIDs(t, changesOK(t, s.start(t), spec), "#1")
+}
+
+// A change recorded against a circuit names it from its nested reference.
+func TestChanges_AllScopeNamesACircuit(t *testing.T) {
+	term := loggedChange{id: 4, minutes: 4, action: "update", ct: "circuits.circuittermination", objID: 9,
+		relType: "circuits.circuit", relID: 3,
+		changedObject: `{"id":9,"display":"Termination A","circuit":{"id":3,"display":"CID-1"}}`,
+		pre:           `{"circuit":3,"description":"a"}`, post: `{"circuit":3,"description":"b"}`}
+	s := newScopedChangeServer(term)
+	changes := changesOK(t, s.start(t), allScope("circuits.circuit"))
+	wantIDs(t, changes, "#4")
+	if got := changes[0].Parent; got != "CID-1" {
+		t.Errorf("parent = %q, want CID-1", got)
 	}
 }
 

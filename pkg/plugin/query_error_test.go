@@ -134,7 +134,7 @@ func TestQueryErrorMessage_Annotation(t *testing.T) {
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonUntrackedField, Value: "last_updated"},
 			`"last_updated" isn't compared between changes, so it can't filter them. Pick another field.`},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonObjectTypesUnreadable},
-			"NetBox's object-type list couldn't be read, and this NetBox version needs it to find related changes. Check that the token can read object types."},
+			"NetBox's object-type list couldn't be read, and it's needed to find related changes. Check that the token can read object types."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonTooManyChildren},
 			"This scope has more than 10,000 interfaces or cables to follow. Narrow the scope, or turn off Include descendants."},
 		{&netbox.AnnotationError{Reason: provider.AnnotationReasonDescendantTypesUnreadable},

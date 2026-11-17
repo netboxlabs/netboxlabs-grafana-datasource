@@ -33,6 +33,8 @@ var scopedTypeIDs = map[string]int{
 	"dcim.cabletermination":         24,
 	"virtualization.virtualmachine": 30,
 	"virtualization.vminterface":    31,
+	"circuits.circuit":              40,
+	"circuits.circuittermination":   41,
 }
 
 // scopedSchema gives devices and interfaces a name filter, for the scope's name

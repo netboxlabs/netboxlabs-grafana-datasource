@@ -65,14 +65,7 @@ func (p *Provider) descendantsBudget() time.Duration {
 // does: the rest of the track is merged and returned in that fifth, rather
 // than lost with the caller's deadline.
 func (p *Provider) descendantsDeadline(ctx context.Context) time.Time {
-	now := time.Now()
-	deadline := now.Add(p.descendantsBudget())
-	if dl, ok := ctx.Deadline(); ok {
-		if reserved := now.Add(dl.Sub(now) * 4 / 5); reserved.Before(deadline) {
-			return reserved
-		}
-	}
-	return deadline
+	return deadlineWithin(ctx, p.descendantsBudget())
 }
 
 // listChildren reads a current-children list. It reads page 1 itself

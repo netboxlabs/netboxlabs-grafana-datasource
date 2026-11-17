@@ -209,21 +209,22 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		}
 		for i := range changes {
 			// These markers are warnings: the change log's own markers are all there.
-			kind := changes[i].Kind
-			if kind != provider.ChangeKindDescendantsError && kind != provider.ChangeKindJournalError {
+			var logMsg string
+			var text func(error, bool) string
+			switch changes[i].Kind {
+			case provider.ChangeKindDescendantsError:
+				logMsg, text = "netbox descendants error", descendantsErrorText
+			case provider.ChangeKindJournalError:
+				logMsg, text = "netbox journal error", journalErrorText
+			default:
 				continue
 			}
 			err := changes[i].Err
 			if err == nil {
 				err = errors.New("unknown error")
 			}
-			if kind == provider.ChangeKindJournalError {
-				log.DefaultLogger.Warn("netbox journal error", "detail", sanitizeLog(err.Error()))
-				changes[i].Message = journalErrorText(err, d.viaProxy)
-				continue
-			}
-			log.DefaultLogger.Warn("netbox descendants error", "detail", sanitizeLog(err.Error()))
-			changes[i].Message = descendantsErrorText(err, d.viaProxy)
+			log.DefaultLogger.Warn(logMsg, "detail", sanitizeLog(err.Error()))
+			changes[i].Message = text(err, d.viaProxy)
 		}
 		if d.cfg.PublicURL != "" {
 			internal, public := trimBase(d.provider.BaseURL()), trimBase(d.cfg.PublicURL)
@@ -966,7 +967,7 @@ func annotationErrorMessage(u *provider.UpstreamError) string {
 	case provider.AnnotationReasonUntrackedField:
 		return fmt.Sprintf("%q isn't compared between changes, so it can't filter them. Pick another field.", value)
 	case provider.AnnotationReasonObjectTypesUnreadable:
-		return "NetBox's object-type list couldn't be read, and this NetBox version needs it to find related changes. Check that the token can read object types."
+		return "NetBox's object-type list couldn't be read, and it's needed to find related changes. Check that the token can read object types."
 	case provider.AnnotationReasonTooManyChildren:
 		return fmt.Sprintf("This scope has more than %s interfaces or cables to follow. Narrow the scope, or turn off Include descendants.", thousands(netbox.ChildListCapRows))
 	case provider.AnnotationReasonDescendantTypesUnreadable:

@@ -1765,8 +1765,8 @@ const changeReadWorkers = 4
 // descendant reads included, rather than wait for them, and its error is the
 // query's. The journal is optional and never fails the query: while the
 // caller's context is live, a journal read that fails, or runs past its own
-// deadline (the descendants' budget, descendantsDeadline), drops the journal
-// entries and ends the track with a journal-error marker.
+// deadline (journalDeadline), drops the journal entries and ends the track
+// with a journal-error marker.
 //
 // With Include descendants on, a device, VM, interface or VM-interface scope
 // also reads the changes to what's attached to it (descendantChanges),
@@ -1850,7 +1850,11 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	// Which descendant types an All scope reads, decided once, for its reads
 	// and its markers both.
 	if scope != nil && scope.All {
-		scope.allDesc, scope.allDescUnreadable = allDescendants(scope, spec, wanted)
+		scope.allDesc, scope.allPartial = allDescendants(scope, spec, wanted)
+		// The related read needs the type map too, unless only the scope
+		// type's own changes are wanted.
+		related := len(wanted) == 0 || slices.ContainsFunc(wanted, func(t string) bool { return t != scope.Type })
+		scope.allPartial = scope.allPartial || (scope.TypeID == 0 && related)
 	}
 	reads, err := p.changeReads(ctx, spec, scope, wanted, filter)
 	if err != nil {
@@ -1870,17 +1874,17 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 	// own deadline within readCtx (optionalRead), so a failed change read
 	// cancels them too, while their own errors don't cancel readCtx: they
 	// become a marker, and the rest of the track stands. The first descendant
-	// read to fail cancels the others through descRead.fail.
+	// read to fail cancels the others through descOpt.fail.
 	var (
-		desc     []changeReadResult
-		descErr  error
-		descRead *optionalRead
+		desc    []changeReadResult
+		descErr error
+		descOpt *optionalRead
 	)
 	// An All scope reads the descendant types itself (allScopeReads).
 	descendants := spec.Descendants && scope != nil && !scope.All
 	if descendants {
-		descRead = newOptionalRead(readCtx, p.descendantsDeadline(ctx))
-		defer descRead.stop()
+		descOpt = newOptionalRead(readCtx, p.descendantsDeadline(ctx))
+		defer descOpt.stop()
 	}
 
 	// Each read owns its result slot, so no lock is needed. At most
@@ -1907,16 +1911,16 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		})
 	}
 	var (
-		journal     []provider.Change
-		journalErr  error
-		journalRead *optionalRead
+		journal    []provider.Change
+		journalErr error
+		journalOpt *optionalRead
 	)
 	if spec.Journal {
-		journalRead = newOptionalRead(readCtx, p.journalDeadline(ctx))
-		defer journalRead.stop()
+		journalOpt = newOptionalRead(readCtx, p.journalDeadline(ctx))
+		defer journalOpt.stop()
 		wg.Go(func() {
-			if journal, journalErr = p.journalEntries(journalRead.ctx, spec, scope, wanted, limit); journalErr != nil {
-				journalRead.fail(journalErr)
+			if journal, journalErr = p.journalEntries(journalOpt.ctx, spec, scope, wanted, limit); journalErr != nil {
+				journalOpt.fail(journalErr)
 			}
 		})
 	}
@@ -1924,8 +1928,8 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		wg.Go(func() {
 			// An error that isn't a read's, such as an unreadable type map, is the
 			// cause too, so a deadline that passes later can't relabel it.
-			if desc, descErr = p.descendantChanges(descRead.ctx, descRead.fail, spec, scope, wanted, filter, limit); descErr != nil {
-				descRead.fail(descErr)
+			if desc, descErr = p.descendantChanges(descOpt.ctx, descOpt.fail, spec, scope, wanted, filter, limit); descErr != nil {
+				descOpt.fail(descErr)
 			}
 		})
 	}
@@ -1951,18 +1955,19 @@ func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]pro
 		return nil, context.Cause(ctx)
 	}
 	if journalErr != nil {
-		journalErr = journalRead.err(provider.AnnotationReasonJournalSlow)
+		journalErr = journalOpt.err(provider.AnnotationReasonJournalSlow)
 		journal = nil
 	}
 	if descErr != nil {
-		descErr = descRead.err(provider.AnnotationReasonDescendantsSlow)
+		descErr = descOpt.err(provider.AnnotationReasonDescendantsSlow)
 		// The rest of the track stands, and a marker says what's missing.
 		desc = nil
 	}
-	// An All scope can't check the descendant types without the type map, so it
-	// didn't read them (allDescendants): the track says so, as a scope's does.
-	if scope != nil && scope.All && scope.allDescUnreadable {
-		descErr = &AnnotationError{Reason: provider.AnnotationReasonDescendantTypesUnreadable}
+	// An All scope ties related rows and checks descendant types by their type
+	// ids, so without the type map part of its track wasn't read (allScopeReads):
+	// the track says so.
+	if scope != nil && scope.All && scope.allPartial {
+		descErr = &AnnotationError{Reason: provider.AnnotationReasonObjectTypesUnreadable}
 	}
 	// Whether the track holds descendant rows: merged from the descendant
 	// reads, or read by type under All.
@@ -2572,11 +2577,13 @@ type optionalRead struct {
 	start, deadline time.Time
 }
 
+// newOptionalRead starts an optional read's context; a zero deadline is none.
 func newOptionalRead(parent context.Context, deadline time.Time) *optionalRead {
-	r := &optionalRead{start: time.Now(), deadline: deadline}
-	deadlineCtx, cancel := context.WithDeadline(parent, deadline)
-	r.ctx, r.fail = context.WithCancelCause(deadlineCtx)
-	r.cancel = cancel
+	r := &optionalRead{start: time.Now(), deadline: deadline, cancel: func() {}}
+	if !deadline.IsZero() {
+		parent, r.cancel = context.WithDeadline(parent, deadline)
+	}
+	r.ctx, r.fail = context.WithCancelCause(parent)
 	return r
 }
 
@@ -2599,23 +2606,37 @@ func (r *optionalRead) err(slowReason string) error {
 	return cause
 }
 
-// journalDeadline is when the journal read is cut: the datasource Timeout from
-// now, or four fifths of what's left of the caller's deadline when that's
-// sooner, so a slow journal leaves time to answer with the change markers.
+// journalDeadline is when the journal read is cut: four fifths of what's left
+// of the caller's deadline, so a slow journal leaves time to answer with the
+// change markers. Without a caller's deadline it is zero, no deadline of its
+// own: nothing can blank the track then, and each of its requests is bounded
+// by the datasource Timeout, whose error is the warning.
 func (p *Provider) journalDeadline(ctx context.Context) time.Time {
-	now := time.Now()
-	budget := p.journalWaitOverride
-	if budget <= 0 {
-		budget = p.requestTimeout
+	if p.journalWaitOverride > 0 {
+		return deadlineWithin(ctx, p.journalWaitOverride)
 	}
-	if budget <= 0 {
-		budget = defaultRequestTimeout
-	}
-	deadline := now.Add(budget)
-	if dl, ok := ctx.Deadline(); ok {
-		if reserved := now.Add(dl.Sub(now) * 4 / 5); reserved.Before(deadline) {
-			return reserved
-		}
+	reserved, _ := reservedDeadline(ctx)
+	return reserved
+}
+
+// deadlineWithin is budget from now, or four fifths of what's left of ctx's
+// deadline when that's sooner (reservedDeadline).
+func deadlineWithin(ctx context.Context, budget time.Duration) time.Time {
+	deadline := time.Now().Add(budget)
+	if reserved, ok := reservedDeadline(ctx); ok && reserved.Before(deadline) {
+		return reserved
 	}
 	return deadline
+}
+
+// reservedDeadline is four fifths of what's left of ctx's deadline, if it has
+// one: a bounded read ends there, leaving the caller time to answer with what
+// it has.
+func reservedDeadline(ctx context.Context) (time.Time, bool) {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return time.Time{}, false
+	}
+	now := time.Now()
+	return now.Add(dl.Sub(now) * 4 / 5), true
 }

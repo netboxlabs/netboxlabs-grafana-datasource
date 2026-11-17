@@ -200,13 +200,7 @@ func (p *Provider) utilizationBudget() time.Duration {
 // distinction exists to prevent. A fifth of the remaining time is left over for
 // the rows already running and for building the response.
 func (p *Provider) utilizationDeadline(ctx context.Context) time.Time {
-	deadline := time.Now().Add(p.utilizationBudget())
-	if dl, ok := ctx.Deadline(); ok {
-		if reserved := time.Now().Add(time.Until(dl) * 4 / 5); reserved.Before(deadline) {
-			return reserved
-		}
-	}
-	return deadline
+	return deadlineWithin(ctx, p.utilizationBudget())
 }
 
 // errUtilizationBudget is the cause the measurement context carries when the

@@ -33,8 +33,7 @@ var allDescendantTypes = map[string][]string{
 // Include descendants, else the scope type's, less those Object types leaves
 // out and those this NetBox doesn't have. Their checks need type ids, so
 // without the type map none are read, and unreadable reports that some were
-// wanted: Changes says so with the descendants warning. It is the one place
-// both decide from.
+// wanted. Changes calls it once, for the reads and the warning both.
 func allDescendants(scope *resolvedScope, spec provider.ChangeSpec, wanted []string) (types []string, unreadable bool) {
 	if !spec.Descendants {
 		return nil, false
@@ -84,9 +83,11 @@ func (p *Provider) allScopeReads(ctx context.Context, spec provider.ChangeSpec, 
 	}
 
 	// Rows are kept only when a snapshot ties them to the scope type
-	// (tiedToScopeType). A type with no field of its own needs the type map for
-	// that, and without it no row could be kept: the read isn't made.
-	if _, named := scopeParentFields[scope.Type]; named || scope.TypeID != 0 {
+	// (tiedToScopeType). Without the type map only a device's or VM's rows can
+	// be, by the field naming them (their components'); the others' tie by a
+	// generic <x>_type pair, so the read isn't made, and the track says so
+	// (resolvedScope.allPartial).
+	if scope.TypeID != 0 || descendantKinds[scope.Type].ownerField != "" {
 		trs, err := p.objectTypeReads(ctx, wanted, changedObjectTypeIDParam, changedObjectTypeParam)
 		if err != nil {
 			return nil, err
@@ -134,21 +135,24 @@ func tiedToScopeType(scope *resolvedScope, oc objectChange) bool {
 	return ok
 }
 
-// allParent names the device or VM a row under an All scope belongs to, for
-// the marker's "on <name>": the display of the changed object's nested owner
-// reference, as an interface's or a module's brief row carries its device.
-// There is no object list to check it against. The scope type's own rows,
-// interface scopes, rows whose brief row names no owner (an IP or MAC address,
-// a service) and deleted objects (no nested references) get none.
+// allParent names the object of the scope type a row under All belongs to, for
+// the marker's "on <name>": the display of the changed object's nested
+// reference under the type's field (scopeParentFields), as an interface's or a
+// module's brief row carries its device, or a circuit termination's its
+// circuit. There is no object list to check it against. Interface scopes get
+// none, since an interface's display doesn't name its device, as do the scope
+// type's own rows, rows whose brief row names no parent (an IP or MAC address,
+// a service) and deleted objects (no nested references).
 func allParent(scope *resolvedScope, oc objectChange) string {
-	kind := descendantKinds[scope.Type]
-	if kind.ownerField == "" || normalizeObjectType(oc.changedType()) == scope.Type {
+	field := scopeParentFields[scope.Type]
+	if k, ok := descendantKinds[scope.Type]; field == "" || (ok && k.ownerField == "") ||
+		normalizeObjectType(oc.changedType()) == scope.Type {
 		return ""
 	}
 	var ref struct {
 		Display string `json:"display"`
 	}
-	if json.Unmarshal(oc.changedObjectMap()[kind.ownerField], &ref) != nil {
+	if json.Unmarshal(oc.changedObjectMap()[field], &ref) != nil {
 		return ""
 	}
 	return ref.Display

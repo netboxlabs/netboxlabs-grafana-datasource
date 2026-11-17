@@ -258,26 +258,31 @@ type annotationRow struct {
 // and the end of the range can hold a cut-off and two warnings. Changes and
 // journal entries are never merged.
 func mergeNotices(rows []annotationRow) []annotationRow {
+	type group struct {
+		at   int // the group's marker in out
+		rows []annotationRow
+	}
 	out := make([]annotationRow, 0, len(rows))
-	at := map[int64]int{}               // a notice time's marker in out
-	groups := map[int][]annotationRow{} // the notices each of those holds
+	var groups map[int64]*group // by time; most tracks have none
 	for _, r := range rows {
 		if !r.notice {
 			out = append(out, r)
 			continue
 		}
 		k := r.time.UnixNano()
-		if i, ok := at[k]; ok {
-			groups[i] = append(groups[i], r)
+		if g, ok := groups[k]; ok {
+			g.rows = append(g.rows, r)
 			continue
 		}
-		at[k] = len(out)
-		groups[len(out)] = []annotationRow{r}
+		if groups == nil {
+			groups = map[int64]*group{}
+		}
+		groups[k] = &group{at: len(out), rows: []annotationRow{r}}
 		out = append(out, r)
 	}
-	for i, g := range groups {
-		if len(g) > 1 {
-			out[i] = mergeRows(g)
+	for _, g := range groups {
+		if len(g.rows) > 1 {
+			out[g.at] = mergeRows(g.rows)
 		}
 	}
 	return out

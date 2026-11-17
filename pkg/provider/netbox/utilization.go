@@ -200,13 +200,7 @@ func (p *Provider) utilizationBudget() time.Duration {
 // distinction exists to prevent. A fifth of the remaining time is left over for
 // the rows already running and for building the response.
 func (p *Provider) utilizationDeadline(ctx context.Context) time.Time {
-	deadline := time.Now().Add(p.utilizationBudget())
-	if dl, ok := ctx.Deadline(); ok {
-		if reserved := time.Now().Add(time.Until(dl) * 4 / 5); reserved.Before(deadline) {
-			return reserved
-		}
-	}
-	return deadline
+	return deadlineWithin(ctx, p.utilizationBudget())
 }
 
 // errUtilizationBudget is the cause the measurement context carries when the
@@ -572,9 +566,9 @@ func (p *Provider) computeUtilization(ctx context.Context, cost *utilCost, objec
 
 // wantsUtilization reports whether the requested fields include any util column.
 // andListNames renders column names as "a", "a and b", "a, b and c" for a
-// sentence a user reads. Deliberately a local copy of pkg/plugin's andList
-// rather than an import: this package is the seam a second, non-NetBox backend
-// plugs into and does not depend on the plugin layer.
+// sentence a user reads. Deliberately a local copy of pkg/plugin's proseList
+// with "and" rather than an import: this package is the seam a second,
+// non-NetBox backend plugs into and does not depend on the plugin layer.
 func andListNames(names []string) string {
 	switch len(names) {
 	case 0:

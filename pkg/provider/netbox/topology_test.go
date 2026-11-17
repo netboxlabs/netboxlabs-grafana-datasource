@@ -215,6 +215,34 @@ func TestTopology_NodeURL(t *testing.T) {
 	}
 }
 
+// A branch-only device 404s in the NetBox UI unless the link names the branch.
+// The branch list is served so the branch resolves to its schema id; without
+// it the branch is main and a missing _branch would pass for the wrong reason.
+func TestTopology_NodeURLCarriesBranch(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/plugins/branching/branches/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"name":"feature","schema_id":"td5smq0f"}]}`)
+	})
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"id":1,"name":"leaf1","display_url":"https://nb/dcim/devices/1/"}]}`)
+	})
+	for _, ep := range []string{"/api/dcim/interfaces/", "/api/dcim/cables/", "/api/wireless/wireless-links/"} {
+		mux.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = fmt.Fprint(w, `{"count":0,"next":null,"results":[]}`)
+		})
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	p := New(srv.URL, "tok", &http.Client{Timeout: 5 * time.Second})
+	g, err := p.Topology(provider.WithBranch(context.Background(), "feature"), provider.TopologySpec{})
+	if err != nil {
+		t.Fatalf("Topology: %v", err)
+	}
+	if len(g.Nodes) != 1 || g.Nodes[0].URL != "https://nb/dcim/devices/1/?_branch=td5smq0f" {
+		t.Errorf("nodes = %+v, want the URL carrying _branch=td5smq0f", g.Nodes)
+	}
+}
+
 // scopedTopologyServer is a NetBox that RECORDS the device_id scoping of every
 // edge request and refuses to answer an unscoped one. The refusal is the point:
 // a mock that answered regardless would let an unscoped fetch pass the test,

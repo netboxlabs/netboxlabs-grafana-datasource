@@ -275,19 +275,23 @@ func TestCapError_NothingToReport(t *testing.T) {
 	}
 }
 
-func TestAndList(t *testing.T) {
+func TestProseList(t *testing.T) {
 	cases := []struct {
-		in   []string
-		want string
+		in          []string
+		conjunction string
+		want        string
 	}{
-		{nil, ""},
-		{[]string{"utilization"}, "utilization"},
-		{[]string{"used", "available"}, "used and available"},
-		{[]string{"utilization", "used", "available"}, "utilization, used and available"},
+		{nil, "and", ""},
+		{[]string{"utilization"}, "and", "utilization"},
+		{[]string{"used", "available"}, "and", "used and available"},
+		{[]string{"utilization", "used", "available"}, "and", "utilization, used and available"},
+		{[]string{"module"}, "or", "module"},
+		{[]string{"module", "service"}, "or", "module or service"},
+		{[]string{"IP address", "MAC address", "module"}, "or", "IP address, MAC address or module"},
 	}
 	for _, tc := range cases {
-		if got := andList(tc.in); got != tc.want {
-			t.Errorf("andList(%v) = %q, want %q", tc.in, got, tc.want)
+		if got := proseList(tc.in, tc.conjunction); got != tc.want {
+			t.Errorf("proseList(%v, %q) = %q, want %q", tc.in, tc.conjunction, got, tc.want)
 		}
 	}
 }

@@ -448,6 +448,14 @@ func (i customFieldIndex) knows(column string) bool {
 	return ok
 }
 
+// complete reports whether known is every custom field NetBox listed, so a
+// name missing from it isn't one: the index is settled, from a fetch that
+// succeeded, not cut short by the walk's ceiling, and not an older list kept
+// because the reread that was replacing it failed.
+func (i customFieldIndex) complete() bool {
+	return i.settled && i.ok && !i.truncated && !i.refreshFailed
+}
+
 // resolveCustomFieldByName looks one custom field up by its exact name and
 // merges the answer into the cached index for the branch on ctx — the type if
 // the field is Integer/Decimal/Boolean, and the name as known either way, so

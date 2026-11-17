@@ -1,12 +1,14 @@
 package plugin
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 func TestBuildFrame_TypesAndLinks(t *testing.T) {
@@ -57,7 +59,7 @@ func TestBuildAnnotationsFrame(t *testing.T) {
 	}
 	frame := buildAnnotationsFrame(changes)
 
-	want := []string{"time", "title", "text", "tags"}
+	want := []string{"time", "title", "text", "tags", "id"}
 	if len(frame.Fields) != len(want) {
 		t.Fatalf("annotation frame has %d fields, want %d", len(frame.Fields), len(want))
 	}
@@ -68,6 +70,236 @@ func TestBuildAnnotationsFrame(t *testing.T) {
 	}
 	if frame.Fields[2].At(0).(string) != "Updated by admin" {
 		t.Errorf("text = %v", frame.Fields[2].At(0))
+	}
+}
+
+func annText(t *testing.T, c provider.Change) string {
+	t.Helper()
+	return buildAnnotationsFrame([]provider.Change{c}).Fields[2].At(0).(string)
+}
+
+func TestBuildAnnotationsFrame_DiffLines(t *testing.T) {
+	c := provider.Change{
+		Action: "Updated", ObjectType: "dcim.device", ObjectRepr: "leaf1", User: "admin",
+		URL: "https://nb/dcim/devices/1/",
+		Diff: []provider.FieldChange{
+			{Field: "platform", Before: "IOS", After: "IOS-XE"},
+			{Field: "role", Before: "Router", After: "Distribution Switch"},
+		},
+	}
+	want := `platform: IOS → IOS-XE<br>role: Router → Distribution Switch<br>Updated by admin · <a href="https://nb/dcim/devices/1/" target="_blank">Open in NetBox</a>`
+	if got := annText(t, c); got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAnnotationsFrame_CapsAtFiveFields(t *testing.T) {
+	var diff []provider.FieldChange
+	for _, f := range []string{"a", "b", "c", "d", "e", "f", "g"} {
+		diff = append(diff, provider.FieldChange{Field: f, Before: "1", After: "2"})
+	}
+	got := annText(t, provider.Change{Action: "Updated", Diff: diff})
+	want := "a: 1 → 2<br>b: 1 → 2<br>c: 1 → 2<br>d: 1 → 2<br>e: 1 → 2<br>+2 more<br>Updated"
+	if got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAnnotationsFrame_EmptyLongAndMultilineValues(t *testing.T) {
+	long := strings.Repeat("x", 61)
+	got := annText(t, provider.Change{Action: "Updated", Diff: []provider.FieldChange{
+		{Field: "a", Before: "", After: "v"},
+		{Field: "b", Before: long, After: "w"},
+		{Field: "c", Before: "line1\nline2", After: "z"},
+	}})
+	want := "a: — → v<br>b: " + strings.Repeat("x", 60) + "… → w<br>c: line1 line2 → z<br>Updated"
+	if got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAnnotationsFrame_ParentAndMessage(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{
+		Action: "Created", ObjectRepr: "eth0", Parent: "leaf1", Message: "CHG-1", User: "bob",
+	}})
+	if got := f.Fields[1].At(0).(string); got != "eth0 on leaf1" {
+		t.Errorf("title = %q", got)
+	}
+	if got, want := f.Fields[2].At(0).(string), `"CHG-1"<br>Created by bob`; got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAnnotationsFrame_EscapesEveryNetBoxValue(t *testing.T) {
+	const raw = `<b>"&`
+	f := buildAnnotationsFrame([]provider.Change{
+		{Action: "Updated", ObjectRepr: raw, Parent: raw, User: raw, Message: raw, URL: raw,
+			Diff: []provider.FieldChange{{Field: raw, Before: raw, After: raw}}},
+		{Kind: provider.ChangeKindJournal, ObjectRepr: raw, Comments: raw, User: raw, URL: raw},
+	})
+	const esc = "&lt;b&gt;&#34;&amp;"
+	for i := 0; i < 2; i++ {
+		for _, col := range []int{1, 2} {
+			s := f.Fields[col].At(i).(string)
+			if strings.Contains(s, "<b>") {
+				t.Errorf("row %d field %d has raw <b>: %q", i, col, s)
+			}
+			if !strings.Contains(s, esc) {
+				t.Errorf("row %d field %d missing escaped value: %q", i, col, s)
+			}
+		}
+		if s := f.Fields[2].At(i).(string); !strings.Contains(s, `href="`+esc+`"`) {
+			t.Errorf("row %d URL not escaped: %q", i, s)
+		}
+	}
+	// Every value in the first row's text: field, before, after, message, user.
+	if s := f.Fields[2].At(0).(string); strings.Count(s, esc) != 6 {
+		t.Errorf("expected 6 escaped values (field, before, after, message, user, url), got %q", s)
+	}
+}
+
+func TestBuildAnnotationsFrame_Journal(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{
+		Kind: provider.ChangeKindJournal, ObjectRepr: "leaf1", JournalKind: "warning",
+		Comments: "line1\nline2", User: "admin",
+	}})
+	if got, want := f.Fields[2].At(0).(string), "line1<br>line2<br>Journal by admin"; got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,journal,warning" {
+		t.Errorf("tags = %q", got)
+	}
+}
+
+// Comments written in NetBox's UI carry CRLF line ends, and an old Mac's lone CR
+// is a line end too: each becomes one <br>, with no stray \r.
+func TestBuildAnnotationsFrame_JournalLineEnds(t *testing.T) {
+	for comments, want := range map[string]string{
+		"a\r\nb":       "a<br>b",
+		"a\rb":         "a<br>b",
+		"a\r\n\r\nb\n": "a<br><br>b<br>",
+	} {
+		f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindJournal, Comments: comments}})
+		if got := f.Fields[2].At(0).(string); got != want+"<br>Journal" {
+			t.Errorf("comments %q: text = %q, want %q", comments, got, want+"<br>Journal")
+		}
+	}
+}
+
+func TestBuildAnnotationsFrame_Cutoff(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindCutoff, Scanned: 2500}})
+	if got := f.Fields[1].At(0).(string); got != "NetBox change log" {
+		t.Errorf("title = %q", got)
+	}
+	want := "Older changes not checked: read 2,500 change-log entries without reaching the start of the range."
+	if got := f.Fields[2].At(0).(string); got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,cutoff" {
+		t.Errorf("tags = %q", got)
+	}
+}
+
+func TestBuildAnnotationsFrame_DescendantsOnlyCutoff(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindCutoff, Scanned: 2500, DescendantsOnly: true}})
+	if got := f.Fields[1].At(0).(string); got != "NetBox change log" {
+		t.Errorf("title = %q", got)
+	}
+	want := "Older changes to what's attached not checked: read 2,500 change-log entries without reaching the start of the range. The scope's own changes were all read."
+	if got := f.Fields[2].At(0).(string); got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,cutoff" {
+		t.Errorf("tags = %q", got)
+	}
+}
+
+func TestBuildAnnotationsFrame_Limit(t *testing.T) {
+	until := time.Date(2026, 11, 9, 11, 30, 5, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		limit int
+		want  string
+	}{
+		{"below the maximum", 50,
+			"Limit reached: changes before 2026-11-09 11:30:05 UTC in this range aren't shown. Raise Limit (now 50, at most 10,000), narrow the range, or narrow Object types."},
+		{"at the maximum", netbox.MaxLimit,
+			"Limit reached: changes before 2026-11-09 11:30:05 UTC in this range aren't shown. Narrow the range or Object types."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindLimit, Limit: tc.limit, Until: until}})
+			if got := f.Fields[1].At(0).(string); got != "NetBox change log" {
+				t.Errorf("title = %q", got)
+			}
+			if got := f.Fields[2].At(0).(string); got != tc.want {
+				t.Errorf("text = %q, want %q", got, tc.want)
+			}
+			if got := f.Fields[3].At(0).(string); got != "netbox,limit" {
+				t.Errorf("tags = %q", got)
+			}
+		})
+	}
+}
+
+func TestBuildAnnotationsFrame_DescendantsError(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindDescendantsError, Message: `Reading what's attached took <20> s`}})
+	if got := f.Fields[1].At(0).(string); got != "NetBox annotation warning" {
+		t.Errorf("title = %q", got)
+	}
+	want := "Reading what&#39;s attached took &lt;20&gt; s"
+	if got := f.Fields[2].At(0).(string); got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,error" {
+		t.Errorf("tags = %q", got)
+	}
+}
+
+func TestBuildAnnotationsFrame_IDFieldIsZero(t *testing.T) {
+	f := buildAnnotationsFrame([]provider.Change{{Action: "Created"}, {Action: "Deleted"}})
+	idf := f.Fields[4]
+	if idf.Name != "id" || idf.Type() != data.FieldTypeInt64 {
+		t.Fatalf("id field = %q %v", idf.Name, idf.Type())
+	}
+	for i := 0; i < idf.Len(); i++ {
+		if idf.At(i).(int64) != 0 {
+			t.Errorf("id[%d] = %v", i, idf.At(i))
+		}
+	}
+}
+
+// The error marker's message can quote a dashboard variable's value, so it is
+// escaped like any NetBox value.
+func TestBuildAnnotationErrorFrame_Escapes(t *testing.T) {
+	at := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	f := annotationErrorFrame(`No NetBox object named "<b>&" for this annotation's scope.`, at)
+
+	want := []string{"time", "title", "text", "tags", "id"}
+	if len(f.Fields) != len(want) {
+		t.Fatalf("error frame has %d fields, want %d", len(f.Fields), len(want))
+	}
+	for i, name := range want {
+		if f.Fields[i].Name != name {
+			t.Errorf("field %d = %q, want %q", i, f.Fields[i].Name, name)
+		}
+	}
+	if n, _ := f.RowLen(); n != 1 {
+		t.Fatalf("rows = %d, want 1", n)
+	}
+	if got := f.Fields[0].At(0).(time.Time); !got.Equal(at) {
+		t.Errorf("time = %v, want %v", got, at)
+	}
+	if got := f.Fields[1].At(0).(string); got != "NetBox annotation error" {
+		t.Errorf("title = %q", got)
+	}
+	if got, want := f.Fields[2].At(0).(string), "No NetBox object named &#34;&lt;b&gt;&amp;&#34; for this annotation&#39;s scope."; got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,error" {
+		t.Errorf("tags = %q", got)
+	}
+	if got := f.Fields[4].At(0).(int64); got != 0 {
+		t.Errorf("id = %d, want 0", got)
 	}
 }
 
@@ -371,4 +603,105 @@ func TestBuildFrame_DeclaredColumnTypeSurvivesAnEmptyColumn(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestBuildAnnotationsFrame_ResidualCutoff(t *testing.T) {
+	until := time.Date(2026, 11, 9, 11, 30, 5, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		types []string
+		until time.Time
+		want  string
+	}{
+		{"all", []string{"ipam.ipaddress", "dcim.macaddress", "dcim.module", "ipam.service"}, until,
+			"Removals before 2026-11-09 11:30:05 UTC not checked: an IP address, MAC address, module or service taken off or deleted earlier may not show."},
+		{"module", []string{"dcim.module"}, until,
+			"Removals before 2026-11-09 11:30:05 UTC not checked: a module taken off or deleted earlier may not show."},
+		{"addresses", []string{"ipam.ipaddress", "dcim.macaddress"}, until,
+			"Removals before 2026-11-09 11:30:05 UTC not checked: an IP address or MAC address taken off or deleted earlier may not show."},
+		{"failed", []string{"dcim.module", "ipam.service"}, time.Time{},
+			"Removals not checked: a module or service taken off or deleted in this range may not show."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := buildAnnotationsFrame([]provider.Change{{Kind: provider.ChangeKindCutoff, Residual: true, Types: tc.types, Until: tc.until, Scanned: 2500}})
+			if got := f.Fields[1].At(0).(string); got != "NetBox change log" {
+				t.Errorf("title = %q", got)
+			}
+			if got := f.Fields[2].At(0).(string); got != tc.want {
+				t.Errorf("text = %q, want %q", got, tc.want)
+			}
+			if got := f.Fields[3].At(0).(string); got != "netbox,cutoff" {
+				t.Errorf("tags = %q", got)
+			}
+		})
+	}
+}
+
+// Notices that share a time are one marker: Grafana's hover shows one of
+// several markers at one time. Errors come first, then the cut-off; the tags
+// are merged without repeats. A change at that time stays its own marker, and
+// a notice at another time isn't merged.
+func TestBuildAnnotationsFrame_MergesNoticesAtOneTime(t *testing.T) {
+	to := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	from := to.Add(-time.Hour)
+	f := buildAnnotationsFrame([]provider.Change{
+		{Time: to, Action: "Updated", ObjectRepr: "leaf1"},
+		{Kind: provider.ChangeKindCutoff, Time: to, Residual: true, Types: []string{"ipam.ipaddress"}},
+		{Kind: provider.ChangeKindLimit, Time: from, Until: from, Limit: 10},
+		{Kind: provider.ChangeKindDescendantsError, Time: to, Message: "D <b>"},
+		{Kind: provider.ChangeKindJournalError, Time: to, Message: "J"},
+	})
+	if n := f.Fields[0].Len(); n != 3 {
+		t.Fatalf("rows = %d, want 3: the change, the limit marker, one merged warning", n)
+	}
+	merged := -1
+	for i := range f.Fields[0].Len() {
+		if f.Fields[1].At(i).(string) == "NetBox annotation warning" {
+			merged = i
+		}
+	}
+	if merged < 0 {
+		t.Fatalf("no merged warning marker in %v", f.Fields[1])
+	}
+	if got := f.Fields[0].At(merged).(time.Time); !got.Equal(to) {
+		t.Errorf("merged time = %v, want %v", got, to)
+	}
+	want := "D &lt;b&gt;<br><br>J<br><br>Removals not checked: an IP address taken off or deleted in this range may not show."
+	if got := f.Fields[2].At(merged).(string); got != want {
+		t.Errorf("merged text = %q, want %q", got, want)
+	}
+	if got := f.Fields[3].At(merged).(string); got != "netbox,error,cutoff" {
+		t.Errorf("merged tags = %q", got)
+	}
+}
+
+// Notices without an error keep the change log's title when merged.
+func TestBuildAnnotationsFrame_MergesNoticesWithoutAnError(t *testing.T) {
+	at := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	f := buildAnnotationsFrame([]provider.Change{
+		{Kind: provider.ChangeKindCutoff, Time: at, Scanned: 2500},
+		{Kind: provider.ChangeKindLimit, Time: at, Until: at, Limit: 10},
+	})
+	if n := f.Fields[0].Len(); n != 1 {
+		t.Fatalf("rows = %d, want 1", n)
+	}
+	if got := f.Fields[1].At(0).(string); got != "NetBox change log" {
+		t.Errorf("title = %q", got)
+	}
+	if got := f.Fields[3].At(0).(string); got != "netbox,cutoff,limit" {
+		t.Errorf("tags = %q", got)
+	}
+}
+
+// Notices are grouped by the time they mark, so two far-apart times stay two
+// markers, the zero time included.
+func TestBuildAnnotationsFrame_KeepsNoticesAtOtherTimesApart(t *testing.T) {
+	far := time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC)
+	f := buildAnnotationsFrame([]provider.Change{
+		{Kind: provider.ChangeKindCutoff, Scanned: 2500},
+		{Kind: provider.ChangeKindLimit, Time: far, Until: far, Limit: 10},
+	})
+	if n := f.Fields[0].Len(); n != 2 {
+		t.Errorf("rows = %d, want 2", n)
+	}
 }

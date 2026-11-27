@@ -13,6 +13,12 @@
   `device_id` and `vm_id` come from the address record at no cost,
   `device_manufacturer` from the device request, and the `prefix_*` fields cost
   the prefix fallback they belong to.
+- **A reference's own fields as columns.** An Objects query can return
+  `<ref>__<col>` columns such as `device_type__manufacturer`, read from the same
+  response, so a device's manufacturer needs no second query.
+- **Long id filters are read in batches.** Filtering an Objects query by up to
+  10,000 NetBox ids (for example the ids a dashboard's metrics carry) no longer
+  overflows the URL, so the NetBox side can read only the objects a panel shows.
 - **Secure SOCKS proxy switch on the settings page.** On self-hosted Grafana
   with a secure SOCKS5 data source proxy, the datasource can be routed through
   it from the settings page. Grafana Cloud's PDC network selector appears once

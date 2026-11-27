@@ -1,6 +1,7 @@
 import {
   filterOperatorsFor,
   filterFieldOptionsFrom,
+  isNestedColumn,
   isOperatorValidForField,
   FILTER_OPERATORS,
   filterWireKey,
@@ -43,10 +44,37 @@ describe('isOperatorValidForField', () => {
 
 describe('filterFieldOptionsFrom', () => {
   it('uses schema field names when available', () => {
-    expect(filterFieldOptionsFrom(schema, [{ label: 'col', value: 'col' }]).map((o) => o.value)).toEqual(['prefix', 'status']);
+    expect(filterFieldOptionsFrom(schema, [{ label: 'col', value: 'col' }]).map((o) => o.value)).toEqual([
+      'prefix',
+      'status',
+    ]);
   });
   it('falls back to columns when the schema is empty', () => {
     expect(filterFieldOptionsFrom([], [{ label: 'col', value: 'col' }]).map((o) => o.value)).toEqual(['col']);
+  });
+  // A nested column is computed by the data source; NetBox has no filter of
+  // that name and would ignore one, leaving the panel silently unfiltered.
+  it('leaves nested columns out of the fallback', () => {
+    const cols = [
+      { label: 'col', value: 'col' },
+      { label: 'device_type__manufacturer', value: 'device_type__manufacturer' },
+    ];
+    expect(filterFieldOptionsFrom([], cols).map((o) => o.value)).toEqual(['col']);
+  });
+});
+
+describe('isNestedColumn', () => {
+  it('mirrors the backend split at the first double underscore', () => {
+    expect(isNestedColumn('device_type__manufacturer')).toBe(true);
+    expect(isNestedColumn('device_type__manufacturer_slug')).toBe(true);
+    expect(isNestedColumn('device_type')).toBe(false);
+    expect(isNestedColumn('site_id')).toBe(false);
+    expect(isNestedColumn('__x')).toBe(false);
+    expect(isNestedColumn('x__')).toBe(false);
+    expect(isNestedColumn('a b__c')).toBe(false);
+    // A custom field's column, even one whose name starts with an underscore.
+    expect(isNestedColumn('cf__owner')).toBe(false);
+    expect(isNestedColumn('cf_owner__name')).toBe(false);
   });
 });
 

@@ -388,16 +388,26 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		if qm.ValueField != "" && len(fields) > 0 && !slices.Contains(fields, qm.ValueField) {
 			fields = append(slices.Clone(fields), qm.ValueField)
 		}
+		// With every column, a nested Value field isn't among them: it is
+		// computed as a key source, and made a column below.
+		keyFields := joinKeySources(qm.JoinKeys)
+		nestedValue := len(fields) == 0 && netbox.IsNestedColumn(qm.ValueField)
+		if nestedValue {
+			keyFields = append(slices.Clone(keyFields), qm.ValueField)
+		}
 		res, err := d.provider.Query(ctx, provider.QuerySpec{
 			ObjectType: qm.ObjectType,
 			Filters:    qm.Filters,
 			Fields:     fields,
-			KeyFields:  joinKeySources(qm.JoinKeys),
+			KeyFields:  keyFields,
 			Ordering:   queryOrdering(qm.Ordering, c),
 			Limit:      qm.Limit,
 		})
 		if err != nil {
 			return d.queryErrorResponse(err)
+		}
+		if nestedValue && !slices.Contains(res.Columns, qm.ValueField) {
+			res.Columns = append(res.Columns, qm.ValueField)
 		}
 		if qm.ValueField != "" && !slices.Contains(res.Columns, qm.ValueField) {
 			return backend.ErrDataResponse(backend.StatusBadRequest,
@@ -908,6 +918,11 @@ func queryErrorMessage(err error, viaProxy bool) string {
 			return "This object type was not found in NetBox (HTTP 404)."
 		case provider.ErrorKindNotOrderable:
 			return "NetBox couldn't list this object type — the endpoint doesn't support pagination (HTTP 500). This model may not be queryable."
+		case provider.ErrorKindIDFilterIgnored:
+			return "NetBox didn't apply the id filter to this object type, so this query can't filter by id. Filter on another field."
+		case provider.ErrorKindTooManyIDs:
+			return fmt.Sprintf("This query filters on %s ids, more than the %s one query reads. Filter on fewer ids, or on another field.",
+				thousands(u.IDs), thousands(u.MaxIDs))
 		case provider.ErrorKindAnnotation:
 			return annotationErrorMessage(u)
 		}
@@ -1030,7 +1045,8 @@ func queryErrorStatus(err error) backend.Status {
 		switch {
 		case u.Kind == provider.ErrorKindAnnotation && u.AnnotationReason == provider.AnnotationReasonObjectTypesUnreadable:
 			return backend.StatusInternal
-		case u.Kind == provider.ErrorKindUnknownObjectType, u.Kind == provider.ErrorKindAnnotation:
+		case u.Kind == provider.ErrorKindUnknownObjectType, u.Kind == provider.ErrorKindAnnotation, u.Kind == provider.ErrorKindIDFilterIgnored,
+			u.Kind == provider.ErrorKindTooManyIDs:
 			return backend.StatusBadRequest
 		}
 	}

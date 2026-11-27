@@ -27,6 +27,7 @@ import {
   FilterField,
   filterFieldOptionsFrom,
   filterOperatorsFor,
+  isNestedColumn,
   isOperatorValidForField,
   FilterRow,
   IP_CONTEXT_FIELD_GROUPS,
@@ -499,6 +500,18 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             options={fieldOptions}
             value={(query.fields ?? []).map((f) => ({ label: f, value: f }))}
             placeholder="All columns"
+            // A nested column (device_type__model) can be typed: the list offers
+            // only references nested in references. Nothing else typed is taken,
+            // so a typo can't become a silently empty column.
+            allowCustomValue
+            isValidNewOption={(v) => isNestedColumn(v.trim()) && !(query.fields ?? []).includes(v.trim())}
+            onCreateOption={(v) => {
+              const name = v.trim();
+              if (!(query.fields ?? []).includes(name)) {
+                update({ fields: [...(query.fields ?? []), name] });
+                onRunQuery();
+              }
+            }}
             onChange={(vals) => {
               update({ fields: vals.map((v) => v.value!).filter(Boolean) });
               onRunQuery();
@@ -604,6 +617,12 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             placeholder="constant 1"
             options={fieldOptions}
             value={query.valueField ? { label: query.valueField, value: query.valueField } : null}
+            allowCustomValue
+            isValidNewOption={(v) => isNestedColumn(v.trim())}
+            onCreateOption={(v) => {
+              update({ valueField: v.trim() });
+              onRunQuery();
+            }}
             onChange={(v) => {
               update({ valueField: v?.value ?? undefined });
               onRunQuery();

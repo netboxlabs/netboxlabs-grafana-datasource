@@ -171,10 +171,17 @@ func appendUpstreamNames(column string, add func(string)) {
 // added later, after the fetch, by enrichUtilization — so a selection of only
 // computed columns yields none of its names no matter how healthy the request
 // was (see Query).
-func fetchableFields(fields []string) []string {
+func fetchableFields(fields []string) []string { return fetchableFieldsWith(fields, nil) }
+
+// fetchableFieldsWith is fetchableFields for a query whose plain names are
+// known (schemaProperties): a property spelt like a nested column is fetched by
+// its own name.
+func fetchableFieldsWith(fields []string, plain map[string]bool) []string {
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
-		if computedColumns[f] {
+		// Nested columns are computed from their reference (nestedRefs), which
+		// fetchOnlyFields asks for.
+		if computedColumns[f] || nestedIn(f, plain) {
 			continue
 		}
 		out = append(out, f)

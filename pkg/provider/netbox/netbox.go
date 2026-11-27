@@ -47,7 +47,10 @@ const schemaTTL = 30 * time.Minute
 // degraded annotations, which is the worse bug and the harder one to notice. Ten
 // seconds is longer than a dashboard's opening burst and short enough that a
 // recovered instance is picked up within a refresh or two, and the degraded path
-// it holds open still returns annotations (see pushChangedObjectType).
+// it holds open still returns annotations (see objectTypeReads).
+//
+// A refused journal-author lookup is remembered for the same window
+// (journalAuthors).
 //
 // A var, not a const, so tests can shorten it (as they do retryBackoff).
 var objectTypeFailureTTL = 10 * time.Second
@@ -109,8 +112,24 @@ type Provider struct {
 	// customFieldsFlightByBranch is the in-progress definition fetch per branch,
 	// the sole writer of customFieldsByBranch (see customFieldsFlight).
 	customFieldsFlightByBranch map[string]*customFieldsFlight
+	// authorsFailedUntil is, per branch, when a refused journal-author lookup
+	// may be tried again (journalAuthors).
+	authorsFailedUntil map[string]time.Time
 	// customFieldsWaitOverride shortens customFieldsWaitBudget; tests only.
 	customFieldsWaitOverride time.Duration
+	// namesWaitOverride shortens namesWaitBudget; tests only.
+	namesWaitOverride time.Duration
+	// changeScanCapOverride lowers changeScanCapRows; tests only.
+	changeScanCapOverride int
+	// residualRowsOverride lowers the residual scans' page; tests only.
+	residualRowsOverride int
+	// childListCapOverride lowers ChildListCapRows; tests only.
+	childListCapOverride int
+	// descendantsWaitOverride replaces descendantsBudget; tests only.
+	descendantsWaitOverride time.Duration
+	// journalWaitOverride replaces the journal's budget, the datasource
+	// Timeout (journalDeadline); tests only.
+	journalWaitOverride time.Duration
 
 	// branchingInstalled caches whether netbox-branching is installed — an
 	// instance-wide, branch-invariant property, so a single value + expiry
@@ -120,12 +139,17 @@ type Provider struct {
 	branchingExpiry    time.Time
 
 	// objectTypeIDs caches app_label.model -> object-type id (see
-	// pushChangedObjectType). Object-type ids are instance-wide and identical on
+	// objectTypeReads). Object-type ids are instance-wide and identical on
 	// every branch — a branch changes DATA, not the model registry — so, like
 	// branchingInstalled, one value + expiry suffices rather than a per-branch
 	// map.
 	objectTypeIDs       map[string]int
 	objectTypeIDsExpiry time.Time
+	// objectTypeEndpoints is app_label.model -> list endpoint ("dcim/devices"),
+	// from rest_api_endpoint on the same read and published with objectTypeIDs
+	// under the same lock and expiry. Empty before NetBox 4.4, which does not
+	// report it (see contentTypeEndpoint).
+	objectTypeEndpoints map[string]string
 
 	// objectTypeErr is the NEGATIVE half of that cache: the failure the last read
 	// ended with, held for the much shorter objectTypeFailureTTL so that a
@@ -151,13 +175,14 @@ type Provider struct {
 // the point: the alternative is each waiter re-attempting a read that has just
 // been shown not to work, one after another.
 //
-// ids and err are written once BEFORE done is closed and read only AFTER, so the
-// close is the happens-before edge that publishes them and no lock is needed on
-// either field.
+// ids, endpoints and err are written once BEFORE done is closed and read only
+// AFTER, so the close is the happens-before edge that publishes them and no lock
+// is needed on any of them.
 type objectTypeFlight struct {
-	done chan struct{}
-	ids  map[string]int
-	err  error
+	done      chan struct{}
+	ids       map[string]int
+	endpoints map[string]string
+	err       error
 }
 
 // schemaCacheEntry holds everything derived from one fetch of /api/schema/.
@@ -301,6 +326,12 @@ func (p *Provider) ObjectTypes(ctx context.Context) ([]provider.ObjectType, erro
 // URLs NetBox wrote from the request as it arrived, which behind a proxy that
 // does not pass X-Forwarded-Proto/-Host name plain http or another host (see
 // nextPageURL). Queries already address object types by these keys.
+//
+// An app whose index can't be read is skipped, but not when ctx has ended: the
+// walk then failed for its caller, not for NetBox, and what it read so far is
+// no list of NetBox's types. It fails with ctx's error, so ObjectTypes caches
+// nothing and the next caller walks again; cached, a walk a short wait cut
+// would hide whole apps for cacheTTL.
 func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) {
 	root, err := p.urlMap(ctx, p.client.apiURL("", nil))
 	if err != nil {
@@ -314,10 +345,17 @@ func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) 
 		}
 		models, err := p.urlMap(ctx, p.client.apiURL(app, nil))
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("discover %s: %w", logSafe(app), ctx.Err())
+			}
 			continue // tolerate individual app discovery failures
 		}
 		if app == "plugins" {
-			types = append(types, p.discoverPlugins(ctx, models)...)
+			plugins, err := p.discoverPlugins(ctx, models)
+			if err != nil {
+				return nil, err
+			}
+			types = append(types, plugins...)
 			continue
 		}
 		for model := range models {
@@ -337,12 +375,16 @@ func (p *Provider) discover(ctx context.Context) ([]provider.ObjectType, error) 
 }
 
 // discoverPlugins enumerates plugin endpoints. Each entry under /api/plugins/ is
-// either a plugin sub-app (a URL map of its models) or a direct collection.
-func (p *Provider) discoverPlugins(ctx context.Context, plugins map[string]string) []provider.ObjectType {
+// either a plugin sub-app (a URL map of its models) or a direct collection. A
+// read ctx ended says neither, so it fails the walk, as in discover.
+func (p *Provider) discoverPlugins(ctx context.Context, plugins map[string]string) ([]provider.ObjectType, error) {
 	var types []provider.ObjectType
 	for plugin := range plugins {
 		sub, err := p.urlMap(ctx, p.client.apiURL("plugins/"+plugin, nil))
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("discover plugins/%s: %w", logSafe(plugin), ctx.Err())
+			}
 			// Direct collection (e.g. installed-plugins).
 			types = append(types, provider.ObjectType{
 				Value: "plugins/" + plugin,
@@ -361,7 +403,7 @@ func (p *Provider) discoverPlugins(ctx context.Context, plugins map[string]strin
 			})
 		}
 	}
-	return types
+	return types, nil
 }
 
 // urlMap fetches a JSON object and returns it as a map ONLY if every value is a
@@ -393,7 +435,7 @@ func (p *Provider) urlMap(ctx context.Context, rawURL string) (map[string]string
 // Query executes an object query and returns flattened, joinable rows.
 func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provider.Result, error) {
 	// One branch for every request and cache key this call makes (pinBranch).
-	ctx, _ = p.client.pinBranch(ctx)
+	ctx, branch := p.client.pinBranch(ctx)
 	if spec.ObjectType == "" {
 		return nil, fmt.Errorf("objectType is required")
 	}
@@ -620,6 +662,17 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		}
 		rows, total = page.rows, page.total
 		columns, seen, flatRows, flatRaws = flattenRows(rows)
+	}
+
+	// A row that exists only in the branch is a 404 in NetBox's UI unless the
+	// link names the branch, as the annotation links do. Only the object's own
+	// display_url: a custom field that happens to hold a URL is the user's data.
+	if branch != "" {
+		for _, row := range flatRows {
+			if u, ok := row["display_url"].(string); ok {
+				row["display_url"] = withBranchParam(u, branch)
+			}
+		}
 	}
 
 	// Computed from the final rows, after any refetch above.
@@ -1261,6 +1314,11 @@ func (p *Provider) getListPageRetry(ctx context.Context, rawURL string) (listPag
 // page that succeeded on its third attempt cost the upstream three requests,
 // and reporting one understates the load precisely when the instance is
 // struggling, which is when that number is worth reading.
+//
+// A retry the context ends during its backoff returns the error it was waiting
+// to retry, as it came, so every caller classifies it by what NetBox or the
+// connection did. A caller that needs to know the context ended it asks the
+// context (see Changes' descendants deadline).
 func (p *Provider) getListPageRetryN(ctx context.Context, rawURL string) (listPage, int, error) {
 	requests := 1
 	page, err := p.client.getListPage(ctx, rawURL)
@@ -1733,89 +1791,352 @@ func (p *Provider) schemaHasLookup(ctx context.Context, objectType, field, op st
 	return false
 }
 
+// changeReadWorkers is how many of a Changes call's change-log reads run at
+// once. With the object-type map unreadable, each object type is a read of its
+// own (objectTypeReads), so a query with fifteen types would otherwise open
+// fifteen walks of the change log at once, and two Actions double that
+// (perAction). The journal and the descendant reads don't count toward it; the
+// journal's own reads by type are capped at the same number, apart.
+const changeReadWorkers = 4
+
 // Changes returns change-log events within a time window for annotations.
+//
+// Unscoped, it is one read of the change log. Scoped, it is two, run at once:
+// the scope objects' own changes and the changes recorded against them, merged
+// newest first (changeReads). With two Actions, each read is made once per
+// Action, since NetBox's action filter takes one value. Changed fields, which
+// NetBox can't filter, are applied here as rows are read, up to changeScanCap
+// rows a read, and a read that stops there short of a full track ends it with
+// a cut-off marker. With Journal on, the journal entries in range (for the
+// scope objects when scoped) are read alongside the change-log reads and merged
+// in by time, under the same limit.
+//
+// A change-log read that fails fails the query. While the caller's context is
+// live, the first to fail cancels every other read, the journal and the
+// descendant reads included, rather than wait for them, and its error is the
+// query's. The journal is optional and never fails the query: while the
+// caller's context is live, a journal read that fails, or runs past its own
+// deadline (journalDeadline), drops the journal entries and ends the track
+// with a journal-error marker.
+//
+// With Include descendants on, a device, VM, interface or VM-interface scope
+// also reads the changes to what's attached to it (descendantChanges),
+// alongside the other reads, and merges them in the same way. Those reads run
+// under their own deadline (descendantsDeadline), so a slow chain of them
+// can't hold the track past the caller's, and the first of them to fail stops
+// the others. While the caller's context is live, a descendant read that fails
+// or runs past that deadline doesn't fail the query: the descendant rows are
+// dropped and the track ends with one descendants-error marker: the switch is
+// on by default, and a slow or refused read of what's attached mustn't blank
+// the scope's own track. The two residual scans are the exception. They
+// read one page each, of IP and MAC changes and of module and service changes,
+// for what was taken off the scope or deleted before the indexed reads could
+// name it, under a shorter deadline of their own: half the time left to the
+// descendants one when they start (residualContext). One that fails or runs
+// past it fails nothing: what it covers is left unchecked, the other
+// descendant rows stand, and the track ends with a cut-off marker. When the
+// descendant reads succeeded (they returned results and no error), the track
+// ends with a limit marker if the limit left a change out; every other track
+// is cut at the limit silently, as before.
+//
+// The names the markers carry are best effort. The network name reads (the
+// by-ID name fill, the diffs' related names and the journal authors) each wait
+// their own namesWait, and past it the markers go without. The by-ID name fill
+// first finds the scope type's endpoint without that bound: on NetBox 4.2 and
+// 4.3, or with the object-type map unreadable, that is API discovery on the
+// query's own context, which can hold the query (nameScopeIDs). The waits on
+// the cached schema (the scope lookup's name-filter check, the Changed-fields
+// check and the diffs' relation lookup) share one schema budget per call
+// (budgetedSchema), so a cold schema costs one wait, not three. The
+// Changed-fields check's read of the custom-field list waits its own
+// customFieldsWait, beside its schema wait rather than after it, and the
+// check as a whole runs beside the scope lookup rather than after it.
 func (p *Provider) Changes(ctx context.Context, spec provider.ChangeSpec) ([]provider.Change, error) {
 	// One branch for every request and cache key this call makes (pinBranch).
-	ctx, _ = p.client.pinBranch(ctx)
+	// The resolved value is the schema id, which the marker links carry.
+	ctx, branch := p.client.pinBranch(ctx)
+	// One schema budget for every schema wait this call makes.
+	ctx = p.withSchemaBudget(ctx)
+	// Match by is normalised once, for the scope lookup and the descendant
+	// reads both: a provisioned "ID" must match by ID, not quietly by name.
+	spec.ScopeMatch = strings.ToLower(strings.TrimSpace(spec.ScopeMatch))
 	limit := spec.Limit
 	if limit <= 0 || limit > MaxLimit {
 		limit = defaultLimit
 	}
-	q := url.Values{}
-	q.Set("ordering", "-time")
-	if !spec.From.IsZero() {
-		q.Set("time_after", spec.From.UTC().Format(time.RFC3339))
-	}
-	if !spec.To.IsZero() {
-		q.Set("time_before", spec.To.UTC().Format(time.RFC3339))
-	}
-	// ONE normalised list feeds both the pushdown and the local filter below, so
-	// the two cannot disagree about case, spacing, or what counts as no filter at
+	// ONE normalised list feeds both the pushdown and the local filter, so the
+	// two cannot disagree about case, spacing, or what counts as no filter at
 	// all. They did: a whitespace-only entry was dropped by the pushdown (nothing
 	// went upstream) but kept by the local filter (every row was discarded), which
 	// is a silently empty annotation with no error anywhere.
 	wanted := normalizeObjectTypes(spec.ObjectTypes)
-
-	// An object type the instance does not know is an ERROR here, before any
-	// change-log request is made, and that is the point of the id form: it is a
-	// wrong question, and answering it with an empty annotation track that looks
-	// exactly like a quiet window is the silent-wrong-answer this whole function
-	// is being fixed for.
-	if err := p.pushChangedObjectType(ctx, q, wanted); err != nil {
-		return nil, err
-	}
-	rows, _, err := p.fetchRows(ctx, "core/object-changes", q, limit)
+	// Before any request: an Action NetBox doesn't record, or a Changed field
+	// the diff doesn't compare, needs no lookup to refuse.
+	filter, err := newChangeFilter(spec)
 	if err != nil {
 		return nil, err
 	}
 
-	// The local filter stays, and is not dead code once the type is pushed
-	// upstream. It is not a correctness net — an unknown type never reaches the
-	// query at all now — it is what makes the pushdown strictly NON-WIDENING:
-	// whatever NetBox does with the parameter (ignores it, ORs it, honours only
-	// the last value, or does not implement it on this version), the frame can
-	// never contain a type the user did not ask for. It is also the only filter
-	// at all on the degraded path, where the id map could not be read and a
-	// multi-type request is pushed nowhere.
-	//
-	// Built from the SAME list the pushdown was given, not from spec.ObjectTypes
-	// again: " DCIM.Device " resolves to an id whose rows NetBox returns, and must
-	// not then be discarded here for its spacing — and a blank entry, which is no
-	// filter upstream, must not become "match nothing" here.
-	typeFilter := make(map[string]bool, len(wanted))
-	for _, t := range wanted {
-		typeFilter[t] = true
+	// The scope lookup and the Changed-fields check need nothing of each other,
+	// so they run side by side, and on cold caches their waits overlap. When
+	// both refuse, the scope's refusal is the answer, so it doesn't depend on
+	// which finishes first, and once the scope has refused the check is
+	// stopped, since its answer can't change that.
+	fieldsCtx, stopFields := context.WithCancel(ctx)
+	defer stopFields()
+	var fieldsErr error
+	var checks sync.WaitGroup
+	checks.Go(func() { fieldsErr = p.checkChangedFields(fieldsCtx, filter.fields) })
+	scope, err := p.resolveAnnotationScope(ctx, spec)
+	if err != nil {
+		stopFields()
+	}
+	checks.Wait()
+	if err != nil {
+		return nil, err
+	}
+	if fieldsErr != nil {
+		return nil, fieldsErr
+	}
+	// Which descendant types an All scope reads, decided once, for its reads
+	// and its limit marker both.
+	if scope != nil && scope.All {
+		scope.allDesc = allDescendants(scope, spec, wanted)
+	}
+	reads, err := p.changeReads(ctx, spec, scope, wanted, filter)
+	if err != nil {
+		return nil, err
 	}
 
-	var changes []provider.Change
-	for _, raw := range rows {
-		var oc objectChange
-		if err := json.Unmarshal(raw, &oc); err != nil {
-			continue
-		}
-		ct := oc.changedType()
-		if len(typeFilter) > 0 && !typeFilter[normalizeObjectType(ct)] {
-			continue
-		}
-		t, _ := time.Parse(time.RFC3339, oc.Time)
-		changes = append(changes, provider.Change{
-			Time:       t,
-			Action:     oc.actionLabel(),
-			ObjectType: ct,
-			ObjectRepr: oc.ObjectRepr,
-			User:       oc.userName(),
-			URL:        oc.deepLink(p.client.BaseURL()),
+	// Any change-log read failing fails the query, so the first to fail cancels
+	// the others, the journal's included, through readCtx, with its error as
+	// the cause, rather than leave the query waiting on reads whose rows won't
+	// be shown. The journal doesn't cancel anything: it fails alone.
+	// A read the cancel ended calls cancelReads too, with the error the cancel
+	// caused, but readCtx has ended by then and keeps the cause it has.
+	readCtx, cancelReads := context.WithCancelCause(ctx)
+	defer cancelReads(nil)
+
+	// The descendant reads and the journal are optional: each runs under its
+	// own deadline within readCtx (optionalRead), so a failed change read
+	// cancels them too, while their own errors don't cancel readCtx: they
+	// become a marker, and the rest of the track stands. The first descendant
+	// read to fail cancels the others through descOpt.fail.
+	var (
+		desc    []changeReadResult
+		descErr error
+		descOpt *optionalRead
+	)
+	// An All scope reads the descendant types itself (allScopeReads).
+	descendants := spec.Descendants && scope != nil && !scope.All
+	if descendants {
+		descOpt = newOptionalRead(readCtx, p.descendantsDeadline(ctx))
+		defer descOpt.stop()
+	}
+
+	// Each read owns its result slot, so no lock is needed. At most
+	// changeReadWorkers of them run at once; each waits in its own goroutine, so
+	// the journal and the descendant reads start without waiting.
+	results := make([]changeReadResult, len(reads))
+	sem := make(chan struct{}, changeReadWorkers)
+	var wg sync.WaitGroup
+	for i, r := range reads {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			// A read that drops rows NetBox returned walks to the scan cap.
+			scan := filter.localScan() || r.scan
+			maxRows := limit
+			if scan {
+				maxRows = p.changeScanCap()
+			}
+			results[i] = p.runChangeRead(readCtx, r, filter, limit, maxRows)
+			results[i].scan = scan
+			if results[i].err != nil {
+				cancelReads(results[i].err)
+			}
 		})
 	}
+	// The journal has no deadline of its own while the other reads run: the
+	// query waits on them anyway. Once they're done it has until
+	// journalDeadline, and past that it is cut as slow (cutSlow), so a slow
+	// journal can't hold the track, and isn't cut while it holds nothing.
+	var (
+		journal         []provider.Change
+		journalErr      error
+		journalOpt      *optionalRead
+		journalDone     chan struct{}
+		journalDeadline time.Time
+	)
+	if spec.Journal {
+		journalDeadline = p.journalDeadline(ctx)
+		journalOpt = newOptionalRead(readCtx, time.Time{})
+		defer journalOpt.stop()
+		journalDone = make(chan struct{})
+		go func() {
+			defer close(journalDone)
+			if journal, journalErr = p.journalEntries(journalOpt.ctx, spec, scope, wanted, limit); journalErr != nil {
+				journalOpt.fail(journalErr)
+			}
+		}()
+	}
+	if descendants {
+		wg.Go(func() {
+			// An error that isn't a read's, such as an unreadable type map, is the
+			// cause too, so a deadline that passes later can't relabel it.
+			if desc, descErr = p.descendantChanges(descOpt.ctx, descOpt.fail, spec, scope, wanted, filter, limit); descErr != nil {
+				descOpt.fail(descErr)
+			}
+		})
+	}
+	wg.Wait()
+	if journalDone != nil {
+		cut := time.NewTimer(time.Until(journalDeadline))
+		select {
+		case <-journalDone:
+		case <-cut.C:
+			journalOpt.cutSlow(journalDeadline)
+			<-journalDone
+		}
+		cut.Stop()
+	}
+	// The read that failed first is the query's error. The others ended after
+	// its cancel, with context.Canceled or, when the cancel cut a retry's
+	// backoff, the stale error they were about to retry, so their errors are
+	// ignored. The cause is read before the caller's context is checked, so
+	// with that context live it can't be the caller's ending.
+	if cause := context.Cause(readCtx); cause != nil && ctx.Err() == nil {
+		return nil, cause
+	}
+	// Past that, a failed read means the caller's context ended: any other
+	// failure would have set the cause.
+	for _, r := range results {
+		if r.err != nil {
+			return nil, r.err
+		}
+	}
+	// The caller's context ending ends the query, whatever an optional read met
+	// before it did.
+	if (journalErr != nil || descErr != nil) && ctx.Err() != nil {
+		return nil, context.Cause(ctx)
+	}
+	if journalErr != nil {
+		journalErr = journalOpt.err(provider.AnnotationReasonJournalSlow)
+		journal = nil
+	}
+	if descErr != nil {
+		descErr = descOpt.err(provider.AnnotationReasonDescendantsSlow)
+		// The rest of the track stands, and a marker says what's missing.
+		desc = nil
+	}
+	// Whether the track holds descendant rows: merged from the descendant
+	// reads, or read by type under All.
+	descMerged := len(desc) > 0 || (scope != nil && scope.All && len(scope.allDesc) > 0)
+	results = append(results, desc...)
+
+	kept := mergeChanges(results, limit)
+	// The cut-off is decided on the change-log rows (kept), before the journal
+	// merge. The marker is about the change log: it says how many change-log
+	// rows were read, and a capped read misses only change-log rows, all older
+	// than the cut-off. kept is the newest limit of everything the reads
+	// matched, so it is the set such a row would have had to enter. Journal
+	// entries say nothing about which change-log rows were read, so they don't
+	// decide it.
+	// One end of the range for every marker placed there, so markers at the
+	// end share one time, which the frame shows as one marker: with no To,
+	// rangeEnd is now, and differs from call to call.
+	end := rangeEnd(spec)
+	var cut provider.Change
+	showCut := false
+	if c, capped := cutoffChange(results, end); capped && cutoffMayMiss(kept, limit, c.Time) {
+		cut, showCut = c, true
+		// A residual cut-off says what may be missing in the range, not where
+		// the scan stopped, so it sits at the end of the range: stable across
+		// refreshes like the left edge, and clear of the limit marker at From,
+		// which Grafana would show instead of it on hover. A descendants error
+		// sits there too, but it drops the descendant results, so no residual
+		// cut exists then. The reach is in Until.
+		if cut.Residual {
+			cut.Time = end
+		}
+	}
+	if scope != nil {
+		objects := scope.objectsByID()
+		for i := range kept {
+			switch {
+			case scope.All:
+				kept[i].parent = allParent(scope, kept[i].oc)
+			case kept[i].descendant:
+				kept[i].parent = descendantParent(scope, objects, kept[i].owner)
+			case kept[i].fromRelated:
+				kept[i].parent = relatedParent(scope, objects, kept[i].oc)
+			}
+		}
+	}
+	changes := p.resolveDiffs(ctx, kept, filter.fields)
+	// A track with descendant rows says when the limit left a change out. The
+	// journal merge can leave one out too, so this is decided while the
+	// change-log rows and the journal entries are still apart.
+	showLimit := descMerged && (limitReached(results, kept, limit) || len(changes)+len(journal) > limit)
+	if len(journal) > 0 {
+		changes = mergeJournal(changes, journal, limit)
+	}
+	// The oldest shown change, before any marker is appended: what the limit
+	// left out is older. A track cut at the limit holds at least one change.
+	var oldest time.Time
+	if len(changes) > 0 {
+		oldest = changes[len(changes)-1].Time
+	}
+	// After the cut, so the limit can't drop it.
+	if showCut {
+		changes = append(changes, cut)
+	}
+	if showLimit {
+		// At From rather than at the oldest shown change, which a marker at its
+		// own time would cover in Grafana.
+		at := spec.From
+		if at.IsZero() {
+			at = oldest
+		}
+		changes = append(changes, provider.Change{Kind: provider.ChangeKindLimit, Time: at, Until: oldest, Limit: limit})
+	}
+	if descErr != nil {
+		changes = append(changes, provider.Change{Kind: provider.ChangeKindDescendantsError, Time: end, Err: descErr})
+	}
+	if journalErr != nil {
+		changes = append(changes, provider.Change{Kind: provider.ChangeKindJournalError, Time: end, Err: journalErr})
+	}
+	for i := range changes {
+		changes[i].URL = withBranchParam(changes[i].URL, branch)
+	}
 	return changes, nil
+}
+
+// withBranchParam adds netbox-branching's _branch=<schema id> query parameter
+// to a marker link, so the NetBox UI activates the branch the change was read
+// from; an object that exists only in a branch is a 404 otherwise. Existing
+// parameters and the fragment are kept and an existing _branch is replaced. An
+// empty URL, main (""), or a URL that does not parse is returned unchanged.
+func withBranchParam(rawURL, schemaID string) string {
+	if rawURL == "" || schemaID == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	q.Set("_branch", schemaID)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // changedObjectTypeIDParam selects change-log rows by the numeric object-type id
 // of the object that changed. This is the parameter the pushdown uses.
 //
 // changedObjectTypeParam is the same filter keyed by app_label.model. It is only
-// ever used as the single-type fallback when the id map cannot be read; see
-// pushChangedObjectType for why it cannot be the primary form.
+// ever used, one type per read, when the id map cannot be read; see
+// objectTypeReads for why it cannot be the primary form.
 const (
 	changedObjectTypeIDParam = "changed_object_type_id"
 	changedObjectTypeParam   = "changed_object_type"
@@ -1827,16 +2148,15 @@ const (
 // is exactly why the map is read rather than hardcoded, and why nothing here
 // depends on its size.
 //
-// core/ is the canonical spelling and the only one that works everywhere.
-// extras/object-types is a legacy alias: 4.4.10 answers it with the same rows
-// AND the same canonical self-URL (…/api/core/object-types/33/), but 4.6 no
-// longer registers object-types under extras (verified in both containers:
-// extras/api/urls.py registers it on 4.4, only core/api/urls.py does on 4.6.0)
-// and the legacy path 404s there. Reading the alias would leave the id map
-// unreadable on every newer instance — the whole pushdown degrading to the
-// silently empty annotation it exists to fix, and, since only successful
-// fetches are cached, a fresh doomed request on every refresh. The demo cannot
-// catch that, because there the alias still works.
+// core/ is the canonical spelling and is read first, but it does not work
+// everywhere: it exists from NetBox 4.4.0. 4.4.10 also answers the
+// extras/object-types alias with the same rows AND the same canonical self-URL
+// (…/api/core/object-types/33/), but the alias is gone from 4.5.0 (4.6.0
+// registers object-types only in core/api/urls.py) and 404s there, so reading it
+// first would leave the id map unreadable on every newer instance. NetBox 4.2
+// and 4.3 are the reverse: they serve the list only at extras/object-types and
+// 404 core/, so readObjectTypeIDs falls back to legacyObjectTypesEndpoint on a
+// 404, and on nothing else.
 const objectTypesEndpoint = "core/object-types"
 
 // maxObjectTypes caps the object-type walk. 154 rows today; the cap is set far
@@ -1879,8 +2199,8 @@ func normalizeObjectTypes(types []string) []string {
 	return out
 }
 
-// pushChangedObjectType moves the annotation's object-type filter into the
-// NetBox query, one repeated changed_object_type_id= per requested type.
+// objectTypeReads moves the annotation's object-type filter into the NetBox
+// query: one repeated changed_object_type_id= per requested type, in one read.
 //
 // Without it, Changes reads the N newest rows of EVERY type and filters in Go.
 // That is not a slow answer, it is a WRONG one: on a 38.8M-row change log a
@@ -1917,23 +2237,27 @@ func normalizeObjectTypes(types []string) []string {
 //     a wrong type name that renders as "no changes" is the whole defect.
 //
 // If the map cannot be read at all (network blip, or a token whose permissions
-// exclude the endpoint) this DEGRADES to the pre-id behaviour rather than
-// failing the annotation: one type still goes upstream by name, several types
-// are left entirely to Changes's local filter, and an unresolvable name cannot
-// be detected so it is not reported. That is strictly the behaviour of the
-// commit before this one — worse than the id path, better than no annotations.
-// The one failure NOT degraded is the caller's own expired context, which is not
-// a statement about the instance at all.
+// exclude the endpoint) this DEGRADES rather than failing the annotation: each
+// type goes upstream by name, in a read of its own because the name form takes
+// one value, and an unresolvable name cannot be detected so it is not reported.
+// Several types left to the local filter in one read would let the newest rows
+// of other types fill it, and the track would quietly come up short. The one
+// failure NOT degraded is the caller's own expired context, which is not a
+// statement about the instance at all.
 //
 // wanted must already be normalised by normalizeObjectTypes — the caller does
 // that so the local filter can be built from the identical list. An empty list
 // therefore means "no filter", and an empty parameter is IGNORED upstream
 // (measured: it returns the unfiltered count), so an unfiltered annotation query
-// sends nothing at all rather than a parameter that means nothing — and must not
-// buy the object-type map to do it.
-func (p *Provider) pushChangedObjectType(ctx context.Context, q url.Values, wanted []string) error {
+// is one read that sends nothing at all rather than a parameter that means
+// nothing — and must not buy the object-type map to do it.
+//
+// idParam and nameParam are the endpoint's two forms of the filter:
+// changed_object_type_id and changed_object_type for the change log,
+// assigned_object_type_id and assigned_object_type for the journal.
+func (p *Provider) objectTypeReads(ctx context.Context, wanted []string, idParam, nameParam string) ([]typeRead, error) {
 	if len(wanted) == 0 {
-		return nil
+		return []typeRead{{}}, nil
 	}
 
 	ids, err := p.objectTypeIDMap(ctx)
@@ -1941,33 +2265,59 @@ func (p *Provider) pushChangedObjectType(ctx context.Context, q url.Values, want
 		if ctx.Err() != nil {
 			// Not an upstream problem: this caller's own deadline ran out (see
 			// objectTypeIDMap — a waiter never spends more than its own budget).
-			// Degrading here would send a change-log request on a dead context and
-			// report a WARN about an instance that may be perfectly healthy.
-			return err
+			// Degrading here would send a request on a dead context and report a
+			// WARN about an instance that may be perfectly healthy.
+			return nil, err
 		}
-		log.DefaultLogger.Warn("netbox: could not resolve NetBox object-type ids; the annotation's type filter is only partly pushed upstream",
-			"error", logSafe(err.Error()))
-		if len(wanted) == 1 {
-			q.Add(changedObjectTypeParam, wanted[0])
+		log.DefaultLogger.Warn("netbox: could not resolve NetBox object-type ids; each object type is read by name on its own",
+			"filter", nameParam, "error", logSafe(err.Error()))
+		reads := make([]typeRead, len(wanted))
+		for i, t := range wanted {
+			reads[i] = typeRead{params: url.Values{nameParam: {t}}, types: map[string]bool{t: true}}
 		}
-		return nil
+		return reads, nil
 	}
 
+	r := typeRead{params: url.Values{}, types: make(map[string]bool, len(wanted))}
 	for _, t := range wanted {
 		id, ok := ids[t]
 		if !ok {
 			// logSafe because the type is free text from the annotation editor and
 			// this string reaches both a log record and the user's screen.
-			return &UnknownObjectTypeError{Type: logSafe(t), Known: len(ids)}
+			return nil, &UnknownObjectTypeError{Type: logSafe(t), Known: len(ids)}
 		}
 		// Add, not Set: the repeated parameter is the OR, measured on both 4.4.10
 		// and 4.6.4. Collapsing these into one comma-joined value is HTTP 400
 		// ("“6,86” is not a valid value.", measured on 4.4.10), so it would not
 		// merely lose the filter — it would fail the annotation outright.
-		q.Add(changedObjectTypeIDParam, strconv.Itoa(id))
+		r.params.Add(idParam, strconv.Itoa(id))
+		r.types[t] = true
 	}
-	return nil
+	return []typeRead{r}, nil
 }
+
+// typeRead is one read's share of an object-type filter: the parameters that
+// push it upstream, and the types its rows are checked against here. Each read
+// checks only its own types, so a NetBox that ignored the name form can't show
+// a row twice, once from each read.
+type typeRead struct {
+	params url.Values      // nil = no type filter
+	types  map[string]bool // nil = every type
+}
+
+// with adds the read's type parameters to q.
+func (r typeRead) with(q url.Values) url.Values {
+	for k, vs := range r.params {
+		for _, v := range vs {
+			q.Add(k, v)
+		}
+	}
+	return q
+}
+
+// keeps reports whether a row of type t passes the read's type check. t must be
+// normalised.
+func (r typeRead) keeps(t string) bool { return r.types == nil || r.types[t] }
 
 // UnknownObjectTypeError reports an annotation object-type filter that this
 // NetBox instance does not know — a typo in the annotation editor, or a model
@@ -2009,7 +2359,7 @@ func (e *UnknownObjectTypeError) Error() string {
 // upgrade or a plugin install), which would argue for the much longer schemaTTL.
 // It follows the shorter discovery TTL instead because a stale entry here is not
 // merely stale: a model added since the fetch resolves to nothing, and
-// pushChangedObjectType turns that into a hard error rather than a slightly old
+// objectTypeReads turns that into a hard error rather than a slightly old
 // answer. Five minutes bounds that window; the fetch is one request for 154 rows.
 //
 // One request per TTL for SIMULTANEOUS callers too. Checking the cache and then
@@ -2054,46 +2404,53 @@ func (e *UnknownObjectTypeError) Error() string {
 // it — 93,251 bytes of response with and without — so sending it would be a
 // parameter that does nothing.
 func (p *Provider) objectTypeIDMap(ctx context.Context) (map[string]int, error) {
-	ids, flight, err := p.objectTypeIDsOrFlight(ctx)
+	ids, _, err := p.objectTypeMaps(ctx)
+	return ids, err
+}
+
+// objectTypeMaps is objectTypeIDMap plus the list endpoints the same read
+// returns (see contentTypeEndpoint), with the same cache and single flight.
+func (p *Provider) objectTypeMaps(ctx context.Context) (map[string]int, map[string]string, error) {
+	ids, endpoints, flight, err := p.objectTypeIDsOrFlight(ctx)
 	if flight == nil {
-		return ids, err
+		return ids, endpoints, err
 	}
 	select {
 	case <-ctx.Done():
 		// THIS caller's deadline, not the leader's. The read carries on for
 		// whoever else is waiting, and its result still lands in the cache.
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	case <-flight.done:
-		return flight.ids, flight.err
+		return flight.ids, flight.endpoints, flight.err
 	}
 }
 
-// objectTypeIDsOrFlight answers a caller from the cache when it can — the map,
+// objectTypeIDsOrFlight answers a caller from the cache when it can — the maps,
 // or a recent failure — and otherwise hands back the read to wait on, joining
 // the one already running or starting it.
 //
-// Exactly one of the three results is meaningful, and a non-nil flight is what
-// says "nothing is decided yet". mu is held for the whole decision so that two
-// simultaneous misses cannot both start a read, and released before the read
-// begins: mu guards short map reads all over the provider and must never be held
-// across an HTTP request.
-func (p *Provider) objectTypeIDsOrFlight(ctx context.Context) (map[string]int, *objectTypeFlight, error) {
+// Exactly one of the maps, the flight and the error is meaningful, and a non-nil
+// flight is what says "nothing is decided yet". mu is held for the whole
+// decision so that two simultaneous misses cannot both start a read, and
+// released before the read begins: mu guards short map reads all over the
+// provider and must never be held across an HTTP request.
+func (p *Provider) objectTypeIDsOrFlight(ctx context.Context) (map[string]int, map[string]string, *objectTypeFlight, error) {
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.objectTypeIDs != nil && now.Before(p.objectTypeIDsExpiry) {
-		return p.objectTypeIDs, nil, nil
+		return p.objectTypeIDs, p.objectTypeEndpoints, nil, nil
 	}
 	if p.objectTypeErr != nil && now.Before(p.objectTypeErrExpiry) {
-		return nil, nil, p.objectTypeErr
+		return nil, nil, nil, p.objectTypeErr
 	}
 	if p.objectTypeFlight != nil {
-		return nil, p.objectTypeFlight, nil
+		return nil, nil, p.objectTypeFlight, nil
 	}
 	flight := &objectTypeFlight{done: make(chan struct{})}
 	p.objectTypeFlight = flight
 	go p.runObjectTypeFetch(ctx, flight)
-	return nil, flight, nil
+	return nil, nil, flight, nil
 }
 
 // runObjectTypeFetch performs one read of the object-type map, publishes it to
@@ -2106,11 +2463,11 @@ func (p *Provider) runObjectTypeFetch(ctx context.Context, flight *objectTypeFli
 	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.objectTypeFetchBudget())
 	defer cancel()
 
-	ids, err := p.readObjectTypeIDs(fetchCtx)
+	ids, endpoints, err := p.readObjectTypeIDs(fetchCtx)
 
 	p.mu.Lock()
 	if err == nil {
-		p.objectTypeIDs, p.objectTypeIDsExpiry = ids, time.Now().Add(cacheTTL)
+		p.objectTypeIDs, p.objectTypeEndpoints, p.objectTypeIDsExpiry = ids, endpoints, time.Now().Add(cacheTTL)
 		p.objectTypeErr, p.objectTypeErrExpiry = nil, time.Time{}
 	} else {
 		p.objectTypeErr, p.objectTypeErrExpiry = err, time.Now().Add(objectTypeFailureTTL)
@@ -2120,7 +2477,7 @@ func (p *Provider) runObjectTypeFetch(ctx context.Context, flight *objectTypeFli
 	p.objectTypeFlight = nil
 	p.mu.Unlock()
 
-	flight.ids, flight.err = ids, err
+	flight.ids, flight.endpoints, flight.err = ids, endpoints, err
 	close(flight.done)
 }
 
@@ -2144,31 +2501,52 @@ func (p *Provider) objectTypeFetchBudget() time.Duration {
 	return defaultRequestTimeout
 }
 
-// readObjectTypeIDs walks /api/core/object-types/ and builds app_label.model ->
-// id. Every failure it returns is one the caller may degrade on.
-func (p *Provider) readObjectTypeIDs(ctx context.Context) (map[string]int, error) {
-	rows, _, err := p.fetchRows(ctx, objectTypesEndpoint, url.Values{}, maxObjectTypes)
+// readObjectTypeIDs walks the object-type list and builds app_label.model -> id,
+// and app_label.model -> list endpoint for the types that report
+// rest_api_endpoint (NetBox 4.4 and later). It reads core/object-types, and
+// extras/object-types when that 404s (NetBox 4.2 and 4.3). Every failure it
+// returns is one the caller may degrade on.
+func (p *Provider) readObjectTypeIDs(ctx context.Context) (map[string]int, map[string]string, error) {
+	endpoint := objectTypesEndpoint
+	rows, _, err := p.fetchRows(ctx, endpoint, url.Values{}, maxObjectTypes)
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+		endpoint = legacyObjectTypesEndpoint
+		rows, _, err = p.fetchRows(ctx, endpoint, url.Values{}, maxObjectTypes)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("fetch object types: %w", err)
+		return nil, nil, fmt.Errorf("fetch object types: %w", err)
 	}
 	ids := make(map[string]int, len(rows))
+	endpoints := make(map[string]string, len(rows))
+	root := p.client.apiRootPath()
 	for _, raw := range rows {
 		var ot struct {
 			ID       int    `json:"id"`
 			AppLabel string `json:"app_label"`
 			Model    string `json:"model"`
+			// Raw, and read on its own below, so an odd value cannot cost the
+			// row its id.
+			RESTAPIEndpoint json.RawMessage `json:"rest_api_endpoint"`
 		}
 		if err := json.Unmarshal(raw, &ot); err != nil || ot.AppLabel == "" || ot.Model == "" {
 			continue
 		}
-		ids[normalizeObjectType(ot.AppLabel+"."+ot.Model)] = ot.ID
+		key := normalizeObjectType(ot.AppLabel + "." + ot.Model)
+		ids[key] = ot.ID
+		var rest string
+		if json.Unmarshal(ot.RESTAPIEndpoint, &rest) == nil {
+			if e := restAPIPath(rest, root); e != "" {
+				endpoints[key] = e
+			}
+		}
 	}
 	// An empty map would make every type unknown, so treat it as a failed read and
 	// let the caller degrade instead of reporting the user's correct type as wrong.
 	if len(ids) == 0 {
-		return nil, fmt.Errorf("fetch object types: %s returned no usable rows", objectTypesEndpoint)
+		return nil, nil, fmt.Errorf("fetch object types: %s returned no usable rows", endpoint)
 	}
-	return ids, nil
+	return ids, endpoints, nil
 }
 
 // allNullCustomFieldColumns returns the cf_* columns among columns that hold
@@ -2254,4 +2632,93 @@ func orderingReserve(sort string) int {
 		return 0
 	}
 	return len("&"+orderingParam+"=") + 2*(len(sort)+len(",-id")) + 16
+}
+
+// optionalRead is the context an optional read runs under, Include
+// descendants' or the journal's: its own deadline within the change reads'
+// context, and a cancel with cause. A failure the read records with fail is
+// the cause, so a deadline passing later, while the change reads finish, can't
+// relabel it as slow.
+type optionalRead struct {
+	ctx             context.Context
+	fail            context.CancelCauseFunc
+	cancel          context.CancelFunc
+	start, deadline time.Time
+}
+
+// newOptionalRead starts an optional read's context; a zero deadline is none
+// (the journal's, which cutSlow ends instead).
+func newOptionalRead(parent context.Context, deadline time.Time) *optionalRead {
+	r := &optionalRead{start: time.Now(), deadline: deadline, cancel: func() {}}
+	if !deadline.IsZero() {
+		parent, r.cancel = context.WithDeadline(parent, deadline)
+	}
+	r.ctx, r.fail = context.WithCancelCause(parent)
+	return r
+}
+
+// cutSlow ends the read now as a deadline would, the one it had: at, which
+// is what its warning counts, however long the other reads held it past that.
+func (r *optionalRead) cutSlow(at time.Time) {
+	r.deadline = at
+	r.fail(context.DeadlineExceeded)
+}
+
+// stop releases the read's contexts.
+func (r *optionalRead) stop() {
+	r.fail(nil)
+	r.cancel()
+}
+
+// err is a failed read's error for its marker: slowReason's refusal, with the
+// seconds the read had, when the deadline ended it before any failure, else
+// the first failure, the cause. The cause is compared by identity: a read cut
+// by the HTTP client's own timeout fails with an error that matches
+// context.DeadlineExceeded too.
+func (r *optionalRead) err(slowReason string) error {
+	cause := context.Cause(r.ctx)
+	if cause == context.DeadlineExceeded && !r.deadline.IsZero() {
+		// Whole seconds it had, so "took longer than" stays true. The deadline
+		// is computed a hair before start is stamped, so an 8 s budget
+		// measures just under 8 s: that gap is allowed for.
+		had := r.deadline.Sub(r.start) + 50*time.Millisecond
+		return &AnnotationError{Reason: slowReason, Count: max(1, int(had.Seconds()))}
+	}
+	return cause
+}
+
+// journalDeadline is when the journal read is cut: twice the datasource
+// Timeout from now, or four fifths of what's left of the caller's deadline
+// when that's sooner, so a slow journal leaves time to answer with the change
+// markers. Twice, so one hung request ends at its own Timeout first, with that
+// error on the warning, and a retry still fits; past it, a journal slow over
+// several pages is cut, and the warning says it was slow.
+func (p *Provider) journalDeadline(ctx context.Context) time.Time {
+	budget := p.journalWaitOverride
+	if budget <= 0 {
+		budget = 2 * p.objectTypeFetchBudget()
+	}
+	return deadlineWithin(ctx, budget)
+}
+
+// deadlineWithin is budget from now, or four fifths of what's left of ctx's
+// deadline when that's sooner (reservedDeadline).
+func deadlineWithin(ctx context.Context, budget time.Duration) time.Time {
+	deadline := time.Now().Add(budget)
+	if reserved, ok := reservedDeadline(ctx); ok && reserved.Before(deadline) {
+		return reserved
+	}
+	return deadline
+}
+
+// reservedDeadline is four fifths of what's left of ctx's deadline, if it has
+// one: a bounded read ends there, leaving the caller time to answer with what
+// it has.
+func reservedDeadline(ctx context.Context) (time.Time, bool) {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return time.Time{}, false
+	}
+	now := time.Now()
+	return now.Add(dl.Sub(now) * 4 / 5), true
 }

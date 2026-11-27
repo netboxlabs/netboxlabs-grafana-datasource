@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"fmt"
+	"html"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 // timeColumns are column names whose RFC3339 string values are rendered as time
@@ -186,40 +189,282 @@ func addObjectDataLinks(frame *data.Frame, columns []string) {
 	}
 }
 
+// Annotation rendering limits. A marker shows provider.MaxDiffLines diff lines.
+const (
+	maxDiffValueLen  = 60
+	maxJournalLength = 200
+)
+
 // buildAnnotationsFrame builds a frame whose field names follow Grafana's
 // annotation convention (time/title/text/tags), so changelog events render as
-// annotations on any time-series panel.
+// annotations on any time-series panel. Title and text are HTML, so every
+// NetBox-supplied value is escaped. The id field is always 0: a marker with an
+// id makes Grafana's tooltip offer Edit, which would save a copy.
 func buildAnnotationsFrame(changes []provider.Change) *data.Frame {
-	times := make([]time.Time, 0, len(changes))
-	titles := make([]string, 0, len(changes))
-	texts := make([]string, 0, len(changes))
-	tags := make([]string, 0, len(changes))
-
+	rows := make([]annotationRow, 0, len(changes))
 	for _, c := range changes {
-		times = append(times, c.Time)
-		titles = append(titles, c.ObjectRepr)
-		text := c.Action
-		if c.User != "" {
-			text = fmt.Sprintf("%s by %s", c.Action, c.User)
+		r := annotationRow{time: c.Time, notice: true}
+		switch c.Kind {
+		case provider.ChangeKindJournal:
+			r.title, r.text, r.tag = journalMarker(c)
+			r.notice = false
+		case provider.ChangeKindCutoff:
+			r.title, r.text, r.tag = cutoffMarker(c)
+		case provider.ChangeKindLimit:
+			r.title, r.text, r.tag = limitMarker(c)
+		case provider.ChangeKindDescendantsError, provider.ChangeKindJournalError:
+			// The track around it is intact, so it isn't titled like a failed query.
+			r.title, r.text, r.tag = warningTitle, html.EscapeString(c.Message), "netbox,error"
+			r.warning = true
+		default:
+			r.title, r.text, r.tag = changeMarker(c)
+			r.notice = false
 		}
-		texts = append(texts, text)
-		tagParts := []string{"netbox"}
-		if c.ObjectType != "" {
-			tagParts = append(tagParts, c.ObjectType)
-		}
-		if c.Action != "" {
-			tagParts = append(tagParts, strings.ToLower(c.Action))
-		}
-		tags = append(tags, strings.Join(tagParts, ","))
+		rows = append(rows, r)
 	}
+	rows = mergeNotices(rows)
 
-	frame := data.NewFrame("netbox_changes",
+	times := make([]time.Time, len(rows))
+	titles := make([]string, len(rows))
+	texts := make([]string, len(rows))
+	tags := make([]string, len(rows))
+	ids := make([]int64, len(rows))
+	for i, r := range rows {
+		times[i], titles[i], texts[i], tags[i] = r.time, r.title, r.text, r.tag
+	}
+	return data.NewFrame("netbox_changes",
 		data.NewField("time", nil, times),
 		data.NewField("title", nil, titles),
 		data.NewField("text", nil, texts),
 		data.NewField("tags", nil, tags),
+		data.NewField("id", nil, ids),
 	)
-	return frame
+}
+
+// warningTitle titles a marker that says part of the track wasn't read.
+const warningTitle = "NetBox annotation warning"
+
+// annotationRow is one marker as rendered. notice marks the plugin's own
+// markers (cut-off, limit, warnings), not a change or a journal entry; warning
+// marks the warnings among them.
+type annotationRow struct {
+	time             time.Time
+	title, text, tag string
+	notice, warning  bool
+}
+
+// mergeNotices makes the notices that share a time one marker, in the first
+// one's place: Grafana's hover shows only one of several markers at one time,
+// and the end of the range can hold a cut-off and two warnings. Changes and
+// journal entries are never merged.
+func mergeNotices(rows []annotationRow) []annotationRow {
+	type group struct {
+		at   int // the group's marker in out
+		rows []annotationRow
+	}
+	out := make([]annotationRow, 0, len(rows))
+	var groups []*group // a track has a few notices at most
+	for _, r := range rows {
+		if !r.notice {
+			out = append(out, r)
+			continue
+		}
+		i := slices.IndexFunc(groups, func(g *group) bool { return g.rows[0].time.Equal(r.time) })
+		if i >= 0 {
+			groups[i].rows = append(groups[i].rows, r)
+			continue
+		}
+		groups = append(groups, &group{at: len(out), rows: []annotationRow{r}})
+		out = append(out, r)
+	}
+	for _, g := range groups {
+		if len(g.rows) > 1 {
+			out[g.at] = mergeRows(g.rows)
+		}
+	}
+	return out
+}
+
+// mergeRows is one marker for notices at one time: the warnings first, their
+// texts as rendered, a blank line apart, and their tags without repeats. It is
+// titled as a warning when one is among them.
+func mergeRows(g []annotationRow) annotationRow {
+	slices.SortStableFunc(g, func(a, b annotationRow) int {
+		switch {
+		case a.warning == b.warning:
+			return 0
+		case a.warning:
+			return -1
+		}
+		return 1
+	})
+	m := annotationRow{time: g[0].time, title: g[0].title, notice: true, warning: g[0].warning}
+	var texts, tags []string
+	for _, r := range g {
+		texts = append(texts, r.text)
+		for _, t := range strings.Split(r.tag, ",") {
+			if !slices.Contains(tags, t) {
+				tags = append(tags, t)
+			}
+		}
+	}
+	m.text, m.tag = strings.Join(texts, "<br><br>"), strings.Join(tags, ",")
+	return m
+}
+
+func changeMarker(c provider.Change) (title, text, tag string) {
+	title = html.EscapeString(c.ObjectRepr)
+	if c.Parent != "" {
+		title += " on " + html.EscapeString(c.Parent)
+	}
+
+	var lines []string
+	for i, d := range c.Diff {
+		if i == provider.MaxDiffLines {
+			lines = append(lines, fmt.Sprintf("+%d more", len(c.Diff)-provider.MaxDiffLines))
+			break
+		}
+		lines = append(lines, fmt.Sprintf("%s: %s → %s",
+			html.EscapeString(d.Field), diffValue(d.Before), diffValue(d.After)))
+	}
+	if c.Message != "" {
+		lines = append(lines, `"`+html.EscapeString(c.Message)+`"`)
+	}
+	who := html.EscapeString(c.Action)
+	if c.User != "" {
+		who += " by " + html.EscapeString(c.User)
+	}
+	lines = append(lines, who+markerLink(c.URL))
+	text = strings.Join(lines, "<br>")
+
+	tagParts := []string{"netbox"}
+	if c.ObjectType != "" {
+		tagParts = append(tagParts, c.ObjectType)
+	}
+	if c.Action != "" {
+		tagParts = append(tagParts, strings.ToLower(c.Action))
+	}
+	return title, text, strings.Join(tagParts, ",")
+}
+
+func journalMarker(c provider.Change) (title, text, tag string) {
+	who := "Journal"
+	if c.User != "" {
+		who += " by " + html.EscapeString(c.User)
+	}
+	// CRLF (from NetBox's UI) and a lone CR are line ends too.
+	comments := strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(c.Comments)
+	comments = strings.ReplaceAll(html.EscapeString(truncateRunes(comments, maxJournalLength)), "\n", "<br>")
+	return html.EscapeString(c.ObjectRepr),
+		comments + "<br>" + who + markerLink(c.URL),
+		"netbox,journal," + c.JournalKind
+}
+
+func cutoffMarker(c provider.Change) (title, text, tag string) {
+	if c.Residual {
+		return "NetBox change log", residualText(c), "netbox,cutoff"
+	}
+	text = fmt.Sprintf("Older changes not checked: read %s change-log entries without reaching the start of the range.", thousands(c.Scanned))
+	if c.DescendantsOnly {
+		text = fmt.Sprintf("Older changes to what's attached not checked: read %s change-log entries without reaching the start of the range. The scope's own changes were all read.", thousands(c.Scanned))
+	}
+	return "NetBox change log", text, "netbox,cutoff"
+}
+
+// markerTimeLayout is the time format the limit and residual markers print.
+const markerTimeLayout = "2006-01-02 15:04:05 UTC"
+
+// residualText says which removals a cut residual scan may have missed, and
+// from when. The marker sits at the end of the range, away from the reach, so
+// the time is in the text. A failed scan has no reach to name, and checked nothing in the range.
+func residualText(c provider.Change) string {
+	nouns := residualNouns(c.Types)
+	if c.Until.IsZero() {
+		return fmt.Sprintf("Removals not checked: %s taken off or deleted in this range may not show.", nouns)
+	}
+	return fmt.Sprintf("Removals before %s not checked: %s taken off or deleted earlier may not show.", c.Until.UTC().Format(markerTimeLayout), nouns)
+}
+
+// residualNoun is an object type's noun with its article.
+type residualNoun struct{ article, name string }
+
+// residualNounByType names the types a residual scan covers.
+var residualNounByType = map[string]residualNoun{
+	"ipam.ipaddress":  {"an", "IP address"},
+	"dcim.macaddress": {"a", "MAC address"},
+	"dcim.module":     {"a", "module"},
+	"ipam.service":    {"a", "service"},
+}
+
+// residualNouns names object types for a sentence: "an IP address, MAC address,
+// module or service". An unknown type is named as given, with "a".
+func residualNouns(types []string) string {
+	nouns := make([]string, len(types))
+	article := "a"
+	for i, t := range types {
+		n, ok := residualNounByType[t]
+		if !ok {
+			n = residualNoun{"a", t}
+		}
+		nouns[i] = n.name
+		if i == 0 {
+			article = n.article
+		}
+	}
+	return article + " " + proseList(nouns, "or")
+}
+
+// limitMarker says the query's Limit hid older changes in the range, and from
+// when. Past the largest Limit there is nothing to raise. Below it, the text
+// names the largest too: Changes reads a Limit above it as the default, so a
+// user who set more sees the default here and needs to know why.
+func limitMarker(c provider.Change) (title, text, tag string) {
+	at := c.Until.UTC().Format(markerTimeLayout)
+	text = fmt.Sprintf("Limit reached: changes before %s in this range aren't shown. Raise Limit (now %d, at most %s), narrow the range, or narrow Object types.", at, c.Limit, thousands(netbox.MaxLimit))
+	if c.Limit >= netbox.MaxLimit {
+		text = fmt.Sprintf("Limit reached: changes before %s in this range aren't shown. Narrow the range or Object types.", at)
+	}
+	return "NetBox change log", text, "netbox,limit"
+}
+
+// annotationErrorFrame is a failed annotation query's error as one marker at
+// at, in buildAnnotationsFrame's shape. Grafana's scenes dashboards drop an
+// annotation query's error, so without it a failure looks like a quiet window.
+// The message can quote a variable's value, so it is escaped.
+func annotationErrorFrame(msg string, at time.Time) *data.Frame {
+	return data.NewFrame("netbox_changes",
+		data.NewField("time", nil, []time.Time{at}),
+		data.NewField("title", nil, []string{"NetBox annotation error"}),
+		data.NewField("text", nil, []string{html.EscapeString(msg)}),
+		data.NewField("tags", nil, []string{"netbox,error"}),
+		data.NewField("id", nil, []int64{0}),
+	)
+}
+
+// diffValue formats one side of a field change: empty becomes a dash, newlines
+// a space, and long values are cut.
+func diffValue(v string) string {
+	if v == "" {
+		return "—"
+	}
+	v = strings.ReplaceAll(v, "\n", " ")
+	return html.EscapeString(truncateRunes(v, maxDiffValueLen))
+}
+
+func markerLink(url string) string {
+	if url == "" {
+		return ""
+	}
+	return ` · <a href="` + html.EscapeString(url) + `" target="_blank">Open in NetBox</a>`
+}
+
+// truncateRunes cuts s to n runes, marking the cut with an ellipsis.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // buildNodeGraphFrames builds the two frames (nodes + edges) Grafana's node

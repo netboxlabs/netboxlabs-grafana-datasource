@@ -42,8 +42,11 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
 - **Template variables.** Drive `site` / `device` / `role` / `tenant` dropdowns from NetBox
   and filter every panel on the dashboard. Multi-value variables become OR filters; a
   Custom all value of `$__all` makes **All** send no filter at all.
-- **Annotations.** Overlay NetBox change-log events (who changed what, when) on any
-  time-series panel using Grafana's `time/title/text/tags` convention.
+- **Annotations.** Overlay NetBox change-log events (who changed what, when), and
+  optionally journal entries, on any time-series panel. Scope them to one object: its
+  changes, the changes NetBox records against it, and what's attached to it (a device's
+  cables, addresses, modules and services). Each marker says what changed. See
+  [docs/RECIPES.md](docs/RECIPES.md#device-dashboard-with-change-markers).
 - **Deep links.** Every row links straight back to the NetBox object page, and the link
   survives the join, so an enriched metrics table stays clickable through to NetBox.
 - **Correlations (Explore drill-downs).** Provision links from any Prometheus/Loki series
@@ -172,7 +175,7 @@ datasources:
 | **Objects**       | A joinable table for any object type (with optional join keys). A reference's own fields are columns too, as `<ref>__<col>` (`device_type__manufacturer`) | Table, or Outer-join onto metrics |
 | **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`. Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
 | **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)     | Node Graph panel                  |
-| **Annotations**   | Change-log events (`time/title/text/tags`)                     | Dashboard annotations             |
+| **Annotations**   | NetBox change-log events, optionally scoped to objects and what's attached, plus journal entries. Read-only (no Edit button) | Dashboard annotations |
 
 See [Demo](#demo) below for a one-command runnable stack (synthetic Prometheus + Loki
 labeled to match NetBox + a rich dashboard).
@@ -304,6 +307,9 @@ them. Objects, IP enrichment, topology, and annotation queries all honor the sel
 branch (annotation and variable queries each have their own Branch field), and the field /
 value-autocomplete pickers reload against it. Only the **object-type** list is always read
 from main (NetBox models are code-level and identical across branches).
+
+Links to NetBox carry the branch, and NetBox then stays on that branch in this browser until
+you pick Main in NetBox's branch menu; a main link from Grafana doesn't switch it back.
 
 The bundled demo ships the plugin already installed and a seeded `demo-branch` that adds a
 branch-only device, `AMS1-leaf-99`. To see branching in action, pick the dashboard's

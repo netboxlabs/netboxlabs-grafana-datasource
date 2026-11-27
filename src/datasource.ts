@@ -29,7 +29,32 @@ export function prepareAnnotationQuery(anno: any): NetBoxQuery {
     objectTypes: target.objectTypes ?? [],
     limit: target.limit,
     branch: target.branch,
+    scopeType: target.scopeType,
+    scope: target.scope,
+    scopeMatch: target.scopeMatch,
+    actions: target.actions,
+    changedFields: target.changedFields,
+    journal: target.journal,
+    includeDescendants: target.includeDescendants,
   };
+}
+
+/**
+ * Formats a variable's value(s) for an annotation scope. The backend splits the
+ * scope on commas, and a NetBox name or cid can hold one ("Acme, West"), so each
+ * value has its backslashes and commas escaped ("\\" and "\,") and the values
+ * are joined with plain commas. Typed text outside a variable isn't formatted:
+ * there a comma separates, and "\," is a literal one.
+ */
+export function scopeFormat(value: unknown): string {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .map((v) =>
+      String(v ?? '')
+        .replace(/\\/g, '\\\\')
+        .replace(/,/g, '\\,')
+    )
+    .join(',');
 }
 
 export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSourceOptions> {
@@ -83,8 +108,48 @@ export class DataSource extends DataSourceWithBackend<NetBoxQuery, NetBoxDataSou
       // backend expands into repeated NetBox query params.
       value: srv.replace(f.value ?? '', scopedVars, 'csv'),
     }));
+    // A provisioned dashboard can carry "scope": null, which is no scope too, or
+    // a bare id such as "scope": 17, which is read as its string.
+    const rawScope = query.scope == null ? undefined : String(query.scope);
+    const scoped =
+      rawScope === undefined
+        ? {}
+        : {
+            // scopeFormat so a multi-value variable reaches the backend comma-joined
+            // (the default format is the glob `{a,b}`), with any comma inside a value
+            // escaped. scopeSet comes from the RAW value so an empty variable is
+            // distinguishable from no scope at all.
+            scope: srv.replace(rawScope, scopedVars, scopeFormat),
+            scopeSet: rawScope.trim() !== '',
+          };
+    // csv so a multi-value variable arrives comma-joined. scopeTypeSet comes from
+    // the RAW type, so an empty variable is told from a type never configured.
+    const rawScopeType = query.scopeType == null ? undefined : String(query.scopeType);
+    const scopedType =
+      rawScopeType === undefined
+        ? {}
+        : { scopeType: srv.replace(rawScopeType, scopedVars, 'csv'), scopeTypeSet: rawScopeType.trim() !== '' };
+    // One entry may be a multi-value variable: expand, split, trim and dedupe.
+    const expand = (list?: string[]) => {
+      if (list === undefined) {
+        return undefined;
+      }
+      const out = [
+        ...new Set(
+          list
+            .flatMap((e) => srv.replace(e, scopedVars, 'csv').split(','))
+            .map((e) => e.trim())
+            .filter(Boolean)
+        ),
+      ];
+      return out.length ? out : undefined;
+    };
     return {
       ...query,
+      ...scoped,
+      ...scopedType,
+      actions: expand(query.actions),
+      changedFields: expand(query.changedFields),
       filters,
       ips: query.ips === undefined ? undefined : srv.replace(query.ips, scopedVars, 'csv'),
       branch: query.branch === undefined ? undefined : srv.replace(query.branch, scopedVars),

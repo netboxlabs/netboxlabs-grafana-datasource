@@ -2,13 +2,17 @@
 
 ## Unreleased
 
+- **Change annotations can follow one object.** Scope an annotation to `$device`
+  to see that device's changes, including its interfaces, cables, addresses,
+  modules and services, each saying what changed. Journal entries can show
+  alongside them. Changes to what's still attached are read by id, so a busy
+  change log doesn't hide them; removals are checked in one page of it.
 - **A reference's own fields as columns.** An Objects query can return
   `<ref>__<col>` columns such as `device_type__manufacturer`, read from the same
   response, so a device's manufacturer needs no second query.
 - **Long id filters are read in batches.** Filtering an Objects query by many
   NetBox ids (for example the ids a dashboard's metrics carry) no longer
   overflows the URL, so the NetBox side can read only the objects a panel shows.
-
 - **Secure SOCKS proxy switch on the settings page.** On self-hosted Grafana
   with a secure SOCKS5 data source proxy, the datasource can be routed through
   it from the settings page. Grafana Cloud's PDC network selector appears once
@@ -38,8 +42,8 @@
   2026-11-13 (GO-2026-6599, 6600, 6603, 6605, 6607, 6608, 6610–6613, 6617,
   6809, 6859, 6860, 6865, 6866 and GHSA-q7gw-24fr-5p69).
 - **npm dependencies updated for new advisories**: zod, basic-ftp, dompurify,
-  fast-uri, glob, ip-address, minimatch, qs and serialize-javascript. None is
-  in the shipped frontend, which does not change.
+  fast-uri, glob, i18next, ip-address, minimatch, qs and serialize-javascript.
+  None is in the shipped frontend, which does not change.
 
 ## 1.0.3 (2026-10-06)
 

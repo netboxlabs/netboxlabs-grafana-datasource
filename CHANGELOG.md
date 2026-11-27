@@ -31,8 +31,8 @@
   2026-11-13 (GO-2026-6599, 6600, 6603, 6605, 6607, 6608, 6610–6613, 6617,
   6809, 6859, 6860, 6865, 6866 and GHSA-q7gw-24fr-5p69).
 - **npm dependencies updated for new advisories**: zod, basic-ftp, dompurify,
-  fast-uri, glob, ip-address, minimatch, qs and serialize-javascript. None is
-  in the shipped frontend, which does not change.
+  fast-uri, glob, i18next, ip-address, minimatch, qs and serialize-javascript.
+  None is in the shipped frontend, which does not change.
 
 ## 1.0.3 (2026-10-06)
 

@@ -24,6 +24,8 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
   IPs to their NetBox address record, the interface it's assigned to, and the owning
   device — including whether it's that device's primary IP — falling back to the
   containing prefix's site/tenant/role when the address isn't individually registered.
+  Each match also returns its NetBox id and link (address record, device or VM, and
+  prefix), and the prefix's scope type, so a panel can link back to NetBox.
   It is the one enrichment a value-join can't do.
 - **Prefix/IP utilization.** Opt-in `utilization` (%), `used` and `available` columns for
   prefixes and IP ranges, computed to match NetBox's own utilization, so you can gauge or
@@ -60,7 +62,7 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
 - **NetBox 4.2 or later.** The plugin depends on
   `display_url` on all serializers (deep links), the `/api/core/object-changes/` endpoint
   (change-log annotations), and a prefix's generic `scope`, returned by IP enrichment as
-  `prefix_scope`. Both classic (v1) and `nbt_…` (v2, NetBox 4.5+) API tokens are supported
+  `prefix_scope` and `prefix_scope_type`. Both classic (v1) and `nbt_…` (v2, NetBox 4.5+) API tokens are supported
   and auto-detected.
 - **Grafana 12.3 or later** (the plugin's `grafanaDependency`; CI runs the e2e
   tests on versions from 12.3 to the latest release, and on nightly).
@@ -167,7 +169,7 @@ datasources:
 | Type              | Returns                                                        | Use with                          |
 | ----------------- | -------------------------------------------------------------- | --------------------------------- |
 | **Objects**       | A joinable table for any object type (with optional join keys) | Table, or Outer-join onto metrics |
-| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`. Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
+| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`, with the NetBox id and link of the address record, device or VM, and prefix (cost per field in [Recipe 3b](docs/RECIPES.md)). Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
 | **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)     | Node Graph panel                  |
 | **Annotations**   | NetBox change-log events, optionally scoped to objects and what's attached, plus journal entries. Read-only (no Edit button) | Dashboard annotations |
 

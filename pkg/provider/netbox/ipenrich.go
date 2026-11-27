@@ -1006,10 +1006,11 @@ func (p *Provider) fetchVMs(ctx context.Context, ids []int, withURL bool) (map[i
 // reusing the device keyspace would collide, and NetBox permits a device and a
 // VM with the same name, which would make the documented device_name →
 // Prometheus `device` join match the wrong thing. vm_id and vm_name come free
-// off the address payload; vm_url costs one VM request (see fetchVMs). Per row at most one of vm_name and device_name is set,
-// never both — and both are blank whenever the address is assigned to neither
-// (an ipam.fhrpgroup, or nothing at all), as they are on a prefix-fallback row;
-// see deviceIDFromAddress and vmNameFromAddress.
+// off the address payload; vm_url costs one VM request (see fetchVMs). Per row
+// at most one of vm_name and device_name is set, never both — and both are
+// blank whenever the address is assigned to neither (an ipam.fhrpgroup, or
+// nothing at all), as they are on a prefix-fallback row; see
+// deviceIDFromAddress and vmNameFromAddress.
 // address_assigned_object_type carries the raw NetBox relation string
 // (dcim.interface, virtualization.vminterface, ipam.fhrpgroup), never a
 // friendly label: unlike address_status, assigned_object_type is a plain

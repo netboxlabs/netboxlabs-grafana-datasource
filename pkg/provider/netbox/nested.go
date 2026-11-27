@@ -1,10 +1,12 @@
 package netbox
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // A nested column, <ref>__<col>, is column <col> of the object under the
@@ -42,13 +44,60 @@ func isNestedColumn(name string) bool {
 	return ok
 }
 
+// nestedIn is isNestedColumn for a query whose plain names are known: a name
+// in plain is one of the object type's own properties (schemaProperties), not
+// a nested column, however it is spelt.
+func nestedIn(name string, plain map[string]bool) bool {
+	return !plain[name] && isNestedColumn(name)
+}
+
+// nestedSchemaWait bounds how long a query waits for NetBox's schema to tell a
+// property spelt <a>__<b> from a nested column. Past it the name is read as a
+// nested column; the schema fetch carries on, and a later refresh has it.
+const nestedSchemaWait = 2 * time.Second
+
+// schemaProperties is which of names, spelt like nested columns, NetBox's
+// schema lists as objectType's own properties. Django refuses "__" in a model
+// field's name, so NetBox's own properties never hold one, but a plugin's
+// serializer can declare one, and that property must be projected and read by
+// its own name. Only asked when a name looks nested; nil when none does or the
+// schema can't be read within nestedSchemaWait.
+func (p *Provider) schemaProperties(ctx context.Context, objectType string, names []string) map[string]bool {
+	var candidates []string
+	for _, n := range names {
+		if isNestedColumn(n) {
+			candidates = append(candidates, n)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	sctx, cancel := context.WithTimeout(ctx, nestedSchemaWait)
+	defer cancel()
+	entry, err := p.schema(sctx)
+	if err != nil || entry.dims == nil {
+		return nil
+	}
+	props := entry.dims[objectType]
+	var plain map[string]bool
+	for _, n := range candidates {
+		if _, ok := props[n]; ok {
+			if plain == nil {
+				plain = map[string]bool{}
+			}
+			plain[n] = true
+		}
+	}
+	return plain
+}
+
 // nestedRefs is the references the nested columns among names read, for the
-// projection, each once.
-func nestedRefs(names []string) []string {
+// projection, each once. plain names aren't nested (nestedIn).
+func nestedRefs(names []string, plain map[string]bool) []string {
 	var refs []string
 	for _, n := range names {
 		ref, _, ok := nestedColumn(n)
-		if ok && !slices.Contains(refs, ref) {
+		if ok && !plain[n] && !slices.Contains(refs, ref) {
 			refs = append(refs, ref)
 		}
 	}
@@ -68,10 +117,10 @@ func nestedRefs(names []string) []string {
 // reference at all (usually a typo), or NetBox's short form of the reference
 // has no such column. One whose reference is present but unset on every row is
 // a note: that can be the data.
-func addNestedColumns(fields, keys []string, raws []json.RawMessage, rows []map[string]interface{}, columns []string, seen map[string]bool) (cols, notes, warnings []string) {
+func addNestedColumns(fields, keys []string, plain map[string]bool, raws []json.RawMessage, rows []map[string]interface{}, columns []string, seen map[string]bool) (cols, notes, warnings []string) {
 	var want []string
 	for _, n := range append(append([]string(nil), fields...), keys...) {
-		if isNestedColumn(n) && !slices.Contains(want, n) {
+		if nestedIn(n, plain) && !slices.Contains(want, n) {
 			want = append(want, n)
 		}
 	}
@@ -113,7 +162,7 @@ func addNestedColumns(fields, keys []string, raws []json.RawMessage, rows []map[
 		}
 	}
 	for _, n := range fields {
-		if isNestedColumn(n) && !seen[n] {
+		if nestedIn(n, plain) && !seen[n] {
 			seen[n] = true
 			columns = append(columns, n)
 		}

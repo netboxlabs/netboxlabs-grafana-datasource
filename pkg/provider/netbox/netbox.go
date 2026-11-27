@@ -435,7 +435,10 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// caller asked for except the columns computed below. Both the projection
 	// and its safety net reason about THIS list, never spec.Fields: a computed
 	// column is added after the fetch and can never come back in the response.
-	fetchable := fetchableFields(spec.Fields)
+	// A name spelt <a>__<b> is a nested column unless NetBox's schema lists it
+	// as one of the object type's own properties (schemaProperties).
+	plain := p.schemaProperties(ctx, spec.ObjectType, append(append([]string(nil), spec.Fields...), spec.KeyFields...))
+	fetchable := fetchableFieldsWith(spec.Fields, plain)
 
 	// Whether the `exclude` parameter is the CALLER'S rather than ours. Read
 	// before the projection sets it, because that is the only moment the two are
@@ -457,7 +460,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// An empty selection is every column, which no projection can express;
 		// a selection of only computed columns still projects, down to the
 		// properties those columns are computed from.
-		if projection = projectionValue(fetchable, fetchOnlyFields(spec)); projection != "" {
+		if projection = projectionValue(fetchable, fetchOnlyFields(spec, plain)); projection != "" {
 			q.Set(fieldsParam, projection)
 			setExcludeConfigContext(q, projection)
 		}
@@ -620,7 +623,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	}
 
 	// Computed from the final rows, after any refetch above.
-	columns, nestedNotes, nestedWarnings := addNestedColumns(spec.Fields, spec.KeyFields, flatRaws, flatRows, columns, seen)
+	columns, nestedNotes, nestedWarnings := addNestedColumns(spec.Fields, spec.KeyFields, plain, flatRaws, flatRows, columns, seen)
 
 	var notes, warnings []string
 	notes = append(notes, nestedNotes...)
@@ -941,16 +944,16 @@ func thousands(n int) string {
 // loudly: a join key derives its output from row[Source] whatever the selection
 // says (see pkg/plugin.joinKeySources), and utilization is computed from
 // properties of the object that the utilization columns do not name.
-func fetchOnlyFields(spec provider.QuerySpec) []string {
+func fetchOnlyFields(spec provider.QuerySpec, plain map[string]bool) []string {
 	var extra []string
 	for _, k := range spec.KeyFields {
-		if !isNestedColumn(k) {
+		if !nestedIn(k, plain) {
 			extra = append(extra, k)
 		}
 	}
 	// A nested column, in the selection or as a key source, is read from its
 	// reference, which is what's asked for: never the nested name.
-	extra = append(extra, nestedRefs(append(append([]string(nil), spec.Fields...), spec.KeyFields...))...)
+	extra = append(extra, nestedRefs(append(append([]string(nil), spec.Fields...), spec.KeyFields...), plain)...)
 	if isUtilizationType(spec.ObjectType) && wantsUtilization(spec.Fields) {
 		extra = append(extra, utilizationSourceFields()...)
 	}

@@ -196,3 +196,28 @@ func TestQueryNestedColumnThatDoesntExistSaysSo(t *testing.T) {
 		t.Errorf("device_type__model has values but is named in %q / %q", warnings, notes)
 	}
 }
+
+// A property whose own name holds a double underscore (a plugin serializer can
+// declare one) is a plain column when NetBox's schema lists it: it is projected
+// by its own name and keeps its value, rather than being read as a nested
+// column of a reference that doesn't exist.
+func TestQueryRealDoubleUnderscorePropertyIsNotNested(t *testing.T) {
+	d := newDimServer(t)
+	d.schema = strings.Replace(dimSchemaFixture, `"name":   {"type": "string"},
+    "site":`, `"name":   {"type": "string"},
+    "plugin__flag": {"type": "string"},
+    "site":`, 1)
+	d.deviceRows = []string{`{"id":1,"name":"a","plugin__flag":"kept","site":{"id":1,"display":"AMS1","name":"AMS1","slug":"ams1"}}`}
+	d.deviceLen = 1
+	p := newDimProvider(d)
+	res, err := p.Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name", "plugin__flag"}, Limit: 10})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := res.Rows[0]["plugin__flag"]; got != "kept" {
+		t.Errorf("plugin__flag = %#v, want kept", got)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("warnings %v, want none", res.Warnings)
+	}
+}

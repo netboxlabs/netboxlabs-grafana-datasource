@@ -9,10 +9,10 @@
   change log doesn't hide them; removals are checked in one page of it.
 - **IP enrichment returns NetBox ids and the device's manufacturer.** New context
   fields: `address_id`, `device_id`, `vm_id`, `prefix_id`, `prefix_scope_type`
-  (`dcim.site`, `dcim.region`, …) and `device_manufacturer`. `address_id`,
-  `device_id` and `vm_id` come from the address record at no cost,
-  `device_manufacturer` from the device request, and the `prefix_*` fields cost
-  the prefix fallback they belong to.
+  (`dcim.site`, `dcim.region`, …) and `device_manufacturer`. In NetBox mode
+  `address_id`, `device_id` and `vm_id` come from the address record at no
+  cost, `device_manufacturer` from the device request, and the `prefix_*` fields
+  cost the prefix fallback they belong to.
 - **Secure SOCKS proxy switch on the settings page.** On self-hosted Grafana
   with a secure SOCKS5 data source proxy, the datasource can be routed through
   it from the settings page. Grafana Cloud's PDC network selector appears once

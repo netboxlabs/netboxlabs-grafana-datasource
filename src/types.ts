@@ -5,8 +5,8 @@ import { DataQuery } from '@grafana/schema';
  *
  * 'netbox' queries the NetBox REST API directly and is the default.
  * 'replica-cache' reads a columnar mirror built for instances the REST API
- * cannot serve interactively; it cannot do annotations, IP enrichment or
- * topology, and says so rather than returning empty results. */
+ * cannot serve interactively; it cannot do annotations or branches, and says
+ * so rather than returning empty results. */
 export type ProviderMode = 'netbox' | 'replica-cache';
 
 /** A single field/operator/value constraint applied to a query. */

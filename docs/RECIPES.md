@@ -196,7 +196,8 @@ longest containing prefix:
    if you selected `device_*` anyway) plus a batched virtual-machine request, because a
    VM's primary address — unlike its name — is not carried inside the address record.
    Both are gated on the column: a query that doesn't select it asks NetBox about no
-   virtual machine at all.
+   virtual machine at all. These are NetBox mode's costs; replica-cache mode's differ
+   per column (see [REPLICA-CACHE.md](REPLICA-CACHE.md#ip-enrichment)).
 
 3. The result is a table keyed by `ip`. Use it standalone, or **Join by field** on `ip`
    against your flow table (rename the flow label to `ip` with an _organize fields_

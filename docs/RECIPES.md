@@ -466,7 +466,10 @@ in batches, each id once, the total exact. Keep in mind:
 it: `device_type__manufacturer` is a device's manufacturer, `device_type__model`
 its model. They come with the row, so they cost no extra request. Add them to
 **Return fields** (the list offers the references nested in references; type any
-other), and use them in SQL as they are: `NB.device_type__manufacturer`.
+other), and use them in SQL as they are: `NB.device_type__manufacturer`. The short
+form carries only some fields (a site's has no region), so a column that can't
+exist, or a misspelled reference, comes back empty with a warning naming it, and
+an alert rule or SQL expression reading it fails with that warning.
 
 ## Beyond joins
 

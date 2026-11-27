@@ -157,7 +157,10 @@ func (p *Provider) readIDBatchWave(ctx context.Context, objectType string, b que
 
 // batchHonoursIDs reports whether a batch's answer is what its id filter
 // allows: no more objects than ids, and every row one of its ids. An endpoint
-// that ignores the filter fails one or the other, however small its table.
+// that ignores the filter fails one or the other, however small its table. A
+// row without an integer id (a caller's own fields filter left it out, or a
+// model keyed by something else) can't be checked by id: the count is its
+// check.
 func batchHonoursIDs(res listResult, ids []string) bool {
 	if res.totalKnown && res.total > len(ids) {
 		return false
@@ -171,19 +174,23 @@ func batchHonoursIDs(res listResult, ids []string) bool {
 	}
 	for _, raw := range res.rows {
 		var row struct {
-			ID int64 `json:"id"`
+			ID json.RawMessage `json:"id"`
 		}
-		if json.Unmarshal(raw, &row) != nil || !set[row.ID] {
+		var id int64
+		if json.Unmarshal(raw, &row) != nil || json.Unmarshal(row.ID, &id) != nil {
+			continue
+		}
+		if !set[id] {
 			return false
 		}
 	}
 	return true
 }
 
-// idBatchNote says a batched, sorted read is sorted within each batch only, and,
-// when Limit cut it, that the rows kept are the first batches', not the top ones
-// by the sort: NetBox's order (natural sort, a reference by its own ordering)
-// can't be reproduced here to merge the batches.
+// idBatchNote says a batched read is ordered within each batch only, and, when
+// Limit cut it, that the rows kept are the first batches' (with a sort, not the
+// top ones by it): NetBox's order (natural sort, a reference by its own
+// ordering) can't be reproduced here to merge the batches.
 func idBatchNote(page listResult, sorted bool, shown int) string {
 	if page.batches < 2 {
 		return ""
@@ -194,13 +201,14 @@ func idBatchNote(page listResult, sorted bool, shown int) string {
 		return fmt.Sprintf("Read in %d batches (%s ids), each sorted by NetBox on its own, and cut at the Limit: the rows shown are the first batches', not the top %s by the sort. Raise the Limit to cover every id.",
 			page.batches, thousands(page.ids), thousands(shown))
 	case cut:
-		return fmt.Sprintf("Read in %d batches (%s ids) and cut at the Limit: the rows shown are the first batches', in the order the ids were given. Raise the Limit to cover every id.",
+		return fmt.Sprintf("Read in %d batches (%s ids), each in NetBox's own order, and cut at the Limit: the rows shown are the first batches'. Raise the Limit to cover every id.",
 			page.batches, thousands(page.ids))
 	case sorted:
-		return fmt.Sprintf("Read in %d batches (%s ids); NetBox sorted each batch separately, so sort in the panel to order the whole table.",
+		return fmt.Sprintf("Read in %d batches (%s ids), each sorted by NetBox on its own; sort in the panel to order the whole table.",
 			page.batches, thousands(page.ids))
 	}
-	return ""
+	return fmt.Sprintf("Read in %d batches (%s ids), each in NetBox's own order; sort in the panel to order the whole table.",
+		page.batches, thousands(page.ids))
 }
 
 // idFilterIgnoredError is a batch of ids answered with more objects than ids:

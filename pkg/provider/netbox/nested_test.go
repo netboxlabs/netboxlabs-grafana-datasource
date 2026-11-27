@@ -173,3 +173,21 @@ func TestNestedColumn(t *testing.T) {
 		}
 	}
 }
+
+// A nested column that is empty on every row because its reference, or the
+// column in it, doesn't exist says so, rather than leave a silent blank: a
+// typo, or a field NetBox's short form of the reference doesn't carry.
+func TestQueryNestedColumnThatDoesntExistSaysSo(t *testing.T) {
+	spec := provider.QuerySpec{ObjectType: "dcim/devices", Limit: 100,
+		Fields: []string{"name", "device_typ__model", "site__region", "device_type__model"}}
+	_, projected, _ := runBoth(t, spec, typedDevices())
+	notes := strings.Join(projected.Notes, " | ")
+	for _, want := range []string{"device_typ__model", "site__region"} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("notes %q don't name %s", notes, want)
+		}
+	}
+	if strings.Contains(notes, "device_type__model") {
+		t.Errorf("notes %q name device_type__model, which has values", notes)
+	}
+}

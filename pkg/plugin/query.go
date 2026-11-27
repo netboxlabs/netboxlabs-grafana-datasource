@@ -272,16 +272,26 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		if qm.ValueField != "" && len(fields) > 0 && !slices.Contains(fields, qm.ValueField) {
 			fields = append(slices.Clone(fields), qm.ValueField)
 		}
+		// With every column, a nested Value field isn't among them: it is
+		// computed as a key source, and made a column below.
+		keyFields := joinKeySources(qm.JoinKeys)
+		nestedValue := len(fields) == 0 && netbox.IsNestedColumn(qm.ValueField)
+		if nestedValue {
+			keyFields = append(slices.Clone(keyFields), qm.ValueField)
+		}
 		res, err := d.provider.Query(ctx, provider.QuerySpec{
 			ObjectType: qm.ObjectType,
 			Filters:    qm.Filters,
 			Fields:     fields,
-			KeyFields:  joinKeySources(qm.JoinKeys),
+			KeyFields:  keyFields,
 			Ordering:   queryOrdering(qm.Ordering, c),
 			Limit:      qm.Limit,
 		})
 		if err != nil {
 			return d.queryErrorResponse(err)
+		}
+		if nestedValue && !slices.Contains(res.Columns, qm.ValueField) {
+			res.Columns = append(res.Columns, qm.ValueField)
 		}
 		if qm.ValueField != "" && !slices.Contains(res.Columns, qm.ValueField) {
 			return backend.ErrDataResponse(backend.StatusBadRequest,

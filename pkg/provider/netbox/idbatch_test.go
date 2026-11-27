@@ -2,6 +2,7 @@ package netbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -168,8 +169,10 @@ func TestQueryLongIDListIsBatched(t *testing.T) {
 			t.Errorf("a batch lost the other parameters: status=%q fields=%q", q.Get("status"), q.Get("fields"))
 		}
 	}
-	if len(res.Notes) != 0 {
-		t.Errorf("notes %v, want none without a sort", res.Notes)
+	// Each batch comes back in NetBox's own order: the note says the table
+	// isn't ordered as a whole.
+	if len(res.Notes) != 1 || !strings.Contains(res.Notes[0], "own order") {
+		t.Errorf("notes %v, want the per-batch order note", res.Notes)
 	}
 }
 
@@ -402,5 +405,26 @@ func TestQueryBatchedCutWithoutSortSaysSo(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("notes = %v, want one saying the rows are the first batches'", res.Notes)
+	}
+}
+
+// A row without an integer id (a caller's own fields filter left id out, or a
+// plugin model keyed by something else) can't be checked by id: the batch's
+// count is its check.
+func TestBatchHonoursIDsWithoutIntegerIDs(t *testing.T) {
+	raw := func(s string) []json.RawMessage { return []json.RawMessage{json.RawMessage(s)} }
+	for _, tc := range []struct {
+		name string
+		res  listResult
+		want bool
+	}{
+		{"no id", listResult{rows: raw(`{"name":"sw1"}`), total: 1, totalKnown: true}, true},
+		{"string id", listResult{rows: raw(`{"id":"3f2a"}`), total: 1, totalKnown: true}, true},
+		{"id outside the batch", listResult{rows: raw(`{"id":99}`), total: 1, totalKnown: true}, false},
+		{"more than the batch", listResult{rows: raw(`{"name":"sw1"}`), total: 3, totalKnown: true}, false},
+	} {
+		if got := batchHonoursIDs(tc.res, []string{"1", "2"}); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

@@ -21,9 +21,10 @@ import (
 // values (unless ignoreID), pages by limit and offset with a count and next
 // link, and records each request's raw query.
 type idServer struct {
-	n        int
-	ignoreID bool
-	failFor  string // an id: a request carrying it answers 400
+	n           int
+	ignoreID    bool
+	failFor     string // an id: a request carrying it answers 400
+	honorFields bool   // rows carry only the ?fields= properties, as NetBox's do
 
 	mu      sync.Mutex
 	queries []string
@@ -59,7 +60,14 @@ func (s *idServer) start(t *testing.T, opts ...Option) *Provider {
 		end := min(len(ids), offset+limit)
 		var rows []string
 		for _, id := range ids[min(offset, len(ids)):end] {
-			rows = append(rows, fmt.Sprintf(`{"id":%d,"name":"d%d"}`, id, id))
+			obj := map[string]string{"id": strconv.Itoa(id), "name": fmt.Sprintf("%q", fmt.Sprintf("d%d", id))}
+			var parts []string
+			for _, k := range []string{"id", "name"} {
+				if !s.honorFields || q.Get("fields") == "" || slices.Contains(strings.Split(q.Get("fields"), ","), k) {
+					parts = append(parts, fmt.Sprintf("%q:%s", k, obj[k]))
+				}
+			}
+			rows = append(rows, "{"+strings.Join(parts, ",")+"}")
 		}
 		next := "null"
 		if end < len(ids) {
@@ -354,5 +362,45 @@ func TestQueryBatchedComparesIDsAsNumbers(t *testing.T) {
 	}
 	if res.Total != 3000 {
 		t.Errorf("total = %d, want 3000", res.Total)
+	}
+}
+
+// A batched read checks each row's id, so it asks for id whatever the Return
+// fields: a selection without it isn't refused as an ignored filter.
+func TestQueryBatchedProjectionKeepsTheID(t *testing.T) {
+	s := &idServer{n: 3000, honorFields: true}
+	res, err := s.start(t).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
+		Filters: []provider.Filter{idFilter(1, 3000)}, Fields: []string{"name"}, Limit: MaxLimit})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Rows) != 3000 || res.Rows[0]["name"] != "d1" || !slices.Equal(res.Columns, []string{"name"}) {
+		t.Errorf("rows %d, first %v, columns %v; want 3000 rows of name only", len(res.Rows), res.Rows[0], res.Columns)
+	}
+}
+
+// Ids are de-duplicated as NetBox reads them, as numbers: 7 and 007 are one
+// object, read once.
+func TestDedupeIDsAsNumbers(t *testing.T) {
+	if got := dedupeIDs([]string{"7", "007", "8", "x", "x"}); !slices.Equal(got, []string{"7", "8", "x"}) {
+		t.Errorf("dedupeIDs = %v", got)
+	}
+}
+
+// An unsorted batched read cut at its Limit says which rows it kept.
+func TestQueryBatchedCutWithoutSortSaysSo(t *testing.T) {
+	s := &idServer{n: 3000}
+	res, err := s.start(t).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Filters: []provider.Filter{idFilter(1, 3000)}, Limit: 100})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	found := false
+	for _, n := range res.Notes {
+		if strings.Contains(n, "batches") && strings.Contains(n, "Limit") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("notes = %v, want one saying the rows are the first batches'", res.Notes)
 	}
 }

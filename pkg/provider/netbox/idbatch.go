@@ -63,13 +63,20 @@ func idRoom(q url.Values) int {
 	return chunkBudgetBytes - idBatcherFor(q).fixedBytes() - pagingParamBytes
 }
 
-// dedupeValues is values without repeats, in first-seen order.
-func dedupeValues(values []string) []string {
+// dedupeIDs is id filter values without repeats, in first-seen order, compared
+// as NetBox reads them: as numbers, so 7 and 007 are one id (the first
+// spelling kept). A value that isn't a number is compared as written; NetBox
+// refuses it anyway.
+func dedupeIDs(values []string) []string {
 	seen := make(map[string]bool, len(values))
 	out := make([]string, 0, len(values))
 	for _, v := range values {
-		if !seen[v] {
-			seen[v] = true
+		key := "s:" + v
+		if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+			key = strconv.FormatInt(n, 10)
+		}
+		if !seen[key] {
+			seen[key] = true
 			out = append(out, v)
 		}
 	}
@@ -84,7 +91,7 @@ func dedupeValues(values []string) []string {
 // (an endpoint that ignores filters would repeat its whole table per batch), and
 // the read fails. The first batch error is the read's.
 func (p *Provider) fetchIDBatches(ctx context.Context, objectType string, q url.Values, limit int) (listResult, error) {
-	ids := dedupeValues(q[idParam])
+	ids := dedupeIDs(q[idParam])
 	b := idBatcherFor(q)
 	chunks := b.chunk(ids)
 	if len(chunks) <= 1 {
@@ -178,15 +185,22 @@ func batchHonoursIDs(res listResult, ids []string) bool {
 // by the sort: NetBox's order (natural sort, a reference by its own ordering)
 // can't be reproduced here to merge the batches.
 func idBatchNote(page listResult, sorted bool, shown int) string {
-	if page.batches < 2 || !sorted {
+	if page.batches < 2 {
 		return ""
 	}
-	if page.totalKnown && page.total > shown {
+	cut := page.totalKnown && page.total > shown
+	switch {
+	case cut && sorted:
 		return fmt.Sprintf("Read in %d batches (%s ids), each sorted by NetBox on its own, and cut at the Limit: the rows shown are the first batches', not the top %s by the sort. Raise the Limit to cover every id.",
 			page.batches, thousands(page.ids), thousands(shown))
+	case cut:
+		return fmt.Sprintf("Read in %d batches (%s ids) and cut at the Limit: the rows shown are the first batches', in the order the ids were given. Raise the Limit to cover every id.",
+			page.batches, thousands(page.ids))
+	case sorted:
+		return fmt.Sprintf("Read in %d batches (%s ids); NetBox sorted each batch separately, so sort in the panel to order the whole table.",
+			page.batches, thousands(page.ids))
 	}
-	return fmt.Sprintf("Read in %d batches (%s ids); NetBox sorted each batch separately, so sort in the panel to order the whole table.",
-		page.batches, thousands(page.ids))
+	return ""
 }
 
 // idFilterIgnoredError is a batch of ids answered with more objects than ids:

@@ -3,8 +3,19 @@ import { Alert, InlineField, Select, Input, Stack, Button, IconButton } from '@g
 import { SelectableValue } from '@grafana/data';
 import { DataSource } from '../datasource';
 import { getTemplateSrv } from '@grafana/runtime';
-import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, BRANCH_FIELD_DISABLED_TOOLTIP } from '../hooks/useBranchingInstalled';
-import { FieldOption, FilterRow, NetBoxVariableQuery, ObjectTypeOption, validateFilters } from '../types';
+import {
+  useBranchingInstalled,
+  BRANCH_FIELD_TOOLTIP,
+  BRANCH_FIELD_DISABLED_TOOLTIP,
+} from '../hooks/useBranchingInstalled';
+import {
+  FieldOption,
+  FilterRow,
+  NetBoxVariableQuery,
+  ObjectTypeOption,
+  isNestedColumn,
+  validateFilters,
+} from '../types';
 
 interface Props {
   query: NetBoxVariableQuery;
@@ -19,15 +30,16 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
   const [fields, setFields] = useState<string[]>([]);
 
   useEffect(() => {
-    datasource.getObjectTypes().then(setObjectTypes).catch(() => setObjectTypes([]));
+    datasource
+      .getObjectTypes()
+      .then(setObjectTypes)
+      .catch(() => setObjectTypes([]));
   }, [datasource]);
 
   useEffect(() => {
     let active = true;
     const branch = query.branch ? getTemplateSrv().replace(query.branch) : undefined;
-    const p = query.objectType
-      ? datasource.getFields(query.objectType, branch)
-      : Promise.resolve<FieldOption[]>([]);
+    const p = query.objectType ? datasource.getFields(query.objectType, branch) : Promise.resolve<FieldOption[]>([]);
     p.then((f) => active && setFields(f.map((x) => x.name))).catch(() => active && setFields([]));
     return () => {
       active = false;
@@ -42,6 +54,9 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
     () => fields.map((f) => ({ label: f, value: f })),
     [fields]
   );
+  // A nested column is computed by the data source: NetBox has no filter of
+  // that name and would ignore one, so the variable would list everything.
+  const filterFieldOptions = useMemo(() => fieldOptions.filter((o) => !isNestedColumn(o.value ?? '')), [fieldOptions]);
 
   const filters = query.filters ?? [];
   const filterIssues = validateFilters(filters);
@@ -100,8 +115,9 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
           <Stack gap={1} direction="row" alignItems="flex-end">
             <InlineField label={i === 0 ? 'Filter' : ' '} labelWidth={16}>
               <Select
+                aria-label="Filter field"
                 width={24}
-                options={fieldOptions}
+                options={filterFieldOptions}
                 allowCustomValue
                 value={f.field ? { label: f.field, value: f.field } : null}
                 placeholder="field"

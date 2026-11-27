@@ -473,9 +473,16 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// fast paging.
 	// Repeated ids are sent once: an id names one object whatever its count.
 	if ids := q[idParam]; len(ids) > 1 {
-		q[idParam] = dedupeValues(ids)
+		q[idParam] = dedupeIDs(ids)
 	}
-	batched := idBatchingNeeded(q, orderingReserve(spec.Ordering))
+	batched := idBatchingNeeded(q, orderingReserve(spec.Ordering)+len(",id"))
+	// A batched read checks every row's id (batchHonoursIDs), so our
+	// projection asks for it whatever the selection; it isn't a column unless
+	// selected. A caller's own `fields` filter is left alone (projection "").
+	if batched && projection != "" && !slices.Contains(strings.Split(projection, ","), "id") {
+		projection += ",id"
+		q.Set(fieldsParam, projection)
+	}
 	cursor := !batched && p.cursorPaging && spec.AllowUncounted && cursorLegal(q)
 
 	// Sorting is decided AFTER cursor mode, and the order of these two lines is the
@@ -2164,8 +2171,7 @@ func (p *Provider) readObjectTypeIDs(ctx context.Context) (map[string]int, error
 func allNullCustomFieldColumns(columns []string, rows []map[string]interface{}) []string {
 	var out []string
 	for _, c := range columns {
-		// cf_<x>__<y> is a nested column, not a custom field.
-		if !strings.HasPrefix(c, cfPrefix) || isNestedColumn(c) {
+		if !strings.HasPrefix(c, cfPrefix) {
 			continue
 		}
 		allNull := true

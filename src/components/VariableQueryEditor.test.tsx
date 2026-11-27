@@ -7,6 +7,15 @@ jest.mock('@grafana/runtime', () => ({
   getTemplateSrv: () => ({ replace: (s: string) => (s === '$branch' ? 'td5smq0f' : s) }),
 }));
 
+// @grafana/ui's Select menu (via ScrollIndicators) uses IntersectionObserver;
+// jsdom doesn't implement it, so opening a Select's dropdown throws without this.
+class IntersectionObserverStub {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+(globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver = IntersectionObserverStub;
+
 const dsMock = {
   uid: 'ds-variable-editor',
   getObjectTypes: jest.fn().mockResolvedValue([]),
@@ -116,4 +125,28 @@ it('attributes a variable filter row message to that row only, not to every row'
     expect(within(row0).getByText(/isn't applied/i)).toBeInTheDocument();
     expect(within(row1).queryByText(/isn't applied/i)).not.toBeInTheDocument();
   });
+});
+
+// A nested column is computed by the data source; NetBox has no filter of that
+// name and would ignore one, so the variable would list everything.
+it('leaves nested columns out of the filter field list', async () => {
+  const ds = {
+    ...dsMock,
+    uid: 'ds-var-nested',
+    getFields: jest.fn().mockResolvedValue([{ name: 'name' }, { name: 'device_type__manufacturer' }]),
+  };
+  render(
+    <VariableQueryEditor
+      query={{ refId: 'A', objectType: 'dcim/devices', filters: [{ field: '', operator: '', value: '' }] } as any}
+      onChange={jest.fn()}
+      datasource={ds}
+    />
+  );
+  const input = await screen.findByLabelText('Filter field');
+  await waitFor(() => expect(ds.getFields).toHaveBeenCalled());
+  fireEvent.focus(input);
+  fireEvent.keyDown(input, { key: 'ArrowDown', keyCode: 40, code: 'ArrowDown' });
+  const menu = within(await screen.findByRole('listbox'));
+  expect(await menu.findByText('name')).toBeInTheDocument();
+  expect(menu.queryByText('device_type__manufacturer')).not.toBeInTheDocument();
 });

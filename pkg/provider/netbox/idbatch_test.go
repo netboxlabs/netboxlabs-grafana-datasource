@@ -26,6 +26,8 @@ type idServer struct {
 	ignoreID    bool
 	failFor     string // an id: a request carrying it answers 400
 	honorFields bool   // rows carry only the ?fields= properties, as NetBox's do
+	stringIDs   bool   // ids are strings, uuid-<n>, as a model keyed by a UUID's are
+	dropID      bool   // rows carry no id, asked for or not
 
 	mu      sync.Mutex
 	queries []string
@@ -46,6 +48,9 @@ func (s *idServer) start(t *testing.T, opts ...Option) *Provider {
 		// Ids are read as numbers, as NetBox reads them.
 		want := map[int]bool{}
 		for _, v := range q["id"] {
+			if s.stringIDs {
+				v = strings.TrimPrefix(strings.ToLower(v), "uuid-")
+			}
 			if n, err := strconv.Atoi(v); err == nil {
 				want[n] = true
 			}
@@ -62,8 +67,15 @@ func (s *idServer) start(t *testing.T, opts ...Option) *Provider {
 		var rows []string
 		for _, id := range ids[min(offset, len(ids)):end] {
 			obj := map[string]string{"id": strconv.Itoa(id), "name": fmt.Sprintf("%q", fmt.Sprintf("d%d", id))}
+			if s.stringIDs {
+				obj["id"] = strconv.Quote(fmt.Sprintf("uuid-%d", id))
+			}
+			keys := []string{"id", "name"}
+			if s.dropID {
+				keys = keys[1:]
+			}
 			var parts []string
-			for _, k := range []string{"id", "name"} {
+			for _, k := range keys {
 				if !s.honorFields || q.Get("fields") == "" || slices.Contains(strings.Split(q.Get("fields"), ","), k) {
 					parts = append(parts, fmt.Sprintf("%q:%s", k, obj[k]))
 				}
@@ -102,6 +114,15 @@ func idFilter(from, to int) provider.Filter {
 	var vals []string
 	for i := from; i <= to; i++ {
 		vals = append(vals, strconv.Itoa(i))
+	}
+	return provider.Filter{Field: "id", Value: strings.Join(vals, ",")}
+}
+
+// uuidFilter is an id filter of string ids, UUID-<from> to UUID-<to>.
+func uuidFilter(from, to int) provider.Filter {
+	var vals []string
+	for i := from; i <= to; i++ {
+		vals = append(vals, fmt.Sprintf("UUID-%d", i))
 	}
 	return provider.Filter{Field: "id", Value: strings.Join(vals, ",")}
 }
@@ -382,10 +403,10 @@ func TestQueryBatchedProjectionKeepsTheID(t *testing.T) {
 	}
 }
 
-// Ids are de-duplicated as NetBox reads them, as numbers: 7 and 007 are one
-// object, read once.
+// Ids are de-duplicated as they're checked: numbers as numbers (7 and 007 are
+// one object, read once), strings ignoring case.
 func TestDedupeIDsAsNumbers(t *testing.T) {
-	if got := dedupeIDs([]string{"7", "007", "8", "x", "x"}); !slices.Equal(got, []string{"7", "8", "x"}) {
+	if got := dedupeIDs([]string{"7", "007", "8", "x", "X"}); !slices.Equal(got, []string{"7", "8", "x"}) {
 		t.Errorf("dedupeIDs = %v", got)
 	}
 }
@@ -408,24 +429,81 @@ func TestQueryBatchedCutWithoutSortSaysSo(t *testing.T) {
 	}
 }
 
-// A row without an integer id (a caller's own fields filter left id out, or a
-// plugin model keyed by something else) can't be checked by id: the batch's
-// count is its check.
-func TestBatchHonoursIDsWithoutIntegerIDs(t *testing.T) {
-	raw := func(s string) []json.RawMessage { return []json.RawMessage{json.RawMessage(s)} }
+// Every row of a batch is checked by its id: a number as a number, a string (a
+// model keyed by a UUID) as written, ignoring case. A row with no id when the
+// request asked for one can't be checked, so the batch fails. Only a caller's
+// own fields filter leaving id out makes the count the only check.
+func TestBatchHonoursIDsChecksEveryRow(t *testing.T) {
+	one := func(row string, total int) listResult {
+		return listResult{rows: []json.RawMessage{json.RawMessage(row)}, total: total, totalKnown: true}
+	}
 	for _, tc := range []struct {
-		name string
-		res  listResult
-		want bool
+		name  string
+		res   listResult
+		ids   []string
+		asked bool
+		want  bool
 	}{
-		{"no id", listResult{rows: raw(`{"name":"sw1"}`), total: 1, totalKnown: true}, true},
-		{"string id", listResult{rows: raw(`{"id":"3f2a"}`), total: 1, totalKnown: true}, true},
-		{"id outside the batch", listResult{rows: raw(`{"id":99}`), total: 1, totalKnown: true}, false},
-		{"more than the batch", listResult{rows: raw(`{"name":"sw1"}`), total: 3, totalKnown: true}, false},
+		{"number in the batch, written with zeros", one(`{"id":7}`, 1), []string{"007"}, true, true},
+		{"number outside the batch", one(`{"id":99}`, 1), []string{"1", "2"}, true, false},
+		{"string in the batch, another case", one(`{"id":"3f2a-c0de"}`, 1), []string{"3F2A-C0DE"}, true, true},
+		{"string outside the batch", one(`{"id":"beef"}`, 1), []string{"3f2a"}, true, false},
+		{"null id", one(`{"id":null}`, 1), []string{"1", "2"}, true, false},
+		{"no id, asked for", one(`{"name":"sw1"}`, 1), []string{"1", "2"}, true, false},
+		{"no id, left out by the caller's fields", one(`{"name":"sw1"}`, 1), []string{"1", "2"}, false, true},
+		{"no id, more than the batch", one(`{"name":"sw1"}`, 3), []string{"1", "2"}, false, false},
 	} {
-		if got := batchHonoursIDs(tc.res, []string{"1", "2"}); got != tc.want {
+		if got := batchHonoursIDs(tc.res, tc.ids, tc.asked); got != tc.want {
 			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A model keyed by strings, on an endpoint that ignores the id filter and holds
+// fewer objects than a batch has ids: every batch would repeat the same rows,
+// and the count can't tell. The rows' ids can.
+func TestQueryBatchedRefusesAnIgnoredFilterOnStringIDs(t *testing.T) {
+	s := &idServer{n: 5, ignoreID: true, stringIDs: true}
+	_, err := s.start(t).Query(context.Background(), provider.QuerySpec{ObjectType: "plugins/things", Filters: []provider.Filter{uuidFilter(1, 3000)}, Limit: MaxLimit})
+	if err == nil || !strings.Contains(err.Error(), "id filter") {
+		t.Errorf("err = %v, want a refusal naming the id filter", err)
+	}
+}
+
+// String ids that the filter honours are read in batches like numbers, matched
+// whatever their case.
+func TestQueryBatchedReadsStringIDs(t *testing.T) {
+	s := &idServer{n: 3000, stringIDs: true}
+	res, err := s.start(t).Query(context.Background(), provider.QuerySpec{ObjectType: "plugins/things", Filters: []provider.Filter{uuidFilter(1, 3000)}, Limit: MaxLimit})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if res.Total != 3000 || len(res.Rows) != 3000 {
+		t.Errorf("total %d, rows %d; want 3000 of each", res.Total, len(res.Rows))
+	}
+}
+
+// Rows with no id, though the request asked for it, can't show the filter was
+// applied: refused rather than trusted on the count.
+func TestQueryBatchedRefusesRowsWithoutAnID(t *testing.T) {
+	s := &idServer{n: 5, ignoreID: true, dropID: true}
+	_, err := s.start(t).Query(context.Background(), provider.QuerySpec{ObjectType: "plugins/things", Filters: []provider.Filter{idFilter(1001, 3000)}, Limit: MaxLimit})
+	if err == nil || !strings.Contains(err.Error(), "id filter") {
+		t.Errorf("err = %v, want a refusal naming the id filter", err)
+	}
+}
+
+// A caller's own fields filter is theirs to shape the rows with, id left out
+// included: the batches are then checked by their counts.
+func TestQueryBatchedKeepsTheCallersFieldsFilter(t *testing.T) {
+	s := &idServer{n: 3000, honorFields: true}
+	res, err := s.start(t).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
+		Filters: []provider.Filter{idFilter(1, 3000), {Field: "fields", Value: "name"}}, Limit: MaxLimit})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if res.Total != 3000 || len(res.Rows) != 3000 {
+		t.Errorf("total %d, rows %d; want 3000 of each", res.Total, len(res.Rows))
 	}
 }
 

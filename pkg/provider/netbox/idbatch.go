@@ -64,14 +64,13 @@ func idRoom(q url.Values) int {
 }
 
 // dedupeIDs is id filter values without repeats, in first-seen order, compared
-// as NetBox reads them: as numbers, so 7 and 007 are one id (the first
-// spelling kept). A value that isn't a number is compared as written; NetBox
-// refuses it anyway.
+// as batchHonoursIDs compares them: numbers as numbers, so 7 and 007 are one id
+// (the first spelling kept), and anything else (a UUID) ignoring case.
 func dedupeIDs(values []string) []string {
 	seen := make(map[string]bool, len(values))
 	out := make([]string, 0, len(values))
 	for _, v := range values {
-		key := "s:" + v
+		key := "s:" + strings.ToLower(strings.TrimSpace(v))
 		if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
 			key = strconv.FormatInt(n, 10)
 		}
@@ -87,9 +86,9 @@ func dedupeIDs(values []string) []string {
 // a few at a time, in order; once the rows read reach limit, the remaining
 // batches are asked for their count only (one row each, dropped). Rows merge in
 // batch order and are cut at limit, and the total is the batches' sum. A batch
-// whose count passes its own id count means NetBox didn't apply the id filter
-// (an endpoint that ignores filters would repeat its whole table per batch), and
-// the read fails. The first batch error is the read's.
+// that fails batchHonoursIDs means NetBox didn't apply the id filter (an
+// endpoint that ignores filters would repeat its whole table per batch), and the
+// read fails. The first batch error is the read's.
 func (p *Provider) fetchIDBatches(ctx context.Context, objectType string, q url.Values, limit int) (listResult, error) {
 	ids := dedupeIDs(q[idParam])
 	b := idBatcherFor(q)
@@ -134,8 +133,9 @@ func (p *Provider) readIDBatchWave(ctx context.Context, objectType string, b que
 			if countOnly {
 				n = 1
 			}
-			res, err := p.fetchList(wctx, objectType, b.query(chunks[i]), n, false)
-			if err == nil && !batchHonoursIDs(res, chunks[i]) {
+			q := b.query(chunks[i])
+			res, err := p.fetchList(wctx, objectType, q, n, false)
+			if err == nil && !batchHonoursIDs(res, chunks[i], asksForID(q)) {
 				err = &idFilterIgnoredError{objectType: objectType, ids: len(chunks[i]), matched: res.total}
 			}
 			if err != nil {
@@ -158,33 +158,72 @@ func (p *Provider) readIDBatchWave(ctx context.Context, objectType string, b que
 // batchHonoursIDs reports whether a batch's answer is what its id filter
 // allows: no more objects than ids, and every row one of its ids. An endpoint
 // that ignores the filter fails one or the other, however small its table. A
-// row without an integer id (a caller's own fields filter left it out, or a
-// model keyed by something else) can't be checked by id: the count is its
-// check.
-func batchHonoursIDs(res listResult, ids []string) bool {
+// number is compared as a number, as NetBox reads it (an id written 007 is row
+// 7), and a string (a model keyed by a UUID) as written, ignoring case. A row
+// whose id is missing although idAsked, or is neither, can't show the filter
+// was applied, so the batch fails. Only when the request didn't ask for id (a
+// caller's own fields filter left it out) is the count the check.
+func batchHonoursIDs(res listResult, ids []string, idAsked bool) bool {
 	if res.totalKnown && res.total > len(ids) {
 		return false
 	}
-	// Compared as numbers, as NetBox reads them: an id written 007 is row 7.
-	set := make(map[int64]bool, len(ids))
+	nums := make(map[int64]bool, len(ids))
+	strs := make(map[string]bool, len(ids))
 	for _, id := range ids {
-		if n, err := strconv.ParseInt(strings.TrimSpace(id), 10, 64); err == nil {
-			set[n] = true
+		id = strings.TrimSpace(id)
+		if n, err := strconv.ParseInt(id, 10, 64); err == nil {
+			nums[n] = true
 		}
+		strs[strings.ToLower(id)] = true
 	}
 	for _, raw := range res.rows {
-		var row struct {
-			ID json.RawMessage `json:"id"`
+		var row map[string]json.RawMessage
+		if json.Unmarshal(raw, &row) != nil {
+			return false
 		}
-		var id int64
-		if json.Unmarshal(raw, &row) != nil || json.Unmarshal(row.ID, &id) != nil {
+		v, ok := row[idParam]
+		if !ok && !idAsked {
 			continue
 		}
-		if !set[id] {
+		if !ok || !idInBatch(v, nums, strs) {
 			return false
 		}
 	}
 	return true
+}
+
+// idInBatch reports whether a row's id is one of a batch's: a number by value,
+// a string ignoring case. null, or any other JSON, isn't.
+func idInBatch(v json.RawMessage, nums map[int64]bool, strs map[string]bool) bool {
+	if string(v) == "null" {
+		return false
+	}
+	var n int64
+	if json.Unmarshal(v, &n) == nil {
+		return nums[n]
+	}
+	var s string
+	if json.Unmarshal(v, &s) == nil {
+		return strs[strings.ToLower(strings.TrimSpace(s))]
+	}
+	return false
+}
+
+// asksForID reports whether a response to q carries each row's id. It does
+// unless a fields projection leaves id out, and only a caller's own fields
+// filter can: Query adds id to its projection for a batched read.
+func asksForID(q url.Values) bool {
+	if !q.Has(fieldsParam) {
+		return true
+	}
+	for _, v := range q[fieldsParam] {
+		for _, f := range strings.Split(v, ",") {
+			if strings.TrimSpace(f) == idParam {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // idBatchNote says a batched read is ordered within each batch only, and, when
@@ -215,8 +254,9 @@ func idBatchNote(page listResult, sorted bool, shown int) string {
 		page.batches, thousands(page.ids))
 }
 
-// idFilterIgnoredError is a batch of ids answered with more objects than ids:
-// NetBox didn't apply the id filter to this object type.
+// idFilterIgnoredError is a batch of ids answered with more objects than ids,
+// or with a row batchHonoursIDs can't place among them: NetBox didn't apply the
+// id filter to this object type.
 type idFilterIgnoredError struct {
 	objectType   string
 	ids, matched int

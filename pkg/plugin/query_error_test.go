@@ -267,9 +267,11 @@ func (e classifiedErr) Classification() *provider.UpstreamError { return &e.u }
 
 // A long id list read in batches on an object type whose endpoint ignored the
 // id filter is the query's to change, not an outage: its own message, a 400.
+// It doesn't suggest fewer ids: a shorter list is read unbatched, unchecked,
+// and comes back as the whole table.
 func TestQueryError_IDFilterIgnored(t *testing.T) {
 	err := classifiedErr{provider.UpstreamError{Kind: provider.ErrorKindIDFilterIgnored}}
-	if got := queryErrorMessage(err, false); !strings.Contains(got, "didn't apply the id filter") {
+	if got := queryErrorMessage(err, false); !strings.Contains(got, "didn't apply the id filter") || strings.Contains(got, "fewer") {
 		t.Errorf("message = %q", got)
 	}
 	if got := queryErrorStatus(err); got != backend.StatusBadRequest {

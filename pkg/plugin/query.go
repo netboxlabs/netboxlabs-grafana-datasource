@@ -757,7 +757,7 @@ func queryErrorMessage(err error, viaProxy bool) string {
 		case provider.ErrorKindNotOrderable:
 			return "NetBox couldn't list this object type — the endpoint doesn't support pagination (HTTP 500). This model may not be queryable."
 		case provider.ErrorKindIDFilterIgnored:
-			return "NetBox didn't apply the id filter to this object type, so a long id list can't be read in batches. Filter on another field, or send fewer ids."
+			return "NetBox didn't apply the id filter to this object type, so this query can't filter by id. Filter on another field."
 		}
 		if u.Status != 0 {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)

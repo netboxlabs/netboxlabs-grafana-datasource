@@ -15,6 +15,7 @@ import {
   FilterRow,
   NetBoxVariableQuery,
   ObjectTypeOption,
+  isNestedColumn,
   validateFilters,
 } from '../types';
 
@@ -47,15 +48,16 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
   const [filterFields, setFilterFields] = useState<string[]>([]);
 
   useEffect(() => {
-    datasource.getObjectTypes().then(setObjectTypes).catch(() => setObjectTypes([]));
+    datasource
+      .getObjectTypes()
+      .then(setObjectTypes)
+      .catch(() => setObjectTypes([]));
   }, [datasource]);
 
   useEffect(() => {
     let active = true;
     const branch = query.branch ? getTemplateSrv().replace(query.branch) : undefined;
-    const p = query.objectType
-      ? datasource.getFields(query.objectType, branch)
-      : Promise.resolve<FieldOption[]>([]);
+    const p = query.objectType ? datasource.getFields(query.objectType, branch) : Promise.resolve<FieldOption[]>([]);
     p.then((f) => active && setFields(f.map((x) => x.name))).catch(() => active && setFields([]));
     const fp = query.objectType
       ? datasource.getFilterFields(query.objectType, branch)
@@ -75,9 +77,14 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
     [fields]
   );
   // Falls back to the value list when the backend publishes no filterable set,
-  // so a provider without that resource keeps the picker it had.
+  // so a provider without that resource keeps the picker it had. A nested
+  // column is computed by the data source, not a filter the backend has, so
+  // the fallback leaves it out: the variable would list everything.
   const filterFieldOptions: Array<SelectableValue<string>> = useMemo(
-    () => (filterFields.length > 0 ? filterFields.map((f) => ({ label: f, value: f })) : fieldOptions),
+    () =>
+      filterFields.length > 0
+        ? filterFields.map((f) => ({ label: f, value: f }))
+        : fieldOptions.filter((o) => !isNestedColumn(o.value ?? '')),
     [filterFields, fieldOptions]
   );
 
@@ -144,6 +151,7 @@ export function VariableQueryEditor({ query, onChange, datasource }: Props) {
           <Stack gap={1} direction="row" alignItems="flex-end">
             <InlineField label={i === 0 ? 'Filter' : ' '} labelWidth={16}>
               <Select
+                aria-label="Filter field"
                 width={24}
                 options={filterFieldOptions}
                 allowCustomValue

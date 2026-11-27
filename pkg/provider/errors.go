@@ -52,6 +52,15 @@ const (
 	// empty at the source; the backend cannot tell which. Retrying cannot fix
 	// it; the query has to name a type the backend has data for.
 	ErrorKindNotReplicated ErrorKind = "not-replicated"
+	// ErrorKindIDFilterIgnored is a long id filter read in batches whose batch
+	// matched more objects than it named ids, or returned a row that isn't one
+	// of them: the upstream didn't apply the id filter to this object type, so
+	// the batches would repeat rows. The query can't be answered as written.
+	ErrorKindIDFilterIgnored ErrorKind = "id-filter-ignored"
+	// ErrorKindTooManyIDs is an id filter naming more distinct ids than one
+	// query reads (IDs of at most MaxIDs). Each batch of them is a request, so
+	// the list is refused before any is sent.
+	ErrorKindTooManyIDs ErrorKind = "too-many-ids"
 	// ErrorKindUpstream is any other identified upstream refusal. Status carries
 	// the code; there is nothing more specific to say.
 	ErrorKindUpstream ErrorKind = "upstream"
@@ -177,6 +186,9 @@ type UpstreamError struct {
 	// through Grafana's secure socks proxy, words the failure by that route
 	// instead.
 	Unreachable string
+	// IDs and MaxIDs are set only for ErrorKindTooManyIDs: the distinct ids the
+	// filter named, and the most one query reads.
+	IDs, MaxIDs int
 }
 
 // CountPastLimit is the AnnotationCount of a too-many-objects refusal made as

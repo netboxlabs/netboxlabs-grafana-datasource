@@ -424,6 +424,9 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 				keyFields = append(keyFields, qm.ValueField)
 			}
 		}
+		// With every column, a nested Value field isn't among them: it is read
+		// as a key field (above), and made a column below.
+		nestedValue := len(fields) == 0 && netbox.IsNestedColumn(qm.ValueField)
 		res, err := d.provider.Query(ctx, provider.QuerySpec{
 			ObjectType: qm.ObjectType,
 			Filters:    qm.Filters,
@@ -434,6 +437,9 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 		})
 		if err != nil {
 			return d.queryErrorResponse(err)
+		}
+		if nestedValue && !slices.Contains(res.Columns, qm.ValueField) {
+			res.Columns = append(res.Columns, qm.ValueField)
 		}
 		// Only a result with rows can lack the value field. A provider names its
 		// columns from the rows it returns, so an empty result has none to look in,
@@ -1092,6 +1098,11 @@ func queryErrorMessage(err error, viaProxy bool) string {
 			return "This object type was not found in NetBox (HTTP 404)."
 		case provider.ErrorKindNotOrderable:
 			return "NetBox couldn't list this object type — the endpoint doesn't support pagination (HTTP 500). This model may not be queryable."
+		case provider.ErrorKindIDFilterIgnored:
+			return "NetBox didn't apply the id filter to this object type, so this query can't filter by id. Filter on another field."
+		case provider.ErrorKindTooManyIDs:
+			return fmt.Sprintf("This query filters on %s ids, more than the %s one query reads. Filter on fewer ids, or on another field.",
+				thousands(u.IDs), thousands(u.MaxIDs))
 		case provider.ErrorKindAnnotation:
 			return annotationErrorMessage(u)
 		}
@@ -1228,7 +1239,8 @@ func queryErrorStatus(err error) backend.Status {
 			return backend.StatusInternal
 		case u.Kind == provider.ErrorKindUnknownObjectType, u.Kind == provider.ErrorKindAnnotation,
 			u.Kind == provider.ErrorKindUnsupported, u.Kind == provider.ErrorKindBadRequest,
-			u.Kind == provider.ErrorKindNotReplicated:
+			u.Kind == provider.ErrorKindNotReplicated, u.Kind == provider.ErrorKindIDFilterIgnored,
+			u.Kind == provider.ErrorKindTooManyIDs:
 			return backend.StatusBadRequest
 		}
 	}

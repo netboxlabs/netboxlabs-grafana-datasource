@@ -131,14 +131,20 @@ and is the simplest way to get predictable query performance at that scale.
    ever show a corner of the table.
 2. **Select only the fields you use.** _Return fields_ is not just presentation
    — the plugin asks NetBox to serialize only those properties, so a narrow
-   selection moves considerably less data.
-3. **Keep limits realistic.** A panel nobody scrolls past the first screen of
+   selection moves considerably less data. A reference's own fields come in the
+   same response: `device_type__manufacturer` is a device's manufacturer, with no
+   extra request.
+3. **Read only the objects you show.** When your metrics carry NetBox ids, filter
+   the NetBox query by them (`id` = a variable of those ids) instead of reading
+   every object. A list too long for one request is read in batches. See
+   [Joining in a SQL expression](docs/RECIPES.md#joining-in-a-sql-expression).
+4. **Keep limits realistic.** A panel nobody scrolls past the first screen of
    does not need a 10,000-row limit.
-4. **Treat `utilization` as expensive.** On prefixes and IP ranges it is
+5. **Treat `utilization` as expensive.** On prefixes and IP ranges it is
    computed from child objects rather than read from a column, so it costs extra
    upstream requests per row. The frame notice tells you how many. Select it
    when you want it, not by default.
-5. **Prefer the enrichment query types over huge object dumps.** IP enrichment
+6. **Prefer the enrichment query types over huge object dumps.** IP enrichment
    resolves a specific list of addresses; it does not scan the address table.
 
 **Two things the plugin does for you:**
@@ -194,7 +200,7 @@ _View in NetBox_ links of a replica that reports no NetBox URL — see
 
 | Type              | Returns                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Use with                          |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
-| **Objects**       | A joinable table for any object type (with optional join keys)                                                                                                                                                                                                                                                                                                                                                                                                       | Table, or Outer-join onto metrics |
+| **Objects**       | A joinable table for any object type (with optional join keys). A reference's own fields are columns too, as `<ref>__<col>` (`device_type__manufacturer`)                                                                                                                                                                                                                                                                                                            | Table, or Outer-join onto metrics |
 | **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`, with the NetBox id of the address record, device or VM, and prefix (cost per field in [Recipe 3](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/RECIPES.md#recipe-3-enrich-flows-or-logs-by-ip)). Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
 | **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)                                                                                                                                                                                                                                                                                                                                                                                                           | Node Graph panel                  |
 | **Annotations**   | NetBox change-log events, optionally scoped to objects and what's attached, plus journal entries. Read-only (no Edit button)                                                                                                                                                                                                                                                                                                                                         | Dashboard annotations             |

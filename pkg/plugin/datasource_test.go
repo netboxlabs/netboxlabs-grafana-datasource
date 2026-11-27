@@ -751,3 +751,29 @@ func TestNewProvider_ReplicaCachePassesBrowserURL(t *testing.T) {
 		})
 	}
 }
+
+// An alert table with every column and a nested Value field computes it: the
+// provider computes a nested column it is asked for as a key source, and the
+// value becomes a column of the table.
+func TestQueryData_AlertTable_NestedValueFieldWithAllColumns(t *testing.T) {
+	fp := &fakeProvider{
+		result: &provider.Result{
+			Columns: []string{"name"},
+			Rows:    []map[string]interface{}{{"name": "leaf1", "device_type__manufacturer_id": 7.0}},
+		},
+	}
+	d := newTestDatasource(fp)
+	req := &backend.QueryDataRequest{
+		Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(`{"objectType":"dcim/devices","alertTable":true,"valueField":"device_type__manufacturer_id"}`)}},
+	}
+	resp, err := d.QueryData(context.Background(), req)
+	if err != nil {
+		t.Fatalf("QueryData: %v", err)
+	}
+	if e := resp.Responses["A"].Error; e != nil {
+		t.Fatalf("response error: %v", e)
+	}
+	if !slices.Contains(fp.querySpec.KeyFields, "device_type__manufacturer_id") || len(fp.querySpec.Fields) != 0 {
+		t.Errorf("spec fields %v, key fields %v; want every column and the value field as a key source", fp.querySpec.Fields, fp.querySpec.KeyFields)
+	}
+}

@@ -456,6 +456,37 @@ filters so every match fits.
   PromQL before the join where you can: Grafana's own `sql_expression_cell_limit`
   (100,000 input cells) is usually reached first.
 
+**Read only the objects the panel shows.** When the metrics carry each object's
+NetBox id (a `netbox_id` label), filter the NetBox query by those ids instead of
+reading every object:
+
+- a hidden dashboard variable of the metric's ids, from the same selector as the
+  panel's query, e.g. Prometheus `label_values(device_cpu_percent{site=~"$site"}, netbox_id)`:
+  multi-value, **Include All** on and selected, and no **Custom all value**, so
+  All sends every id the variable lists (with the custom value `$__all` the
+  filter is dropped and every object is read);
+- on **NB**, the filter `id` = `${netbox_ids}`.
+
+The NetBox side then grows with what the panel shows, not with the inventory, and
+narrows when the dashboard's filters do. A list too long for one request is read
+in batches, each id once, the total exact. Keep in mind:
+
+- an empty variable sends no filter, so the query reads every object again;
+- more than 10,000 ids is refused, naming the count: no query shows more objects
+  than the ceiling above, and each batch is a request;
+- a sorted query read in batches is sorted within each batch (a notice says so):
+  sort in the panel if the order matters.
+
+**A reference's own fields.** A NetBox row carries each reference (`site`,
+`device_type`) in a short form, and a column named `<ref>__<col>` reads a field of
+it: `device_type__manufacturer` is a device's manufacturer, `device_type__model`
+its model. They come with the row, so they cost no extra request. Add them to
+**Return fields** (the list offers the references nested in references; type any
+other), and use them in SQL as they are: `NB.device_type__manufacturer`. The short
+form carries only some fields (a site's has no region), so a column that can't
+exist, or a misspelled reference, comes back empty with a warning naming it, and
+an alert rule or SQL expression reading it fails with that warning.
+
 ## Beyond joins
 
 - **Dashboard variables:** variable type **Query** → NetBox datasource → object type

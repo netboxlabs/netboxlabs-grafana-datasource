@@ -477,7 +477,10 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// caller asked for except the columns computed below. Both the projection
 	// and its safety net reason about THIS list, never spec.Fields: a computed
 	// column is added after the fetch and can never come back in the response.
-	fetchable := fetchableFields(spec.Fields)
+	// A name spelt <a>__<b> is a nested column unless NetBox's schema lists it
+	// as one of the object type's own properties (schemaProperties).
+	plain := p.schemaProperties(ctx, spec.ObjectType, append(append([]string(nil), spec.Fields...), spec.KeyFields...))
+	fetchable := fetchableFieldsWith(spec.Fields, plain)
 
 	// Whether the `exclude` parameter is the CALLER'S rather than ours. Read
 	// before the projection sets it, because that is the only moment the two are
@@ -499,7 +502,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// An empty selection is every column, which no projection can express;
 		// a selection of only computed columns still projects, down to the
 		// properties those columns are computed from.
-		if projection = projectionValue(fetchable, fetchOnlyFields(spec)); projection != "" {
+		if projection = projectionValue(fetchable, fetchOnlyFields(spec, plain)); projection != "" {
 			q.Set(fieldsParam, projection)
 			setExcludeConfigContext(q, projection)
 		}
@@ -509,7 +512,26 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// result with no match count. AllowUncounted defaults to false so that a
 	// path added later inherits the counted behaviour by omission — forgetting
 	// this field costs speed, never correctness.
-	cursor := p.cursorPaging && spec.AllowUncounted && cursorLegal(q)
+	// A long id filter is read in batches (fetchIDBatches), and a batched read
+	// pages by offset: cursor mode has no counts to sum. Decided here, before
+	// the sort, so a batched query's sort is applied rather than refused for
+	// fast paging.
+	// Repeated ids are sent once: an id names one object whatever its count.
+	if ids := q[idParam]; len(ids) > 1 {
+		q[idParam] = dedupeIDs(ids)
+	}
+	if n := len(q[idParam]); n > maxFilterIDs {
+		return nil, &tooManyIDsError{ids: n}
+	}
+	batched := idBatchingNeeded(q, orderingReserve(spec.Ordering)+len(",id"))
+	// A batched read checks every row's id (batchHonoursIDs), so our
+	// projection asks for it whatever the selection; it isn't a column unless
+	// selected. A caller's own `fields` filter is left alone (projection "").
+	if batched && projection != "" && !slices.Contains(strings.Split(projection, ","), "id") {
+		projection += ",id"
+		q.Set(fieldsParam, projection)
+	}
+	cursor := !batched && p.cursorPaging && spec.AllowUncounted && cursorLegal(q)
 
 	// Sorting is decided AFTER cursor mode, and the order of these two lines is the
 	// whole interaction between them. NetBox refuses ?start= together with
@@ -519,7 +541,15 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// leaves applyOrdering to say, in a note, that the sort was not applied.
 	orderNote := applyOrdering(q, spec, cursor)
 
-	page, err := p.fetchList(ctx, spec.ObjectType, q, limit, cursor)
+	// Every read below, the first and each retry, goes through fetch, so a
+	// retry of a batched read is batched too (and repeats every batch).
+	fetch := func() (listResult, error) {
+		if batched {
+			return p.fetchIDBatches(ctx, spec.ObjectType, q, limit)
+		}
+		return p.fetchList(ctx, spec.ObjectType, q, limit, cursor)
+	}
+	page, err := fetch()
 	// One repeat, at most, and which of the two it is depends on whether there is
 	// a projection to drop. projection != "" is a precondition on the first, not a
 	// nicety: it protects the query above that YIELDED to a caller's own `fields`
@@ -570,7 +600,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// No projection is in play any more, which also retires the "returned none
 		// of the requested columns" check below: there is nothing left to blame.
 		projection = ""
-		page, err = p.fetchList(ctx, spec.ObjectType, q, limit, cursor)
+		page, err = fetch()
 
 	case err != nil && projection == "" && upstreamServerError(err):
 		// The same single repeat for the query that has NO projection to drop.
@@ -587,7 +617,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// as sent, and re-sending it unchanged asks the same question again.
 		log.DefaultLogger.Warn("netbox: upstream 500; retrying the query once",
 			"objectType", logSafe(spec.ObjectType), "error", logSafe(err.Error()))
-		page, err = p.fetchList(ctx, spec.ObjectType, q, limit, cursor)
+		page, err = fetch()
 	}
 	if err != nil {
 		return nil, err
@@ -630,7 +660,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		if !callerOwnsExclude {
 			q.Del(excludeParam)
 		}
-		if page, err = p.fetchList(ctx, spec.ObjectType, q, limit, cursor); err != nil {
+		if page, err = fetch(); err != nil {
 			return nil, err
 		}
 		rows, total = page.rows, page.total
@@ -648,9 +678,17 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		}
 	}
 
+	// Computed from the final rows, after any refetch above.
+	columns, nestedNotes, nestedWarnings := addNestedColumns(spec.Fields, spec.KeyFields, plain, flatRaws, flatRows, columns, seen)
+
 	var notes, warnings []string
+	notes = append(notes, nestedNotes...)
+	warnings = append(warnings, nestedWarnings...)
 	if orderNote != "" {
 		notes = append(notes, orderNote)
+	}
+	if n := idBatchNote(page, q.Has(orderingParam), len(flatRows)); n != "" {
+		notes = append(notes, n)
 	}
 	var capped *provider.Cap
 	if isUtilizationType(spec.ObjectType) && wantsUtilization(spec.Fields) {
@@ -756,6 +794,7 @@ func projectionRejected(err error, sent url.Values) bool {
 // page of a paged walk. One immediate repeat per QUERY is a different trade, and
 // it is the one this call site has always made — an unprojected query got it as
 // a side effect of the projection fallback long before there was a name for it.
+// A long id filter read in batches repeats the whole batched read, every batch.
 //
 // Be honest about what that repeat costs, because it is not one request. Query
 // repeats the fetchList CALL, so the walk starts again at page 1: every page
@@ -961,10 +1000,18 @@ func thousands(n int) string {
 // loudly: a join key derives its output from row[Source] whatever the selection
 // says (see pkg/plugin.joinKeySources), and utilization is computed from
 // properties of the object that the utilization columns do not name.
-func fetchOnlyFields(spec provider.QuerySpec) []string {
-	extra := spec.KeyFields
+func fetchOnlyFields(spec provider.QuerySpec, plain map[string]bool) []string {
+	var extra []string
+	for _, k := range spec.KeyFields {
+		if !nestedIn(k, plain) {
+			extra = append(extra, k)
+		}
+	}
+	// A nested column, in the selection or as a key source, is read from its
+	// reference, which is what's asked for: never the nested name.
+	extra = append(extra, nestedRefs(append(append([]string(nil), spec.Fields...), spec.KeyFields...), plain)...)
 	if isUtilizationType(spec.ObjectType) && wantsUtilization(spec.Fields) {
-		extra = append(append([]string(nil), extra...), utilizationSourceFields()...)
+		extra = append(extra, utilizationSourceFields()...)
 	}
 	return extra
 }
@@ -1004,6 +1051,10 @@ type listResult struct {
 	rows       []json.RawMessage
 	total      int
 	totalKnown bool
+	// batches and ids are set by a read of a long id filter in batches
+	// (fetchIDBatches): how many requests it was split into, and over how many
+	// distinct ids. Zero for any other read.
+	batches, ids int
 }
 
 // fetchRows pages through a NetBox list endpoint in the default OFFSET mode,
@@ -1347,6 +1398,9 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 				}
 				fields = append(fields, provider.Field{Name: c, Type: t})
 			}
+		}
+		for _, n := range nestedReferenceOffers(rows[0]) {
+			fields = append(fields, provider.Field{Name: n, Type: provider.FieldTypeString})
 		}
 	}
 
@@ -2572,6 +2626,15 @@ func humanize(s string) string {
 		words[i] = strings.ToUpper(w[:1]) + w[1:]
 	}
 	return strings.Join(words, " ")
+}
+
+// orderingReserve is an upper bound on what applyOrdering adds to a query for
+// sort: the field, and the id tiebreaker, each possibly descending.
+func orderingReserve(sort string) int {
+	if sort == "" {
+		return 0
+	}
+	return len("&"+orderingParam+"=") + 2*(len(sort)+len(",-id")) + 16
 }
 
 // optionalRead is the context an optional read runs under, Include

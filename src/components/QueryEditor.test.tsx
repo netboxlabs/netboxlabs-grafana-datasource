@@ -1012,3 +1012,31 @@ describe('branch field when branching is unavailable', () => {
     await waitFor(() => expect(input).toBeDisabled());
   });
 });
+
+describe('QueryEditor — nested columns in Return fields', () => {
+  it('does not add a nested column twice', async () => {
+    const { onChange } = setup({ fields: ['name', 'device_type__model'] });
+    const input = await screen.findByLabelText('Return fields');
+    fireEvent.change(input, { target: { value: 'device_type__model' } });
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 13, code: 'Enter' });
+    await new Promise((r) => setTimeout(r, 50));
+    for (const [arg] of onChange.mock.calls) {
+      expect(arg.fields).not.toEqual(['name', 'device_type__model', 'device_type__model']);
+    }
+  });
+
+  // A nested column (<ref>__<col>) can be typed, since the column list offers
+  // only references nested in references; any other typed name is refused, so
+  // a typo can't become a silently empty column.
+  it('adds a typed nested column and refuses any other typed name', async () => {
+    const { onChange } = setup({ fields: ['name'] });
+    const input = await screen.findByLabelText('Return fields');
+    fireEvent.change(input, { target: { value: 'nonsense' } });
+    expect(screen.queryByText(/Create: nonsense/)).not.toBeInTheDocument();
+    fireEvent.change(input, { target: { value: 'device_type__model' } });
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 13, code: 'Enter' });
+    await waitFor(() =>
+      expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ fields: ['name', 'device_type__model'] }))
+    );
+  });
+});

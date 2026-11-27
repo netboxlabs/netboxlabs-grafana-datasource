@@ -164,6 +164,32 @@ func readsAsOn(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &n) == nil && n != 0
 }
 
+// ReadsAsOff is readsAsOn's mirror: whether a flag that is not a JSON boolean
+// was written to mean off — zero, or a string that strconv.ParseBool or YAML 1.1
+// reads as false, in any case. A JSON false reads as off too; absent, null and
+// anything unrecognised do not. Exported for annotations' Include descendants
+// switch: Grafana reads provisioning files with yaml/v3, which keeps off and no
+// as strings, and a strict bool would fail the query on them.
+func ReadsAsOff(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		return !b
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "false", "f", "0", "no", "n", "off":
+			return true
+		}
+		return false
+	}
+	var n float64
+	return json.Unmarshal(raw, &n) == nil && n == 0
+}
+
 func loadSecretPluginSettings(source map[string]string) *SecretPluginSettings {
 	return &SecretPluginSettings{
 		APIToken: source["apiToken"],

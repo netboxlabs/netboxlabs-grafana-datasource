@@ -595,6 +595,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		columns, seen, flatRows, flatRaws = flattenRows(rows)
 	}
 
+	// Computed from the final rows, after any refetch above.
+	columns = addNestedColumns(spec.Fields, spec.KeyFields, flatRaws, flatRows, columns, seen)
+
 	var notes, warnings []string
 	if orderNote != "" {
 		notes = append(notes, orderNote)
@@ -909,9 +912,17 @@ func thousands(n int) string {
 // says (see pkg/plugin.joinKeySources), and utilization is computed from
 // properties of the object that the utilization columns do not name.
 func fetchOnlyFields(spec provider.QuerySpec) []string {
-	extra := spec.KeyFields
+	var extra []string
+	for _, k := range spec.KeyFields {
+		if !isNestedColumn(k) {
+			extra = append(extra, k)
+		}
+	}
+	// A nested column, in the selection or as a key source, is read from its
+	// reference, which is what's asked for: never the nested name.
+	extra = append(extra, nestedRefs(append(append([]string(nil), spec.Fields...), spec.KeyFields...))...)
 	if isUtilizationType(spec.ObjectType) && wantsUtilization(spec.Fields) {
-		extra = append(append([]string(nil), extra...), utilizationSourceFields()...)
+		extra = append(extra, utilizationSourceFields()...)
 	}
 	return extra
 }
@@ -1289,6 +1300,9 @@ func (p *Provider) Fields(ctx context.Context, objectType string) ([]provider.Fi
 				}
 				fields = append(fields, provider.Field{Name: c, Type: t})
 			}
+		}
+		for _, n := range nestedReferenceOffers(rows[0]) {
+			fields = append(fields, provider.Field{Name: n, Type: provider.FieldTypeString})
 		}
 	}
 
@@ -2125,7 +2139,8 @@ func (p *Provider) readObjectTypeIDs(ctx context.Context) (map[string]int, error
 func allNullCustomFieldColumns(columns []string, rows []map[string]interface{}) []string {
 	var out []string
 	for _, c := range columns {
-		if !strings.HasPrefix(c, cfPrefix) {
+		// cf_<x>__<y> is a nested column, not a custom field.
+		if !strings.HasPrefix(c, cfPrefix) || isNestedColumn(c) {
 			continue
 		}
 		allNull := true

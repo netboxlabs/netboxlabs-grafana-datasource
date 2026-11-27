@@ -174,7 +174,9 @@ func appendUpstreamNames(column string, add func(string)) {
 func fetchableFields(fields []string) []string {
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
-		if computedColumns[f] {
+		// Nested columns are computed from their reference (nestedRefs), which
+		// fetchOnlyFields asks for.
+		if computedColumns[f] || isNestedColumn(f) {
 			continue
 		}
 		out = append(out, f)

@@ -497,7 +497,23 @@ export function filterFieldOptionsFrom(
   filterFields: FilterField[],
   fallback: Array<SelectableValue<string>>
 ): Array<SelectableValue<string>> {
-  return filterFields.length > 0 ? filterFields.map((f) => ({ label: f.name, value: f.name })) : fallback;
+  // A nested column is computed by the data source: NetBox has no filter of
+  // that name and would ignore one, leaving the panel silently unfiltered.
+  return filterFields.length > 0
+    ? filterFields.map((f) => ({ label: f.name, value: f.name }))
+    : fallback.filter((o) => !isNestedColumn(o.value ?? ''));
+}
+
+/** Whether a column name is a nested column, `<ref>__<col>`: column `<col>` of
+ * the object under the reference `<ref>`, as `device_type__manufacturer`. Split
+ * at the first double underscore, both sides non-empty, as the backend splits it
+ * (pkg/provider/netbox/nested.go). */
+export function isNestedColumn(name: string): boolean {
+  if (/\s/.test(name)) {
+    return false;
+  }
+  const i = name.indexOf('__');
+  return i > 0 && i + 2 < name.length;
 }
 
 /** Operators offered for a filter field. Schema-restricted when the field is

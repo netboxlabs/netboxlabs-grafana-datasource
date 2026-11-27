@@ -817,3 +817,20 @@ describe('query type change and filters', () => {
     expect(onChange.mock.calls.at(-1)![0].filters).toEqual([{ field: 'site', operator: '', value: 'dc1' }]);
   });
 });
+
+describe('QueryEditor — nested columns in Return fields', () => {
+  // A nested column (<ref>__<col>) can be typed, since the column list offers
+  // only references nested in references; any other typed name is refused, so
+  // a typo can't become a silently empty column.
+  it('adds a typed nested column and refuses any other typed name', async () => {
+    const { onChange } = setup({ fields: ['name'] });
+    const input = await screen.findByLabelText('Return fields');
+    fireEvent.change(input, { target: { value: 'nonsense' } });
+    expect(screen.queryByText(/Create: nonsense/)).not.toBeInTheDocument();
+    fireEvent.change(input, { target: { value: 'device_type__model' } });
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 13, code: 'Enter' });
+    await waitFor(() =>
+      expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ fields: ['name', 'device_type__model'] }))
+    );
+  });
+});

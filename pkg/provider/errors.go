@@ -55,6 +55,79 @@ const (
 	// ErrorKindUpstream is any other identified upstream refusal. Status carries
 	// the code; there is nothing more specific to say.
 	ErrorKindUpstream ErrorKind = "upstream"
+	// ErrorKindAnnotation is an annotation query that cannot be answered as
+	// configured: its scope names nothing, or too much, or one of its options
+	// needs something the upstream won't give. AnnotationReason says which. It
+	// is answered as a bad request, because the query is what has to change.
+	ErrorKindAnnotation ErrorKind = "annotation"
+)
+
+// The reasons an annotation query is refused (ErrorKindAnnotation). Each has its
+// own user-facing message in the plugin layer.
+const (
+	// AnnotationReasonEmptyScope is a scope that was configured but came out
+	// empty, usually an empty variable. It is never read as unscoped.
+	AnnotationReasonEmptyScope = "empty-scope"
+	// AnnotationReasonEmptyScopeType is a Scope type that was configured but
+	// came out empty, usually an empty variable. It is never read as the
+	// default type.
+	AnnotationReasonEmptyScopeType = "empty-scope-type"
+	// AnnotationReasonScopeTypeNotOne is a Scope type that isn't one object
+	// type: a multi-value variable joined with commas, or $__all
+	// (AnnotationValue).
+	AnnotationReasonScopeTypeNotOne = "scope-type-not-one"
+	// AnnotationReasonNoMatch is a scope name no object has (AnnotationValue).
+	AnnotationReasonNoMatch = "no-match"
+	// AnnotationReasonTooManyMatches is a scope name more than 20 objects share
+	// (AnnotationValue).
+	AnnotationReasonTooManyMatches = "too-many-matches"
+	// AnnotationReasonNotAnID is a scope value matched by ID that isn't a
+	// positive integer (AnnotationValue).
+	AnnotationReasonNotAnID = "not-an-id"
+	// AnnotationReasonNoNameFilter is a scope type whose list endpoint can't be
+	// filtered by its name: the schema says so, or NetBox answered the lookup
+	// with rows that match none of the names.
+	AnnotationReasonNoNameFilter = "no-name-filter"
+	// AnnotationReasonNoEndpoint is a scope type matched by name whose list
+	// endpoint the instance doesn't report.
+	AnnotationReasonNoEndpoint = "no-endpoint"
+	// AnnotationReasonTooManyObjects is a scope of more than 100 objects
+	// (AnnotationCount, or CountPastLimit).
+	AnnotationReasonTooManyObjects = "too-many-objects"
+	// AnnotationReasonUnknownField is a Changed-fields name no object type has
+	// (AnnotationValue).
+	AnnotationReasonUnknownField = "unknown-field"
+	// AnnotationReasonUnknownCustomField is a Changed-fields cf_<name> that
+	// isn't one of the instance's custom fields (AnnotationValue).
+	AnnotationReasonUnknownCustomField = "unknown-custom-field"
+	// AnnotationReasonUnknownAction is an Actions value that isn't create,
+	// update or delete (AnnotationValue).
+	AnnotationReasonUnknownAction = "unknown-action"
+	// AnnotationReasonUntrackedField is a Changed-fields name the change log's
+	// diff doesn't compare: created, last_updated or one starting with _
+	// (AnnotationValue).
+	AnnotationReasonUntrackedField = "untracked-field"
+	// AnnotationReasonJournalForbidden is a journal read the API token isn't
+	// allowed.
+	AnnotationReasonJournalForbidden = "journal-forbidden"
+	// AnnotationReasonJournalSlow is a journal read that ran past its time
+	// budget (AnnotationCount = seconds).
+	AnnotationReasonJournalSlow = "journal-slow"
+	// AnnotationReasonObjectTypesUnreadable is an object-type list that couldn't
+	// be read where its ids are needed to find related changes.
+	AnnotationReasonObjectTypesUnreadable = "object-types-unreadable"
+	// AnnotationReasonTooManyChildren is a scope with more interfaces or cables
+	// than Include descendants will follow.
+	AnnotationReasonTooManyChildren = "too-many-children"
+	// AnnotationReasonDescendantTypesUnreadable is an object-type list that
+	// couldn't be read where Include descendants needs it.
+	AnnotationReasonDescendantTypesUnreadable = "descendant-types-unreadable"
+	// AnnotationReasonDescendantsForbidden is a read of the scope's objects,
+	// interfaces or cables the API token isn't allowed.
+	AnnotationReasonDescendantsForbidden = "descendants-forbidden"
+	// AnnotationReasonDescendantsSlow is a descendants read that ran past its
+	// time budget (AnnotationCount = seconds).
+	AnnotationReasonDescendantsSlow = "descendants-slow"
 )
 
 // UpstreamError is a provider's own classification of a failure it received.
@@ -75,6 +148,16 @@ type UpstreamError struct {
 	// KnownTypes is set only for ErrorKindUnknownObjectType: how many types the
 	// instance does report, so the message can say how far off the input was.
 	KnownTypes int
+	// AnnotationReason is set only for ErrorKindAnnotation: one of the
+	// AnnotationReason constants.
+	AnnotationReason string
+	// AnnotationValue is the scope value or field name the reason is about, when
+	// it is about one. It is free text from the query editor or a dashboard
+	// variable, so the plugin layer bounds it before display.
+	AnnotationValue string
+	// AnnotationCount is the object count for AnnotationReasonTooManyObjects,
+	// or CountPastLimit when only that it passes the limit is known.
+	AnnotationCount int
 	// Detail is a complete, user-facing sentence the PROVIDER wrote about this
 	// failure, used where the kind alone cannot say enough — today
 	// ErrorKindUnsupported, where naming the missing capability and the way
@@ -95,6 +178,11 @@ type UpstreamError struct {
 	// instead.
 	Unreachable string
 }
+
+// CountPastLimit is the AnnotationCount of a too-many-objects refusal made as
+// soon as the scope passed the limit, before the rest of it was looked up: its
+// full count isn't known, only that it is more than the limit.
+const CountPastLimit = -1
 
 func (e *UpstreamError) Error() string {
 	if e.Status != 0 {

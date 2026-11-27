@@ -35,11 +35,16 @@ const IsPrimaryIPColumn = "is_primary_ip"
 // generic scope (a site, region, site group or location), which is why 4.2 is
 // the supported floor (README Requirements).
 //
-// interface_* stops at the name and description, and vm_* at the name: in
-// NetBox mode the address payload embeds the brief interface (and, for a VM
+// interface_* stops at the name and description, and vm_* at the id and name:
+// in NetBox mode the address payload embeds the brief interface (and, for a VM
 // interface, the brief virtual machine), which carries nothing else worth a
 // column, and any other attribute (a VM's cluster, site, role, platform or
 // status) costs a request per address that was ruled not worth it.
+//
+// The *_id columns are NetBox ids, so a row can feed an Objects query's id
+// filter or a NetBox link. In NetBox mode device_id and vm_id come off the
+// address record at no cost; replica-cache mode reads them from the
+// interfaces. device_manufacturer is the manufacturer of the device's type.
 // vm_name is not folded into device_name: a VM and a device live in different
 // NetBox models, NetBox permits one of each with the same name, and the
 // documented device_name join onto a Prometheus `device` label would then
@@ -60,16 +65,18 @@ const IsPrimaryIPColumn = "is_primary_ip"
 func IPEnrichColumns() []string {
 	return []string{
 		"ip", "match_count", IsPrimaryIPColumn,
-		"prefix_cidr", "prefix_scope", "prefix_tenant", "prefix_role",
+		"prefix_id", "prefix_cidr", "prefix_scope", "prefix_scope_type",
+		"prefix_tenant", "prefix_role",
 		"prefix_vrf", "prefix_vlan", "prefix_description",
+		"address_id",
 		"address_dns_name", "address_status", "address_role", "address_vrf",
 		"address_tenant", "address_description", "address_assigned_object_type",
 		"address_nat_inside", "address_nat_outside",
 		"interface_name", "interface_description",
-		"device_name", "device_role", "device_platform", "device_device_type",
-		"device_site", "device_location", "device_rack", "device_tenant",
-		"device_status",
-		"vm_name",
+		"device_id", "device_name", "device_role", "device_platform", "device_device_type",
+		"device_manufacturer", "device_site", "device_location", "device_rack",
+		"device_tenant", "device_status",
+		"vm_id", "vm_name",
 	}
 }
 
@@ -91,9 +98,10 @@ var defaultIPEnrichFields = []string{
 // handed out by value is one the caller can rewrite.
 func DefaultIPEnrichFields() []string { return slices.Clone(defaultIPEnrichFields) }
 
-// ipEnrichColumnTypes declares the two ip-enrichment columns that are not
-// strings. This schema is fixed in code, so a column's type is known even when
-// the current IP set puts no value in it — and an FHRP-only, unassigned-only or
+// ipEnrichColumnTypes declares the ip-enrichment columns that are not
+// strings: match_count, is_primary_ip and the four ids. This schema is fixed
+// in code, so a column's type is known even when the current IP set puts no
+// value in it — and an FHRP-only, unassigned-only or
 // external-address refresh puts none in is_primary_ip, which would otherwise be
 // typed from its values and alternate between a boolean field and a string one
 // from refresh to refresh. See Result.ColumnTypes.
@@ -103,6 +111,10 @@ func DefaultIPEnrichFields() []string { return slices.Clone(defaultIPEnrichField
 var ipEnrichColumnTypes = map[string]FieldType{
 	"match_count":     FieldTypeNumber,
 	IsPrimaryIPColumn: FieldTypeBoolean,
+	"address_id":      FieldTypeNumber,
+	"prefix_id":       FieldTypeNumber,
+	"device_id":       FieldTypeNumber,
+	"vm_id":           FieldTypeNumber,
 }
 
 // DeclaredIPEnrichColumnTypes returns the type declarations for the fields a

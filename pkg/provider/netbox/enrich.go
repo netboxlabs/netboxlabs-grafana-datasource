@@ -55,7 +55,7 @@ func buildFilterValues(filters []provider.Filter) url.Values {
 // or raw physical cables, plus wireless links in both views.
 func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*provider.Graph, error) {
 	// One branch for every request and cache key this call makes (pinBranch).
-	ctx, _ = p.client.pinBranch(ctx)
+	ctx, branch := p.client.pinBranch(ctx)
 	// Clamped to the ceiling rather than reset to the default, matching Query.
 	// Treating an over-limit request like an unset one sent a caller asking for
 	// 5,000 devices back to 1,000 — and the truncation refusal then advises
@@ -163,6 +163,12 @@ func (p *Provider) Topology(ctx context.Context, spec provider.TopologySpec) (*p
 			}
 		}
 		nodes = kept
+	}
+
+	// A device that exists only in the branch is a 404 in NetBox's UI unless the
+	// link names the branch, as the annotation links do.
+	for i := range nodes {
+		nodes[i].URL = withBranchParam(nodes[i].URL, branch)
 	}
 
 	return &provider.Graph{

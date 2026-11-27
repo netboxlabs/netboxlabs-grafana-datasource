@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Change annotations can follow one object.** Scope an annotation to `$device`
+  to see that device's changes, including its interfaces, cables, addresses,
+  modules and services, each saying what changed. Journal entries can show
+  alongside them. Changes to what's still attached are read by id, so a busy
+  change log doesn't hide them; removals are checked in one page of it.
+- **IP enrichment returns NetBox ids and the device's manufacturer.** New context
+  fields: `address_id`, `device_id`, `vm_id`, `prefix_id`, `prefix_scope_type`
+  (`dcim.site`, `dcim.region`, …) and `device_manufacturer`. `address_id`,
+  `device_id` and `vm_id` come from the address record at no cost,
+  `device_manufacturer` from the device request, and the `prefix_*` fields cost
+  the prefix fallback they belong to.
 - **Secure SOCKS proxy switch on the settings page.** On self-hosted Grafana
   with a secure SOCKS5 data source proxy, the datasource can be routed through
   it from the settings page. Grafana Cloud's PDC network selector appears once
@@ -26,13 +37,13 @@
 - **Recording-rule recipe fixed.** Alerts built on the recipe in
   `docs/alerting/rule-time-join.md` no longer go into error for minutes after a
   device's site, role or tenant changes, and the recipe states its limits.
-- **Go 1.26.10, `golang.org/x/net` 0.62.0 and `klauspost/compress` 1.20.2**,
-  for the Go security advisories of 2026-10-08, 2026-10-21, 2026-10-27 and
-  2026-11-05 (GO-2026-6599, 6600, 6603, 6605, 6607, 6608, 6610–6613, 6617,
-  6809, 6860, 6865, 6866).
-- **npm dependencies updated for new advisories**: zod, dompurify, fast-uri,
-  glob, ip-address, minimatch, qs and serialize-javascript. None is in the
-  shipped frontend, which does not change.
+- **Go 1.26.11, `golang.org/x/net` 0.62.0, `klauspost/compress` 1.20.2 and
+  OpenTelemetry 1.47.0**, for the Go security advisories of 2026-10-08 to
+  2026-11-13 (GO-2026-6599, 6600, 6603, 6605, 6607, 6608, 6610–6613, 6617,
+  6809, 6859, 6860, 6865, 6866 and GHSA-q7gw-24fr-5p69).
+- **npm dependencies updated for new advisories**: zod, basic-ftp, dompurify,
+  fast-uri, glob, i18next, ip-address, minimatch, qs and serialize-javascript.
+  None is in the shipped frontend, which does not change.
 - **IP enrichment's prefix fallback asks about the host.** A masked or
   IPv4-mapped input no longer misses the prefixes that hold the address.
 - **An alert table that matches nothing evaluates empty, in both modes.** It

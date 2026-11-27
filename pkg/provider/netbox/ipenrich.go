@@ -282,9 +282,8 @@ func causeText(err error) string {
 }
 
 // The four degradation messages below each name the missing COLUMNS and end by
-// stating what the blank does NOT mean. vm_name and is_primary_ip are spelled
-// out individually because they are the columns with no group prefix to hide
-// behind: a reader scanning for "vm_*" would not find one, and since
+// stating what the blank does NOT mean. vm_* and is_primary_ip are spelled
+// out because they are the columns with no group hop to hide behind, and since
 // is_primary_ip left the device_* group, "device_*" no longer covers the other.
 // Both are in the default selection, so a degraded default panel blanks them.
 // ruling out the reading a blank column would otherwise invite. "Degraded" on
@@ -301,7 +300,7 @@ func causeText(err error) string {
 // the lookup never answered.
 func addressHopWarning(d degradation) string {
 	return fmt.Sprintf(
-		"Address lookup failed for %s — %s. The match_count, address_*, interface_*, device_*, vm_name, is_primary_ip and prefix_* columns on the affected rows are empty because the lookup failed, not because NetBox has no record for those IPs.",
+		"Address lookup failed for %s — %s. The match_count, address_*, interface_*, device_*, vm_*, is_primary_ip and prefix_* columns on the affected rows are empty because the lookup failed, not because NetBox has no record for those IPs.",
 		d.scope("IP", "IPs"), causeText(d.cause))
 }
 
@@ -331,7 +330,7 @@ func addressHopWarning(d degradation) string {
 // The two booleans are ResolveIPs' own gate variables rather than a second test
 // of `fields` here, so the warning cannot describe a hop the gate did not run.
 func deviceHopWarning(d degradation, wantDeviceGroup, wantPrimaryIP bool) string {
-	blanked, verb, notBecause := "The device_* and "+isPrimaryIPColumn+" columns", "are", "those IPs have no device"
+	blanked, verb, notBecause := "The device_* columns other than device_id and the "+isPrimaryIPColumn+" column", "are", "those IPs have no device"
 	switch {
 	case !wantDeviceGroup:
 		// wantPrimaryIP is necessarily true here — with both false the hop never
@@ -339,7 +338,8 @@ func deviceHopWarning(d degradation, wantDeviceGroup, wantPrimaryIP bool) string
 		blanked, verb = "The "+isPrimaryIPColumn+" column", "is"
 		notBecause = "those IPs are not their device's primary address"
 	case !wantPrimaryIP:
-		blanked = "The device_* columns"
+		// device_id is read off the address record, so it survives the failure.
+		blanked = "The device_* columns other than device_id"
 	}
 	return fmt.Sprintf(
 		"Device lookup failed for %s — %s. %s on the affected rows %s blank because the lookup failed, not because %s.",
@@ -385,7 +385,7 @@ func addressTruncationWarning(hosts []string) string {
 		subject = "1 IP"
 	}
 	return fmt.Sprintf(
-		"NetBox holds more than %s address records for %s (%s) — only the first %s were read. match_count is a floor rather than a count for the affected rows, and their address_*, interface_*, device_*, vm_name and is_primary_ip columns describe a record picked from the part that was read.",
+		"NetBox holds more than %s address records for %s (%s) — only the first %s were read. match_count is a floor rather than a count for the affected rows, and their address_*, interface_*, device_*, vm_* and is_primary_ip columns describe a record picked from the part that was read.",
 		humanInt(MaxLimit), subject, list, humanInt(MaxLimit))
 }
 
@@ -422,7 +422,9 @@ type addressLookup struct {
 // fetchAddressRecords batches ips into ?address= queries and returns every
 // matching record indexed by host portion. Pagination is exhausted per batch:
 // a truncated page would undercount anycast duplicates and corrupt
-// match_count, which is the signal that keeps an ambiguous pick visible.
+// match_count, which is the signal that keeps an ambiguous pick visible. On a
+// match_count > 1 row, address_id, device_id and vm_id come from the picked
+// record, like every other address column.
 //
 // A failed batch degrades only the IPs it covers, and addressLookup.failed names
 // them. That set is not a convenience: without it the per-IP loop cannot tell
@@ -820,12 +822,36 @@ func (p *Provider) fetchDevices(ctx context.Context, ids []int, wantDeviceColumn
 			if err != nil {
 				continue
 			}
+			if m, ok := deviceTypeManufacturer(raw); ok {
+				vals[manufacturerKey] = m
+			}
 			if v, ok := vals["id"].(float64); ok {
 				out[int(v)] = vals
 			}
 		}
 	}
 	return out, deg
+}
+
+// manufacturerKey is where fetchDevices keeps a device's manufacturer among its
+// flattened fields. NetBox never uses a double underscore in a field name, so it
+// can't collide with one.
+const manufacturerKey = "device_type__manufacturer"
+
+// deviceTypeManufacturer is the manufacturer nested in a device row's
+// device_type (NetBox's short form of a device type carries it), so
+// device_manufacturer costs no dcim/device-types request. The flattener keeps a
+// reference's display, id and slug, not what is nested in it.
+func deviceTypeManufacturer(raw json.RawMessage) (string, bool) {
+	var row struct {
+		DeviceType struct {
+			Manufacturer map[string]interface{} `json:"manufacturer"`
+		} `json:"device_type"`
+	}
+	if json.Unmarshal(raw, &row) != nil || row.DeviceType.Manufacturer == nil {
+		return "", false
+	}
+	return nestedDisplay(row.DeviceType.Manufacturer), true
 }
 
 // primaryIPFields is the projection a hop sends when is_primary_ip is the only
@@ -839,7 +865,7 @@ func (p *Provider) fetchDevices(ctx context.Context, ids []int, wantDeviceColumn
 // semantics (NetBox 4.4.10 /api/schema/), so a per-hop copy could only ever drift
 // from the reader that consumes it. The VM hop always sends it — the flag is the
 // only reason that hop exists — while the device hop sends it only when no
-// device_* column was selected; see fetchDevices.
+// device_* column other than device_id was selected; see fetchDevices.
 //
 // Verified against NetBox 4.4.10 on both endpoints: ?fields=id,primary_ip4,
 // primary_ip6 answers with exactly those three keys and an unchanged envelope
@@ -960,19 +986,30 @@ var defaultIPEnrichFields = provider.DefaultIPEnrichFields()
 // is_primary_ip permanently blank.
 //
 // Prefix matching is exact-by-construction: every column in IPEnrichColumns
-// beginning with "device_" or "prefix_" comes from that group's hop, and the
-// three non-namespaced columns ("ip", "match_count", "is_primary_ip") belong to
-// neither group — the last of them needing the explicit test above.
+// beginning with "device_" or "prefix_" comes from that group's hop, except
+// device_id, which wantsGroupExcept exempts because the address record carries
+// it. The three non-namespaced columns ("ip", "match_count", "is_primary_ip")
+// belong to neither group — the last of them needing the explicit test above.
 //
-// "vm_" is NOT a group here, alongside "address_" and "interface_": vm_name is
-// read off the address payload this query already holds, so there is no hop to
-// skip. The VM hop is gated on is_primary_ip by name for exactly that reason —
-// gating it on the "vm_" prefix would make the free column start paying for a
-// request, and gating it on the whole selection would make every ip-enrichment
-// query pay for a column nobody asked for.
+// "vm_" is NOT a group here, alongside "address_" and "interface_": vm_name and
+// vm_id are read off the address payload this query already holds, so there is
+// no hop to skip. The VM hop is gated on is_primary_ip by name for exactly
+// that reason — gating it on the "vm_" prefix would make the free columns start
+// paying for a request, and gating it on the whole selection
+// would make every ip-enrichment query pay for a column nobody asked for.
+//
+// wantsGroup exempts nothing; the device_ gate calls wantsGroupExcept directly.
 func wantsGroup(fields []string, group string) bool {
+	return wantsGroupExcept(fields, group)
+}
+
+// wantsGroupExcept is wantsGroup that ignores the columns named in free: columns
+// that carry the group's prefix but are read off the address record already in
+// hand, so selecting them alone must not start the group's hop. device_id is the
+// one today.
+func wantsGroupExcept(fields []string, group string, free ...string) bool {
 	for _, f := range fields {
-		if strings.HasPrefix(f, group) {
+		if strings.HasPrefix(f, group) && !slices.Contains(free, f) {
 			return true
 		}
 	}
@@ -1157,6 +1194,7 @@ func applyAddressColumns(row map[string]interface{}, raw json.RawMessage) {
 		return
 	}
 	for src, dst := range map[string]string{
+		"id":          "address_id",
 		"dns_name":    "address_dns_name",
 		"status":      "address_status",
 		"role":        "address_role",
@@ -1240,15 +1278,16 @@ func assignedType(vals map[string]interface{}) string {
 // dcim.interface-assigned row.
 func applyDeviceColumns(row map[string]interface{}, dev map[string]interface{}, ipID int) {
 	for src, dst := range map[string]string{
-		"name":        "device_name",
-		"role":        "device_role",
-		"platform":    "device_platform",
-		"device_type": "device_device_type",
-		"site":        "device_site",
-		"location":    "device_location",
-		"rack":        "device_rack",
-		"tenant":      "device_tenant",
-		"status":      "device_status",
+		"name":          "device_name",
+		"role":          "device_role",
+		"platform":      "device_platform",
+		"device_type":   "device_device_type",
+		manufacturerKey: "device_manufacturer",
+		"site":          "device_site",
+		"location":      "device_location",
+		"rack":          "device_rack",
+		"tenant":        "device_tenant",
+		"status":        "device_status",
 	} {
 		if v, ok := dev[src]; ok {
 			row[dst] = v
@@ -1260,13 +1299,13 @@ func applyDeviceColumns(row map[string]interface{}, dev map[string]interface{}, 
 // applyVMColumns fills what a fetched virtual machine can say about the address:
 // is_primary_ip, and nothing else.
 //
-// One column, and that is not an oversight. vm_name is already on the row by the
-// time this runs — the address payload carries it (see vmNameFromAddress) — and
-// every other VM attribute a dashboard might want (cluster, site, role,
-// platform, status) is ruled out on IPEnrichColumns as not worth the request.
-// This hop is made for the flag alone, so it reads the flag alone. Adding a
-// vm_* column here would also silently change what the hop's gate means, since
-// that gate names is_primary_ip rather than a namespace.
+// One column, and that is not an oversight. vm_name and vm_id are already on the
+// row by the time this runs — the address payload carries them — and every other
+// VM attribute a dashboard might want (cluster, site, role, platform, status) is
+// ruled out on IPEnrichColumns as not worth the request. This hop is made for
+// the flag alone, so it reads the flag alone. Adding a vm_* column here would
+// also silently change what the hop's gate means, since that gate names
+// is_primary_ip rather than a namespace.
 func applyVMColumns(row map[string]interface{}, vm map[string]interface{}, ipID int) {
 	row[isPrimaryIPColumn] = isPrimaryIP(vm, ipID)
 }
@@ -1314,6 +1353,8 @@ func (p *Provider) applyPrefixColumns(ctx context.Context, row map[string]interf
 		return nil
 	}
 	for src, dst := range map[string]string{
+		"id":          "prefix_id",
+		"scope_type":  "prefix_scope_type",
 		"prefix":      "prefix_cidr",
 		"scope":       "prefix_scope",
 		"tenant":      "prefix_tenant",
@@ -1577,9 +1618,9 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 	// BOTH identity hops rather than either group: it is the device's answer for a
 	// dcim.interface-assigned row and the VM's for a virtualization.vminterface
 	// one, and neither hop can supply the other's rows. It is also the only reason
-	// the VM hop exists at all — vm_name rides along on the address payload for
-	// free — so a query that leaves it unselected never asks NetBox about a
-	// virtual machine.
+	// the VM hop exists at all — vm_name and vm_id ride along on the address
+	// payload for free — so a query that leaves it unselected never asks NetBox
+	// about a virtual machine.
 	//
 	// Selecting it alone therefore costs two batched requests, not one. That is
 	// the honest price of a column whose value depends on which model owns the
@@ -1592,8 +1633,11 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 	// failure actually blanked in THIS frame. Deriving either of those from
 	// `fields` again, separately, is how a request or a warning drifts away from
 	// the gate that caused it.
+	// device_id is exempt from the device group: it is read off the address
+	// record, so selecting it alone makes no device request. The same holds for
+	// vm_id, which no gate reads at all.
 	wantPrimaryIP := slices.Contains(fields, isPrimaryIPColumn)
-	wantDeviceGroup := wantsGroup(fields, "device_")
+	wantDeviceGroup := wantsGroupExcept(fields, "device_", "device_id")
 	wantDevice := wantDeviceGroup || wantPrimaryIP
 	wantVM := wantPrimaryIP
 	wantPrefix := wantsGroup(fields, "prefix_")
@@ -1707,19 +1751,30 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 		switch {
 		case hasBest:
 			applyAddressColumns(row, best)
+			// device_id and vm_id are read off the address record already in hand,
+			// so they cost no request and are set whether or not a hop ran. float64
+			// like every other number the frame layer classifies.
+			devID, hasDev := deviceIDFromAddress(best)
+			if hasDev {
+				row["device_id"] = float64(devID)
+			}
+			vmID, hasVM := vmIDFromAddress(best)
+			if hasVM {
+				row["vm_id"] = float64(vmID)
+			}
 			// Exactly one of these two can fire, and often neither: the type gates
 			// inside deviceIDFromAddress and vmIDFromAddress are mutually
 			// exclusive, and an address assigned to an FHRP group or to nothing at
 			// all satisfies neither. Those rows leave is_primary_ip ABSENT — not
 			// false — and that is a decision rather than a gap; isPrimaryIP states
 			// why, including why the FHRP case is left without a value on purpose.
-			if id, ok := deviceIDFromAddress(best); ok {
-				if dev, ok := devices[id]; ok {
+			if hasDev {
+				if dev, ok := devices[devID]; ok {
 					applyDeviceColumns(row, dev, addressID(best))
 				}
 			}
-			if id, ok := vmIDFromAddress(best); ok {
-				if vm, ok := vms[id]; ok {
+			if hasVM {
+				if vm, ok := vms[vmID]; ok {
 					applyVMColumns(row, vm, addressID(best))
 				}
 			}

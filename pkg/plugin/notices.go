@@ -200,11 +200,11 @@ func capNoticeText(c *provider.Cap) string {
 	if c.Measured == 0 {
 		return fmt.Sprintf(
 			"%s could not be measured for any of the %s rows: NetBox answered too slowly for even one row in the time this datasource allows. Add filters, raise the datasource timeout, or deselect those columns.",
-			andList(c.Columns), thousands(c.Rows))
+			proseList(c.Columns, "and"), thousands(c.Rows))
 	}
 	return fmt.Sprintf(
 		"Measured %s for the first %s of %s rows; the other %s are blank because each row costs its own NetBox lookups and measuring them all would take longer than this query allows. Lower the row limit, add filters, or deselect those columns.",
-		andList(c.Columns), thousands(c.Measured), thousands(c.Rows),
+		proseList(c.Columns, "and"), thousands(c.Measured), thousands(c.Rows),
 		thousands(c.Rows-c.Measured))
 }
 
@@ -237,24 +237,26 @@ func capError(who consumer, res *provider.Result) string {
 		return fmt.Sprintf(
 			"%s measured %s for none of its %s rows, so all of them %s. "+
 				"NetBox answered too slowly for even one row to be measured in the time this datasource allows: add filters, raise the datasource timeout, or deselect those columns.",
-			v.subject, andList(c.Columns), thousands(c.Rows), v.unmeasured)
+			v.subject, proseList(c.Columns, "and"), thousands(c.Rows), v.unmeasured)
 	}
 	return fmt.Sprintf(
 		"%s measured %s for %s of its %s rows, so the other %s %s. "+
 			"Lower the row limit to %s or fewer, or add filters so every row is measured.",
-		v.subject, andList(c.Columns), thousands(c.Measured), thousands(c.Rows),
+		v.subject, proseList(c.Columns, "and"), thousands(c.Measured), thousands(c.Rows),
 		thousands(c.Rows-c.Measured), v.unmeasured, thousands(c.Measured))
 }
 
-// andList renders a column list as prose: "utilization, used and available".
-func andList(items []string) string {
+// proseList renders a list as prose, its last two items joined by conjunction:
+// with "and", "utilization, used and available"; with "or", "a module or
+// service".
+func proseList(items []string, conjunction string) string {
 	switch len(items) {
 	case 0:
 		return ""
 	case 1:
 		return items[0]
 	}
-	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
+	return strings.Join(items[:len(items)-1], ", ") + " " + conjunction + " " + items[len(items)-1]
 }
 
 // degradationError is the message for an alerting query whose result carried

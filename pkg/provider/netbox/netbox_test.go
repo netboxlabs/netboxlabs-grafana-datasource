@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -158,6 +159,66 @@ func TestObjectTypes_Discovery(t *testing.T) {
 	}
 	if got["status/"] || got["status"] {
 		t.Errorf("status should not be discovered as an object type")
+	}
+}
+
+// A discovery walk its caller's deadline cuts short is no answer: it fails, and
+// nothing is cached, so a later call with time to spare sees every app and
+// every plugin model. A cut walk cached as complete would hide whole apps for
+// cacheTTL, and a plugin index cut mid-read would pass for a collection.
+func TestObjectTypes_CutWalkIsNotCached(t *testing.T) {
+	var slow atomic.Bool
+	slow.Store(true)
+	var base string
+	index := func(held bool, keys ...string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if held && slow.Load() {
+				select {
+				case <-time.After(5 * time.Second):
+				case <-r.Context().Done():
+					return
+				}
+			}
+			parts := make([]string, len(keys))
+			for i, k := range keys {
+				parts[i] = fmt.Sprintf(`%q:"%s%s%s/"`, k, base, strings.TrimSuffix(r.URL.Path, "/")+"/", k)
+			}
+			_, _ = fmt.Fprintf(w, "{%s}", strings.Join(parts, ","))
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/", index(false, "dcim", "ipam", "plugins"))
+	mux.HandleFunc("/api/dcim/", index(false, "devices"))
+	mux.HandleFunc("/api/ipam/", index(true, "prefixes"))
+	mux.HandleFunc("/api/plugins/", index(false, "bgp"))
+	mux.HandleFunc("/api/plugins/bgp/", index(true, "bgp-sessions"))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	base = srv.URL
+	p := New(srv.URL, "test-token", srv.Client())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if types, err := p.ObjectTypes(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ObjectTypes = %d types, %v; want the deadline's error", len(types), err)
+	}
+
+	slow.Store(false)
+	types, err := p.ObjectTypes(context.Background())
+	if err != nil {
+		t.Fatalf("ObjectTypes: %v", err)
+	}
+	got := map[string]bool{}
+	for _, ot := range types {
+		got[ot.Value] = true
+	}
+	for _, want := range []string{"dcim/devices", "ipam/prefixes", "plugins/bgp/bgp-sessions"} {
+		if !got[want] {
+			t.Errorf("missing %q; got %v", want, keys(got))
+		}
+	}
+	if got["plugins/bgp"] {
+		t.Error("plugins/bgp listed as a collection: its cut index read was taken for one")
 	}
 }
 
@@ -608,6 +669,40 @@ func TestFetchRows_RetryStopsOnContextCancel(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("requests = %d, want 1 (cancelled before the retry)", calls)
+	}
+}
+
+// A retry the context cuts short returns the error it was waiting to retry,
+// as it came. Here that is a dropped connection: it still reads as one, not as
+// the context's end, for every caller that classifies it, and it unwraps one
+// cause at a time down to it.
+func TestGetListPageRetry_CutRetryKeepsTheTransportError(t *testing.T) {
+	saved := retryBackoff
+	retryBackoff = []time.Duration{time.Hour}
+	t.Cleanup(func() { retryBackoff = saved })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := p.getListPageRetry(ctx, p.client.apiURL("dcim/devices", nil))
+	if err == nil {
+		t.Fatal("want the dropped connection's error")
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want the dropped connection's own error, not the context's", err)
+	}
+	if !transientTransport(err) {
+		t.Errorf("err = %v, want it classified as a transport failure", err)
+	}
+	if errors.Unwrap(err) == nil {
+		t.Errorf("err = %v, want one cause to unwrap to", err)
 	}
 }
 

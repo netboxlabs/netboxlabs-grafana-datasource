@@ -22,8 +22,12 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
   [docs/JOIN-KEYS.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/JOIN-KEYS.md).
 - **IP enrichment (address, device and longest-prefix match).** Resolve arbitrary observed
   IPs to their NetBox address record, the interface it's assigned to, and the owning
-  device — including whether it's that device's primary IP — falling back to the
+  device — including its manufacturer and whether it's that device's primary IP — falling back to the
   containing prefix's site/tenant/role when the address isn't individually registered.
+  Each match also returns its NetBox id (address record, device or VM, and
+  prefix) and the prefix's scope type; link a row back to NetBox with a data link to
+  `<NetBox URL>/dcim/devices/<id>/`, or read more about the object with an `objects`
+  query filtered on `id`.
   It is the one enrichment a value-join can't do.
 - **Prefix/IP utilization.** Opt-in `utilization` (%), `used` and `available` columns for
   prefixes and IP ranges, computed to match NetBox's own utilization, so you can gauge or
@@ -42,8 +46,11 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
 - **Template variables.** Drive `site` / `device` / `role` / `tenant` dropdowns from NetBox
   and filter every panel on the dashboard. Multi-value variables become OR filters; a
   Custom all value of `$__all` makes **All** send no filter at all.
-- **Annotations.** Overlay NetBox change-log events (who changed what, when) on any
-  time-series panel using Grafana's `time/title/text/tags` convention.
+- **Annotations.** Overlay NetBox change-log events (who changed what, when), and
+  optionally journal entries, on any time-series panel. Scope them to one object: its
+  changes, the changes NetBox records against it, and what's attached to it (a device's
+  cables, addresses, modules and services). Each marker says what changed. See
+  [docs/RECIPES.md](docs/RECIPES.md#device-dashboard-with-change-markers).
 - **Deep links.** Every row links straight back to the NetBox object page, and the link
   survives the join, so an enriched metrics table stays clickable through to NetBox.
 - **Correlations (Explore drill-downs).** Provision links from any Prometheus/Loki series
@@ -57,7 +64,7 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
 - **NetBox 4.2 or later.** The plugin depends on
   `display_url` on all serializers (deep links), the `/api/core/object-changes/` endpoint
   (change-log annotations), and a prefix's generic `scope`, returned by IP enrichment as
-  `prefix_scope`. Both classic (v1) and `nbt_…` (v2, NetBox 4.5+) API tokens are supported
+  `prefix_scope` and `prefix_scope_type`. Both classic (v1) and `nbt_…` (v2, NetBox 4.5+) API tokens are supported
   and auto-detected.
 - **Grafana 12.3 or later** (the plugin's `grafanaDependency`; CI runs the e2e
   tests on versions from 12.3 to the latest release, and on nightly).
@@ -185,12 +192,12 @@ _View in NetBox_ links of a replica that reports no NetBox URL — see
 
 ## Query types
 
-| Type              | Returns                                                                                                                                                                                                                                | Use with                          |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
-| **Objects**       | A joinable table for any object type (with optional join keys)                                                                                                                                                                         | Table, or Outer-join onto metrics |
-| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`. Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
-| **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)                                                                                                                                                                             | Node Graph panel                  |
-| **Annotations**   | Change-log events (`time/title/text/tags`)                                                                                                                                                                                             | Dashboard annotations             |
+| Type              | Returns                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Use with                          |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| **Objects**       | A joinable table for any object type (with optional join keys)                                                                                                                                                                                                                                                                                                                                                                                                       | Table, or Outer-join onto metrics |
+| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`, with the NetBox id of the address record, device or VM, and prefix (cost per field in [Recipe 3](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/RECIPES.md#recipe-3-enrich-flows-or-logs-by-ip)). Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
+| **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)                                                                                                                                                                                                                                                                                                                                                                                                           | Node Graph panel                  |
+| **Annotations**   | NetBox change-log events, optionally scoped to objects and what's attached, plus journal entries. Read-only (no Edit button)                                                                                                                                                                                                                                                                                                                                         | Dashboard annotations             |
 
 See [Demo](#demo) below for a one-command runnable stack (synthetic Prometheus + Loki
 labeled to match NetBox + a rich dashboard).
@@ -323,6 +330,9 @@ them. Objects, IP enrichment, topology, and annotation queries all honor the sel
 branch (annotation and variable queries each have their own Branch field), and the field /
 value-autocomplete pickers reload against it. Only the **object-type** list is always read
 from main (NetBox models are code-level and identical across branches).
+
+Links to NetBox carry the branch, and NetBox then stays on that branch in this browser until
+you pick Main in NetBox's branch menu; a main link from Grafana doesn't switch it back.
 
 The bundled demo ships the plugin already installed and a seeded `demo-branch` that adds a
 branch-only device, `AMS1-leaf-99`. To see branching in action, pick the dashboard's

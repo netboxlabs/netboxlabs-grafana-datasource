@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -9,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
@@ -86,6 +89,71 @@ type queryModel struct {
 	// upstream request it makes) targets that branch via the X-NetBox-Branch
 	// header. Empty targets the default (main) branch.
 	Branch string `json:"branch"`
+	// ScopeType and Scope (for annotations) scope the query to objects: an
+	// app_label.model, and names or ids, comma-separated, interpolated with the
+	// csv format. ScopeSet says a scope was configured before interpolation, so
+	// an empty variable is an error rather than all of NetBox. ScopeMatch is
+	// "name" (or empty) or "id".
+	ScopeType string `json:"scopeType"`
+	// ScopeTypeSet says a Scope type was configured before interpolation, so an
+	// empty variable is an error rather than the default type.
+	ScopeTypeSet bool      `json:"scopeTypeSet"`
+	Scope        scopeText `json:"scope"`
+	ScopeSet     bool      `json:"scopeSet"`
+	ScopeMatch   string    `json:"scopeMatch"`
+	// Actions, ChangedFields and Journal (for annotations) narrow the change
+	// markers to some actions and changed fields, and add journal entries.
+	Actions       []string `json:"actions"`
+	ChangedFields []string `json:"changedFields"`
+	Journal       bool     `json:"journal"`
+	// IncludeDescendants (for annotations) adds changes to what is attached to
+	// the scope. Kept raw and read leniently (models.ReadsAsOff): absent means
+	// on, so dashboards saved before the field existed get descendants, and a
+	// provisioned "off" is off rather than a query that fails to decode.
+	IncludeDescendants json.RawMessage `json:"includeDescendants"`
+}
+
+// scopeText is an annotation's scope as the query JSON carries it: a string,
+// or a bare number, as a stored dashboard can hold ("scope": 17), read as its
+// text. A query reaches the backend without the frontend's interpolation on a
+// public dashboard, so the number can't be left to the frontend. null is
+// empty; anything else is refused as a string field refuses it.
+type scopeText string
+
+func (s *scopeText) UnmarshalJSON(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return err
+	}
+	switch v := v.(type) {
+	case nil:
+	case string:
+		*s = scopeText(v)
+	case json.Number:
+		*s = scopeText(v)
+	default:
+		kind := "array"
+		switch v.(type) {
+		case bool:
+			kind = "bool"
+		case map[string]any:
+			kind = "object"
+		}
+		return &json.UnmarshalTypeError{Value: kind, Type: reflect.TypeFor[string]()}
+	}
+	return nil
+}
+
+// withAnnotationErrorMarker adds to an annotation query's error response its
+// error as one marker at the range's end: scenes dashboards drop an annotation
+// query's error, so without it the query fails with nothing to say why.
+func withAnnotationErrorMarker(resp backend.DataResponse, q backend.DataQuery) backend.DataResponse {
+	marker := annotationErrorFrame(resp.Error.Error(), q.TimeRange.To)
+	marker.RefID = q.RefID
+	resp.Frames = data.Frames{marker}
+	return resp
 }
 
 // query executes a single query and returns its data response.
@@ -98,7 +166,17 @@ type queryModel struct {
 func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer) backend.DataResponse {
 	var qm queryModel
 	if err := json.Unmarshal(q.JSON, &qm); err != nil {
-		return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err))
+		resp := backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err))
+		// An annotation query gets the marker its other errors get, or a scenes
+		// dashboard drops the error and shows nothing. The query type is read on
+		// its own, since the whole model didn't decode.
+		var kind struct {
+			QueryType string `json:"queryType"`
+		}
+		if json.Unmarshal(q.JSON, &kind) == nil && kind.QueryType == queryTypeAnnotations {
+			return withAnnotationErrorMarker(resp, q)
+		}
+		return resp
 	}
 
 	// Once, here, so no branch below can forget it (see dropAllFilters).
@@ -109,14 +187,51 @@ func (d *Datasource) query(ctx context.Context, q backend.DataQuery, c consumer)
 
 	switch qm.QueryType {
 	case queryTypeAnnotations:
+		scope, scopeAll := parseScope(string(qm.Scope))
 		changes, err := d.provider.Changes(ctx, provider.ChangeSpec{
-			From:        q.TimeRange.From,
-			To:          q.TimeRange.To,
-			ObjectTypes: qm.ObjectTypes,
-			Limit:       qm.Limit,
+			From:         q.TimeRange.From,
+			To:           q.TimeRange.To,
+			ObjectTypes:  qm.ObjectTypes,
+			Limit:        qm.Limit,
+			ScopeType:    qm.ScopeType,
+			ScopeTypeSet: qm.ScopeTypeSet,
+			Scope:        scope,
+			// A caller that sends a scope without scopeSet still configured one.
+			ScopeSet:      qm.ScopeSet || strings.TrimSpace(string(qm.Scope)) != "",
+			ScopeAll:      scopeAll,
+			ScopeMatch:    qm.ScopeMatch,
+			Actions:       qm.Actions,
+			ChangedFields: qm.ChangedFields,
+			Journal:       qm.Journal,
+			Descendants:   !models.ReadsAsOff(qm.IncludeDescendants),
 		})
 		if err != nil {
-			return d.queryErrorResponse(err)
+			return withAnnotationErrorMarker(d.queryErrorResponse(err), q)
+		}
+		for i := range changes {
+			// These markers are warnings: the change log's own markers are all there.
+			var logMsg string
+			var text func(error, bool) string
+			switch changes[i].Kind {
+			case provider.ChangeKindDescendantsError:
+				logMsg, text = "netbox descendants error", descendantsErrorText
+			case provider.ChangeKindJournalError:
+				logMsg, text = "netbox journal error", journalErrorText
+			default:
+				continue
+			}
+			err := changes[i].Err
+			if err == nil {
+				err = errors.New("unknown error")
+			}
+			log.DefaultLogger.Warn(logMsg, "detail", sanitizeLog(err.Error()))
+			changes[i].Message = text(err, d.viaProxy)
+		}
+		if d.cfg.PublicURL != "" {
+			internal, public := trimBase(d.provider.BaseURL()), trimBase(d.cfg.PublicURL)
+			for i := range changes {
+				changes[i].URL = rewriteLinkURL(changes[i].URL, internal, public)
+			}
 		}
 		frame := buildAnnotationsFrame(changes)
 		frame.RefID = q.RefID
@@ -528,7 +643,7 @@ func scopeNeedsAFilter(mode models.ProviderMode) string {
 
 // allFilterValue is Grafana's own token for a variable's "All" option. A filter
 // row whose value is exactly this means "do not filter on this field".
-const allFilterValue = "$__all"
+const allFilterValue = provider.AllValue
 
 // dropAllFilters removes the filter rows whose value is "All".
 //
@@ -560,6 +675,42 @@ func dropAllFilters(filters []provider.Filter) []provider.Filter {
 		}
 	}
 	return out
+}
+
+// parseScope splits an annotation's interpolated scope on commas. A NetBox name
+// can hold a comma, so one written \, is part of its value, as is a backslash
+// written \\: the frontend escapes variable values so (scopeFormat), and a user
+// can type them. A backslash before anything else stays as it is, so a name
+// such as Gi0\1 reads as written. The whole value $__all is all: every object
+// of the Scope type, the token dropAllFilters honours as no filter. A list
+// holding $__all beside other values is malformed and stays a list of values:
+// it must not widen the query.
+func parseScope(raw string) (values []string, all bool) {
+	if strings.TrimSpace(raw) == allFilterValue {
+		return nil, true
+	}
+	var cur strings.Builder
+	flush := func() {
+		if v := strings.TrimSpace(cur.String()); v != "" {
+			values = append(values, v)
+		}
+		cur.Reset()
+	}
+	// Byte by byte: a comma and a backslash are ASCII, never part of a UTF-8
+	// sequence.
+	for i := 0; i < len(raw); i++ {
+		switch c := raw[i]; {
+		case c == '\\' && i+1 < len(raw) && (raw[i+1] == ',' || raw[i+1] == '\\'):
+			cur.WriteByte(raw[i+1])
+			i++
+		case c == ',':
+			flush()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	flush()
+	return values, false
 }
 
 // splitList parses a free-form list separated by commas, whitespace or newlines.
@@ -745,6 +896,20 @@ func boundedDetail(u *provider.UpstreamError) string {
 // Grafana toast.
 const maxUpstreamDetail = 300
 
+// boundDetail cuts a user-supplied string for a user-facing error to
+// maxUpstreamDetail bytes, and marks the cut. The cut steps back to a
+// character's first byte, so a non-ASCII name isn't split into an escape.
+func boundDetail(s string) string {
+	if len(s) <= maxUpstreamDetail {
+		return s
+	}
+	n := maxUpstreamDetail
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
+}
+
 // transportCause names why a request never got an answer, in words that carry
 // no address, port, path or raw error text.
 //
@@ -908,12 +1073,8 @@ func queryErrorMessage(err error, viaProxy bool) string {
 		case provider.ErrorKindUnknownObjectType:
 			// Bounded like every other echoed string here: the type is free text
 			// from the annotation editor and lands in the same toast.
-			name := u.ObjectType
-			if len(name) > maxUpstreamDetail {
-				name = name[:maxUpstreamDetail] + "…"
-			}
 			return fmt.Sprintf("NetBox has no object type %q — it isn't one of the %d types this instance reports. Annotations filter by app_label.model, singular (e.g. dcim.device, ipam.ipaddress).",
-				name, u.KnownTypes)
+				boundDetail(u.ObjectType), u.KnownTypes)
 		// A capability the backend does not have. The provider's own sentence is
 		// preferred because only it can name what is missing and what to use
 		// instead; it is provider-authored (never an upstream body) but bounded
@@ -935,6 +1096,8 @@ func queryErrorMessage(err error, viaProxy bool) string {
 			return "This object type was not found in NetBox (HTTP 404)."
 		case provider.ErrorKindNotOrderable:
 			return "NetBox couldn't list this object type — the endpoint doesn't support pagination (HTTP 500). This model may not be queryable."
+		case provider.ErrorKindAnnotation:
+			return annotationErrorMessage(u)
 		}
 		if u.Status != 0 {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
@@ -960,6 +1123,90 @@ func proxiedQueryMessage(err error, service string) string {
 	return "Couldn't reach " + service + ": " + cause + ". The Grafana server log has the full error."
 }
 
+// annotationErrorMessage says what to change in an annotation query the provider
+// refused (provider.ErrorKindAnnotation).
+func annotationErrorMessage(u *provider.UpstreamError) string {
+	// Bounded like the object type above: the value is free text from the
+	// annotation editor or a dashboard variable, and lands in the same toast.
+	value := boundDetail(u.AnnotationValue)
+	switch u.AnnotationReason {
+	case provider.AnnotationReasonEmptyScope:
+		return "The annotation's scope came out empty. Is its variable empty?"
+	case provider.AnnotationReasonEmptyScopeType:
+		return "The annotation's Scope type came out empty. Is its variable empty?"
+	case provider.AnnotationReasonScopeTypeNotOne:
+		return fmt.Sprintf("Scope type takes one object type, not %q. Give its variable a single value.", value)
+	case provider.AnnotationReasonNoMatch:
+		return fmt.Sprintf("No NetBox object named %q for this annotation's scope. Check the name, or match by ID.", value)
+	case provider.AnnotationReasonTooManyMatches:
+		return fmt.Sprintf("%q matches more than %d NetBox objects. Names like interface names repeat across devices: give the variable ids and set Match by to ID.", value, netbox.MaxNameMatches)
+	case provider.AnnotationReasonNotAnID:
+		return fmt.Sprintf("%q isn't a NetBox id. Set Match by to Name, or give the variable ids.", value)
+	case provider.AnnotationReasonNoNameFilter:
+		return "This object type can't be looked up by name. Set Match by to ID."
+	case provider.AnnotationReasonNoEndpoint:
+		return "This NetBox doesn't say where this object type lives, so it can't be looked up by name. Set Match by to ID."
+	case provider.AnnotationReasonTooManyObjects:
+		// A name lookup that stopped once past the limit knows only that much.
+		covers := fmt.Sprint(u.AnnotationCount)
+		if u.AnnotationCount == provider.CountPastLimit {
+			covers = fmt.Sprintf("more than %d", netbox.MaxScopeObjects)
+		}
+		return fmt.Sprintf("The scope covers %s objects; the limit is %d. Narrow the variable's selection. To follow every object of the Scope type in NetBox, give the All option the custom value $__all.", covers, netbox.MaxScopeObjects)
+	case provider.AnnotationReasonUnknownField:
+		return fmt.Sprintf("%q isn't a field of any NetBox object type. Custom fields are written cf_<name>.", value)
+	case provider.AnnotationReasonUnknownCustomField:
+		return fmt.Sprintf("%q isn't a custom field on this NetBox. Check the name after cf_.", value)
+	case provider.AnnotationReasonUnknownAction:
+		return fmt.Sprintf("%q isn't a change action. Use create, update or delete.", value)
+	case provider.AnnotationReasonUntrackedField:
+		return fmt.Sprintf("%q isn't compared between changes, so it can't filter them. Pick another field.", value)
+	case provider.AnnotationReasonObjectTypesUnreadable:
+		return "NetBox's object-type list couldn't be read, and it's needed to find related changes. Check that the token can read object types."
+	case provider.AnnotationReasonTooManyChildren:
+		return fmt.Sprintf("This scope has more than %s interfaces or cables to follow. Narrow the scope, or turn off Include descendants.", thousands(netbox.ChildListCapRows))
+	case provider.AnnotationReasonDescendantTypesUnreadable:
+		return "NetBox's object-type list couldn't be read. If this keeps happening, turn off Include descendants."
+	case provider.AnnotationReasonDescendantsForbidden:
+		return "The API token can't read this scope's objects, interfaces or cables. Let the token view them, or turn off Include descendants."
+	case provider.AnnotationReasonDescendantsSlow:
+		return fmt.Sprintf("Reading what's attached took longer than %d s. Narrow the range, or turn off Include descendants on a busy NetBox.", u.AnnotationCount)
+	}
+	return "NetBox can't answer this annotation query as configured. Check its scope and filters."
+}
+
+// descendantsErrorText is the warning marker's text for a failed descendants
+// read.
+func descendantsErrorText(err error, viaProxy bool) string {
+	return warningText("Changes to what's attached weren't read.", "Include descendants", err, viaProxy)
+}
+
+// journalErrorText is the warning marker's text for a failed journal read: a
+// refused or slow journal says why and what to do, any other failure says what
+// NetBox answered.
+func journalErrorText(err error, viaProxy bool) string {
+	if u := provider.Classify(err); u != nil && u.Kind == provider.ErrorKindAnnotation {
+		switch u.AnnotationReason {
+		case provider.AnnotationReasonJournalForbidden:
+			return "Journal entries weren't read: the API token can't read them. Let the token view journal entries, or turn off Journal entries."
+		case provider.AnnotationReasonJournalSlow:
+			return fmt.Sprintf("Journal entries weren't read: reading them took longer than %d s. Narrow the range, or turn off Journal entries on a busy NetBox.", u.AnnotationCount)
+		}
+	}
+	return warningText("Journal entries weren't read.", "Journal entries", err, viaProxy)
+}
+
+// warningText says what wasn't read, and why. The messages for an annotation
+// refusal already say what to do, so only other failures get the hint to turn
+// off the switch that asked for the read.
+func warningText(what, option string, err error, viaProxy bool) string {
+	text := what + " " + queryErrorMessage(err, viaProxy)
+	if u := provider.Classify(err); u == nil || u.Kind != provider.ErrorKindAnnotation {
+		text += " If this keeps happening, turn off " + option + "."
+	}
+	return text
+}
+
 // queryErrorResponse logs the raw upstream error (sanitized) and returns a data
 // response carrying only the user-facing mapped message.
 func (d *Datasource) queryErrorResponse(err error) backend.DataResponse {
@@ -971,20 +1218,21 @@ func (d *Datasource) queryErrorResponse(err error) backend.DataResponse {
 // a NetBox 500, an unreachable host — stays StatusInternal, which is the honest
 // "our side broke, try again". A query that could never have worked as written
 // is a bad request, and saying otherwise tells the reader to retry something
-// only they can fix.
+// only they can fix. object-types-unreadable is an annotation refusal, but of
+// a read that failed upstream, often in passing, so it is StatusInternal too.
 func queryErrorStatus(err error) backend.Status {
-	// These three are settled facts about what was asked for, and StatusInternal
-	// says "our side broke, try again" — the opposite of what the reader has to
-	// do. A bad request belongs with them: whether it came from the upstream
-	// answering 400 or from a filter this backend cannot express, the query is
-	// what has to change, and no retry will help.
-	//
-	// Genuine upstream failures are untouched. A 500 or an unreachable host
-	// classifies as ErrorKindUpstream or not at all, and stays internal.
+	// A bad request belongs with the settled facts about what was asked for:
+	// whether it came from the upstream answering 400 or from a filter this
+	// backend cannot express, the query is what has to change, and no retry
+	// will help. So does a capability the backend lacks, or an object type the
+	// replica doesn't carry.
 	if u := provider.Classify(err); u != nil {
-		switch u.Kind {
-		case provider.ErrorKindUnknownObjectType, provider.ErrorKindUnsupported, provider.ErrorKindBadRequest,
-			provider.ErrorKindNotReplicated:
+		switch {
+		case u.Kind == provider.ErrorKindAnnotation && u.AnnotationReason == provider.AnnotationReasonObjectTypesUnreadable:
+			return backend.StatusInternal
+		case u.Kind == provider.ErrorKindUnknownObjectType, u.Kind == provider.ErrorKindAnnotation,
+			u.Kind == provider.ErrorKindUnsupported, u.Kind == provider.ErrorKindBadRequest,
+			u.Kind == provider.ErrorKindNotReplicated:
 			return backend.StatusBadRequest
 		}
 	}

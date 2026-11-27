@@ -471,7 +471,8 @@ func TestResolveIPs_NoRecordRowShape(t *testing.T) {
 	if got := rowFor(t, res, "192.0.2.1"); !reflect.DeepEqual(got, want) {
 		t.Errorf("row = %v, want %v", got, want)
 	}
-	if !reflect.DeepEqual(res.ColumnTypes, map[string]provider.FieldType{"match_count": provider.FieldTypeNumber, "is_primary_ip": provider.FieldTypeBoolean}) {
+	if !reflect.DeepEqual(res.ColumnTypes, map[string]provider.FieldType{"match_count": provider.FieldTypeNumber, "is_primary_ip": provider.FieldTypeBoolean,
+		"address_id": provider.FieldTypeNumber, "prefix_id": provider.FieldTypeNumber, "device_id": provider.FieldTypeNumber, "vm_id": provider.FieldTypeNumber}) {
 		t.Errorf("column types = %v", res.ColumnTypes)
 	}
 }

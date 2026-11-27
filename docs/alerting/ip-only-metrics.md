@@ -73,9 +73,11 @@ in the scope, so it would alert on an incomplete result. Raise the row limit
   metric row. Check the scope in a panel first.
 - **Cost is per evaluation.** The scope is listed and enriched on every
   evaluation. Select only the context columns the rule uses: the device hop runs
-  only when a `device_*` column or `is_primary_ip` is selected, and
-  `is_primary_ip` also costs the VM hop. `vm_name` is free in NetBox mode — it
-  rides on the address record — and costs the VM reads in replica-cache mode.
+  only when a `device_*` column other than `device_id`, or `is_primary_ip`, is
+  selected, and `is_primary_ip` also costs the VM hop. In NetBox mode
+  `address_id`, `device_id`, `vm_id` and `vm_name` are free — they ride on the
+  address record. In replica-cache mode only `address_id` is: `device_id` and
+  `vm_id` cost the interface reads, and `vm_name` the VM reads as well.
 - **No `prefix_*` columns here.** The containing-prefix lookup is the fallback
   for an IP with no address record, and every row of a scope has one, so the
   editor does not offer the Prefix group on a scope query. Filter the scope by

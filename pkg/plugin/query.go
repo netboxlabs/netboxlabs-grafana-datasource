@@ -920,6 +920,9 @@ func queryErrorMessage(err error, viaProxy bool) string {
 			return "NetBox couldn't list this object type — the endpoint doesn't support pagination (HTTP 500). This model may not be queryable."
 		case provider.ErrorKindIDFilterIgnored:
 			return "NetBox didn't apply the id filter to this object type, so this query can't filter by id. Filter on another field."
+		case provider.ErrorKindTooManyIDs:
+			return fmt.Sprintf("This query filters on %s ids, more than the %s one query reads. Filter on fewer ids, or on another field.",
+				thousands(u.IDs), thousands(u.MaxIDs))
 		case provider.ErrorKindAnnotation:
 			return annotationErrorMessage(u)
 		}
@@ -1042,7 +1045,8 @@ func queryErrorStatus(err error) backend.Status {
 		switch {
 		case u.Kind == provider.ErrorKindAnnotation && u.AnnotationReason == provider.AnnotationReasonObjectTypesUnreadable:
 			return backend.StatusInternal
-		case u.Kind == provider.ErrorKindUnknownObjectType, u.Kind == provider.ErrorKindAnnotation, u.Kind == provider.ErrorKindIDFilterIgnored:
+		case u.Kind == provider.ErrorKindUnknownObjectType, u.Kind == provider.ErrorKindAnnotation, u.Kind == provider.ErrorKindIDFilterIgnored,
+			u.Kind == provider.ErrorKindTooManyIDs:
 			return backend.StatusBadRequest
 		}
 	}

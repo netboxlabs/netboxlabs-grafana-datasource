@@ -507,16 +507,43 @@ func TestQueryBatchedKeepsTheCallersFieldsFilter(t *testing.T) {
 	}
 }
 
-// Past the 10,000-row ceiling no Limit covers every id: the note says to send
-// fewer, not to raise the Limit.
-func TestQueryBatchedPastTheCeilingSaysSendFewer(t *testing.T) {
-	s := &idServer{n: 12000}
-	res, err := s.start(t).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Filters: []provider.Filter{idFilter(1, 12000)}, Limit: MaxLimit})
-	if err != nil {
-		t.Fatalf("Query: %v", err)
+// More ids than the 10,000-row ceiling are refused before any request: each
+// batch costs a request, so a list without a bound is a burst of requests
+// without one, and a query can't show more objects than the ceiling anyway.
+// The count is of distinct ids, so a list that repeats ids is judged by what it
+// names.
+func TestQueryRefusesMoreIDsThanTheCeiling(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    provider.Filter
+	}{
+		{"numbers", idFilter(1, MaxLimit+1)},
+		{"strings", uuidFilter(1, MaxLimit+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &idServer{n: 12000, stringIDs: tc.name == "strings"}
+			for _, spec := range []provider.QuerySpec{
+				{ObjectType: "dcim/devices", Filters: []provider.Filter{tc.f}, Limit: MaxLimit},
+				{ObjectType: "dcim/devices", Filters: []provider.Filter{tc.f}, CountOnly: true},
+			} {
+				_, err := s.start(t).Query(context.Background(), spec)
+				u := provider.Classify(err)
+				if u == nil || u.Kind != provider.ErrorKindTooManyIDs || u.IDs != MaxLimit+1 || u.MaxIDs != MaxLimit {
+					t.Fatalf("err = %v (%+v), want too many ids: %d of at most %d", err, u, MaxLimit+1, MaxLimit)
+				}
+			}
+			if n := len(s.rawQueries()); n != 0 {
+				t.Errorf("%d requests sent for a refused id list", n)
+			}
+		})
 	}
-	notes := strings.Join(res.Notes, " | ")
-	if !strings.Contains(notes, "fewer ids") || strings.Contains(notes, "Raise the Limit") {
-		t.Errorf("notes %q, want send fewer ids", notes)
+
+	// The ceiling itself is read, repeats and all.
+	s := &idServer{n: 12000}
+	f := idFilter(1, MaxLimit)
+	f.Value += ",1,2,3"
+	res, err := s.start(t).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Filters: []provider.Filter{f}, CountOnly: true})
+	if err != nil || res.Total != MaxLimit {
+		t.Fatalf("err %v, total %v; want the %d ids counted", err, res, MaxLimit)
 	}
 }

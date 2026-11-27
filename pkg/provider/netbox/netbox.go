@@ -520,6 +520,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if ids := q[idParam]; len(ids) > 1 {
 		q[idParam] = dedupeIDs(ids)
 	}
+	if n := len(q[idParam]); n > maxFilterIDs {
+		return nil, &tooManyIDsError{ids: n}
+	}
 	batched := idBatchingNeeded(q, orderingReserve(spec.Ordering)+len(",id"))
 	// A batched read checks every row's id (batchHonoursIDs), so our
 	// projection asks for it whatever the selection; it isn't a column unless

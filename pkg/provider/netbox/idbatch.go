@@ -35,6 +35,12 @@ const minIDBudget = 1024
 // idBatchWorkers is how many batches are read at once.
 const idBatchWorkers = 4
 
+// maxFilterIDs is the most distinct ids one query reads. Every batch is a
+// request, so without a bound the requests grow with whatever list a dashboard
+// variable or a hand-written query sends. MaxLimit is that bound: each id names
+// at most one object, so a longer list could match more than a query shows.
+const maxFilterIDs = MaxLimit
+
 // idBatchingNeeded reports whether q's id filter must be read in batches: it
 // holds more than one id, the query doesn't fit the budget with reserve more
 // bytes (the sort applyOrdering adds after this), and the other parameters
@@ -235,10 +241,9 @@ func idBatchNote(page listResult, sorted bool, shown int) string {
 		return ""
 	}
 	cut := page.totalKnown && page.total > shown
-	advice := "Raise the Limit to cover every id."
-	if page.total > MaxLimit {
-		advice = fmt.Sprintf("Send fewer ids: more match than the %s-row ceiling.", thousands(MaxLimit))
-	}
+	// No more ids than the ceiling are read (maxFilterIDs), so a higher Limit
+	// always covers them.
+	const advice = "Raise the Limit to cover every id."
 	switch {
 	case cut && sorted:
 		return fmt.Sprintf("Read in %d batches (%s ids), each sorted by NetBox on its own, and cut at the Limit: the rows shown are the first batches', not the top %s by the sort. %s",
@@ -269,4 +274,16 @@ func (e *idFilterIgnoredError) Error() string {
 // Classification reports it as the query's: it can't be answered as written.
 func (e *idFilterIgnoredError) Classification() *provider.UpstreamError {
 	return &provider.UpstreamError{Kind: provider.ErrorKindIDFilterIgnored}
+}
+
+// tooManyIDsError is an id filter naming more distinct ids than maxFilterIDs.
+type tooManyIDsError struct{ ids int }
+
+func (e *tooManyIDsError) Error() string {
+	return fmt.Sprintf("netbox: the id filter names %d ids, more than the %d one query reads", e.ids, maxFilterIDs)
+}
+
+// Classification reports it as the query's: it can't be answered as written.
+func (e *tooManyIDsError) Classification() *provider.UpstreamError {
+	return &provider.UpstreamError{Kind: provider.ErrorKindTooManyIDs, IDs: e.ids, MaxIDs: maxFilterIDs}
 }

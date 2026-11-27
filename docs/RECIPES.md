@@ -467,7 +467,8 @@ narrows when the dashboard's filters do. A list too long for one request is read
 in batches, each id once, the total exact. Keep in mind:
 
 - an empty variable sends no filter, so the query reads every object again;
-- more than 10,000 ids is still past the ceiling above;
+- more than 10,000 ids is refused, naming the count: no query shows more objects
+  than the ceiling above, and each batch is a request;
 - a sorted query read in batches is sorted within each batch (a notice says so):
   sort in the panel if the order matters.
 

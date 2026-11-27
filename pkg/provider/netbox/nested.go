@@ -61,11 +61,14 @@ func nestedRefs(names []string) []string {
 // order. A key source is computed but isn't a column, as any key source isn't.
 // A row that already holds a key of that name (a plugin model's own property)
 // keeps it. A reference that is absent, null or not an object, or whose
-// flattened object has no such column, gives null. A column that is null on
-// every row because no row has its reference, or no reference has its column,
-// gets a note naming it: a typo, or a field NetBox's short form of the
-// reference doesn't carry, rather than a silent blank.
-func addNestedColumns(fields, keys []string, raws []json.RawMessage, rows []map[string]interface{}, columns []string, seen map[string]bool) ([]string, []string) {
+// flattened object has no such column, gives null.
+//
+// A column that can't exist is a warning naming it, so an alert rule or SQL
+// join reading it refuses rather than read nulls as values: no row has its
+// reference at all (usually a typo), or NetBox's short form of the reference
+// has no such column. One whose reference is present but unset on every row is
+// a note: that can be the data.
+func addNestedColumns(fields, keys []string, raws []json.RawMessage, rows []map[string]interface{}, columns []string, seen map[string]bool) (cols, notes, warnings []string) {
 	var want []string
 	for _, n := range append(append([]string(nil), fields...), keys...) {
 		if isNestedColumn(n) && !slices.Contains(want, n) {
@@ -73,9 +76,9 @@ func addNestedColumns(fields, keys []string, raws []json.RawMessage, rows []map[
 		}
 	}
 	if len(want) == 0 {
-		return columns, nil
+		return columns, nil, nil
 	}
-	type found struct{ real, ref, col bool }
+	type found struct{ real, refKey, ref, col bool }
 	seenIn := make(map[string]*found, len(want))
 	for _, n := range want {
 		seenIn[n] = &found{}
@@ -92,6 +95,9 @@ func addNestedColumns(fields, keys []string, raws []json.RawMessage, rows []map[
 				continue
 			}
 			ref, col, _ := nestedColumn(name)
+			if _, ok := obj[ref]; ok {
+				seenIn[name].refKey = true
+			}
 			vals, done := flat[ref]
 			if !done {
 				vals = flattenReference(obj[ref])
@@ -112,21 +118,22 @@ func addNestedColumns(fields, keys []string, raws []json.RawMessage, rows []map[
 			columns = append(columns, n)
 		}
 	}
-	var notes []string
 	if len(rows) > 0 {
 		for _, n := range want {
 			f := seenIn[n]
 			ref, col, _ := nestedColumn(n)
 			switch {
 			case f.real:
+			case !f.refKey:
+				warnings = append(warnings, fmt.Sprintf("%s is empty: no row has a %s. Check the name.", n, ref))
 			case !f.ref:
-				notes = append(notes, fmt.Sprintf("%s is empty: no row has a %s to read %s from. Check the name.", n, ref, col))
+				notes = append(notes, fmt.Sprintf("%s is empty: no row has a %s set.", n, ref))
 			case !f.col:
-				notes = append(notes, fmt.Sprintf("%s is empty: NetBox's short form of %s has no %s.", n, ref, col))
+				warnings = append(warnings, fmt.Sprintf("%s is empty: NetBox's short form of %s has no %s.", n, ref, col))
 			}
 		}
 	}
-	return columns, notes
+	return columns, notes, warnings
 }
 
 // IsNestedColumn reports whether a column name is a nested column,

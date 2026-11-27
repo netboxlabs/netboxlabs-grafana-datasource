@@ -23,13 +23,13 @@ func typedDeviceFixtures() []map[string]interface{} {
 		}
 	}
 	return []map[string]interface{}{
-		{"id": 1.0, "name": "leaf1", "device_type": devType(1, "DCS-7050SX3", "Arista", "arista"),
+		{"id": 1.0, "name": "leaf1", "tenant": nil, "device_type": devType(1, "DCS-7050SX3", "Arista", "arista"),
 			"site": map[string]interface{}{"id": 2.0, "name": "dc1", "slug": "dc1"}},
-		{"id": 2.0, "name": "leaf2", "device_type": devType(2, "QFX5120", "Juniper", "juniper"),
+		{"id": 2.0, "name": "leaf2", "tenant": nil, "device_type": devType(2, "QFX5120", "Juniper", "juniper"),
 			"site": map[string]interface{}{"id": 3.0, "name": "dc2", "slug": "dc2"}},
-		{"id": 3.0, "name": "spare", "device_type": nil,
+		{"id": 3.0, "name": "spare", "tenant": nil, "device_type": nil,
 			"site": map[string]interface{}{"id": 3.0, "name": "dc2", "slug": "dc2"}},
-		{"id": 4.0, "name": "odd", "device_type": "not an object", "plugin__flag": "kept",
+		{"id": 4.0, "name": "odd", "tenant": nil, "device_type": "not an object", "plugin__flag": "kept",
 			"site": map[string]interface{}{"id": 3.0, "name": "dc2", "slug": "dc2"}},
 	}
 }
@@ -174,20 +174,25 @@ func TestNestedColumn(t *testing.T) {
 	}
 }
 
-// A nested column that is empty on every row because its reference, or the
-// column in it, doesn't exist says so, rather than leave a silent blank: a
-// typo, or a field NetBox's short form of the reference doesn't carry.
+// A nested column that can't exist (no row has its reference: usually a typo;
+// or NetBox's short form of the reference has no such field) is a warning, so
+// an alert rule or SQL join reading it refuses rather than read nulls as
+// values. One whose reference is present but unset on every row is a note.
 func TestQueryNestedColumnThatDoesntExistSaysSo(t *testing.T) {
 	spec := provider.QuerySpec{ObjectType: "dcim/devices", Limit: 100,
-		Fields: []string{"name", "device_typ__model", "site__region", "device_type__model"}}
+		Fields: []string{"name", "device_typ__model", "site__region", "tenant__group", "device_type__model"}}
 	_, projected, _ := runBoth(t, spec, typedDevices())
-	notes := strings.Join(projected.Notes, " | ")
-	for _, want := range []string{"device_typ__model", "site__region"} {
-		if !strings.Contains(notes, want) {
-			t.Errorf("notes %q don't name %s", notes, want)
-		}
+	warnings, notes := strings.Join(projected.Warnings, " | "), strings.Join(projected.Notes, " | ")
+	if !strings.Contains(warnings, "device_typ__model") || !strings.Contains(warnings, "Check the name") {
+		t.Errorf("warnings %q, want device_typ__model with Check the name", warnings)
 	}
-	if strings.Contains(notes, "device_type__model") {
-		t.Errorf("notes %q name device_type__model, which has values", notes)
+	if !strings.Contains(warnings, "site__region") {
+		t.Errorf("warnings %q, want site__region", warnings)
+	}
+	if !strings.Contains(notes, "tenant__group") || strings.Contains(notes, "Check the name") || strings.Contains(warnings, "tenant__group") {
+		t.Errorf("notes %q, warnings %q: want tenant__group as a note without Check the name", notes, warnings)
+	}
+	if strings.Contains(warnings+notes, "device_type__model") {
+		t.Errorf("device_type__model has values but is named in %q / %q", warnings, notes)
 	}
 }

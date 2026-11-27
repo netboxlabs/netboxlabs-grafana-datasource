@@ -428,3 +428,17 @@ func TestBatchHonoursIDsWithoutIntegerIDs(t *testing.T) {
 		}
 	}
 }
+
+// Past the 10,000-row ceiling no Limit covers every id: the note says to send
+// fewer, not to raise the Limit.
+func TestQueryBatchedPastTheCeilingSaysSendFewer(t *testing.T) {
+	s := &idServer{n: 12000}
+	res, err := s.start(t).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Filters: []provider.Filter{idFilter(1, 12000)}, Limit: MaxLimit})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	notes := strings.Join(res.Notes, " | ")
+	if !strings.Contains(notes, "fewer ids") || strings.Contains(notes, "Raise the Limit") {
+		t.Errorf("notes %q, want send fewer ids", notes)
+	}
+}

@@ -620,10 +620,11 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	}
 
 	// Computed from the final rows, after any refetch above.
-	columns, nestedNotes := addNestedColumns(spec.Fields, spec.KeyFields, flatRaws, flatRows, columns, seen)
+	columns, nestedNotes, nestedWarnings := addNestedColumns(spec.Fields, spec.KeyFields, flatRaws, flatRows, columns, seen)
 
 	var notes, warnings []string
 	notes = append(notes, nestedNotes...)
+	warnings = append(warnings, nestedWarnings...)
 	if orderNote != "" {
 		notes = append(notes, orderNote)
 	}

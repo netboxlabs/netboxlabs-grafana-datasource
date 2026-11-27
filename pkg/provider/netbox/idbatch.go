@@ -196,13 +196,17 @@ func idBatchNote(page listResult, sorted bool, shown int) string {
 		return ""
 	}
 	cut := page.totalKnown && page.total > shown
+	advice := "Raise the Limit to cover every id."
+	if page.total > MaxLimit {
+		advice = fmt.Sprintf("Send fewer ids: more match than the %s-row ceiling.", thousands(MaxLimit))
+	}
 	switch {
 	case cut && sorted:
-		return fmt.Sprintf("Read in %d batches (%s ids), each sorted by NetBox on its own, and cut at the Limit: the rows shown are the first batches', not the top %s by the sort. Raise the Limit to cover every id.",
-			page.batches, thousands(page.ids), thousands(shown))
+		return fmt.Sprintf("Read in %d batches (%s ids), each sorted by NetBox on its own, and cut at the Limit: the rows shown are the first batches', not the top %s by the sort. %s",
+			page.batches, thousands(page.ids), thousands(shown), advice)
 	case cut:
-		return fmt.Sprintf("Read in %d batches (%s ids), each in NetBox's own order, and cut at the Limit: the rows shown are the first batches'. Raise the Limit to cover every id.",
-			page.batches, thousands(page.ids))
+		return fmt.Sprintf("Read in %d batches (%s ids), each in NetBox's own order, and cut at the Limit: the rows shown are the first batches'. %s",
+			page.batches, thousands(page.ids), advice)
 	case sorted:
 		return fmt.Sprintf("Read in %d batches (%s ids), each sorted by NetBox on its own; sort in the panel to order the whole table.",
 			page.batches, thousands(page.ids))

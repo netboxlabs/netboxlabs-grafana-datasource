@@ -883,11 +883,7 @@ func proxyHop(err error) bool {
 // provider.UpstreamError), but it is bounded here anyway on the same principle
 // as every other echoed string: the caller cannot see who wrote it.
 func boundedDetail(u *provider.UpstreamError) string {
-	d := strings.TrimSpace(u.Detail)
-	if len(d) > maxUpstreamDetail {
-		d = d[:maxUpstreamDetail] + "…"
-	}
-	return d
+	return boundDetail(strings.TrimSpace(u.Detail))
 }
 
 // maxUpstreamDetail bounds a user-supplied string echoed in a user-facing

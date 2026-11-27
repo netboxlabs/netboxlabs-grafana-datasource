@@ -216,9 +216,10 @@ export const JOIN_KEY_TRANSFORMS: Array<{ label: string; value: string; descript
  *  embedded assigned_object is the brief serializer, which for a
  *  `dcim.interface` carries nothing else — a `virtualization.vminterface`
  *  carries one thing more, its nested virtual_machine, and that is `vm_name`.
- *  `vm_name` is the only vm_* column: every other VM attribute (cluster, site,
- *  role, platform, status) needs a second NetBox request, while the name is
- *  already in the address payload. It is mutually exclusive with `device_name`
+ *  `vm_id` and `vm_name` are the only vm_* columns: every other VM attribute
+ *  (cluster, site, role, platform, status) needs a second NetBox request, while
+ *  the id and name are already in the address payload. `vm_name` is mutually
+ *  exclusive with `device_name`
  *  per row — an address is assigned to a device interface, to a VM interface,
  *  or to neither (an FHRP group, or nothing at all), so the two are never both
  *  set and may well both be blank — and it is deliberately not folded into
@@ -249,7 +250,7 @@ export const IP_CONTEXT_FIELD_GROUPS: Array<{
   },
   {
     label: 'Prefix',
-    options: ['cidr', 'scope', 'tenant', 'role', 'vrf', 'vlan', 'description'].map((f) => ({
+    options: ['id', 'cidr', 'scope', 'scope_type', 'tenant', 'role', 'vrf', 'vlan', 'description'].map((f) => ({
       label: `prefix_${f}`,
       value: `prefix_${f}`,
     })),
@@ -257,6 +258,7 @@ export const IP_CONTEXT_FIELD_GROUPS: Array<{
   {
     label: 'Address',
     options: [
+      'id',
       'dns_name',
       'status',
       'role',
@@ -277,14 +279,26 @@ export const IP_CONTEXT_FIELD_GROUPS: Array<{
   },
   {
     label: 'Device',
-    options: ['name', 'role', 'platform', 'device_type', 'site', 'location', 'rack', 'tenant', 'status'].map((f) => ({
+    options: [
+      'id',
+      'name',
+      'role',
+      'platform',
+      'device_type',
+      'manufacturer',
+      'site',
+      'location',
+      'rack',
+      'tenant',
+      'status',
+    ].map((f) => ({
       label: `device_${f}`,
       value: `device_${f}`,
     })),
   },
   {
     label: 'Virtual machine',
-    options: ['name'].map((f) => ({ label: `vm_${f}`, value: `vm_${f}` })),
+    options: ['id', 'name'].map((f) => ({ label: `vm_${f}`, value: `vm_${f}` })),
   },
 ];
 

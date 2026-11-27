@@ -2215,7 +2215,8 @@ func TestResolveIPs(t *testing.T) {
 	deviceFixtures := map[string]string{
 		"100": `{"id":100,"name":"leaf-01","role":{"id":2,"name":"Leaf Switch","slug":"leaf-switch"},` +
 			`"platform":{"id":3,"name":"Arista EOS","slug":"arista-eos"},` +
-			`"device_type":{"id":4,"model":"DCS-7050TX"},"site":{"id":5,"name":"AMS1","slug":"ams1"},` +
+			`"device_type":{"id":4,"model":"DCS-7050TX","manufacturer":{"id":9,"name":"Arista","slug":"arista","display":"Arista"}},` +
+			`"site":{"id":5,"name":"AMS1","slug":"ams1"},` +
 			`"location":{"id":6,"name":"Hall 1","slug":"hall-1"},"rack":{"id":7,"name":"R101"},` +
 			`"tenant":{"id":8,"name":"NetOps","slug":"netops"},"status":{"value":"active","label":"Active"},` +
 			`"primary_ip4":{"id":1,"address":"10.0.0.1/32"}}`,
@@ -2262,8 +2263,8 @@ func TestResolveIPs(t *testing.T) {
 	// mock that DOES answer, by TestResolveIPs_IsPrimaryIP.
 	deviceColumns := []string{
 		"device_name", "device_role", "device_platform", "device_device_type",
-		"device_site", "device_location", "device_rack", "device_tenant",
-		"device_status",
+		"device_manufacturer", "device_site", "device_location", "device_rack",
+		"device_tenant", "device_status",
 	}
 
 	t.Run("Total is the pre-clamp distinct count, not the post-clamp row count", func(t *testing.T) {
@@ -2361,6 +2362,11 @@ func TestResolveIPs(t *testing.T) {
 		}
 		if devRow["device_site"] != "AMS1" {
 			t.Errorf("device_site = %v, want %q", devRow["device_site"], "AMS1")
+		}
+		// The manufacturer comes from the device type nested in the same device
+		// row: no dcim/device-types request.
+		if devRow["device_manufacturer"] != "Arista" {
+			t.Errorf("device_manufacturer = %v, want %q", devRow["device_manufacturer"], "Arista")
 		}
 		// This mock serves no virtualization endpoint, so selecting is_primary_ip
 		// puts the VM hop through a 404 in this very call — and the device row's
@@ -3073,7 +3079,7 @@ func TestHopWarningTexts(t *testing.T) {
 			// 0 asserts "NetBox holds no record" and a prefix_cidr looks like a
 			// successful longest-match fallback, on an IP NetBox knows.
 			want: "Address lookup failed for 330 of 1,200 IPs — NetBox returned HTTP 503. " +
-				"The match_count, address_*, interface_*, device_*, vm_name, is_primary_ip and prefix_* columns on the affected rows are empty " +
+				"The match_count, address_*, interface_*, device_*, vm_*, is_primary_ip and prefix_* columns on the affected rows are empty " +
 				"because the lookup failed, not because NetBox has no record for those IPs.",
 		},
 		{
@@ -3081,7 +3087,7 @@ func TestHopWarningTexts(t *testing.T) {
 			name: "device hop, total",
 			got:  deviceHopWarning(degradation{failed: 12, total: 12, cause: apiErr}, true, true),
 			want: "Device lookup failed for all 12 devices — NetBox returned HTTP 503. " +
-				"The device_* and is_primary_ip columns on the affected rows are blank because the lookup failed, " +
+				"The device_* columns other than device_id and the is_primary_ip column on the affected rows are blank because the lookup failed, " +
 				"not because those IPs have no device.",
 		},
 		{
@@ -3090,7 +3096,7 @@ func TestHopWarningTexts(t *testing.T) {
 			name: "device hop, device_* selected without is_primary_ip",
 			got:  deviceHopWarning(degradation{failed: 12, total: 12, cause: apiErr}, true, false),
 			want: "Device lookup failed for all 12 devices — NetBox returned HTTP 503. " +
-				"The device_* columns on the affected rows are blank because the lookup failed, " +
+				"The device_* columns other than device_id on the affected rows are blank because the lookup failed, " +
 				"not because those IPs have no device.",
 		},
 		{
@@ -3528,7 +3534,7 @@ func TestResolveIPs_DeviceHopWarningNamesOnlySelectedColumns(t *testing.T) {
 		{
 			name:    "both",
 			fields:  []string{"ip", "device_name", "is_primary_ip"},
-			want:    []string{"The device_* and is_primary_ip columns", "are blank"},
+			want:    []string{"The device_* columns other than device_id and the is_primary_ip column", "are blank"},
 			notWhat: "not because those IPs have no device",
 		},
 	}
@@ -3924,6 +3930,125 @@ func TestResolveIPs_DeclaresColumnTypes(t *testing.T) {
 	}
 	if len(res.ColumnTypes) != 0 {
 		t.Errorf("ColumnTypes = %v, want none when no declared column is selected", res.ColumnTypes)
+	}
+}
+
+// freeIDServer serves three address records: one on a device interface (device
+// 100), one on a VM interface (VM 7) and one unassigned. The device and VM
+// endpoints count their requests, so a test can prove an id column cost none.
+func freeIDServer(t *testing.T, deviceCalls, vmCalls *int) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		fx := map[string]string{
+			"10.0.0.1": `{"id":1,"address":"10.0.0.1/32","display_url":"https://nb.example.com/ipam/ip-addresses/1/","assigned_object_type":"dcim.interface","assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"}}}`,
+			"10.0.0.2": `{"id":2,"address":"10.0.0.2/32","display_url":"https://nb.example.com/ipam/ip-addresses/2/","assigned_object_type":"virtualization.vminterface","assigned_object":{"id":4,"name":"eth0","virtual_machine":{"id":7,"name":"vm-07"}}}`,
+			"10.0.0.3": `{"id":3,"address":"10.0.0.3/32","display_url":"https://nb.example.com/ipam/ip-addresses/3/","assigned_object_type":null,"assigned_object":null}`,
+		}
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			if v, ok := fx[a]; ok {
+				results = append(results, v)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		*deviceCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	mux.HandleFunc("/api/virtualization/virtual-machines/", func(w http.ResponseWriter, r *http.Request) {
+		*vmCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+var freeIDFields = []string{"ip", "address_id", "device_id", "vm_id"}
+
+// TestResolveIPs_FreeIDColumns pins the four columns that come straight off the
+// address record: the record's own id and the owning device's or VM's id.
+func TestResolveIPs_FreeIDColumns(t *testing.T) {
+	var dev, vm int
+	srv := freeIDServer(t, &dev, &vm)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, freeIDFields, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(res.Rows) != 3 {
+		t.Fatalf("rows = %d, want 3", len(res.Rows))
+	}
+	r0, r1, r2 := res.Rows[0], res.Rows[1], res.Rows[2]
+	if r0["address_id"] != float64(1) {
+		t.Errorf("row 0 address_id = %v", r0["address_id"])
+	}
+	if r0["device_id"] != float64(100) || r0["vm_id"] != nil {
+		t.Errorf("row 0 device_id/vm_id = %v / %v, want 100 / nil", r0["device_id"], r0["vm_id"])
+	}
+	if r1["vm_id"] != float64(7) || r1["device_id"] != nil {
+		t.Errorf("row 1 device_id/vm_id = %v / %v, want nil / 7", r1["device_id"], r1["vm_id"])
+	}
+	if r2["address_id"] != float64(3) || r2["device_id"] != nil || r2["vm_id"] != nil {
+		t.Errorf("row 2 = %v, want address_id 3 and no device or VM", r2)
+	}
+}
+
+// TestResolveIPs_FreeIDsMakeNoHopRequest is the cost promise: the id columns
+// are read off the address record, so selecting them asks NetBox for no device
+// and no virtual machine.
+func TestResolveIPs_FreeIDsMakeNoHopRequest(t *testing.T) {
+	var dev, vm int
+	srv := freeIDServer(t, &dev, &vm)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	if _, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, freeIDFields, 0); err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if dev != 0 || vm != 0 {
+		t.Errorf("device requests = %d, VM requests = %d, want 0 and 0", dev, vm)
+	}
+}
+
+func TestWantsGroupExcept(t *testing.T) {
+	cases := []struct {
+		fields []string
+		group  string
+		free   []string
+		want   bool
+	}{
+		{[]string{"device_id"}, "device_", []string{"device_id"}, false},
+		{[]string{"device_id", "device_name"}, "device_", []string{"device_id"}, true},
+		{[]string{"prefix_cidr"}, "device_", []string{"device_id"}, false},
+	}
+	for _, tc := range cases {
+		if got := wantsGroupExcept(tc.fields, tc.group, tc.free...); got != tc.want {
+			t.Errorf("wantsGroupExcept(%v, %q, %v) = %v, want %v", tc.fields, tc.group, tc.free, got, tc.want)
+		}
+	}
+}
+
+// TestResolveIPs_DeclaresIDColumnTypes: the id columns are numbers even when
+// nothing resolves, so an all-null column is not rendered as text.
+func TestResolveIPs_DeclaresIDColumnTypes(t *testing.T) {
+	var dev, vm int
+	srv := freeIDServer(t, &dev, &vm)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	res, err := p.ResolveIPs(context.Background(), []string{"8.8.8.8"}, freeIDFields, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	for _, c := range []string{"address_id", "device_id", "vm_id"} {
+		if got := res.ColumnTypes[c]; got != provider.FieldTypeNumber {
+			t.Errorf("ColumnTypes[%s] = %q, want %q", c, got, provider.FieldTypeNumber)
+		}
 	}
 }
 
@@ -4411,4 +4536,45 @@ func ipsOf(res *provider.Result) []string {
 		out = append(out, r["ip"].(string))
 	}
 	return out
+}
+
+// prefixServer answers every ?contains= lookup with one site-scoped prefix.
+func prefixServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"id":5,"prefix":"10.10.10.0/24","scope_type":"dcim.site","scope":{"id":3,"name":"AMS1"}}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestResolveIPs_PrefixIDAndScopeType(t *testing.T) {
+	srv := prefixServer(t)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	fields := []string{"ip", "prefix_id", "prefix_scope", "prefix_scope_type"}
+	res, err := p.ResolveIPs(context.Background(), []string{"10.10.10.7"}, fields, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	row := res.Rows[0]
+	if row["prefix_id"] != float64(5) {
+		t.Errorf("prefix_id = %v (%T), want float64(5)", row["prefix_id"], row["prefix_id"])
+	}
+	if row["prefix_scope_type"] != "dcim.site" {
+		t.Errorf("prefix_scope_type = %v", row["prefix_scope_type"])
+	}
+	if row["prefix_scope"] != "AMS1" {
+		t.Errorf("prefix_scope = %v", row["prefix_scope"])
+	}
+	if got := res.ColumnTypes["prefix_id"]; got != provider.FieldTypeNumber {
+		t.Errorf("ColumnTypes[prefix_id] = %q, want number", got)
+	}
 }

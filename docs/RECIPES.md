@@ -133,7 +133,7 @@ longest containing prefix:
    exactly one of three outcomes, never a mix:
    - **The IP is a registered address assigned to a device interface** (e.g. a loopback
      or a routed interface): `address_*` (`address_dns_name`, …), `interface_name`,
-     `is_primary_ip` and `device_*` (`device_name`, `device_site`, …) populate.
+     `is_primary_ip` and `device_*` (`device_name`, `device_site`, `device_manufacturer`, …) populate.
      `address_id` and `device_id` carry the address record's and the device's NetBox id. `prefix_*` stays blank — the device hop already answered the question a prefix
      lookup would.
    - **The IP is a registered address not assigned to any interface, or assigned to a VM

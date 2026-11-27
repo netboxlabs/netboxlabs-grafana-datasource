@@ -506,10 +506,12 @@ export function filterFieldOptionsFrom(
 
 /** Whether a column name is a nested column, `<ref>__<col>`: column `<col>` of
  * the object under the reference `<ref>`, as `device_type__manufacturer`. Split
- * at the first double underscore, both sides non-empty, as the backend splits it
- * (pkg/provider/netbox/nested.go). */
+ * at the first double underscore, both sides non-empty, custom fields' `cf_`
+ * columns aside, as the backend splits it (pkg/provider/netbox/nested.go). */
 export function isNestedColumn(name: string): boolean {
-  if (/\s/.test(name)) {
+  // A custom field's column is never nested, even cf__<name> for a custom field
+  // whose name starts with an underscore.
+  if (/\s/.test(name) || name.startsWith('cf_')) {
     return false;
   }
   const i = name.indexOf('__');

@@ -164,6 +164,8 @@ func TestNestedColumn(t *testing.T) {
 		{"__x", "", "", false},
 		{"x__", "", "", false},
 		{"site_id", "", "", false},
+		{"cf__owner", "", "", false}, // the custom field _owner
+		{"cf_owner__name", "", "", false},
 	} {
 		ref, col, ok := nestedColumn(tc.name)
 		if ref != tc.ref || col != tc.col || ok != tc.ok {

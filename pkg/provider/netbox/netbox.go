@@ -471,7 +471,11 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// pages by offset: cursor mode has no counts to sum. Decided here, before
 	// the sort, so a batched query's sort is applied rather than refused for
 	// fast paging.
-	batched := idBatchingNeeded(q)
+	// Repeated ids are sent once: an id names one object whatever its count.
+	if ids := q[idParam]; len(ids) > 1 {
+		q[idParam] = dedupeValues(ids)
+	}
+	batched := idBatchingNeeded(q, orderingReserve(spec.Ordering))
 	cursor := !batched && p.cursorPaging && spec.AllowUncounted && cursorLegal(q)
 
 	// Sorting is decided AFTER cursor mode, and the order of these two lines is the
@@ -615,7 +619,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	if orderNote != "" {
 		notes = append(notes, orderNote)
 	}
-	if n := idBatchNote(page, q.Has(orderingParam)); n != "" {
+	if n := idBatchNote(page, q.Has(orderingParam), len(flatRows)); n != "" {
 		notes = append(notes, n)
 	}
 	var capped *provider.Cap
@@ -2230,4 +2234,13 @@ func humanize(s string) string {
 		words[i] = strings.ToUpper(w[:1]) + w[1:]
 	}
 	return strings.Join(words, " ")
+}
+
+// orderingReserve is an upper bound on what applyOrdering adds to a query for
+// sort: the field, and the id tiebreaker, each possibly descending.
+func orderingReserve(sort string) int {
+	if sort == "" {
+		return 0
+	}
+	return len("&"+orderingParam+"=") + 2*(len(sort)+len(",-id")) + 16
 }

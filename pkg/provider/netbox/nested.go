@@ -20,8 +20,13 @@ import (
 const nestedSep = "__"
 
 // nestedColumn splits a nested column's name at its first "__" into the
-// reference and the column of it. ok is false for any other name.
+// reference and the column of it. ok is false for any other name, and for a
+// custom field's column (cf_…): custom fields aren't top-level properties, and
+// one whose name starts with an underscore flattens to cf__<name>.
 func nestedColumn(name string) (ref, col string, ok bool) {
+	if strings.HasPrefix(name, cfPrefix) {
+		return "", "", false
+	}
 	ref, col, ok = strings.Cut(name, nestedSep)
 	if !ok || ref == "" || col == "" {
 		return "", "", false
@@ -37,13 +42,12 @@ func isNestedColumn(name string) bool {
 }
 
 // nestedRefs is the references the nested columns among names read, for the
-// projection, each once. A custom field isn't a top-level property, so a
-// cf_<x>__<y> column reads none and is null.
+// projection, each once.
 func nestedRefs(names []string) []string {
 	var refs []string
 	for _, n := range names {
 		ref, _, ok := nestedColumn(n)
-		if ok && !strings.HasPrefix(ref, cfPrefix) && !slices.Contains(refs, ref) {
+		if ok && !slices.Contains(refs, ref) {
 			refs = append(refs, ref)
 		}
 	}

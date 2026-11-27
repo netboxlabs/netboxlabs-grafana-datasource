@@ -41,9 +41,16 @@ func (s *idServer) start(t *testing.T, opts ...Option) *Provider {
 			_, _ = fmt.Fprint(w, `{"id":["Select a valid choice."]}`)
 			return
 		}
+		// Ids are read as numbers, as NetBox reads them.
+		want := map[int]bool{}
+		for _, v := range q["id"] {
+			if n, err := strconv.Atoi(v); err == nil {
+				want[n] = true
+			}
+		}
 		var ids []int
 		for i := 1; i <= s.n; i++ {
-			if s.ignoreID || len(q["id"]) == 0 || slices.Contains(q["id"], strconv.Itoa(i)) {
+			if s.ignoreID || len(q["id"]) == 0 || want[i] {
 				ids = append(ids, i)
 			}
 		}
@@ -284,4 +291,68 @@ func firstPages(qs []url.Values) int {
 		}
 	}
 	return n
+}
+
+// An endpoint that ignores the id filter and holds fewer objects than a batch
+// has ids still answers rows outside the batch: refused too.
+func TestQueryBatchedRefusesAnIgnoredIDFilterOnASmallTable(t *testing.T) {
+	s := &idServer{n: 5, ignoreID: true}
+	_, err := s.start(t).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Filters: []provider.Filter{idFilter(1001, 3000)}, Limit: MaxLimit})
+	if err == nil || !strings.Contains(err.Error(), "id filter") {
+		t.Errorf("err = %v, want a refusal naming the id filter", err)
+	}
+}
+
+// A sorted batched read cut at its Limit keeps the first batches' rows, not the
+// top ones by the sort: the note says so and points at the Limit.
+func TestQueryBatchedSortedAndCutSaysSo(t *testing.T) {
+	s := &idServer{n: 3000}
+	spec := provider.QuerySpec{ObjectType: "dcim/devices", Filters: []provider.Filter{idFilter(1, 3000)}, Limit: 100, Ordering: "name"}
+	res, err := s.start(t).Query(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	found := false
+	for _, n := range res.Notes {
+		if strings.Contains(n, "not the top") && strings.Contains(n, "Limit") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("notes = %v, want one saying the rows aren't the top ones by the sort", res.Notes)
+	}
+}
+
+// Repeated ids don't make a list that fits look long: it is sent as one
+// ordinary read, so fast paging stays on for it.
+func TestQueryRepeatedIDsThatFitAreNotBatched(t *testing.T) {
+	s := &idServer{n: 500}
+	f := idFilter(1, 500)
+	f.Value += "," + f.Value + "," + f.Value
+	spec := provider.QuerySpec{ObjectType: "dcim/devices", Filters: []provider.Filter{f}, Limit: MaxLimit, AllowUncounted: true}
+	if _, err := s.start(t, WithCursorPaging(true)).Query(context.Background(), spec); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	qs := s.requests()
+	if firstPages(qs) != 1 || !qs[0].Has("start") || len(qs[0]["id"]) != 500 {
+		t.Errorf("first read start=%q with %d ids; want one fast-paged read of 500 distinct ids", qs[0].Get("start"), len(qs[0]["id"]))
+	}
+}
+
+// An id written with leading zeros is the same object to NetBox, not a sign the
+// filter was ignored.
+func TestQueryBatchedComparesIDsAsNumbers(t *testing.T) {
+	s := &idServer{n: 3000}
+	var vals []string
+	for i := 1; i <= 3000; i++ {
+		vals = append(vals, fmt.Sprintf("%04d", i))
+	}
+	res, err := s.start(t).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
+		Filters: []provider.Filter{{Field: "id", Value: strings.Join(vals, ",")}}, Limit: MaxLimit})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if res.Total != 3000 {
+		t.Errorf("total = %d, want 3000", res.Total)
+	}
 }

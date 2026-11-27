@@ -72,6 +72,9 @@ describe('isNestedColumn', () => {
     expect(isNestedColumn('__x')).toBe(false);
     expect(isNestedColumn('x__')).toBe(false);
     expect(isNestedColumn('a b__c')).toBe(false);
+    // A custom field's column, even one whose name starts with an underscore.
+    expect(isNestedColumn('cf__owner')).toBe(false);
+    expect(isNestedColumn('cf_owner__name')).toBe(false);
   });
 });
 

@@ -504,10 +504,13 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             // only references nested in references. Nothing else typed is taken,
             // so a typo can't become a silently empty column.
             allowCustomValue
-            isValidNewOption={(v) => isNestedColumn(v.trim())}
+            isValidNewOption={(v) => isNestedColumn(v.trim()) && !(query.fields ?? []).includes(v.trim())}
             onCreateOption={(v) => {
-              update({ fields: [...(query.fields ?? []), v.trim()] });
-              onRunQuery();
+              const name = v.trim();
+              if (!(query.fields ?? []).includes(name)) {
+                update({ fields: [...(query.fields ?? []), name] });
+                onRunQuery();
+              }
             }}
             onChange={(vals) => {
               update({ fields: vals.map((v) => v.value!).filter(Boolean) });

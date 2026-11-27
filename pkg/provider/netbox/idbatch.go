@@ -2,8 +2,11 @@ package netbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
@@ -33,14 +36,15 @@ const minIDBudget = 1024
 const idBatchWorkers = 4
 
 // idBatchingNeeded reports whether q's id filter must be read in batches: it
-// holds more than one id, the query doesn't fit the budget, and the other
-// parameters leave at least minIDBudget for ids. Query decides this before
-// cursor paging and the sort, since a batched read pages by offset.
-func idBatchingNeeded(q url.Values) bool {
-	if len(dedupeValues(q[idParam])) < 2 || len(q.Encode())+pagingParamBytes <= chunkBudgetBytes {
+// holds more than one id, the query doesn't fit the budget with reserve more
+// bytes (the sort applyOrdering adds after this), and the other parameters
+// leave at least minIDBudget for ids. Query de-duplicates the ids and decides
+// this before cursor paging and the sort, since a batched read pages by offset.
+func idBatchingNeeded(q url.Values, reserve int) bool {
+	if len(q[idParam]) < 2 || len(q.Encode())+pagingParamBytes+reserve <= chunkBudgetBytes {
 		return false
 	}
-	return idRoom(q) >= minIDBudget
+	return idRoom(q)-reserve >= minIDBudget
 }
 
 // idBatcherFor is the batcher for q's id filter: every other parameter fixed.
@@ -124,7 +128,7 @@ func (p *Provider) readIDBatchWave(ctx context.Context, objectType string, b que
 				n = 1
 			}
 			res, err := p.fetchList(wctx, objectType, b.query(chunks[i]), n, false)
-			if err == nil && res.totalKnown && res.total > len(chunks[i]) {
+			if err == nil && !batchHonoursIDs(res, chunks[i]) {
 				err = &idFilterIgnoredError{objectType: objectType, ids: len(chunks[i]), matched: res.total}
 			}
 			if err != nil {
@@ -144,10 +148,42 @@ func (p *Provider) readIDBatchWave(ctx context.Context, objectType string, b que
 	return firstErr
 }
 
-// idBatchNote says a batched, sorted read is sorted within each batch only.
-func idBatchNote(page listResult, sorted bool) string {
+// batchHonoursIDs reports whether a batch's answer is what its id filter
+// allows: no more objects than ids, and every row one of its ids. An endpoint
+// that ignores the filter fails one or the other, however small its table.
+func batchHonoursIDs(res listResult, ids []string) bool {
+	if res.totalKnown && res.total > len(ids) {
+		return false
+	}
+	// Compared as numbers, as NetBox reads them: an id written 007 is row 7.
+	set := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		if n, err := strconv.ParseInt(strings.TrimSpace(id), 10, 64); err == nil {
+			set[n] = true
+		}
+	}
+	for _, raw := range res.rows {
+		var row struct {
+			ID int64 `json:"id"`
+		}
+		if json.Unmarshal(raw, &row) != nil || !set[row.ID] {
+			return false
+		}
+	}
+	return true
+}
+
+// idBatchNote says a batched, sorted read is sorted within each batch only, and,
+// when Limit cut it, that the rows kept are the first batches', not the top ones
+// by the sort: NetBox's order (natural sort, a reference by its own ordering)
+// can't be reproduced here to merge the batches.
+func idBatchNote(page listResult, sorted bool, shown int) string {
 	if page.batches < 2 || !sorted {
 		return ""
+	}
+	if page.totalKnown && page.total > shown {
+		return fmt.Sprintf("Read in %d batches (%s ids), each sorted by NetBox on its own, and cut at the Limit: the rows shown are the first batches', not the top %s by the sort. Raise the Limit to cover every id.",
+			page.batches, thousands(page.ids), thousands(shown))
 	}
 	return fmt.Sprintf("Read in %d batches (%s ids); NetBox sorted each batch separately, so sort in the panel to order the whole table.",
 		page.batches, thousands(page.ids))

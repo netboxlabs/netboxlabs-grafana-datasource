@@ -62,8 +62,8 @@ in the scope, so it would alert on an incomplete result. Raise the row limit
   metric row. Check the scope in a panel first.
 - **Cost is per evaluation.** The scope is listed and enriched on every
   evaluation. Select only the context columns the rule uses: the device hop runs
-  only when a `device_*` column or `is_primary_ip` is selected, and
-  `is_primary_ip` and `vm_url` also cost the VM hop. `vm_name`, `vm_id`,
+  only when a `device_*` column other than `device_id`, or `is_primary_ip`, is selected, and
+  `is_primary_ip` and `vm_url` cost the VM hop. `vm_name`, `vm_id`,
   `address_id`, `address_url` and `device_id` are free — they ride on the address
   record.
 - **No `prefix_*` columns here.** The containing-prefix lookup is the fallback

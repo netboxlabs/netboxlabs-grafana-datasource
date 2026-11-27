@@ -152,7 +152,8 @@ longest containing prefix:
      VM request. A VM's cluster, site, role, platform and status are not offered: each
      would cost a second NetBox request, whereas the name and id are already inside the
      address record and so are free.
-     `is_primary_ip` is the one VM fact worth that second request, and it is not a
+     `is_primary_ip` is the one VM fact worth a request of its own (`vm_url` shares that
+     request), and it is not a
      `vm_*` column because it is not a VM-only fact: NetBox gives a virtual machine
      `primary_ip4`/`primary_ip6` exactly as it gives a device them, so the flag answers
      on a VM row as readily as on a device row.
@@ -186,15 +187,15 @@ longest containing prefix:
    per IP, or ~20 s for a 1,000-IP panel of external addresses. The default field
    selection contains no `prefix_*` column and therefore makes no prefix request at all;
    add one only when you want prefix context. `prefix_id`, `prefix_url` and
-   `prefix_scope_type` cost nothing beyond that fallback. `device_*` costs one extra
-   batched request for the whole IP list; `device_url` rides on it. `address_id`,
+   `prefix_scope_type` cost nothing beyond that fallback. `device_*` columns other
+   than `device_id` cost one extra batched request for the whole IP list; `device_url` rides on it. `address_id`,
    `address_url`, `device_id`, `vm_id` and `vm_name` cost nothing: they come from the
    address record. `vm_url` costs one batched VM request, gated on the column like the
    others. `is_primary_ip` costs up to two: the same device request (shared
    if you selected `device_*` anyway) plus a batched virtual-machine request, because a
    VM's primary address — unlike its name — is not carried inside the address record.
-   Both are gated on the column: a query that doesn't select it asks NetBox about no
-   virtual machine at all.
+   Both are gated on the column: a query that selects neither `is_primary_ip` nor
+   `vm_url` asks NetBox about no virtual machine at all. The two share one VM request.
 3. The result is a table keyed by `ip`. Use it standalone, or **Join by field** on `ip`
    against your flow table (rename the flow label to `ip` with an _organize fields_
    transform, or set a join key output accordingly).
@@ -301,7 +302,8 @@ context column blank — signal too (unknown/external traffic).
   address records for that host — an anycast address registered once per device, or a
   virtual IP recorded separately on each member interface; the plugin picks one match
   deterministically so the row is stable across queries, but a count above 1 is your cue
-  that "the device" isn't unique for that address.
+  that "the device" isn't unique for that address. On such a row `address_id`,
+  `device_id` and `vm_id` come from the picked record, like every other address column.
 
   It is **not** a VRRP/HSRP detector. When a virtual address is modelled the way modern
   NetBox intends — one address record assigned to an **FHRP group**, with the redundant

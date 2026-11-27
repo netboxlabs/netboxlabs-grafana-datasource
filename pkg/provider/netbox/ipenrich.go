@@ -339,7 +339,7 @@ func addressHopWarning(d degradation) string {
 // The two booleans are ResolveIPs' own gate variables rather than a second test
 // of `fields` here, so the warning cannot describe a hop the gate did not run.
 func deviceHopWarning(d degradation, wantDeviceGroup, wantPrimaryIP bool) string {
-	blanked, verb, notBecause := "The device_* and "+isPrimaryIPColumn+" columns", "are", "those IPs have no device"
+	blanked, verb, notBecause := "The device_* columns other than device_id and the "+isPrimaryIPColumn+" column", "are", "those IPs have no device"
 	switch {
 	case !wantDeviceGroup:
 		// wantPrimaryIP is necessarily true here — with both false the hop never
@@ -347,22 +347,33 @@ func deviceHopWarning(d degradation, wantDeviceGroup, wantPrimaryIP bool) string
 		blanked, verb = "The "+isPrimaryIPColumn+" column", "is"
 		notBecause = "those IPs are not their device's primary address"
 	case !wantPrimaryIP:
-		blanked = "The device_* columns"
+		// device_id is read off the address record, so it survives the failure.
+		blanked = "The device_* columns other than device_id"
 	}
 	return fmt.Sprintf(
 		"Device lookup failed for %s — %s. %s on the affected rows %s blank because the lookup failed, not because %s.",
 		d.scope("device", "devices"), causeText(d.cause), blanked, verb, notBecause)
 }
 
-// vmHopWarning is the VM half of the device warning, and names the one column
-// that hop fills. Its "not because" clause is the sharpest of the four: a blank
-// is_primary_ip is what a correct FHRP-assigned, unassigned or unknown row looks
-// like, so without this sentence a failed lookup is indistinguishable from an
-// address whose owner has no primary-IP concept at all.
-func vmHopWarning(d degradation) string {
+// vmHopWarning is the VM half of the device warning, and names the columns that
+// hop fills in THIS frame: is_primary_ip, vm_url or both, as the two booleans
+// (ResolveIPs' own gate variables) say. For is_primary_ip alone its "not
+// because" clause is the sharpest of the four: a blank is_primary_ip is what a
+// correct FHRP-assigned, unassigned or unknown row looks like, so without this
+// sentence a failed lookup is indistinguishable from an address whose owner has
+// no primary-IP concept at all. A blank vm_url is read as "no virtual machine".
+func vmHopWarning(d degradation, wantPrimaryIP, wantVMURL bool) string {
+	blanked, verb, notBecause := "The is_primary_ip and vm_url columns", "are", "those IPs have no virtual machine"
+	switch {
+	case !wantVMURL:
+		blanked, verb = "The "+isPrimaryIPColumn+" column", "is"
+		notBecause = "those IPs are not their virtual machine's primary address"
+	case !wantPrimaryIP:
+		blanked, verb = "The vm_url column", "is"
+	}
 	return fmt.Sprintf(
-		"Virtual machine lookup failed for %s — %s. The is_primary_ip column on the affected rows is blank because the lookup failed, not because those IPs are not their virtual machine's primary address.",
-		d.scope("virtual machine", "virtual machines"), causeText(d.cause))
+		"Virtual machine lookup failed for %s — %s. %s on the affected rows %s blank because the lookup failed, not because %s.",
+		d.scope("virtual machine", "virtual machines"), causeText(d.cause), blanked, verb, notBecause)
 }
 
 // addressTruncationWarning states the one gap batch splitting cannot close: a
@@ -446,7 +457,9 @@ type addressLookup struct {
 // fetchAddressRecords batches ips into ?address= queries and returns every
 // matching record indexed by host portion. Pagination is exhausted per batch:
 // a truncated page would undercount anycast duplicates and corrupt
-// match_count, which is the signal that keeps an ambiguous pick visible.
+// match_count, which is the signal that keeps an ambiguous pick visible. On a
+// match_count > 1 row, address_id, device_id and vm_id come from the picked
+// record, like every other address column.
 //
 // A failed batch degrades only the IPs it covers, and addressLookup.failed names
 // them. That set is not a convenience: without it the per-IP loop cannot tell
@@ -874,9 +887,10 @@ func (p *Provider) fetchDevices(ctx context.Context, ids []int, wantDeviceColumn
 // ONE list for both models, because isPrimaryIP is one function for both: a
 // device and a virtual machine expose primary_ip4/primary_ip6 with identical
 // semantics (NetBox 4.4.10 /api/schema/), so a per-hop copy could only ever drift
-// from the reader that consumes it. The VM hop always sends it — the flag is the
-// only reason that hop exists — while the device hop sends it only when no
-// device_* column was selected; see fetchDevices.
+// from the reader that consumes it. The VM hop always sends it, and adds
+// display_url when vm_url is selected (see vmFields), while the device hop sends
+// it only when no device_* column other than device_id was selected; see
+// fetchDevices.
 //
 // Verified against NetBox 4.4.10 on both endpoints: ?fields=id,primary_ip4,
 // primary_ip6 answers with exactly those three keys and an unchanged envelope
@@ -922,7 +936,8 @@ func vmFields(withURL bool) []string {
 }
 
 // fetchVMs batches virtual machine ids and returns the flattened objects by id,
-// for the one column a VM-assigned row cannot get for free: is_primary_ip.
+// for the two columns a VM-assigned row cannot get for free: is_primary_ip and
+// vm_url, which share this one request.
 //
 // It is fetchDevices' mirror image and keeps every one of its properties, for
 // the reasons stated there — batching by id within the same byte budget, one
@@ -1028,14 +1043,13 @@ func (p *Provider) fetchVMs(ctx context.Context, ids []int, withURL bool) (map[i
 // status) and the dropped interface_* columns. The VM's NAME is not in that
 // ruling: it is embedded in the address payload already, so it costs nothing
 // and is shipped as vm_name.
-// is_primary_ip is the one VM attribute that IS worth a request, and the only
-// column here that costs one for a VM-assigned row: it is the SNMP/flow join
-// key ("is this the address the poller talks to"), it is in the default
-// selection, and NetBox's nested virtual_machine object is the brief serializer
-// form — {id,url,display,name,description}, verified live on 4.4.10 — so unlike
-// vm_name it cannot be read off the address payload. Its hop is gated on the
-// column itself (see ResolveIPs), so a query that does not select it pays
-// nothing.
+// is_primary_ip is the one VM attribute worth a request of its own: it is the
+// SNMP/flow join key ("is this the address the poller talks to"), it is in the
+// default selection, and NetBox's nested virtual_machine object is the brief
+// serializer form — {id,url,display,name,description}, verified live on 4.4.10 —
+// so unlike vm_name it cannot be read off the address payload. vm_url costs the
+// same request, and the two share it. Its hop is gated on those two columns
+// (see ResolveIPs), so a query that selects neither pays nothing.
 func IPEnrichColumns() []string {
 	return []string{
 		"ip", "match_count", "is_primary_ip",
@@ -1764,10 +1778,10 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 	// is_primary_ip is the one column no prefix test can find, and it switches on
 	// BOTH identity hops rather than either group: it is the device's answer for a
 	// dcim.interface-assigned row and the VM's for a virtualization.vminterface
-	// one, and neither hop can supply the other's rows. It is also the only reason
-	// the VM hop exists at all — vm_name rides along on the address payload for
-	// free — so a query that leaves it unselected never asks NetBox about a
-	// virtual machine.
+	// one, and neither hop can supply the other's rows. The VM hop exists for it
+	// and for vm_url, which shares its request — vm_name and vm_id ride along on
+	// the address payload for free — so a query that selects neither never asks
+	// NetBox about a virtual machine.
 	//
 	// Selecting it alone therefore costs two batched requests, not one. That is
 	// the honest price of a column whose value depends on which model owns the
@@ -1906,8 +1920,9 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 			if hasDev {
 				row["device_id"] = float64(devID)
 			}
-			if id, ok := vmIDFromAddress(best); ok {
-				row["vm_id"] = float64(id)
+			vmID, hasVM := vmIDFromAddress(best)
+			if hasVM {
+				row["vm_id"] = float64(vmID)
 			}
 			// Exactly one of these two can fire, and often neither: the type gates
 			// inside deviceIDFromAddress and vmIDFromAddress are mutually
@@ -1920,8 +1935,8 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 					applyDeviceColumns(row, dev, addressID(best))
 				}
 			}
-			if id, ok := vmIDFromAddress(best); ok {
-				if vm, ok := vms[id]; ok {
+			if hasVM {
+				if vm, ok := vms[vmID]; ok {
 					applyVMColumns(row, vm, addressID(best))
 				}
 			}
@@ -1996,7 +2011,7 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 		warnings = append(warnings, deviceHopWarning(devDeg, wantDeviceGroup, wantPrimaryIP))
 	}
 	if vmDeg.any() {
-		warnings = append(warnings, vmHopWarning(vmDeg))
+		warnings = append(warnings, vmHopWarning(vmDeg, wantPrimaryIP, wantVMURL))
 	}
 	if prefixDeg.any() {
 		warnings = append(warnings, prefixHopWarning(prefixDeg))

@@ -169,7 +169,7 @@ datasources:
 | Type              | Returns                                                        | Use with                          |
 | ----------------- | -------------------------------------------------------------- | --------------------------------- |
 | **Objects**       | A joinable table for any object type (with optional join keys) | Table, or Outer-join onto metrics |
-| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`, with the NetBox id and link of the address record, device or VM, and prefix (cost per field in [Recipe 3b](docs/RECIPES.md)). Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
+| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`, with the NetBox id and link of the address record, device or VM, and prefix (cost per field in [Recipe 3](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/RECIPES.md#recipe-3-enrich-flows-or-logs-by-ip)). Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
 | **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)     | Node Graph panel                  |
 | **Annotations**   | NetBox change-log events, optionally scoped to objects and what's attached, plus journal entries. Read-only (no Edit button) | Dashboard annotations |
 

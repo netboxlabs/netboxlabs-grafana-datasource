@@ -3081,7 +3081,7 @@ func TestHopWarningTexts(t *testing.T) {
 			name: "device hop, total",
 			got:  deviceHopWarning(degradation{failed: 12, total: 12, cause: apiErr}, true, true),
 			want: "Device lookup failed for all 12 devices — NetBox returned HTTP 503. " +
-				"The device_* and is_primary_ip columns on the affected rows are blank because the lookup failed, " +
+				"The device_* columns other than device_id and the is_primary_ip column on the affected rows are blank because the lookup failed, " +
 				"not because those IPs have no device.",
 		},
 		{
@@ -3090,7 +3090,7 @@ func TestHopWarningTexts(t *testing.T) {
 			name: "device hop, device_* selected without is_primary_ip",
 			got:  deviceHopWarning(degradation{failed: 12, total: 12, cause: apiErr}, true, false),
 			want: "Device lookup failed for all 12 devices — NetBox returned HTTP 503. " +
-				"The device_* columns on the affected rows are blank because the lookup failed, " +
+				"The device_* columns other than device_id on the affected rows are blank because the lookup failed, " +
 				"not because those IPs have no device.",
 		},
 		{
@@ -3107,7 +3107,7 @@ func TestHopWarningTexts(t *testing.T) {
 		},
 		{
 			name: "virtual machine hop, partial",
-			got:  vmHopWarning(degradation{failed: 2, total: 9, cause: apiErr}),
+			got:  vmHopWarning(degradation{failed: 2, total: 9, cause: apiErr}, true, false),
 			// "not because those IPs are not their virtual machine's primary
 			// address" is the load-bearing half: a blank is_primary_ip is exactly
 			// what a correct FHRP-assigned or unassigned row looks like, so the
@@ -3115,6 +3115,20 @@ func TestHopWarningTexts(t *testing.T) {
 			want: "Virtual machine lookup failed for 2 of 9 virtual machines — NetBox returned HTTP 503. " +
 				"The is_primary_ip column on the affected rows is blank because the lookup failed, " +
 				"not because those IPs are not their virtual machine's primary address.",
+		},
+		{
+			name: "virtual machine hop, vm_url only",
+			got:  vmHopWarning(degradation{failed: 2, total: 9, cause: apiErr}, false, true),
+			want: "Virtual machine lookup failed for 2 of 9 virtual machines — NetBox returned HTTP 503. " +
+				"The vm_url column on the affected rows is blank because the lookup failed, " +
+				"not because those IPs have no virtual machine.",
+		},
+		{
+			name: "virtual machine hop, vm_url and is_primary_ip",
+			got:  vmHopWarning(degradation{failed: 2, total: 9, cause: apiErr}, true, true),
+			want: "Virtual machine lookup failed for 2 of 9 virtual machines — NetBox returned HTTP 503. " +
+				"The is_primary_ip and vm_url columns on the affected rows are blank because the lookup failed, " +
+				"not because those IPs have no virtual machine.",
 		},
 		{
 			name: "prefix fallback, single IP",
@@ -3528,7 +3542,7 @@ func TestResolveIPs_DeviceHopWarningNamesOnlySelectedColumns(t *testing.T) {
 		{
 			name:    "both",
 			fields:  []string{"ip", "device_name", "is_primary_ip"},
-			want:    []string{"The device_* and is_primary_ip columns", "are blank"},
+			want:    []string{"The device_* columns other than device_id and the is_primary_ip column", "are blank"},
 			notWhat: "not because those IPs have no device",
 		},
 	}
@@ -4597,7 +4611,12 @@ func TestResolveIPs_DeviceURL(t *testing.T) {
 		t.Errorf("device_url = %v", got)
 	}
 	if len(ls.deviceReqs) != 1 {
-		t.Errorf("device requests = %d, want exactly 1", len(ls.deviceReqs))
+		t.Fatalf("device requests = %d, want exactly 1", len(ls.deviceReqs))
+	}
+	// Unprojected: the fake serves display_url whatever ?fields= says, so the
+	// request itself is what shows the hop did not fall back to primaryIPFields.
+	if f := ls.deviceReqs[0].Get("fields"); f != "" {
+		t.Errorf("device request fields = %q, want none (unprojected)", f)
 	}
 }
 
@@ -4653,5 +4672,62 @@ func TestResolveIPs_PrefixIDLinkAndScopeType(t *testing.T) {
 	}
 	if got := res.ColumnTypes["prefix_id"]; got != provider.FieldTypeNumber {
 		t.Errorf("ColumnTypes[prefix_id] = %q, want number", got)
+	}
+}
+
+// TestResolveIPs_VMURLHopWarningAndSharedRequest covers the VM hop's two
+// columns together: a 403 names the columns in THIS frame, and when both are
+// selected they share one request projected with display_url.
+func TestResolveIPs_VMURLHopWarningAndSharedRequest(t *testing.T) {
+	ctx := context.Background()
+	ips := []string{"10.0.0.2"}
+
+	for _, tc := range []struct {
+		fields []string
+		want   string
+	}{
+		{[]string{"ip", "vm_url"}, "The vm_url column on the affected rows is blank"},
+		{[]string{"ip", "vm_url", "is_primary_ip"}, "The is_primary_ip and vm_url columns on the affected rows are blank"},
+	} {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"id":2,"address":"10.0.0.2/32","assigned_object_type":"virtualization.vminterface","assigned_object":{"id":4,"name":"eth0","virtual_machine":{"id":7,"name":"vm-07"}}}]}`))
+		})
+		mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
+		})
+		mux.HandleFunc("/api/virtualization/virtual-machines/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"detail":"nope"}`))
+		})
+		srv := httptest.NewServer(mux)
+		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+		res, err := p.ResolveIPs(ctx, ips, tc.fields, 0)
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%v: ResolveIPs: %v", tc.fields, err)
+		}
+		if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], tc.want) {
+			t.Errorf("%v: Warnings = %#v, want one containing %q", tc.fields, res.Warnings, tc.want)
+		}
+	}
+
+	ls := newLinkServer(t)
+	ls.vmBody = `{"count":1,"next":null,"results":[{"id":7,"primary_ip4":{"id":2,"address":"10.0.0.2/32"},"display_url":"https://nb.example.com/virtualization/virtual-machines/7/"}]}`
+	p := New(ls.srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	res, err := p.ResolveIPs(ctx, ips, []string{"ip", "vm_url", "is_primary_ip"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(ls.vmReqs) != 1 {
+		t.Fatalf("VM requests = %d, want 1", len(ls.vmReqs))
+	}
+	if f := ls.vmReqs[0].Get("fields"); f != "id,primary_ip4,primary_ip6,display_url" {
+		t.Errorf("VM fields = %q", f)
+	}
+	if res.Rows[0]["vm_url"] != "https://nb.example.com/virtualization/virtual-machines/7/" || res.Rows[0]["is_primary_ip"] != true {
+		t.Errorf("row = %v, want vm_url and is_primary_ip filled", res.Rows[0])
 	}
 }

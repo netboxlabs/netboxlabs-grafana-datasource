@@ -219,7 +219,7 @@ export const JOIN_KEY_TRANSFORMS: Array<{ label: string; value: string; descript
  *  `vm_id`, `vm_name` and `vm_url` are the only vm_* columns: every other VM
  *  attribute (cluster, site, role, platform, status) needs a second NetBox
  *  request, while the id and name are already in the address payload (`vm_url`
- *  costs one VM request). It is mutually exclusive with `device_name`
+ *  costs one VM request). `vm_name` is mutually exclusive with `device_name`
  *  per row — an address is assigned to a device interface, to a VM interface,
  *  or to neither (an FHRP group, or nothing at all), so the two are never both
  *  set and may well both be blank — and it is deliberately not folded into

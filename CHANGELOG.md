@@ -10,8 +10,8 @@
 - **IP enrichment returns NetBox ids and links.** New context fields:
   `address_id`, `address_url`, `device_id`, `device_url`, `vm_id`, `vm_url`,
   `prefix_id`, `prefix_url` and `prefix_scope_type` (`dcim.site`, `dcim.region`,
-  `dcim.location`, …). The ids and `address_url` come from the address record at
-  no cost, `device_url` rides on the device lookup, `vm_url` costs one VM
+  `dcim.location`, …). `address_id`, `address_url`, `device_id` and `vm_id` come from the address
+  record at no cost, `device_url` rides on the device lookup, `vm_url` costs one VM
   request, and the `prefix_*` fields cost the prefix fallback they belong to.
 - **Secure SOCKS proxy switch on the settings page.** On self-hosted Grafana
   with a secure SOCKS5 data source proxy, the datasource can be routed through

@@ -746,6 +746,8 @@ func queryErrorMessage(err error, viaProxy bool) string {
 			return "This object type was not found in NetBox (HTTP 404)."
 		case provider.ErrorKindNotOrderable:
 			return "NetBox couldn't list this object type — the endpoint doesn't support pagination (HTTP 500). This model may not be queryable."
+		case provider.ErrorKindIDFilterIgnored:
+			return "NetBox didn't apply the id filter to this object type, so a long id list can't be read in batches. Filter on another field, or send fewer ids."
 		}
 		if u.Status != 0 {
 			return fmt.Sprintf("NetBox returned HTTP %d for this object type.", u.Status)
@@ -777,7 +779,7 @@ func (d *Datasource) queryErrorResponse(err error) backend.DataResponse {
 // is a bad request, and saying otherwise tells the reader to retry something
 // only they can fix.
 func queryErrorStatus(err error) backend.Status {
-	if u := provider.Classify(err); u != nil && u.Kind == provider.ErrorKindUnknownObjectType {
+	if u := provider.Classify(err); u != nil && (u.Kind == provider.ErrorKindUnknownObjectType || u.Kind == provider.ErrorKindIDFilterIgnored) {
 		return backend.StatusBadRequest
 	}
 	return backend.StatusInternal

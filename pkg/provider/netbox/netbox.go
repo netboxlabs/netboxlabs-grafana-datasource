@@ -467,7 +467,12 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// result with no match count. AllowUncounted defaults to false so that a
 	// path added later inherits the counted behaviour by omission — forgetting
 	// this field costs speed, never correctness.
-	cursor := p.cursorPaging && spec.AllowUncounted && cursorLegal(q)
+	// A long id filter is read in batches (fetchIDBatches), and a batched read
+	// pages by offset: cursor mode has no counts to sum. Decided here, before
+	// the sort, so a batched query's sort is applied rather than refused for
+	// fast paging.
+	batched := idBatchingNeeded(q)
+	cursor := !batched && p.cursorPaging && spec.AllowUncounted && cursorLegal(q)
 
 	// Sorting is decided AFTER cursor mode, and the order of these two lines is the
 	// whole interaction between them. NetBox refuses ?start= together with
@@ -477,7 +482,15 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// leaves applyOrdering to say, in a note, that the sort was not applied.
 	orderNote := applyOrdering(q, spec, cursor)
 
-	page, err := p.fetchList(ctx, spec.ObjectType, q, limit, cursor)
+	// Every read below, the first and each retry, goes through fetch, so a
+	// retry of a batched read is batched too (and repeats every batch).
+	fetch := func() (listResult, error) {
+		if batched {
+			return p.fetchIDBatches(ctx, spec.ObjectType, q, limit)
+		}
+		return p.fetchList(ctx, spec.ObjectType, q, limit, cursor)
+	}
+	page, err := fetch()
 	// One repeat, at most, and which of the two it is depends on whether there is
 	// a projection to drop. projection != "" is a precondition on the first, not a
 	// nicety: it protects the query above that YIELDED to a caller's own `fields`
@@ -528,7 +541,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// No projection is in play any more, which also retires the "returned none
 		// of the requested columns" check below: there is nothing left to blame.
 		projection = ""
-		page, err = p.fetchList(ctx, spec.ObjectType, q, limit, cursor)
+		page, err = fetch()
 
 	case err != nil && projection == "" && upstreamServerError(err):
 		// The same single repeat for the query that has NO projection to drop.
@@ -545,7 +558,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// as sent, and re-sending it unchanged asks the same question again.
 		log.DefaultLogger.Warn("netbox: upstream 500; retrying the query once",
 			"objectType", logSafe(spec.ObjectType), "error", logSafe(err.Error()))
-		page, err = p.fetchList(ctx, spec.ObjectType, q, limit, cursor)
+		page, err = fetch()
 	}
 	if err != nil {
 		return nil, err
@@ -588,7 +601,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		if !callerOwnsExclude {
 			q.Del(excludeParam)
 		}
-		if page, err = p.fetchList(ctx, spec.ObjectType, q, limit, cursor); err != nil {
+		if page, err = fetch(); err != nil {
 			return nil, err
 		}
 		rows, total = page.rows, page.total
@@ -601,6 +614,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	var notes, warnings []string
 	if orderNote != "" {
 		notes = append(notes, orderNote)
+	}
+	if n := idBatchNote(page, q.Has(orderingParam)); n != "" {
+		notes = append(notes, n)
 	}
 	var capped *provider.Cap
 	if isUtilizationType(spec.ObjectType) && wantsUtilization(spec.Fields) {
@@ -706,6 +722,7 @@ func projectionRejected(err error, sent url.Values) bool {
 // page of a paged walk. One immediate repeat per QUERY is a different trade, and
 // it is the one this call site has always made — an unprojected query got it as
 // a side effect of the projection fallback long before there was a name for it.
+// A long id filter read in batches repeats the whole batched read, every batch.
 //
 // Be honest about what that repeat costs, because it is not one request. Query
 // repeats the fetchList CALL, so the walk starts again at page 1: every page
@@ -962,6 +979,10 @@ type listResult struct {
 	rows       []json.RawMessage
 	total      int
 	totalKnown bool
+	// batches and ids are set by a read of a long id filter in batches
+	// (fetchIDBatches): how many requests it was split into, and over how many
+	// distinct ids. Zero for any other read.
+	batches, ids int
 }
 
 // fetchRows pages through a NetBox list endpoint in the default OFFSET mode,

@@ -16,6 +16,7 @@ import (
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
@@ -254,5 +255,24 @@ func TestIsAlertRequest(t *testing.T) {
 	}
 	if isAlertRequest(nil) {
 		t.Error("a nil request must not be treated as an alert evaluation")
+	}
+}
+
+// classifiedErr is an error a provider has classified, standing in for one this
+// package can't build.
+type classifiedErr struct{ u provider.UpstreamError }
+
+func (e classifiedErr) Error() string                           { return "classified" }
+func (e classifiedErr) Classification() *provider.UpstreamError { return &e.u }
+
+// A long id list read in batches on an object type whose endpoint ignored the
+// id filter is the query's to change, not an outage: its own message, a 400.
+func TestQueryError_IDFilterIgnored(t *testing.T) {
+	err := classifiedErr{provider.UpstreamError{Kind: provider.ErrorKindIDFilterIgnored}}
+	if got := queryErrorMessage(err, false); !strings.Contains(got, "didn't apply the id filter") {
+		t.Errorf("message = %q", got)
+	}
+	if got := queryErrorStatus(err); got != backend.StatusBadRequest {
+		t.Errorf("status = %v, want bad request", got)
 	}
 }

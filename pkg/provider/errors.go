@@ -41,6 +41,11 @@ const (
 	// ErrorKindNotFound because it is actionable in the query editor and should
 	// be answered as a bad request rather than an outage.
 	ErrorKindUnknownObjectType ErrorKind = "unknown-object-type"
+	// ErrorKindIDFilterIgnored is a long id filter read in batches whose batch
+	// matched more objects than it named ids: the upstream didn't apply the id
+	// filter to this object type, so the batches would repeat rows. The query
+	// can't be answered as written.
+	ErrorKindIDFilterIgnored ErrorKind = "id-filter-ignored"
 	// ErrorKindUpstream is any other identified upstream refusal. Status carries
 	// the code; there is nothing more specific to say.
 	ErrorKindUpstream ErrorKind = "upstream"

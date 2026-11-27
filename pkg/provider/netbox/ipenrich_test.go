@@ -222,7 +222,7 @@ func TestBatchedQueriesStayWithinTheByteBudget(t *testing.T) {
 		srv := idEndpointServer(t, "/api/virtualization/virtual-machines/", &queries)
 		p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
 
-		got, deg := p.fetchVMs(context.Background(), ids)
+		got, deg := p.fetchVMs(context.Background(), ids, false)
 		if deg.any() {
 			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
 		}
@@ -307,7 +307,7 @@ func TestBatchedQueriesStayWithinTheByteBudget(t *testing.T) {
 		base = srv.URL + "/api/virtualization/virtual-machines/"
 
 		p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
-		got, deg := p.fetchVMs(context.Background(), ids)
+		got, deg := p.fetchVMs(context.Background(), ids, false)
 		if deg.any() {
 			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
 		}
@@ -1393,7 +1393,7 @@ func TestFetchVMs(t *testing.T) {
 			ids[i] = i + 1
 		}
 
-		got, deg := p.fetchVMs(context.Background(), ids)
+		got, deg := p.fetchVMs(context.Background(), ids, false)
 		if deg.any() {
 			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
 		}
@@ -1431,7 +1431,7 @@ func TestFetchVMs(t *testing.T) {
 		defer srv.Close()
 
 		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
-		got, deg := p.fetchVMs(context.Background(), nil)
+		got, deg := p.fetchVMs(context.Background(), nil, false)
 		if deg.any() {
 			t.Fatalf("no ids means nothing to degrade, got %+v", deg)
 		}
@@ -1457,7 +1457,7 @@ func TestFetchVMs(t *testing.T) {
 		// guarantee, for the reason fetchDevices' comment gives — an error here
 		// would have no consumer, and discarding one is how a total failure came
 		// out looking like fact.
-		got, deg := p.fetchVMs(context.Background(), []int{5, 6})
+		got, deg := p.fetchVMs(context.Background(), []int{5, 6}, false)
 		if len(got) != 0 {
 			t.Fatalf("a forbidden endpoint cannot produce virtual machines, got %v", got)
 		}
@@ -3073,7 +3073,7 @@ func TestHopWarningTexts(t *testing.T) {
 			// 0 asserts "NetBox holds no record" and a prefix_cidr looks like a
 			// successful longest-match fallback, on an IP NetBox knows.
 			want: "Address lookup failed for 330 of 1,200 IPs — NetBox returned HTTP 503. " +
-				"The match_count, address_*, interface_*, device_*, vm_name, is_primary_ip and prefix_* columns on the affected rows are empty " +
+				"The match_count, address_*, interface_*, device_*, vm_*, is_primary_ip and prefix_* columns on the affected rows are empty " +
 				"because the lookup failed, not because NetBox has no record for those IPs.",
 		},
 		{
@@ -4530,4 +4530,128 @@ func ipsOf(res *provider.Result) []string {
 		out = append(out, r["ip"].(string))
 	}
 	return out
+}
+
+// linkServer serves one address on a device interface (device 100), one on a VM
+// interface (VM 7), and a prefix for any ?contains= lookup. Every hop endpoint
+// records its requests, so a test can assert how many were made and how they
+// were projected.
+type linkServer struct {
+	srv                *httptest.Server
+	deviceReqs, vmReqs []url.Values
+	deviceBody, vmBody string
+}
+
+func newLinkServer(t *testing.T) *linkServer {
+	t.Helper()
+	ls := &linkServer{
+		deviceBody: `{"count":1,"next":null,"results":[{"id":100,"name":"leaf-01","display_url":"https://nb.example.com/dcim/devices/100/"}]}`,
+		vmBody:     `{"count":1,"next":null,"results":[{"id":7,"name":"vm-07","display_url":"https://nb.example.com/virtualization/virtual-machines/7/"}]}`,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
+		fx := map[string]string{
+			"10.0.0.1": `{"id":1,"address":"10.0.0.1/32","assigned_object_type":"dcim.interface","assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"}}}`,
+			"10.0.0.2": `{"id":2,"address":"10.0.0.2/32","assigned_object_type":"virtualization.vminterface","assigned_object":{"id":4,"name":"eth0","virtual_machine":{"id":7,"name":"vm-07"}}}`,
+		}
+		var results []string
+		for _, a := range r.URL.Query()["address"] {
+			if v, ok := fx[a]; ok {
+				results = append(results, v)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
+	})
+	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
+		ls.deviceReqs = append(ls.deviceReqs, r.URL.Query())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(ls.deviceBody))
+	})
+	mux.HandleFunc("/api/virtualization/virtual-machines/", func(w http.ResponseWriter, r *http.Request) {
+		ls.vmReqs = append(ls.vmReqs, r.URL.Query())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(ls.vmBody))
+	})
+	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"id":5,"prefix":"10.10.10.0/24","scope_type":"dcim.site","scope":{"id":3,"name":"AMS1"},"display_url":"https://nb.example.com/ipam/prefixes/5/"}]}`))
+	})
+	ls.srv = httptest.NewServer(mux)
+	t.Cleanup(ls.srv.Close)
+	return ls
+}
+
+// TestResolveIPs_DeviceURL is also the end-to-end check of the device-hop gate:
+// device_url is a device_ column other than device_id, so it starts the hop, and
+// the hop is unprojected so display_url reaches the row. Exactly one request.
+func TestResolveIPs_DeviceURL(t *testing.T) {
+	ls := newLinkServer(t)
+	p := New(ls.srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"ip", "device_url"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if got := res.Rows[0]["device_url"]; got != "https://nb.example.com/dcim/devices/100/" {
+		t.Errorf("device_url = %v", got)
+	}
+	if len(ls.deviceReqs) != 1 {
+		t.Errorf("device requests = %d, want exactly 1", len(ls.deviceReqs))
+	}
+}
+
+func TestResolveIPs_VMURLMakesOneVMRequest(t *testing.T) {
+	ls := newLinkServer(t)
+	p := New(ls.srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.2"}, []string{"ip", "vm_url"}, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if got := res.Rows[0]["vm_url"]; got != "https://nb.example.com/virtualization/virtual-machines/7/" {
+		t.Errorf("vm_url = %v", got)
+	}
+	if len(ls.vmReqs) != 1 {
+		t.Fatalf("VM requests = %d, want 1", len(ls.vmReqs))
+	}
+	if f := ls.vmReqs[0].Get("fields"); !strings.Contains(f, "display_url") {
+		t.Errorf("VM fields param = %q, want it to include display_url", f)
+	}
+
+	ls2 := newLinkServer(t)
+	p2 := New(ls2.srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+	if _, err := p2.ResolveIPs(context.Background(), []string{"10.0.0.2"}, []string{"ip", "vm_id"}, 0); err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	if len(ls2.vmReqs) != 0 {
+		t.Errorf("vm_id alone made %d VM requests, want 0", len(ls2.vmReqs))
+	}
+}
+
+func TestResolveIPs_PrefixIDLinkAndScopeType(t *testing.T) {
+	ls := newLinkServer(t)
+	p := New(ls.srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+
+	fields := []string{"ip", "prefix_id", "prefix_url", "prefix_scope", "prefix_scope_type"}
+	res, err := p.ResolveIPs(context.Background(), []string{"10.10.10.7"}, fields, 0)
+	if err != nil {
+		t.Fatalf("ResolveIPs: %v", err)
+	}
+	row := res.Rows[0]
+	if row["prefix_id"] != float64(5) {
+		t.Errorf("prefix_id = %v (%T), want float64(5)", row["prefix_id"], row["prefix_id"])
+	}
+	if row["prefix_url"] != "https://nb.example.com/ipam/prefixes/5/" {
+		t.Errorf("prefix_url = %v", row["prefix_url"])
+	}
+	if row["prefix_scope_type"] != "dcim.site" {
+		t.Errorf("prefix_scope_type = %v", row["prefix_scope_type"])
+	}
+	if row["prefix_scope"] != "AMS1" {
+		t.Errorf("prefix_scope = %v", row["prefix_scope"])
+	}
+	if got := res.ColumnTypes["prefix_id"]; got != provider.FieldTypeNumber {
+		t.Errorf("ColumnTypes[prefix_id] = %q, want number", got)
+	}
 }

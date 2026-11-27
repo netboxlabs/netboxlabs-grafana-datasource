@@ -35,7 +35,8 @@ func ipWorld() *fakeService {
 	f.addRows("tenancy/tenants", named(1, "Grafana Demo"), named(2, "parity-tenant"))
 	f.addRows("dcim/sites", named(1, "AMS1"))
 	f.addRows("dcim/device-roles", named(1, "Leaf"), named(2, "Spine"))
-	f.addRows("dcim/device-types", map[string]interface{}{"id": float64(1), "model": "DCS-7050SX3", "slug": "dcs-7050sx3"})
+	f.addRows("dcim/manufacturers", named(1, "Arista"))
+	f.addRows("dcim/device-types", map[string]interface{}{"id": float64(1), "model": "DCS-7050SX3", "slug": "dcs-7050sx3", "manufacturer_id": float64(1)})
 	f.addRows("dcim/locations", named(1, "parity-loc"))
 	f.addRows("dcim/regions", named(1, "parity-region"))
 	f.addRows("dcim/site-groups", named(1, "parity-sitegroup"))
@@ -216,16 +217,19 @@ func TestResolveIPs_DeviceInterfaceAddress(t *testing.T) {
 	}
 	wantRow(t, res, "10.1.0.1", map[string]interface{}{
 		"ip": "10.1.0.1", "match_count": float64(1), "is_primary_ip": true,
-		"prefix_cidr": nil, "prefix_scope": nil, "prefix_tenant": nil, "prefix_role": nil,
+		"prefix_id": nil, "prefix_cidr": nil, "prefix_scope": nil, "prefix_scope_type": nil, "prefix_tenant": nil, "prefix_role": nil,
 		"prefix_vrf": nil, "prefix_vlan": nil, "prefix_description": nil,
-		"address_dns_name": "leaf01.example.net", "address_status": "Active", "address_role": nil, "address_vrf": nil,
+		"address_id": float64(100), "address_dns_name": "leaf01.example.net", "address_status": "Active", "address_role": nil, "address_vrf": nil,
 		"address_tenant": "Grafana Demo", "address_description": "", "address_assigned_object_type": "dcim.interface",
 		"address_nat_inside": nil, "address_nat_outside": "",
 		"interface_name": "eth0 (uplink)", "interface_description": "to spine",
-		"device_name": "leaf-01", "device_role": "Leaf", "device_platform": nil, "device_device_type": "DCS-7050SX3",
-		"device_site": "AMS1", "device_location": "parity-loc", "device_rack": "parity-rack (PR-1)", "device_tenant": "Grafana Demo",
-		"device_status": "Active", "vm_name": nil,
+		"device_id": float64(1), "device_name": "leaf-01", "device_role": "Leaf", "device_platform": nil, "device_device_type": "DCS-7050SX3",
+		"device_manufacturer": "Arista", "device_site": "AMS1", "device_location": "parity-loc", "device_rack": "parity-rack (PR-1)",
+		"device_tenant": "Grafana Demo", "device_status": "Active", "vm_id": nil, "vm_name": nil,
 	})
+	if len(res.Columns) != 37 {
+		t.Errorf("%d columns: a column was added to the contract, so add it here", len(res.Columns))
+	}
 }
 
 // Both of a device's primary addresses are its primary, whatever the input's
@@ -265,6 +269,7 @@ func TestResolveIPs_VMPrimary(t *testing.T) {
 	wantRow(t, res, "10.4.0.1", map[string]interface{}{
 		"address_assigned_object_type": "virtualization.vminterface", "interface_name": "eth0", "interface_description": "vm uplink",
 		"vm_name": "vm-01", "is_primary_ip": true, "device_name": nil, "device_site": nil,
+		"address_id": float64(200), "vm_id": float64(1), "device_id": nil, "device_manufacturer": nil,
 	})
 }
 
@@ -286,6 +291,7 @@ func TestResolveIPs_FHRP(t *testing.T) {
 	wantRow(t, res, "10.5.0.1", map[string]interface{}{
 		"address_assigned_object_type": "ipam.fhrpgroup", "address_role": "VRRP",
 		"interface_name": nil, "interface_description": nil, "device_name": nil, "vm_name": nil, "is_primary_ip": nil,
+		"address_id": float64(300), "device_id": nil, "vm_id": nil,
 	})
 }
 
@@ -293,14 +299,16 @@ func TestResolveIPs_FHRP(t *testing.T) {
 // — an unassigned one too — does not, as in NetBox mode.
 func TestResolveIPs_UnassignedFallsBackToPrefix(t *testing.T) {
 	res := resolveIPs(t, newTestProvider(t, ipWorld()), []string{"10.10.10.77", "10.250.1.10"},
-		"match_count", "prefix_cidr", "prefix_scope", "prefix_tenant", "prefix_role", "prefix_vrf", "prefix_vlan", "prefix_description", "address_vrf")
+		"match_count", "prefix_id", "prefix_cidr", "prefix_scope", "prefix_scope_type", "prefix_tenant", "prefix_role", "prefix_vrf", "prefix_vlan",
+		"prefix_description", "address_id", "address_vrf")
 	noWarnings(t, res)
 	wantRow(t, res, "10.10.10.77", map[string]interface{}{
-		"match_count": float64(0), "prefix_cidr": "10.10.10.0/24", "prefix_scope": "AMS1", "prefix_tenant": "Grafana Demo",
-		"prefix_role": "LAN", "prefix_vrf": nil, "prefix_vlan": "ams1-lan (110)", "prefix_description": "", "address_vrf": nil,
+		"match_count": float64(0), "prefix_id": float64(2), "prefix_cidr": "10.10.10.0/24", "prefix_scope": "AMS1", "prefix_scope_type": "dcim.site",
+		"prefix_tenant": "Grafana Demo", "prefix_role": "LAN", "prefix_vrf": nil, "prefix_vlan": "ams1-lan (110)", "prefix_description": "",
+		"address_id": nil, "address_vrf": nil,
 	})
 	wantRow(t, res, "10.250.1.10", map[string]interface{}{
-		"match_count": float64(1), "prefix_cidr": nil, "address_vrf": "parity-vrf-a (65000:101)",
+		"match_count": float64(1), "prefix_id": nil, "prefix_cidr": nil, "address_id": float64(500), "address_vrf": "parity-vrf-a (65000:101)",
 	})
 }
 
@@ -384,12 +392,12 @@ func TestResolveIPs_UnclassifiedAssignmentWarns(t *testing.T) {
 	res := resolveIPs(t, newTestProvider(t, f), []string{"10.8.0.1", "10.8.0.2", "10.8.0.3"}, allColumns()...)
 	for _, ip := range []string{"10.8.0.1", "10.8.0.3"} {
 		wantRow(t, res, ip, map[string]interface{}{"address_assigned_object_type": nil, "interface_name": nil,
-			"device_name": nil, "vm_name": nil, "is_primary_ip": nil, "address_status": "Active"})
+			"device_id": nil, "device_name": nil, "vm_id": nil, "vm_name": nil, "is_primary_ip": nil, "address_status": "Active"})
 	}
 	wantRow(t, res, "10.8.0.2", map[string]interface{}{"address_assigned_object_type": "dcim.interface", "device_name": "spine-01"})
 	want := []string{
 		"1 of 3 rows matched several address records, some of them assigned to objects this replica cannot identify, so the record they show is the one with the lowest id among those NetBox mode could pick, which may not be the one it picks.",
-		"2 addresses are assigned to objects this replica cannot identify (it does not serve NetBox's content-type names), so their address_assigned_object_type, interface_*, device_*, vm_name and is_primary_ip columns are blank.",
+		"2 addresses are assigned to objects this replica cannot identify (it does not serve NetBox's content-type names), so their address_assigned_object_type, interface_*, device_*, vm_* and is_primary_ip columns are blank.",
 	}
 	if !reflect.DeepEqual(res.Warnings, want) {
 		t.Errorf("warnings = %q, want %q", res.Warnings, want)
@@ -402,6 +410,7 @@ func TestResolveIPs_UnclassifiedAssignmentWarns(t *testing.T) {
 		"device_name":                                 "1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its device_name column is blank.",
 		"address_assigned_object_type":                "1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its address_assigned_object_type column is blank.",
 		"device_name,device_site,vm_name":             "1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its device_* and vm_name columns are blank.",
+		"device_id,vm_id":                             "1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its device_id and vm_id columns are blank.",
 		"interface_name,is_primary_ip,ip,match_count": "1 address is assigned to an object this replica cannot identify (it does not serve NetBox's content-type names), so its interface_name and is_primary_ip columns are blank.",
 	} {
 		res = resolveIPs(t, newTestProvider(t, f), []string{"10.8.0.1"}, strings.Split(fields, ",")...)
@@ -487,14 +496,23 @@ func TestResolveIPs_LongestPrefixTieFollowsNetBoxOrder(t *testing.T) {
 	wantRow(t, res, "10.250.1.99", map[string]interface{}{"prefix_cidr": "10.250.1.0/24", "prefix_description": "vrf-nested-24"})
 }
 
-// A prefix's scope is named from the most specific level NetBox caches on it.
+// A prefix's scope is named from the most specific level NetBox caches on it,
+// and so is its type, as NetBox names a content type.
 func TestResolveIPs_PrefixScopeNames(t *testing.T) {
-	res := resolveIPs(t, newTestProvider(t, ipWorld()), []string{"10.10.10.5", "10.250.10.5", "10.250.11.5", "10.250.12.5", "10.250.99.1"}, "prefix_scope")
+	res := resolveIPs(t, newTestProvider(t, ipWorld()), []string{"10.10.10.5", "10.250.10.5", "10.250.11.5", "10.250.12.5", "10.250.99.1"},
+		"prefix_scope", "prefix_scope_type")
 	noWarnings(t, res)
-	for ip, scope := range map[string]interface{}{"10.10.10.5": "AMS1", "10.250.10.5": "parity-loc", "10.250.11.5": "parity-region",
-		"10.250.12.5": "parity-sitegroup", "10.250.99.1": nil} {
-		wantRow(t, res, ip, map[string]interface{}{"prefix_scope": scope})
+	for ip, scope := range map[string][2]interface{}{"10.10.10.5": {"AMS1", "dcim.site"}, "10.250.10.5": {"parity-loc", "dcim.location"},
+		"10.250.11.5": {"parity-region", "dcim.region"}, "10.250.12.5": {"parity-sitegroup", "dcim.sitegroup"}, "10.250.99.1": {nil, nil}} {
+		wantRow(t, res, ip, map[string]interface{}{"prefix_scope": scope[0], "prefix_scope_type": scope[1]})
 	}
+	// The type needs no read of the scope: a scope the replica does not hold
+	// still has a type.
+	f0 := ipWorld()
+	f0.entities["dcim/sites"] = nil
+	res = resolveIPs(t, newTestProvider(t, f0), []string{"10.10.10.5"}, "prefix_scope_type")
+	noWarnings(t, res)
+	wantRow(t, res, "10.10.10.5", map[string]interface{}{"prefix_scope_type": "dcim.site"})
 
 	// A scope with no level cached (NetBox caches one whenever it saves a
 	// scoped prefix) cannot be named: a gap, counted.
@@ -502,10 +520,12 @@ func TestResolveIPs_PrefixScopeNames(t *testing.T) {
 	r := ipPrefix(30, "10.252.0.0/16", 0, "")
 	r["scope_id"], r["scope_type_id"] = float64(4), float64(1)
 	f.addFakeRows("ipam/prefixes", r)
-	res = resolveIPs(t, newTestProvider(t, f), []string{"10.252.0.1"}, "prefix_cidr", "prefix_scope")
-	wantRow(t, res, "10.252.0.1", map[string]interface{}{"prefix_cidr": "10.252.0.0/16", "prefix_scope": nil})
-	if len(res.Warnings) != 1 || !strings.HasPrefix(res.Warnings[0], "Related objects are missing for 1 of 1 rows") {
-		t.Errorf("warnings = %q, want the uncached scope counted", res.Warnings)
+	for _, col := range []string{"prefix_scope", "prefix_scope_type"} {
+		res = resolveIPs(t, newTestProvider(t, f), []string{"10.252.0.1"}, "prefix_cidr", col)
+		wantRow(t, res, "10.252.0.1", map[string]interface{}{"prefix_cidr": "10.252.0.0/16", col: nil})
+		if len(res.Warnings) != 1 || !strings.HasPrefix(res.Warnings[0], "Related objects are missing for 1 of 1 rows") {
+			t.Errorf("%s: warnings = %q, want the uncached scope counted", col, res.Warnings)
+		}
 	}
 }
 
@@ -825,6 +845,42 @@ func TestResolveIPs_ReadsOnlyWhatTheColumnsNeed(t *testing.T) {
 	if n := len(f.sentWith("dcim/devices", "filter[id]__in")); n != 0 {
 		t.Errorf("is_primary_ip on VM addresses read %d device batches", n)
 	}
+
+	// device_id and vm_id are the interface's and the VM interface's to say, as
+	// NetBox mode reads them off the address payload: neither reads its owner.
+	f = ipWorld()
+	res = resolveIPs(t, newTestProvider(t, f), []string{"10.1.0.1", "10.4.0.1"}, "device_id", "vm_id")
+	noWarnings(t, res)
+	wantRow(t, res, "10.1.0.1", map[string]interface{}{"device_id": float64(1), "vm_id": nil})
+	wantRow(t, res, "10.4.0.1", map[string]interface{}{"device_id": nil, "vm_id": float64(1)})
+	for _, table := range []string{"dcim/devices", "virtualization/virtual-machines", "dcim/device-types"} {
+		if n := len(f.sentWith(table, "filter[id]__in")); n != 0 {
+			t.Errorf("device_id and vm_id read %s", table)
+		}
+	}
+
+	// device_manufacturer reads the device's type and its manufacturer; no
+	// other device column does.
+	f = ipWorld()
+	resolveIPs(t, newTestProvider(t, f), []string{"10.1.0.1"}, "device_name", "device_device_type")
+	for _, table := range []string{"dcim/device-types", "dcim/manufacturers"} {
+		if n := len(f.sentWith(table, "filter[id]__in")); n != 0 {
+			t.Errorf("device_name and device_device_type read %s", table)
+		}
+	}
+	f = ipWorld()
+	res = resolveIPs(t, newTestProvider(t, f), []string{"10.1.0.1", "10.6.0.10"}, "device_manufacturer")
+	noWarnings(t, res)
+	// spine-01 has no type in this world, so nothing to name.
+	wantRow(t, res, "10.1.0.1", map[string]interface{}{"device_manufacturer": "Arista"})
+	wantRow(t, res, "10.6.0.10", map[string]interface{}{"device_manufacturer": nil})
+	types := f.sentWith("dcim/device-types", "filter[id]__in")
+	if len(types) != 1 || types[0].query.Get("fields") != "id,manufacturer_id" {
+		t.Errorf("device types read as %v", types)
+	}
+	if n := len(f.sentWith("dcim/manufacturers", "filter[id]__in")); n != 1 {
+		t.Errorf("%d manufacturer reads, want 1", n)
+	}
 }
 
 // A reference NetBox keeps intact that names an object the replica does not
@@ -869,14 +925,42 @@ func TestResolveIPs_MissingRelatedObjectsWarn(t *testing.T) {
 	// Not shown, not counted.
 	res = resolveIPs(t, newTestProvider(t, f), []string{"10.85.0.1", "10.85.0.3", "10.85.0.5"}, "device_name")
 	noWarnings(t, res)
+	// The owner's id is the interface's to say, so a missing owner blanks
+	// neither id, and counts for neither.
+	res = resolveIPs(t, newTestProvider(t, f), []string{"10.85.0.4", "10.85.0.5"}, "device_id", "vm_id")
+	noWarnings(t, res)
+	wantRow(t, res, "10.85.0.4", map[string]interface{}{"device_id": float64(6), "vm_id": nil})
+	wantRow(t, res, "10.85.0.5", map[string]interface{}{"device_id": nil, "vm_id": float64(9)})
 	res = resolveIPs(t, newTestProvider(t, f), []string{"10.85.0.4", "10.85.0.5"}, "interface_name")
+	noWarnings(t, res)
+}
+
+// A device type, or a manufacturer, the replica does not hold blanks
+// device_manufacturer, counted; a device with no type has nothing to name.
+func TestResolveIPs_MissingManufacturerWarns(t *testing.T) {
+	f := ipWorld()
+	f.addRows("dcim/device-types", map[string]interface{}{"id": float64(2), "model": "orphan-type", "slug": "orphan-type", "manufacturer_id": float64(9)})
+	f.addRows("dcim/devices",
+		ipDevice(6, "typeless-maker", "active", 0, 0, 0, 0, 2, 0, 0),
+		ipDevice(7, "unknown-type", "active", 0, 0, 0, 0, 8, 0, 0))
+	f.addRows("dcim/interfaces", ipIface(16, 6, "eth0", "", ""), ipIface(17, 7, "eth0", "", ""))
+	f.addFakeRows("ipam/ip-addresses", ipAddr(860, "10.86.0.1/24", idInterface, 16), ipAddr(861, "10.86.0.2/24", idInterface, 17))
+	res := resolveIPs(t, newTestProvider(t, f), []string{"10.86.0.1", "10.86.0.2", "10.1.0.1", "10.6.0.10"}, "device_name", "device_manufacturer")
+	wantRow(t, res, "10.86.0.1", map[string]interface{}{"device_name": "typeless-maker", "device_manufacturer": nil})
+	wantRow(t, res, "10.86.0.2", map[string]interface{}{"device_name": "unknown-type", "device_manufacturer": nil})
+	wantRow(t, res, "10.1.0.1", map[string]interface{}{"device_manufacturer": "Arista"})
+	want := []string{"Related objects are missing for 2 of 4 rows: they reference objects this replica does not hold, so those columns are blank there."}
+	if !reflect.DeepEqual(res.Warnings, want) {
+		t.Errorf("warnings = %q, want %q", res.Warnings, want)
+	}
+	res = resolveIPs(t, newTestProvider(t, f), []string{"10.86.0.1", "10.86.0.2"}, "device_name")
 	noWarnings(t, res)
 }
 
 // A read that fails fails the answer: a blank column from a failed read is
 // indistinguishable from one with nothing to show.
 func TestResolveIPs_FailedReadIsAnError(t *testing.T) {
-	for _, table := range []string{addressesEntity, "dcim/devices", "ipam/prefixes", "ipam/vrfs"} {
+	for _, table := range []string{addressesEntity, "dcim/devices", "dcim/device-types", "dcim/manufacturers", "ipam/prefixes", "ipam/vrfs"} {
 		f := ipWorld()
 		f.failing = map[string]int{table: 503}
 		_, err := newTestProvider(t, f).ResolveIPs(context.Background(), []string{"10.1.0.1", "10.250.1.10", "10.10.10.5"}, allColumns(), 0)
@@ -931,7 +1015,8 @@ func TestResolveIPs_RecordsPastTheCeilingWarn(t *testing.T) {
 	res := resolveIPs(t, newTestProvider(t, f), []string{"10.66.0.1", "10.1.0.1"}, "match_count")
 	wantRow(t, res, "10.66.0.1", map[string]interface{}{"match_count": float64(MaxLimit)})
 	wantRow(t, res, "10.1.0.1", map[string]interface{}{"match_count": float64(1)})
-	if len(res.Warnings) != 1 || !strings.HasPrefix(res.Warnings[0], "The replica holds more than 10,000 address records for 1 IP (10.66.0.1)") {
+	if len(res.Warnings) != 1 || !strings.HasPrefix(res.Warnings[0], "The replica holds more than 10,000 address records for 1 IP (10.66.0.1)") ||
+		!strings.Contains(res.Warnings[0], "device_*, vm_* and is_primary_ip") {
 		t.Errorf("warnings = %q", res.Warnings)
 	}
 }

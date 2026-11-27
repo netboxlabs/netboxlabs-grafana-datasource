@@ -176,7 +176,7 @@ func recordsCappedWarning(hosts []string) string {
 		subject = "1 IP"
 	}
 	return fmt.Sprintf(
-		"The replica holds more than %s address records for %s (%s) — only the first %s were read. match_count is a floor rather than a count for the affected rows, and their address_*, interface_*, device_*, vm_name and is_primary_ip columns describe a record picked from the part that was read.",
+		"The replica holds more than %s address records for %s (%s) — only the first %s were read. match_count is a floor rather than a count for the affected rows, and their address_*, interface_*, device_*, vm_* and is_primary_ip columns describe a record picked from the part that was read.",
 		provider.HumanInt(MaxLimit), subject, list, provider.HumanInt(MaxLimit))
 }
 
@@ -307,9 +307,20 @@ func (s ipSelection) group(prefix string) bool {
 	return false
 }
 
+// device is whether any column needs the device's own row: every device_*
+// column but device_id, which the interface names.
+func (s ipSelection) device() bool {
+	for c := range s.cols {
+		if strings.HasPrefix(c, "device_") && c != "device_id" {
+			return true
+		}
+	}
+	return false
+}
+
 // owner is whether any column is named from what an address is assigned to.
 func (s ipSelection) owner() bool {
-	return s.group("interface_") || s.group("device_") || s.has(provider.IsPrimaryIPColumn) || s.has("vm_name")
+	return s.group("interface_") || s.group("device_") || s.group("vm_") || s.has(provider.IsPrimaryIPColumn)
 }
 
 // typed is whether any column needs the assignment's type named.
@@ -328,17 +339,19 @@ type enrichment struct {
 	sel       ipSelection
 	st        *readStats
 
-	types      contentTypes
-	ifaces     map[int]ifaceRecord
-	vmIfaces   map[int]vmIfaceRecord
-	devices    map[int]deviceRecord
-	vms        map[int]vmRecord
-	racks      map[int]rackRecord
-	vrfs       map[int]vrfRecord
-	vlans      map[int]vlanRecord
-	natOutside map[int][]string
-	prefixOf   map[string]*prefixRecord
-	scopeNames map[scopeLevel]map[int]string
+	types         contentTypes
+	ifaces        map[int]ifaceRecord
+	vmIfaces      map[int]vmIfaceRecord
+	devices       map[int]deviceRecord
+	deviceTypes   map[int]deviceTypeRecord
+	manufacturers map[int]namedRecord
+	vms           map[int]vmRecord
+	racks         map[int]rackRecord
+	vrfs          map[int]vrfRecord
+	vlans         map[int]vlanRecord
+	natOutside    map[int][]string
+	prefixOf      map[string]*prefixRecord
+	scopeNames    map[scopeLevel]map[int]string
 
 	warnings, notes []string
 }
@@ -516,7 +529,7 @@ func typedColumns(sel ipSelection) []string {
 	if sel.has("address_assigned_object_type") {
 		out = append(out, "address_assigned_object_type")
 	}
-	for _, group := range []string{"interface_", "device_"} {
+	for _, group := range []string{"interface_", "device_", "vm_"} {
 		var cols []string
 		for _, c := range provider.IPEnrichColumns() {
 			if strings.HasPrefix(c, group) && sel.has(c) {
@@ -531,10 +544,8 @@ func typedColumns(sel ipSelection) []string {
 			out = append(out, group+"*")
 		}
 	}
-	for _, c := range []string{"vm_name", provider.IsPrimaryIPColumn} {
-		if sel.has(c) {
-			out = append(out, c)
-		}
+	if sel.has(provider.IsPrimaryIPColumn) {
+		out = append(out, provider.IsPrimaryIPColumn)
 	}
 	return out
 }
@@ -696,6 +707,13 @@ type deviceRecord struct {
 	Tenant       *string `json:"tenant"`
 }
 
+// deviceTypeRecord is a device type as device_manufacturer needs it: NetBox
+// requires a manufacturer on every type.
+type deviceTypeRecord struct {
+	ID             int `json:"id"`
+	ManufacturerID int `json:"manufacturer_id"`
+}
+
 type vmRecord struct {
 	ID   int     `json:"id"`
 	Name *string `json:"name"`
@@ -754,19 +772,19 @@ func (en *enrichment) readOwners(ctx context.Context, picked map[string]addressR
 			return err
 		}
 	}
-	if sel.group("interface_") || sel.has("vm_name") || sel.has(provider.IsPrimaryIPColumn) {
+	if sel.group("interface_") || sel.group("vm_") || sel.has(provider.IsPrimaryIPColumn) {
 		if en.vmIfaces, err = readByID[vmIfaceRecord](ctx, en.p, "virtualization/interfaces", vmIfaceIDs, url.Values{"fields": {"id,name,description,virtual_machine_id"}}, en.st,
 			func(r vmIfaceRecord) int { return r.ID }); err != nil {
 			return err
 		}
 	}
-	if sel.group("device_") || sel.has(provider.IsPrimaryIPColumn) {
+	if sel.device() || sel.has(provider.IsPrimaryIPColumn) {
 		var deviceIDs []int
 		for _, i := range en.ifaces {
 			deviceIDs = append(deviceIDs, i.Device)
 		}
 		params := url.Values{"fields": {primaryFields}}
-		if sel.group("device_") {
+		if sel.device() {
 			params.Set("fields", deviceFields)
 			e, _, err := en.p.entityFor(ctx, "dcim/devices")
 			if err != nil && !unknownEntity(err) {
@@ -779,6 +797,9 @@ func (en *enrichment) readOwners(ctx context.Context, picked map[string]addressR
 		if en.devices, err = readByID[deviceRecord](ctx, en.p, "dcim/devices", deviceIDs, params, en.st, func(r deviceRecord) int { return r.ID }); err != nil {
 			return err
 		}
+	}
+	if err := en.readManufacturers(ctx); err != nil {
+		return err
 	}
 	if sel.has("vm_name") || sel.has(provider.IsPrimaryIPColumn) {
 		var vmIDs []int
@@ -801,6 +822,32 @@ func (en *enrichment) readOwners(ctx context.Context, picked map[string]addressR
 		}
 	}
 	return nil
+}
+
+// readManufacturers reads the devices' types and their manufacturers, for
+// device_manufacturer. NetBox mode reads the manufacturer off the device type
+// nested in the device row; the replica's device row holds the type's id alone,
+// so here it costs these two reads, made only when the column is selected.
+func (en *enrichment) readManufacturers(ctx context.Context) error {
+	if !en.sel.has("device_manufacturer") {
+		return nil
+	}
+	var typeIDs []int
+	for _, d := range en.devices {
+		typeIDs = append(typeIDs, d.DeviceTypeID)
+	}
+	var err error
+	if en.deviceTypes, err = readByID[deviceTypeRecord](ctx, en.p, "dcim/device-types", typeIDs, url.Values{"fields": {"id,manufacturer_id"}}, en.st,
+		func(r deviceTypeRecord) int { return r.ID }); err != nil {
+		return err
+	}
+	var makerIDs []int
+	for _, t := range en.deviceTypes {
+		makerIDs = append(makerIDs, t.ManufacturerID)
+	}
+	en.manufacturers, err = readByID[namedRecord](ctx, en.p, "dcim/manufacturers", makerIDs, url.Values{"fields": {"id,name"}}, en.st,
+		func(r namedRecord) int { return r.ID })
+	return err
 }
 
 // readByID reads the rows of objectType with the given primary keys, by key.
@@ -881,9 +928,15 @@ func (en *enrichment) readNATOutside(ctx context.Context, picked map[string]addr
 // and the site's region and group; to a site, the site, region and group; to
 // a region or a site group, that alone. So the most specific level set is the
 // scope itself.
-type scopeLevel struct{ table string }
+//
+// contentType is the level's model as NetBox names a content type, which is
+// what NetBox mode's prefix_scope_type shows.
+type scopeLevel struct{ table, contentType string }
 
-var scopeLevels = []scopeLevel{{"dcim/locations"}, {"dcim/sites"}, {"dcim/site-groups"}, {"dcim/regions"}}
+var scopeLevels = []scopeLevel{
+	{"dcim/locations", "dcim.location"}, {"dcim/sites", "dcim.site"},
+	{"dcim/site-groups", "dcim.sitegroup"}, {"dcim/regions", "dcim.region"},
+}
 
 // prefixRecord is an ipam/prefixes row as the fallback reads it.
 type prefixRecord struct {
@@ -1092,6 +1145,7 @@ func (en *enrichment) readDisplays(ctx context.Context, picked map[string]addres
 // flattened address does: a choice by its label, a related object by its
 // display, a blank text as itself.
 func (en *enrichment) addressColumns(row *ipRow, r addressRecord) {
+	row.set("address_id", float64(r.ID))
 	row.set("address_dns_name", textValue(r.DNSName))
 	row.set("address_status", choiceValue(addressesEntity, "status", r.Status))
 	row.set("address_role", choiceValue(addressesEntity, "role", r.Role))
@@ -1138,9 +1192,12 @@ func (en *enrichment) ownerColumns(row *ipRow, r addressRecord) bool {
 		if iface.Device == 0 {
 			return true
 		}
+		// The interface names its device, as the address payload does in NetBox
+		// mode, so device_id is set whether or not the replica holds the device.
+		row.set("device_id", float64(iface.Device))
 		dev, ok := en.devices[iface.Device]
 		if !ok {
-			row.dangling = row.dangling || en.sel.group("device_") || en.sel.has(provider.IsPrimaryIPColumn)
+			row.dangling = row.dangling || en.sel.device() || en.sel.has(provider.IsPrimaryIPColumn)
 			return true
 		}
 		en.deviceColumns(row, dev, r.ID)
@@ -1156,6 +1213,7 @@ func (en *enrichment) ownerColumns(row *ipRow, r addressRecord) bool {
 		if vi.VM == 0 {
 			return true
 		}
+		row.set("vm_id", float64(vi.VM))
 		vm, ok := en.vms[vi.VM]
 		if !ok {
 			row.dangling = row.dangling || en.sel.has("vm_name") || en.sel.has(provider.IsPrimaryIPColumn)
@@ -1174,7 +1232,7 @@ func (en *enrichment) ownerColumns(row *ipRow, r addressRecord) bool {
 // neither).
 func (en *enrichment) deviceColumns(row *ipRow, d deviceRecord, addressID int) {
 	row.set(provider.IsPrimaryIPColumn, d.IP4 == addressID || d.IP6 == addressID)
-	if !en.sel.group("device_") {
+	if !en.sel.device() {
 		return
 	}
 	row.set("device_name", textValue(d.Name))
@@ -1182,6 +1240,9 @@ func (en *enrichment) deviceColumns(row *ipRow, d deviceRecord, addressID int) {
 	row.ref("device_role", d.RoleID, d.Role)
 	row.ref("device_platform", d.PlatformID, d.Platform)
 	row.ref("device_device_type", d.DeviceTypeID, d.DeviceType)
+	if en.sel.has("device_manufacturer") {
+		en.manufacturerColumn(row, d.DeviceTypeID)
+	}
 	row.ref("device_site", d.SiteID, d.Site)
 	row.ref("device_location", d.LocationID, d.Location)
 	row.ref("device_tenant", d.TenantID, d.Tenant)
@@ -1191,6 +1252,19 @@ func (en *enrichment) deviceColumns(row *ipRow, d deviceRecord, addressID int) {
 	}
 }
 
+// manufacturerColumn sets device_manufacturer, the name of the device type's
+// manufacturer, as NetBox mode shows the manufacturer nested in the type. A type
+// or a manufacturer the replica does not hold is a gap.
+func (en *enrichment) manufacturerColumn(row *ipRow, typeID int) {
+	t, ok := en.deviceTypes[typeID]
+	if !ok {
+		row.ref("device_manufacturer", typeID, nil)
+		return
+	}
+	m := en.manufacturers[t.ManufacturerID]
+	row.ref("device_manufacturer", t.ManufacturerID, m.Name)
+}
+
 // prefixColumns fills prefix_* from the host's longest containing prefix, or
 // leaves them null when none holds it.
 func (en *enrichment) prefixColumns(row *ipRow, host string) {
@@ -1198,6 +1272,7 @@ func (en *enrichment) prefixColumns(row *ipRow, host string) {
 	if !ok {
 		return
 	}
+	row.set("prefix_id", float64(pr.ID))
 	row.set("prefix_cidr", pr.Prefix)
 	row.set("prefix_description", textValue(pr.Description))
 	row.ref("prefix_tenant", pr.TenantID, pr.Tenant)
@@ -1205,19 +1280,22 @@ func (en *enrichment) prefixColumns(row *ipRow, host string) {
 	en.vrfColumn(row, "prefix_vrf", pr.VRF)
 	v := en.vlans[pr.VLAN]
 	row.ref("prefix_vlan", pr.VLAN, vlanDisplay(v.Name, v.VID))
-	// The scope is named from the most specific level cached on the prefix. A
-	// scope with no level cached cannot be named, and is a gap like any other.
-	scope, scopeID := (*string)(nil), pr.Scope
+	// The scope is named from the most specific level cached on the prefix,
+	// and that level is its type. A scope with no level cached cannot be named
+	// or typed, and is a gap like any other.
+	scope, scopeType, scopeID := (*string)(nil), (*string)(nil), pr.Scope
 	for _, l := range scopeLevels {
 		if id := pr.level(l); id > 0 {
 			scopeID = id
 			if name, ok := en.scopeNames[l][id]; ok {
 				scope = &name
 			}
+			scopeType = &l.contentType
 			break
 		}
 	}
 	row.ref("prefix_scope", scopeID, scope)
+	row.ref("prefix_scope_type", scopeID, scopeType)
 }
 
 // vrfColumn sets a VRF as NetBox displays one (vrfDisplay); one the replica

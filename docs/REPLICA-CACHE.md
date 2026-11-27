@@ -483,6 +483,13 @@ with no record, ties broken in NetBox's order.
   by VRF or tenant instead. A scope cut off by the row limit keeps the
   replica's first records, which can differ from NetBox mode's; alert rules
   refuse it as truncated in both modes.
+- **What a column costs.** Each table is read once for the whole list, and only
+  for the columns that need it. `address_id` and `prefix_id` come with the
+  address and prefix rows. `device_id` and `vm_id` cost the interface reads,
+  where NetBox mode reads them off the address record, and
+  `device_manufacturer` reads the device types and their manufacturers, where
+  NetBox mode reads it off the device. `prefix_scope_type` is the most specific
+  scope level the prefix caches, so it costs no read.
 - IP enrichment needs a replica-cache build with the host match (v1.38), and
   its prefix columns one with containment (v1.39).
 - A tenant with no VRFs, racks, VLANs, VMs or FHRP groups gets a complete

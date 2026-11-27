@@ -1278,8 +1278,8 @@ func (f *fakeService) addIPEnrichmentTables() {
 	f.addColumns("virtualization/virtual-machines", "name:VARCHAR")
 	f.addColumns("dcim/devices", "device_type_id:BIGINT", "location_id:BIGINT")
 	f.addColumns("dcim/racks", "facility_id:VARCHAR")
-	f.addEntity("dcim/device-types", "id:BIGINT:pk", "model:VARCHAR", "slug:VARCHAR")
-	for _, named := range []string{"dcim/locations", "dcim/regions", "dcim/site-groups", "ipam/roles"} {
+	f.addEntity("dcim/device-types", "id:BIGINT:pk", "model:VARCHAR", "slug:VARCHAR", "manufacturer_id:BIGINT")
+	for _, named := range []string{"dcim/manufacturers", "dcim/locations", "dcim/regions", "dcim/site-groups", "ipam/roles"} {
 		f.addEntity(named, "id:BIGINT:pk", "name:VARCHAR", "slug:VARCHAR")
 	}
 	f.addEntity("ipam/vrfs", "id:BIGINT:pk", "name:VARCHAR", "rd:VARCHAR")
@@ -1288,7 +1288,7 @@ func (f *fakeService) addIPEnrichmentTables() {
 	f.addColumns("ipam/prefixes", "description:VARCHAR", "tenant_id:BIGINT", "role_id:BIGINT", "vlan_id:BIGINT",
 		"scope_id:BIGINT", "scope_type_id:INTEGER", "_location_id:BIGINT", "_region_id:BIGINT", "_site_id:BIGINT", "_site_group_id:BIGINT")
 	for _, table := range []string{"tenancy/tenants", "dcim/sites", "dcim/device-roles", "dcim/racks", "dcim/device-types",
-		"dcim/locations", "dcim/regions", "dcim/site-groups", "ipam/roles", "ipam/vrfs", "ipam/vlans", "ipam/prefixes"} {
+		"dcim/manufacturers", "dcim/locations", "dcim/regions", "dcim/site-groups", "ipam/roles", "ipam/vrfs", "ipam/vlans", "ipam/prefixes"} {
 		f.entities[table] = []map[string]interface{}{}
 	}
 	f.addReference("ipam/ip-addresses", "tenant_id", "tenancy/tenants", "tenant", "name", "slug")

@@ -988,7 +988,7 @@ func (p *Provider) fetchVMs(ctx context.Context, ids []int) (map[int]map[string]
 // virtualization.vminterface carries one thing more — a nested virtual_machine
 // object — and that is where vm_name comes from; it costs nothing, because the
 // address hop already has the payload.
-// vm_name is the ONLY vm_* column. It is deliberately not device_name: a VM id
+// vm_name and vm_id are the only vm_* columns. vm_name is deliberately not device_name: a VM id
 // and a device id live in different NetBox models, so reusing the device
 // keyspace would collide, and NetBox permits a device and a VM with the same
 // name, which would make the documented device_name → Prometheus `device` join
@@ -1026,14 +1026,15 @@ func IPEnrichColumns() []string {
 		"ip", "match_count", "is_primary_ip",
 		"prefix_cidr", "prefix_scope", "prefix_tenant", "prefix_role",
 		"prefix_vrf", "prefix_vlan", "prefix_description",
+		"address_id", "address_url",
 		"address_dns_name", "address_status", "address_role", "address_vrf",
 		"address_tenant", "address_description", "address_assigned_object_type",
 		"address_nat_inside", "address_nat_outside",
 		"interface_name", "interface_description",
-		"device_name", "device_role", "device_platform", "device_device_type",
+		"device_id", "device_name", "device_role", "device_platform", "device_device_type",
 		"device_site", "device_location", "device_rack", "device_tenant",
 		"device_status",
-		"vm_name",
+		"vm_id", "vm_name",
 	}
 }
 
@@ -1077,6 +1078,9 @@ func DefaultIPEnrichFields() []string { return slices.Clone(defaultIPEnrichField
 var ipEnrichColumnTypes = map[string]provider.FieldType{
 	"match_count":     provider.FieldTypeNumber,
 	isPrimaryIPColumn: provider.FieldTypeBoolean,
+	"address_id":      provider.FieldTypeNumber,
+	"device_id":       provider.FieldTypeNumber,
+	"vm_id":           provider.FieldTypeNumber,
 }
 
 // declaredColumnTypes returns the type declarations for the fields this query
@@ -1111,19 +1115,29 @@ func declaredColumnTypes(fields []string) map[string]provider.FieldType {
 // is_primary_ip permanently blank.
 //
 // Prefix matching is exact-by-construction: every column in IPEnrichColumns
-// beginning with "device_" or "prefix_" comes from that group's hop, and the
+// beginning with "device_" or "prefix_" comes from that group's hop, except
+// device_id, which wantsGroupExcept exempts because the address record carries
+// it, and the
 // three non-namespaced columns ("ip", "match_count", "is_primary_ip") belong to
 // neither group — the last of them needing the explicit test above.
 //
-// "vm_" is NOT a group here, alongside "address_" and "interface_": vm_name is
-// read off the address payload this query already holds, so there is no hop to
+// "vm_" is NOT a group here, alongside "address_" and "interface_": vm_name and
+// vm_id are read off the address payload this query already holds, so there is no hop to
 // skip. The VM hop is gated on is_primary_ip by name for exactly that reason —
 // gating it on the "vm_" prefix would make the free column start paying for a
 // request, and gating it on the whole selection would make every ip-enrichment
 // query pay for a column nobody asked for.
 func wantsGroup(fields []string, group string) bool {
+	return wantsGroupExcept(fields, group)
+}
+
+// wantsGroupExcept is wantsGroup that ignores the columns named in free: columns
+// that carry the group's prefix but are read off the address record already in
+// hand, so selecting them alone must not start the group's hop. device_id is the
+// one today; vm_* never was a group.
+func wantsGroupExcept(fields []string, group string, free ...string) bool {
 	for _, f := range fields {
-		if strings.HasPrefix(f, group) {
+		if strings.HasPrefix(f, group) && !slices.Contains(free, f) {
 			return true
 		}
 	}
@@ -1308,6 +1322,8 @@ func applyAddressColumns(row map[string]interface{}, raw json.RawMessage) {
 		return
 	}
 	for src, dst := range map[string]string{
+		"id":          "address_id",
+		"display_url": "address_url",
 		"dns_name":    "address_dns_name",
 		"status":      "address_status",
 		"role":        "address_role",
@@ -1740,8 +1756,11 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 	// failure actually blanked in THIS frame. Deriving either of those from
 	// `fields` again, separately, is how a request or a warning drifts away from
 	// the gate that caused it.
+	// device_id is exempt from the device group: it is read off the address
+	// record, so selecting it alone makes no device request. The same holds for
+	// vm_id, which no gate reads at all.
 	wantPrimaryIP := slices.Contains(fields, isPrimaryIPColumn)
-	wantDeviceGroup := wantsGroup(fields, "device_")
+	wantDeviceGroup := wantsGroupExcept(fields, "device_", "device_id")
 	wantDevice := wantDeviceGroup || wantPrimaryIP
 	wantVM := wantPrimaryIP
 	wantPrefix := wantsGroup(fields, "prefix_")
@@ -1855,6 +1874,15 @@ func (p *Provider) enrichHosts(ctx context.Context, hosts []string, addrs addres
 		switch {
 		case hasBest:
 			applyAddressColumns(row, best)
+			// device_id and vm_id are read off the address record already in hand,
+			// so they cost no request and are set whether or not a hop ran. float64
+			// like every other number the frame layer classifies.
+			if id, ok := deviceIDFromAddress(best); ok {
+				row["device_id"] = float64(id)
+			}
+			if id, ok := vmIDFromAddress(best); ok {
+				row["vm_id"] = float64(id)
+			}
 			// Exactly one of these two can fire, and often neither: the type gates
 			// inside deviceIDFromAddress and vmIDFromAddress are mutually
 			// exclusive, and an address assigned to an FHRP group or to nothing at

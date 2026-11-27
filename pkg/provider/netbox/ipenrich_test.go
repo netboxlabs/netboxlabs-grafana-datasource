@@ -2215,7 +2215,8 @@ func TestResolveIPs(t *testing.T) {
 	deviceFixtures := map[string]string{
 		"100": `{"id":100,"name":"leaf-01","role":{"id":2,"name":"Leaf Switch","slug":"leaf-switch"},` +
 			`"platform":{"id":3,"name":"Arista EOS","slug":"arista-eos"},` +
-			`"device_type":{"id":4,"model":"DCS-7050TX"},"site":{"id":5,"name":"AMS1","slug":"ams1"},` +
+			`"device_type":{"id":4,"model":"DCS-7050TX","manufacturer":{"id":9,"name":"Arista","slug":"arista","display":"Arista"}},` +
+			`"site":{"id":5,"name":"AMS1","slug":"ams1"},` +
 			`"location":{"id":6,"name":"Hall 1","slug":"hall-1"},"rack":{"id":7,"name":"R101"},` +
 			`"tenant":{"id":8,"name":"NetOps","slug":"netops"},"status":{"value":"active","label":"Active"},` +
 			`"primary_ip4":{"id":1,"address":"10.0.0.1/32"}}`,
@@ -2262,8 +2263,8 @@ func TestResolveIPs(t *testing.T) {
 	// mock that DOES answer, by TestResolveIPs_IsPrimaryIP.
 	deviceColumns := []string{
 		"device_name", "device_role", "device_platform", "device_device_type",
-		"device_site", "device_location", "device_rack", "device_tenant",
-		"device_status",
+		"device_manufacturer", "device_site", "device_location", "device_rack",
+		"device_tenant", "device_status",
 	}
 
 	t.Run("Total is the pre-clamp distinct count, not the post-clamp row count", func(t *testing.T) {
@@ -2361,6 +2362,11 @@ func TestResolveIPs(t *testing.T) {
 		}
 		if devRow["device_site"] != "AMS1" {
 			t.Errorf("device_site = %v, want %q", devRow["device_site"], "AMS1")
+		}
+		// The manufacturer comes from the device type nested in the same device
+		// row: no dcim/device-types request.
+		if devRow["device_manufacturer"] != "Arista" {
+			t.Errorf("device_manufacturer = %v, want %q", devRow["device_manufacturer"], "Arista")
 		}
 		// This mock serves no virtualization endpoint, so selecting is_primary_ip
 		// puts the VM hop through a 404 in this very call — and the device row's

@@ -279,12 +279,22 @@ export const IP_CONTEXT_FIELD_GROUPS: Array<{
   },
   {
     label: 'Device',
-    options: ['id', 'name', 'role', 'platform', 'device_type', 'site', 'location', 'rack', 'tenant', 'status'].map(
-      (f) => ({
-        label: `device_${f}`,
-        value: `device_${f}`,
-      })
-    ),
+    options: [
+      'id',
+      'name',
+      'role',
+      'platform',
+      'device_type',
+      'manufacturer',
+      'site',
+      'location',
+      'rack',
+      'tenant',
+      'status',
+    ].map((f) => ({
+      label: `device_${f}`,
+      value: `device_${f}`,
+    })),
   },
   {
     label: 'Virtual machine',

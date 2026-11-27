@@ -185,7 +185,8 @@ longest containing prefix:
    selection contains no `prefix_*` column and therefore makes no prefix request at all;
    add one only when you want prefix context. `prefix_id` and
    `prefix_scope_type` cost nothing beyond that fallback. `device_*` columns other
-   than `device_id` cost one extra batched request for the whole IP list. `address_id`,
+   than `device_id` cost one extra batched request for the whole IP list;
+   `device_manufacturer` comes from the device's type in that same request. `address_id`,
    `device_id`, `vm_id` and `vm_name` cost nothing: they come from the address
    record. To link a row back to NetBox, use a data link to
    `<NetBox URL>/dcim/devices/<id>/`, or read more about the object with an `objects`

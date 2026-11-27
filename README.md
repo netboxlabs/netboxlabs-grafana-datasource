@@ -22,7 +22,7 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
   [docs/JOIN-KEYS.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/JOIN-KEYS.md).
 - **IP enrichment (address, device and longest-prefix match).** Resolve arbitrary observed
   IPs to their NetBox address record, the interface it's assigned to, and the owning
-  device — including whether it's that device's primary IP — falling back to the
+  device — including its manufacturer and whether it's that device's primary IP — falling back to the
   containing prefix's site/tenant/role when the address isn't individually registered.
   Each match also returns its NetBox id (address record, device or VM, and
   prefix) and the prefix's scope type; link a row back to NetBox with a data link to

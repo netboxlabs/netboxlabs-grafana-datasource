@@ -860,12 +860,36 @@ func (p *Provider) fetchDevices(ctx context.Context, ids []int, wantDeviceColumn
 			if err != nil {
 				continue
 			}
+			if m, ok := deviceTypeManufacturer(raw); ok {
+				vals[manufacturerKey] = m
+			}
 			if v, ok := vals["id"].(float64); ok {
 				out[int(v)] = vals
 			}
 		}
 	}
 	return out, deg
+}
+
+// manufacturerKey is where fetchDevices keeps a device's manufacturer among its
+// flattened fields. NetBox never uses a double underscore in a field name, so it
+// can't collide with one.
+const manufacturerKey = "device_type__manufacturer"
+
+// deviceTypeManufacturer is the manufacturer nested in a device row's
+// device_type (NetBox's short form of a device type carries it), so
+// device_manufacturer costs no dcim/device-types request. The flattener keeps a
+// reference's display, id and slug, not what is nested in it.
+func deviceTypeManufacturer(raw json.RawMessage) (string, bool) {
+	var row struct {
+		DeviceType struct {
+			Manufacturer map[string]interface{} `json:"manufacturer"`
+		} `json:"device_type"`
+	}
+	if json.Unmarshal(raw, &row) != nil || row.DeviceType.Manufacturer == nil {
+		return "", false
+	}
+	return nestedDisplay(row.DeviceType.Manufacturer), true
 }
 
 // primaryIPFields is the projection a hop sends when is_primary_ip is the only
@@ -1036,8 +1060,8 @@ func IPEnrichColumns() []string {
 		"address_nat_inside", "address_nat_outside",
 		"interface_name", "interface_description",
 		"device_id", "device_name", "device_role", "device_platform", "device_device_type",
-		"device_site", "device_location", "device_rack", "device_tenant",
-		"device_status",
+		"device_manufacturer", "device_site", "device_location", "device_rack",
+		"device_tenant", "device_status",
 		"vm_id", "vm_name",
 	}
 }
@@ -1412,15 +1436,16 @@ func assignedType(vals map[string]interface{}) string {
 // dcim.interface-assigned row.
 func applyDeviceColumns(row map[string]interface{}, dev map[string]interface{}, ipID int) {
 	for src, dst := range map[string]string{
-		"name":        "device_name",
-		"role":        "device_role",
-		"platform":    "device_platform",
-		"device_type": "device_device_type",
-		"site":        "device_site",
-		"location":    "device_location",
-		"rack":        "device_rack",
-		"tenant":      "device_tenant",
-		"status":      "device_status",
+		"name":          "device_name",
+		"role":          "device_role",
+		"platform":      "device_platform",
+		"device_type":   "device_device_type",
+		manufacturerKey: "device_manufacturer",
+		"site":          "device_site",
+		"location":      "device_location",
+		"rack":          "device_rack",
+		"tenant":        "device_tenant",
+		"status":        "device_status",
 	} {
 		if v, ok := dev[src]; ok {
 			row[dst] = v

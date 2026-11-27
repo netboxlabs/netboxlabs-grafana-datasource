@@ -7,6 +7,12 @@
   modules and services, each saying what changed. Journal entries can show
   alongside them. Changes to what's still attached are read by id, so a busy
   change log doesn't hide them; removals are checked in one page of it.
+- **IP enrichment returns NetBox ids and the device's manufacturer.** New context
+  fields: `address_id`, `device_id`, `vm_id`, `prefix_id`, `prefix_scope_type`
+  (`dcim.site`, `dcim.region`, …) and `device_manufacturer`. `address_id`,
+  `device_id` and `vm_id` come from the address record at no cost,
+  `device_manufacturer` from the device request, and the `prefix_*` fields cost
+  the prefix fallback they belong to.
 - **A reference's own fields as columns.** An Objects query can return
   `<ref>__<col>` columns such as `device_type__manufacturer`, read from the same
   response, so a device's manufacturer needs no second query.

@@ -22,8 +22,12 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
   [docs/JOIN-KEYS.md](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/JOIN-KEYS.md).
 - **IP enrichment (address, device and longest-prefix match).** Resolve arbitrary observed
   IPs to their NetBox address record, the interface it's assigned to, and the owning
-  device — including whether it's that device's primary IP — falling back to the
+  device — including its manufacturer and whether it's that device's primary IP — falling back to the
   containing prefix's site/tenant/role when the address isn't individually registered.
+  Each match also returns its NetBox id (address record, device or VM, and
+  prefix) and the prefix's scope type; link a row back to NetBox with a data link to
+  `<NetBox URL>/dcim/devices/<id>/`, or read more about the object with an `objects`
+  query filtered on `id`.
   It is the one enrichment a value-join can't do.
 - **Prefix/IP utilization.** Opt-in `utilization` (%), `used` and `available` columns for
   prefixes and IP ranges, computed to match NetBox's own utilization, so you can gauge or
@@ -60,7 +64,7 @@ from Prometheus, Loki, Mimir, InfluxDB or anything else, turning `device="leaf1"
 - **NetBox 4.2 or later.** The plugin depends on
   `display_url` on all serializers (deep links), the `/api/core/object-changes/` endpoint
   (change-log annotations), and a prefix's generic `scope`, returned by IP enrichment as
-  `prefix_scope`. Both classic (v1) and `nbt_…` (v2, NetBox 4.5+) API tokens are supported
+  `prefix_scope` and `prefix_scope_type`. Both classic (v1) and `nbt_…` (v2, NetBox 4.5+) API tokens are supported
   and auto-detected.
 - **Grafana 12.3 or later** (the plugin's `grafanaDependency`; CI runs the e2e
   tests on versions from 12.3 to the latest release, and on nightly).
@@ -71,14 +75,14 @@ Re-verify any NetBox version locally with [`demo/compat-check.sh`](https://githu
 
 Add the data source (**Connections → Data sources → NetBox**) and set:
 
-| Field               | Description                                                                                                                                                                                                     |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **NetBox URL**      | Base URL of your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`).                                                                                                                       |
-| **Browser URL**     | Optional. Where users' browsers reach NetBox when Grafana connects over an internal address (Docker/k8s service DNS). Deep links are rewritten to this base; leave empty if the URL above is browser-reachable. |
-| **API Token**       | A NetBox API token. Both classic 40-character (v1) tokens and `nbt_…` (v2) tokens are auto-detected. Stored encrypted.                                                                                          |
-| **Skip TLS verify** | Accept self-signed certificates.                                                                                                                                                                                |
-| **Timeout (s)**     | Per-request upstream timeout (default 30).                                                                                                                                                                      |
-| **Fast paging**     | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                |
+| Field                  | Description                                                                                                                                                                                                                                                                  |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **NetBox URL**         | Base URL of your NetBox instance, e.g. `https://netbox.example.com` (no trailing `/api`).                                                                                                                                                                                    |
+| **Browser URL**        | Optional. Where users' browsers reach NetBox when Grafana connects over an internal address (Docker/k8s service DNS). Deep links are rewritten to this base; leave empty if the URL above is browser-reachable.                                                              |
+| **API Token**          | A NetBox API token. Both classic 40-character (v1) tokens and `nbt_…` (v2) tokens are auto-detected. Stored encrypted.                                                                                                                                                       |
+| **Skip TLS verify**    | Accept self-signed certificates.                                                                                                                                                                                                                                             |
+| **Timeout (s)**        | Per-request upstream timeout (default 30).                                                                                                                                                                                                                                   |
+| **Fast paging**        | Off by default. For very large instances only — see [Large NetBox instances](#large-netbox-instances).                                                                                                                                                                       |
 | **Secure Socks Proxy** | Shown only on self-hosted Grafana with a [secure SOCKS5 data source proxy](https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/proxy/) configured. **Enabled** routes this datasource through it. On Grafana Cloud, see [Grafana Cloud](#grafana-cloud). |
 
 Click **Save & test**. A healthy data source reports the connected NetBox version.
@@ -106,7 +110,7 @@ and is the simplest way to get predictable query performance at that scale.
    objects returns an informational notice saying as much, because the largest
    page this data source returns is 10,000 rows: at that size a panel can only
    ever show a corner of the table.
-2. **Select only the fields you use.** *Return fields* is not just presentation
+2. **Select only the fields you use.** _Return fields_ is not just presentation
    — the plugin asks NetBox to serialize only those properties, so a narrow
    selection moves considerably less data. A reference's own fields come in the
    same response: `device_type__manufacturer` is a device's manufacturer, with no
@@ -170,12 +174,12 @@ datasources:
 
 ## Query types
 
-| Type              | Returns                                                        | Use with                          |
-| ----------------- | -------------------------------------------------------------- | --------------------------------- |
-| **Objects**       | A joinable table for any object type (with optional join keys). A reference's own fields are columns too, as `<ref>__<col>` (`device_type__manufacturer`) | Table, or Outer-join onto metrics |
-| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`. Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
-| **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)     | Node Graph panel                  |
-| **Annotations**   | NetBox change-log events, optionally scoped to objects and what's attached, plus journal entries. Read-only (no Edit button) | Dashboard annotations |
+| Type              | Returns                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Use with                          |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| **Objects**       | A joinable table for any object type (with optional join keys). A reference's own fields are columns too, as `<ref>__<col>` (`device_type__manufacturer`)                                                                                                                                                                                                                                                                                                            | Table, or Outer-join onto metrics |
+| **IP enrichment** | Per-IP longest-prefix context, keyed on `ip`, with the NetBox id of the address record, device or VM, and prefix (cost per field in [Recipe 3](https://github.com/netboxlabs/netboxlabs-grafana-datasource/blob/main/docs/RECIPES.md#recipe-3-enrich-flows-or-logs-by-ip)). Source **IP list** (the IPs you give, or a variable) or **NetBox scope** (every address under `ipam/ip-addresses` filters — for alert rules, which join a metric's IP against it in SQL) | Join onto flow/log data by IP     |
+| **Topology**      | Devices (nodes) + links (edges: cable paths or raw cables)                                                                                                                                                                                                                                                                                                                                                                                                           | Node Graph panel                  |
+| **Annotations**   | NetBox change-log events, optionally scoped to objects and what's attached, plus journal entries. Read-only (no Edit button)                                                                                                                                                                                                                                                                                                                                         | Dashboard annotations             |
 
 See [Demo](#demo) below for a one-command runnable stack (synthetic Prometheus + Loki
 labeled to match NetBox + a rich dashboard).
@@ -187,7 +191,7 @@ labeled to match NetBox + a rich dashboard).
 > if the schema can't be read, the editor falls back to the discovered columns with all
 > operators available.
 
-> Filter rows stack with **AND**, but NetBox combines *repeated* parameters with **OR**, so
+> Filter rows stack with **AND**, but NetBox combines _repeated_ parameters with **OR**, so
 > two rows that resolve to the same NetBox parameter (two `name contains` rows, say) are
 > OR-ed instead, and the editor warns on both. Two cases are not flagged, because there the
 > stacked AND is already what NetBox does: `tag`/`tag_id` rows (NetBox requires every listed
@@ -337,6 +341,7 @@ in a `golang:1.26` container instead.
   `admin` / `admin`), and Grafana is at `http://localhost:3001`
   (anonymous admin, no login). The demo's pre-provisioned API token is
   `0123456789abcdef0123456789abcdef01234567`.
+
 - **Fast / bring-your-own-NetBox mode**: point the stack at your own NetBox instead of the
   bundled one (same script, so the plugin gets built too):
   ```bash

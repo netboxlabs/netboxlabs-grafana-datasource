@@ -59,12 +59,12 @@ both, but not both at once for the same IP: give it a list of IPs (literally, or
 from a `$variable` sourced from your flow data) and, per IP, it either finds a
 registered address record — returning whatever owns it: a device and its
 interface (`device_name`, `interface_name`, `device_site`, …), or
-`vm_name` when the address sits on a virtual machine's interface instead
-(`is_primary_ip` is un-namespaced because it answers for either owner) — or,
+`vm_*` (`vm_name`, `vm_id`) when the address sits on a virtual machine's
+interface instead (`is_primary_ip` is un-namespaced because it answers for either owner) — or,
 only when no address record matches at all, falls back to
 the longest-matching prefix's context (`prefix_tenant`, `prefix_role`,
 `prefix_vrf`, `prefix_vlan`, `prefix_scope`, …). `prefix_*` and
-`address_*`/`interface_*`/`device_*`/`vm_name` are mutually exclusive per row,
+`address_*`/`interface_*`/`device_*`/`vm_*` are mutually exclusive per row,
 and `device_name` and `vm_name` are never both set on the same row either — but
 neither is guaranteed to be set. An address is assigned to a device interface,
 to a VM interface, or to neither (an FHRP/VRRP group, or nothing at all), and in

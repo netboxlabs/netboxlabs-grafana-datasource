@@ -222,7 +222,7 @@ func TestBatchedQueriesStayWithinTheByteBudget(t *testing.T) {
 		srv := idEndpointServer(t, "/api/virtualization/virtual-machines/", &queries)
 		p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
 
-		got, deg := p.fetchVMs(context.Background(), ids, false)
+		got, deg := p.fetchVMs(context.Background(), ids)
 		if deg.any() {
 			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
 		}
@@ -307,7 +307,7 @@ func TestBatchedQueriesStayWithinTheByteBudget(t *testing.T) {
 		base = srv.URL + "/api/virtualization/virtual-machines/"
 
 		p := New(srv.URL, "test-token", &http.Client{Timeout: 10 * time.Second})
-		got, deg := p.fetchVMs(context.Background(), ids, false)
+		got, deg := p.fetchVMs(context.Background(), ids)
 		if deg.any() {
 			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
 		}
@@ -1393,7 +1393,7 @@ func TestFetchVMs(t *testing.T) {
 			ids[i] = i + 1
 		}
 
-		got, deg := p.fetchVMs(context.Background(), ids, false)
+		got, deg := p.fetchVMs(context.Background(), ids)
 		if deg.any() {
 			t.Fatalf("a fully successful hop must report no degradation, got %+v", deg)
 		}
@@ -1431,7 +1431,7 @@ func TestFetchVMs(t *testing.T) {
 		defer srv.Close()
 
 		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
-		got, deg := p.fetchVMs(context.Background(), nil, false)
+		got, deg := p.fetchVMs(context.Background(), nil)
 		if deg.any() {
 			t.Fatalf("no ids means nothing to degrade, got %+v", deg)
 		}
@@ -1457,7 +1457,7 @@ func TestFetchVMs(t *testing.T) {
 		// guarantee, for the reason fetchDevices' comment gives — an error here
 		// would have no consumer, and discarding one is how a total failure came
 		// out looking like fact.
-		got, deg := p.fetchVMs(context.Background(), []int{5, 6}, false)
+		got, deg := p.fetchVMs(context.Background(), []int{5, 6})
 		if len(got) != 0 {
 			t.Fatalf("a forbidden endpoint cannot produce virtual machines, got %v", got)
 		}
@@ -3107,7 +3107,7 @@ func TestHopWarningTexts(t *testing.T) {
 		},
 		{
 			name: "virtual machine hop, partial",
-			got:  vmHopWarning(degradation{failed: 2, total: 9, cause: apiErr}, true, false),
+			got:  vmHopWarning(degradation{failed: 2, total: 9, cause: apiErr}),
 			// "not because those IPs are not their virtual machine's primary
 			// address" is the load-bearing half: a blank is_primary_ip is exactly
 			// what a correct FHRP-assigned or unassigned row looks like, so the
@@ -3115,20 +3115,6 @@ func TestHopWarningTexts(t *testing.T) {
 			want: "Virtual machine lookup failed for 2 of 9 virtual machines — NetBox returned HTTP 503. " +
 				"The is_primary_ip column on the affected rows is blank because the lookup failed, " +
 				"not because those IPs are not their virtual machine's primary address.",
-		},
-		{
-			name: "virtual machine hop, vm_url only",
-			got:  vmHopWarning(degradation{failed: 2, total: 9, cause: apiErr}, false, true),
-			want: "Virtual machine lookup failed for 2 of 9 virtual machines — NetBox returned HTTP 503. " +
-				"The vm_url column on the affected rows is blank because the lookup failed, " +
-				"not because those IPs have no virtual machine.",
-		},
-		{
-			name: "virtual machine hop, vm_url and is_primary_ip",
-			got:  vmHopWarning(degradation{failed: 2, total: 9, cause: apiErr}, true, true),
-			want: "Virtual machine lookup failed for 2 of 9 virtual machines — NetBox returned HTTP 503. " +
-				"The is_primary_ip and vm_url columns on the affected rows are blank because the lookup failed, " +
-				"not because those IPs have no virtual machine.",
 		},
 		{
 			name: "prefix fallback, single IP",
@@ -3977,10 +3963,10 @@ func freeIDServer(t *testing.T, deviceCalls, vmCalls *int) *httptest.Server {
 	return srv
 }
 
-var freeIDFields = []string{"ip", "address_id", "address_url", "device_id", "vm_id"}
+var freeIDFields = []string{"ip", "address_id", "device_id", "vm_id"}
 
 // TestResolveIPs_FreeIDColumns pins the four columns that come straight off the
-// address record: the record's own id and link, and the owning device's or VM's id.
+// address record: the record's own id and the owning device's or VM's id.
 func TestResolveIPs_FreeIDColumns(t *testing.T) {
 	var dev, vm int
 	srv := freeIDServer(t, &dev, &vm)
@@ -3994,8 +3980,8 @@ func TestResolveIPs_FreeIDColumns(t *testing.T) {
 		t.Fatalf("rows = %d, want 3", len(res.Rows))
 	}
 	r0, r1, r2 := res.Rows[0], res.Rows[1], res.Rows[2]
-	if r0["address_id"] != float64(1) || r0["address_url"] != "https://nb.example.com/ipam/ip-addresses/1/" {
-		t.Errorf("row 0 address_id/url = %v / %v", r0["address_id"], r0["address_url"])
+	if r0["address_id"] != float64(1) {
+		t.Errorf("row 0 address_id = %v", r0["address_id"])
 	}
 	if r0["device_id"] != float64(100) || r0["vm_id"] != nil {
 		t.Errorf("row 0 device_id/vm_id = %v / %v, want 100 / nil", r0["device_id"], r0["vm_id"])
@@ -4546,113 +4532,28 @@ func ipsOf(res *provider.Result) []string {
 	return out
 }
 
-// linkServer serves one address on a device interface (device 100), one on a VM
-// interface (VM 7), and a prefix for any ?contains= lookup. Every hop endpoint
-// records its requests, so a test can assert how many were made and how they
-// were projected.
-type linkServer struct {
-	srv                *httptest.Server
-	deviceReqs, vmReqs []url.Values
-	deviceBody, vmBody string
-}
-
-func newLinkServer(t *testing.T) *linkServer {
+// prefixServer answers every ?contains= lookup with one site-scoped prefix.
+func prefixServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	ls := &linkServer{
-		deviceBody: `{"count":1,"next":null,"results":[{"id":100,"name":"leaf-01","display_url":"https://nb.example.com/dcim/devices/100/"}]}`,
-		vmBody:     `{"count":1,"next":null,"results":[{"id":7,"name":"vm-07","display_url":"https://nb.example.com/virtualization/virtual-machines/7/"}]}`,
-	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
-		fx := map[string]string{
-			"10.0.0.1": `{"id":1,"address":"10.0.0.1/32","assigned_object_type":"dcim.interface","assigned_object":{"id":9,"name":"Ethernet1","device":{"id":100,"name":"leaf-01"}}}`,
-			"10.0.0.2": `{"id":2,"address":"10.0.0.2/32","assigned_object_type":"virtualization.vminterface","assigned_object":{"id":4,"name":"eth0","virtual_machine":{"id":7,"name":"vm-07"}}}`,
-		}
-		var results []string
-		for _, a := range r.URL.Query()["address"] {
-			if v, ok := fx[a]; ok {
-				results = append(results, v)
-			}
-		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"count":%d,"next":null,"results":[%s]}`, len(results), strings.Join(results, ","))
-	})
-	mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
-		ls.deviceReqs = append(ls.deviceReqs, r.URL.Query())
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(ls.deviceBody))
-	})
-	mux.HandleFunc("/api/virtualization/virtual-machines/", func(w http.ResponseWriter, r *http.Request) {
-		ls.vmReqs = append(ls.vmReqs, r.URL.Query())
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(ls.vmBody))
+		_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
 	})
 	mux.HandleFunc("/api/ipam/prefixes/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"id":5,"prefix":"10.10.10.0/24","scope_type":"dcim.site","scope":{"id":3,"name":"AMS1"},"display_url":"https://nb.example.com/ipam/prefixes/5/"}]}`))
+		_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"id":5,"prefix":"10.10.10.0/24","scope_type":"dcim.site","scope":{"id":3,"name":"AMS1"}}]}`))
 	})
-	ls.srv = httptest.NewServer(mux)
-	t.Cleanup(ls.srv.Close)
-	return ls
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
 }
 
-// TestResolveIPs_DeviceURL is also the end-to-end check of the device-hop gate:
-// device_url is a device_ column other than device_id, so it starts the hop, and
-// the hop is unprojected so display_url reaches the row. Exactly one request.
-func TestResolveIPs_DeviceURL(t *testing.T) {
-	ls := newLinkServer(t)
-	p := New(ls.srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
+func TestResolveIPs_PrefixIDAndScopeType(t *testing.T) {
+	srv := prefixServer(t)
+	p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
 
-	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.1"}, []string{"ip", "device_url"}, 0)
-	if err != nil {
-		t.Fatalf("ResolveIPs: %v", err)
-	}
-	if got := res.Rows[0]["device_url"]; got != "https://nb.example.com/dcim/devices/100/" {
-		t.Errorf("device_url = %v", got)
-	}
-	if len(ls.deviceReqs) != 1 {
-		t.Fatalf("device requests = %d, want exactly 1", len(ls.deviceReqs))
-	}
-	// Unprojected: the fake serves display_url whatever ?fields= says, so the
-	// request itself is what shows the hop did not fall back to primaryIPFields.
-	if f := ls.deviceReqs[0].Get("fields"); f != "" {
-		t.Errorf("device request fields = %q, want none (unprojected)", f)
-	}
-}
-
-func TestResolveIPs_VMURLMakesOneVMRequest(t *testing.T) {
-	ls := newLinkServer(t)
-	p := New(ls.srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
-
-	res, err := p.ResolveIPs(context.Background(), []string{"10.0.0.2"}, []string{"ip", "vm_url"}, 0)
-	if err != nil {
-		t.Fatalf("ResolveIPs: %v", err)
-	}
-	if got := res.Rows[0]["vm_url"]; got != "https://nb.example.com/virtualization/virtual-machines/7/" {
-		t.Errorf("vm_url = %v", got)
-	}
-	if len(ls.vmReqs) != 1 {
-		t.Fatalf("VM requests = %d, want 1", len(ls.vmReqs))
-	}
-	if f := ls.vmReqs[0].Get("fields"); !strings.Contains(f, "display_url") {
-		t.Errorf("VM fields param = %q, want it to include display_url", f)
-	}
-
-	ls2 := newLinkServer(t)
-	p2 := New(ls2.srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
-	if _, err := p2.ResolveIPs(context.Background(), []string{"10.0.0.2"}, []string{"ip", "vm_id"}, 0); err != nil {
-		t.Fatalf("ResolveIPs: %v", err)
-	}
-	if len(ls2.vmReqs) != 0 {
-		t.Errorf("vm_id alone made %d VM requests, want 0", len(ls2.vmReqs))
-	}
-}
-
-func TestResolveIPs_PrefixIDLinkAndScopeType(t *testing.T) {
-	ls := newLinkServer(t)
-	p := New(ls.srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
-
-	fields := []string{"ip", "prefix_id", "prefix_url", "prefix_scope", "prefix_scope_type"}
+	fields := []string{"ip", "prefix_id", "prefix_scope", "prefix_scope_type"}
 	res, err := p.ResolveIPs(context.Background(), []string{"10.10.10.7"}, fields, 0)
 	if err != nil {
 		t.Fatalf("ResolveIPs: %v", err)
@@ -4660,9 +4561,6 @@ func TestResolveIPs_PrefixIDLinkAndScopeType(t *testing.T) {
 	row := res.Rows[0]
 	if row["prefix_id"] != float64(5) {
 		t.Errorf("prefix_id = %v (%T), want float64(5)", row["prefix_id"], row["prefix_id"])
-	}
-	if row["prefix_url"] != "https://nb.example.com/ipam/prefixes/5/" {
-		t.Errorf("prefix_url = %v", row["prefix_url"])
 	}
 	if row["prefix_scope_type"] != "dcim.site" {
 		t.Errorf("prefix_scope_type = %v", row["prefix_scope_type"])
@@ -4672,62 +4570,5 @@ func TestResolveIPs_PrefixIDLinkAndScopeType(t *testing.T) {
 	}
 	if got := res.ColumnTypes["prefix_id"]; got != provider.FieldTypeNumber {
 		t.Errorf("ColumnTypes[prefix_id] = %q, want number", got)
-	}
-}
-
-// TestResolveIPs_VMURLHopWarningAndSharedRequest covers the VM hop's two
-// columns together: a 403 names the columns in THIS frame, and when both are
-// selected they share one request projected with display_url.
-func TestResolveIPs_VMURLHopWarningAndSharedRequest(t *testing.T) {
-	ctx := context.Background()
-	ips := []string{"10.0.0.2"}
-
-	for _, tc := range []struct {
-		fields []string
-		want   string
-	}{
-		{[]string{"ip", "vm_url"}, "The vm_url column on the affected rows is blank"},
-		{[]string{"ip", "vm_url", "is_primary_ip"}, "The is_primary_ip and vm_url columns on the affected rows are blank"},
-	} {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/api/ipam/ip-addresses/", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"count":1,"next":null,"results":[{"id":2,"address":"10.0.0.2/32","assigned_object_type":"virtualization.vminterface","assigned_object":{"id":4,"name":"eth0","virtual_machine":{"id":7,"name":"vm-07"}}}]}`))
-		})
-		mux.HandleFunc("/api/dcim/devices/", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"count":0,"next":null,"results":[]}`))
-		})
-		mux.HandleFunc("/api/virtualization/virtual-machines/", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"detail":"nope"}`))
-		})
-		srv := httptest.NewServer(mux)
-		p := New(srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
-		res, err := p.ResolveIPs(ctx, ips, tc.fields, 0)
-		srv.Close()
-		if err != nil {
-			t.Fatalf("%v: ResolveIPs: %v", tc.fields, err)
-		}
-		if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], tc.want) {
-			t.Errorf("%v: Warnings = %#v, want one containing %q", tc.fields, res.Warnings, tc.want)
-		}
-	}
-
-	ls := newLinkServer(t)
-	ls.vmBody = `{"count":1,"next":null,"results":[{"id":7,"primary_ip4":{"id":2,"address":"10.0.0.2/32"},"display_url":"https://nb.example.com/virtualization/virtual-machines/7/"}]}`
-	p := New(ls.srv.URL, "test-token", &http.Client{Timeout: 5 * time.Second})
-	res, err := p.ResolveIPs(ctx, ips, []string{"ip", "vm_url", "is_primary_ip"}, 0)
-	if err != nil {
-		t.Fatalf("ResolveIPs: %v", err)
-	}
-	if len(ls.vmReqs) != 1 {
-		t.Fatalf("VM requests = %d, want 1", len(ls.vmReqs))
-	}
-	if f := ls.vmReqs[0].Get("fields"); f != "id,primary_ip4,primary_ip6,display_url" {
-		t.Errorf("VM fields = %q", f)
-	}
-	if res.Rows[0]["vm_url"] != "https://nb.example.com/virtualization/virtual-machines/7/" || res.Rows[0]["is_primary_ip"] != true {
-		t.Errorf("row = %v, want vm_url and is_primary_ip filled", res.Rows[0])
 	}
 }

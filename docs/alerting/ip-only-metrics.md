@@ -63,8 +63,8 @@ in the scope, so it would alert on an incomplete result. Raise the row limit
 - **Cost is per evaluation.** The scope is listed and enriched on every
   evaluation. Select only the context columns the rule uses: the device hop runs
   only when a `device_*` column other than `device_id`, or `is_primary_ip`, is selected, and
-  `is_primary_ip` and `vm_url` cost the VM hop. `vm_name`, `vm_id`,
-  `address_id`, `address_url` and `device_id` are free — they ride on the address
+  `is_primary_ip` also costs the VM hop. `vm_name`, `vm_id`,
+  `address_id` and `device_id` are free — they ride on the address
   record.
 - **No `prefix_*` columns here.** The containing-prefix lookup is the fallback
   for an IP with no address record, and every row of a scope has one, so the

@@ -137,52 +137,6 @@ func TestQueryData_IPEnrichment_PublicURLRewritesLinks(t *testing.T) {
 	t.Fatal("display_url field missing")
 }
 
-// TestQueryData_IPEnrichment_PublicURLRewritesTheNewLinks covers the link
-// columns beyond the address's own: device, VM, address and prefix.
-func TestQueryData_IPEnrichment_PublicURLRewritesTheNewLinks(t *testing.T) {
-	cols := []string{"ip", "device_url", "vm_url", "address_url", "prefix_url"}
-	d := newTestDatasource(&fakeProvider{
-		ipResult: &provider.Result{
-			Columns: cols,
-			Rows: []map[string]interface{}{{
-				"ip":          "10.0.0.5",
-				"device_url":  "http://nb/dcim/devices/1/",
-				"vm_url":      "http://nb/virtualization/virtual-machines/2/",
-				"address_url": "http://nb/ipam/ip-addresses/3/",
-				"prefix_url":  "http://nb/ipam/prefixes/4/",
-			}},
-		},
-	})
-	d.cfg.PublicURL = "http://localhost:8000"
-	req := &backend.QueryDataRequest{
-		Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(`{"queryType":"ip-enrichment","ips":"10.0.0.5"}`)}},
-	}
-	resp, err := d.QueryData(context.Background(), req)
-	if err != nil {
-		t.Fatalf("QueryData: %v", err)
-	}
-	want := map[string]string{
-		"device_url":  "http://localhost:8000/dcim/devices/1/",
-		"vm_url":      "http://localhost:8000/virtualization/virtual-machines/2/",
-		"address_url": "http://localhost:8000/ipam/ip-addresses/3/",
-		"prefix_url":  "http://localhost:8000/ipam/prefixes/4/",
-	}
-	seen := 0
-	for _, f := range resp.Responses["A"].Frames[0].Fields {
-		w, ok := want[f.Name]
-		if !ok {
-			continue
-		}
-		seen++
-		if got, _ := f.At(0).(string); got != w {
-			t.Errorf("%s = %v, want %s", f.Name, f.At(0), w)
-		}
-	}
-	if seen != len(want) {
-		t.Errorf("found %d of %d link fields", seen, len(want))
-	}
-}
-
 // TestHandleQuery_PublicURLRewritesLinks guards the /query resource endpoint
 // (variable queries) the same way.
 func TestHandleQuery_PublicURLRewritesLinks(t *testing.T) {

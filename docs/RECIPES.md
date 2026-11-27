@@ -134,8 +134,7 @@ longest containing prefix:
    - **The IP is a registered address assigned to a device interface** (e.g. a loopback
      or a routed interface): `address_*` (`address_dns_name`, …), `interface_name`,
      `is_primary_ip` and `device_*` (`device_name`, `device_site`, …) populate.
-     `address_id` and `address_url` carry the address record's NetBox id and link, and
-     `device_id` and `device_url` the device's. `prefix_*` stays blank — the device hop already answered the question a prefix
+     `address_id` and `device_id` carry the address record's and the device's NetBox id. `prefix_*` stays blank — the device hop already answered the question a prefix
      lookup would.
    - **The IP is a registered address not assigned to any interface, or assigned to a VM
      interface** (VMs have no NetBox device): `address_*` populates (plus `interface_name`
@@ -147,13 +146,11 @@ longest containing prefix:
      than a value folded into `device_name` on purpose — NetBox lets a device and a
      virtual machine share a name, so folding the two together would make the
      `device_name` → metric `device` join in step 4 match the wrong host. `vm_name` and
-     `device_name` are mutually exclusive per row. The other `vm_*` columns are `vm_id`, the
-     VM's NetBox id (free, like the name), and `vm_url`, its NetBox link, which costs one
-     VM request. A VM's cluster, site, role, platform and status are not offered: each
+     `device_name` are mutually exclusive per row. The other `vm_*` column is `vm_id`, the
+     VM's NetBox id (free, like the name). A VM's cluster, site, role, platform and status are not offered: each
      would cost a second NetBox request, whereas the name and id are already inside the
      address record and so are free.
-     `is_primary_ip` is the one VM fact worth a request of its own (`vm_url` shares that
-     request), and it is not a
+     `is_primary_ip` is the one VM fact worth that second request, and it is not a
      `vm_*` column because it is not a VM-only fact: NetBox gives a virtual machine
      `primary_ip4`/`primary_ip6` exactly as it gives a device them, so the flag answers
      on a VM row as readily as on a device row.
@@ -172,8 +169,8 @@ longest containing prefix:
      only signal that finds a VRRP/HSRP virtual address — `match_count` does not.
    - **The IP matches no address record at all**: only then does the query fall back to
      the longest-**containing** prefix, populating `prefix_cidr`, `prefix_scope`,
-     `prefix_tenant`, `prefix_role`, `prefix_vlan`, plus `prefix_id` and `prefix_url` (the
-     prefix's NetBox id and link) and `prefix_scope_type` (what kind of object
+     `prefix_tenant`, `prefix_role`, `prefix_vlan`, plus `prefix_id` (the
+     prefix's NetBox id) and `prefix_scope_type` (what kind of object
      `prefix_scope` names: `dcim.site`, `dcim.region`, `dcim.location`, …).
      `address_*`/`interface_*`/`device_*` stay blank. There is no `prefix_site`: NetBox 4.2 replaced a prefix's `site` with a
      generic **scope** (a site, a region or a location), surfaced here as `prefix_scope`
@@ -186,16 +183,17 @@ longest containing prefix:
    one request per IP with no address record and cannot be batched — measured at ~20 ms
    per IP, or ~20 s for a 1,000-IP panel of external addresses. The default field
    selection contains no `prefix_*` column and therefore makes no prefix request at all;
-   add one only when you want prefix context. `prefix_id`, `prefix_url` and
+   add one only when you want prefix context. `prefix_id` and
    `prefix_scope_type` cost nothing beyond that fallback. `device_*` columns other
-   than `device_id` cost one extra batched request for the whole IP list; `device_url` rides on it. `address_id`,
-   `address_url`, `device_id`, `vm_id` and `vm_name` cost nothing: they come from the
-   address record. `vm_url` costs one batched VM request, gated on the column like the
-   others. `is_primary_ip` costs up to two: the same device request (shared
+   than `device_id` cost one extra batched request for the whole IP list. `address_id`,
+   `device_id`, `vm_id` and `vm_name` cost nothing: they come from the address
+   record. To link a row back to NetBox, use a data link to
+   `<NetBox URL>/dcim/devices/<id>/`, or read more about the object with an `objects`
+   query filtered on `id`. `is_primary_ip` costs up to two: the same device request (shared
    if you selected `device_*` anyway) plus a batched virtual-machine request, because a
    VM's primary address — unlike its name — is not carried inside the address record.
-   Both are gated on the column: a query that selects neither `is_primary_ip` nor
-   `vm_url` asks NetBox about no virtual machine at all. The two share one VM request.
+   Both are gated on the column: a query that doesn't select it asks NetBox about no
+   virtual machine at all.
 3. The result is a table keyed by `ip`. Use it standalone, or **Join by field** on `ip`
    against your flow table (rename the flow label to `ip` with an _organize fields_
    transform, or set a join key output accordingly).

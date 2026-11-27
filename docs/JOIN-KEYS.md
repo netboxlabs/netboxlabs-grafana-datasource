@@ -59,7 +59,7 @@ both, but not both at once for the same IP: give it a list of IPs (literally, or
 from a `$variable` sourced from your flow data) and, per IP, it either finds a
 registered address record — returning whatever owns it: a device and its
 interface (`device_name`, `interface_name`, `device_site`, …), or
-`vm_*` (`vm_name`, `vm_id`, `vm_url`) when the address sits on a virtual machine's
+`vm_*` (`vm_name`, `vm_id`) when the address sits on a virtual machine's
 interface instead (`is_primary_ip` is un-namespaced because it answers for either owner) — or,
 only when no address record matches at all, falls back to
 the longest-matching prefix's context (`prefix_tenant`, `prefix_role`,

@@ -33,6 +33,8 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/proxy"
 	"github.com/grafana/grafana-plugin-sdk-go/config"
+
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/replicacache"
 )
 
 // Save & test against a NetBox that only Grafana's secure socks proxy can
@@ -807,6 +809,121 @@ func TestErrorMessages_DirectRouteNeverMentionsTheProxySettings(t *testing.T) {
 	for _, msg := range []string{healthErrorMessage(err, false), queryErrorMessage(err, false)} {
 		if mentionsTheProxy(msg) || strings.Contains(msg, "secureSocksProxy") {
 			t.Errorf("direct message %q mentions the secure socks proxy's settings", msg)
+		}
+	}
+}
+
+// Replica-cache mode builds its client the same way, so a cache only PDC can
+// reach goes through the proxy too, and a failure to reach it is worded by
+// that route as NetBox's is. The cache's own sentence says "reachable from
+// Grafana", the one hop Grafana does not make on this route.
+func TestSaveAndTest_ReplicaCacheThroughTheProxy(t *testing.T) {
+	cacheMode := func(url string, extra map[string]any) map[string]any {
+		jsonData := map[string]any{
+			"mode":                     "replica-cache",
+			"url":                      url,
+			"netboxId":                 "nb-1",
+			"enableSecureSocksProxy":   true,
+			"secureSocksProxyUsername": "0d5c3a6e-pdc-network",
+		}
+		maps.Copy(jsonData, extra)
+		return jsonData
+	}
+	namesTheCache := func(t *testing.T, msg string) {
+		t.Helper()
+		if !strings.Contains(msg, "replica-cache") || strings.Contains(msg, "NetBox") || strings.Contains(msg, "reachable from Grafana") {
+			t.Errorf("message %q does not name replica-cache as the service the proxy dials", msg)
+		}
+	}
+
+	t.Run("goes through the proxy, as the PDC network", func(t *testing.T) {
+		cache := replicaStub(t, "")
+		socks := startSOCKS5(t)
+		res := saveAndTest(t, socks.addr, cacheMode(cache.URL, nil))
+		if res.Status != backend.HealthStatusOk {
+			t.Fatalf("health = %v %q, want ok", res.Status, res.Message)
+		}
+		want := socksConnect{user: "0d5c3a6e-pdc-network", pass: "pdc-secret", target: strings.TrimPrefix(cache.URL, "http://")}
+		if got := socks.connects(); !allConnects(got, want) {
+			t.Errorf("proxy relayed %v, want only CONNECTs %+v", got, want)
+		}
+	})
+
+	t.Run("names the proxy when it cannot reach replica-cache", func(t *testing.T) {
+		cache := replicaStub(t, "")
+		socks := startSOCKS5(t, refusing)
+		res := saveAndTest(t, socks.addr, cacheMode(cache.URL, nil))
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
+		}
+		assertNamesTheProxyOnly(t, res.Message, socks.addr, cache.URL)
+		assertPointsAtTheAgent(t, res.Message)
+		namesTheCache(t, res.Message)
+	})
+
+	// The timeout's advice names the service that was slow.
+	t.Run("names the proxy when it never answers", func(t *testing.T) {
+		cache := replicaStub(t, "")
+		socks := startSOCKS5(t, silent)
+		res := saveAndTest(t, socks.addr, cacheMode(cache.URL, map[string]any{"timeoutSeconds": 1}))
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
+		}
+		if !strings.Contains(res.Message, "timed out") {
+			t.Errorf("message %q does not say the request timed out", res.Message)
+		}
+		assertNamesTheProxyOnly(t, res.Message, socks.addr, cache.URL)
+		namesTheCache(t, res.Message)
+	})
+
+	t.Run("names the proxy credentials when the proxy refuses them", func(t *testing.T) {
+		cache := replicaStub(t, "")
+		socks := startSOCKS5(t, rejectingCredentials)
+		res := saveAndTest(t, socks.addr, cacheMode(cache.URL, nil))
+		if res.Status != backend.HealthStatusError {
+			t.Fatalf("health = %v %q, want an error", res.Status, res.Message)
+		}
+		assertNamesTheProxyOnly(t, res.Message, socks.addr, cache.URL)
+		assertNamesTheProxyCredentials(t, res.Message)
+		namesTheCache(t, res.Message)
+	})
+}
+
+// A query in replica-cache mode words a failure to reach the cache by the
+// datasource's route, as Save & test does. The cache's other sentences are
+// about an answer it sent, which came back through a route that works, so they
+// reach the reader as the provider wrote them on either route.
+func TestQueryErrorMessage_ReplicaCacheThroughTheProxy(t *testing.T) {
+	unreached := &replicacache.TransportError{Op: "requesting http://10.9.9.9:8443/v1/dcim/devices",
+		Err: &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.IPv4(10, 9, 9, 9), Port: 8443}, Err: syscall.ECONNREFUSED}}
+	direct := "Cannot reach replica-cache. Check the replica-cache URL and that the service is reachable from Grafana."
+
+	proxied := queryErrorMessage(unreached, true)
+	for _, want := range []string{"Couldn't reach replica-cache through the secure socks proxy", "refused", "PDC agent"} {
+		if !strings.Contains(proxied, want) {
+			t.Errorf("proxied message %q does not say %q", proxied, want)
+		}
+	}
+	for _, unwanted := range []string{"NetBox", "10.9.9.9", "8443"} {
+		if strings.Contains(proxied, unwanted) {
+			t.Errorf("proxied message %q says %q", proxied, unwanted)
+		}
+	}
+	if got := queryErrorMessage(unreached, false); got != direct {
+		t.Errorf("direct message = %q, want the provider's %q", got, direct)
+	}
+	if got := healthErrorMessage(unreached, false); got != direct {
+		t.Errorf("direct health message = %q, want the provider's %q", got, direct)
+	}
+
+	answered := &replicacache.TransportError{Op: "decoding response", Err: errors.New("invalid character"),
+		Message: "Replica cache returned a response that could not be read. The service is reachable but answered with something unexpected."}
+	for _, viaProxy := range []bool{true, false} {
+		if got := queryErrorMessage(answered, viaProxy); got != answered.Message {
+			t.Errorf("viaProxy=%v: message = %q, want the provider's %q", viaProxy, got, answered.Message)
+		}
+		if got := healthErrorMessage(answered, viaProxy); got != answered.Message {
+			t.Errorf("viaProxy=%v: health message = %q, want the provider's %q", viaProxy, got, answered.Message)
 		}
 	}
 }

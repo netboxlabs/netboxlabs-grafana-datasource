@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
-	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
 )
 
 // joinKey is one source→output key mapping with an optional value transform.
@@ -59,7 +58,7 @@ type joinKey struct {
 // join the user asked for, and it is paid only when they ask.
 func ipEnrichFields(selected []string, keys []joinKey) (fields, joinOnly []string) {
 	if len(selected) == 0 {
-		selected = netbox.DefaultIPEnrichFields()
+		selected = provider.DefaultIPEnrichFields()
 	}
 	have := make(map[string]bool, len(selected)+1)
 	for _, f := range selected {
@@ -77,7 +76,7 @@ func ipEnrichFields(selected []string, keys []joinKey) (fields, joinOnly []strin
 		}
 	}
 	known := make(map[string]bool)
-	for _, c := range netbox.IPEnrichColumns() {
+	for _, c := range provider.IPEnrichColumns() {
 		known[c] = true
 	}
 

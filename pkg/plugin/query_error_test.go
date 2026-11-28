@@ -21,6 +21,7 @@ import (
 
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/netbox"
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider/replicacache"
 )
 
 func TestQueryErrorMessage(t *testing.T) {
@@ -451,6 +452,19 @@ func TestIsAlertRequest(t *testing.T) {
 	}
 }
 
+// An entity the replica has received no data for is the reader's problem to
+// route around — pick a served type — not an outage to retry, so it answers
+// as a bad request with the provider's own sentence.
+func TestNotReplicatedIsABadRequestWithTheProviderSentence(t *testing.T) {
+	err := &replicacache.APIError{Status: 404, URL: "https://rc.example/v1/dcim/platforms?limit=1", Message: "no data received for this entity"}
+	if got := queryErrorMessage(err, false); !strings.Contains(got, "dcim/platforms") || !strings.Contains(got, "has received no data") {
+		t.Errorf("message = %q", got)
+	}
+	if got := queryErrorStatus(err); got != backend.StatusBadRequest {
+		t.Errorf("status = %v, want bad request", got)
+	}
+}
+
 // classifiedErr is an error a provider has classified, standing in for one this
 // package can't build.
 type classifiedErr struct{ u provider.UpstreamError }
@@ -458,10 +472,6 @@ type classifiedErr struct{ u provider.UpstreamError }
 func (e classifiedErr) Error() string                           { return "classified" }
 func (e classifiedErr) Classification() *provider.UpstreamError { return &e.u }
 
-// A long id list read in batches on an object type whose endpoint ignored the
-// id filter is the query's to change, not an outage: its own message, a 400.
-// It doesn't suggest fewer ids: a shorter list is read unbatched, unchecked,
-// and comes back as the whole table.
 // An id list past the ceiling names both numbers and what to do.
 func TestQueryError_TooManyIDs(t *testing.T) {
 	err := classifiedErr{provider.UpstreamError{Kind: provider.ErrorKindTooManyIDs, IDs: 12345, MaxIDs: 10000}}
@@ -474,6 +484,10 @@ func TestQueryError_TooManyIDs(t *testing.T) {
 	}
 }
 
+// A long id list read in batches on an object type whose endpoint ignored the
+// id filter is the query's to change, not an outage: its own message, a 400.
+// It doesn't suggest fewer ids: a shorter list is read unbatched, unchecked,
+// and comes back as the whole table.
 func TestQueryError_IDFilterIgnored(t *testing.T) {
 	err := classifiedErr{provider.UpstreamError{Kind: provider.ErrorKindIDFilterIgnored}}
 	if got := queryErrorMessage(err, false); !strings.Contains(got, "didn't apply the id filter") || strings.Contains(got, "fewer") {

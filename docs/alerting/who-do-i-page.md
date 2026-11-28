@@ -6,7 +6,9 @@ Resolution order for the owner/contact of an alerting device, using NetBox
 primitives that exist across the supported range (NetBox ≥ 4.2). Every step is
 the same `tenancy/contact-assignments` query with a different
 `object_type`/`object_id` pair. Contacts are assigned with roles, so prefer an
-"emergency" or "operational" role if your NetBox defines them:
+"emergency" or "operational" role if your NetBox defines them. (A data source in
+[replica-cache mode](../REPLICA-CACHE.md#what-it-answers) cannot run these
+queries: the replica does not serve contacts, so use one in NetBox mode.)
 
 1. **Device** — `object_type=dcim.device`.
 2. **Rack** — `object_type=dcim.rack`, the device's rack.
@@ -25,10 +27,10 @@ For a virtual machine, substitute its **cluster**
 site, group, region and tenant steps are unchanged.
 
 **Do not stop at the device.** Contacts are normally attached to the
-*organisational* objects rather than to individual devices, so a chain that
+_organisational_ objects rather than to individual devices, so a chain that
 checks only device → site → tenant resolves almost nothing on a real instance.
 Measured on the public demo.netbox.dev (4.6, 233 devices): **no device carries a
-contact at all**, a single site does — 1.7% of devices — and the site *group*
+contact at all**, a single site does — 1.7% of devices — and the site _group_
 covers **21%**. The group and region steps are what make the recipe work, not
 optional thoroughness.
 

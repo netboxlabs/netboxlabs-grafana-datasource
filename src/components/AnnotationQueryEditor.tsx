@@ -2,11 +2,7 @@ import React, { useState } from 'react';
 import { InlineField, InlineSwitch, MultiSelect, Input, RadioButtonGroup, Select, Stack } from '@grafana/ui';
 import { SelectableValue } from '@grafana/data';
 import { DataSource } from '../datasource';
-import {
-  useBranchingInstalled,
-  BRANCH_FIELD_TOOLTIP,
-  BRANCH_FIELD_DISABLED_TOOLTIP,
-} from '../hooks/useBranchingInstalled';
+import { useBranchingInstalled, BRANCH_FIELD_TOOLTIP, branchUnavailableTooltip } from '../hooks/useBranchingInstalled';
 import { DESCENDANT_SCOPE_TYPES, NetBoxQuery } from '../types';
 
 /** Wide enough for "Include descendants" and its tooltip icon on one line. */
@@ -218,7 +214,7 @@ export function AnnotationQueryEditor({ query, onChange, datasource }: Props) {
         label="Branch"
         labelWidth={LABEL_WIDTH}
         disabled={branchDisabled}
-        tooltip={branchDisabled ? BRANCH_FIELD_DISABLED_TOOLTIP : BRANCH_FIELD_TOOLTIP}
+        tooltip={branchDisabled ? branchUnavailableTooltip(datasource) : BRANCH_FIELD_TOOLTIP}
       >
         <Input
           id="annotation-branch"

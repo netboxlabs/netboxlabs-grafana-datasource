@@ -8,6 +8,7 @@ import (
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/models"
 	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
@@ -91,6 +92,32 @@ func TestQuery_IPEnrichment_ScopeWithoutFiltersIsRefused(t *testing.T) {
 		JSON: []byte(`{"queryType":"ip-enrichment","ipSource":"scope","filters":[{"field":"tenant","operator":"nempty","value":""}]}`)}, consumerDashboard)
 	if resp.Error != nil || fp.scopeCalls != 1 {
 		t.Errorf("tenant has-any-value: err=%v calls=%d", resp.Error, fp.scopeCalls)
+	}
+}
+
+// The refusal's examples are filters the datasource's mode answers: a prefix
+// (parent) in NetBox mode, where it is the usual scope; never in replica-cache
+// mode, whose replica has no address-within-prefix filter and refuses it.
+func TestQuery_IPEnrichment_ScopeRefusalNamesFiltersTheModeAnswers(t *testing.T) {
+	q := backend.DataQuery{RefID: "A", JSON: []byte(`{"queryType":"ip-enrichment","ipSource":"scope","filters":[]}`)}
+	for _, tc := range []struct {
+		mode     models.ProviderMode
+		has, not string
+	}{
+		{"", "a prefix (parent), VRF or tenant", ""},
+		{models.ModeNetBox, "a prefix (parent), VRF or tenant", ""},
+		{models.ModeReplicaCache, "a VRF or a tenant", "parent"},
+	} {
+		d := newTestDatasource(&fakeProvider{scopeResult: scopeRows()})
+		d.cfg.Mode = tc.mode
+		resp := d.query(context.Background(), q, consumerAlert)
+		if resp.Error == nil {
+			t.Fatalf("mode %q: an unfiltered scope was not refused", tc.mode)
+		}
+		msg := resp.Error.Error()
+		if !strings.Contains(msg, tc.has) || (tc.not != "" && strings.Contains(msg, tc.not)) {
+			t.Errorf("mode %q: %q, want it to name %q and not %q", tc.mode, msg, tc.has, tc.not)
+		}
 	}
 }
 

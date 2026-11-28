@@ -41,6 +41,17 @@ const (
 	// ErrorKindNotFound because it is actionable in the query editor and should
 	// be answered as a bad request rather than an outage.
 	ErrorKindUnknownObjectType ErrorKind = "unknown-object-type"
+	// ErrorKindUnsupported is a capability the configured backend does not have.
+	// It is neither a failure nor bad input: the answer does not exist there, and
+	// no retry or correction to the query will produce one. It is separate from
+	// ErrorKindBadRequest because the remedy is different — the reader has to
+	// point the query at a backend that can answer it, not fix the query.
+	ErrorKindUnsupported ErrorKind = "unsupported"
+	// ErrorKindNotReplicated is an object type the backend is configured to
+	// serve but has received no data for — not replicated for this tenant, or
+	// empty at the source; the backend cannot tell which. Retrying cannot fix
+	// it; the query has to name a type the backend has data for.
+	ErrorKindNotReplicated ErrorKind = "not-replicated"
 	// ErrorKindIDFilterIgnored is a long id filter read in batches whose batch
 	// matched more objects than it named ids, or returned a row that isn't one
 	// of them: the upstream didn't apply the id filter to this object type, so
@@ -156,6 +167,25 @@ type UpstreamError struct {
 	// AnnotationCount is the object count for AnnotationReasonTooManyObjects,
 	// or CountPastLimit when only that it passes the limit is known.
 	AnnotationCount int
+	// Detail is a complete, user-facing sentence the PROVIDER wrote about this
+	// failure, used where the kind alone cannot say enough — today
+	// ErrorKindUnsupported, where naming the missing capability and the way
+	// around it is the whole value of the message.
+	//
+	// It must be authored by the provider, never copied from an upstream
+	// response. Everything else on this struct is a classification precisely so
+	// that no upstream text crosses the seam, and a field that carried a
+	// response body here would undo that in one line. Providers must keep it
+	// short; the plugin layer bounds it before display regardless.
+	Detail string
+	// Unreachable names the backend as the reader knows it ("replica-cache")
+	// when the request never got an answer from it: the connection failed, or
+	// the answer stopped partway. Empty when the backend answered. The provider
+	// cannot see the route its requests take, and Detail can only assume they
+	// go straight from Grafana; the plugin layer, which knows when they go
+	// through Grafana's secure socks proxy, words the failure by that route
+	// instead.
+	Unreachable string
 	// IDs and MaxIDs are set only for ErrorKindTooManyIDs: the distinct ids the
 	// filter named, and the most one query reads.
 	IDs, MaxIDs int

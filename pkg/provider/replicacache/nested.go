@@ -114,14 +114,20 @@ func (p *Provider) addNestedColumns(ctx context.Context, c *catalog, e entity, s
 	byRef := map[string][]nestedName{}
 	for _, n := range names {
 		switch {
+		case n.col == "id" && (n.declared || e.has(n.ref+"_id")):
+			// The reference's id, which the row holds whatever the replica holds
+			// of its target (one of several types, or one with no data).
+			src := n.ref + "_id"
+			if n.declared {
+				src = n.via.Name
+			}
+			for _, row := range rows {
+				row[n.name] = row[src]
+			}
 		case !n.declared:
 			warn(undeclaredNestedWarning(e, spec.ObjectType, n))
 		case !n.via.Ref.Available:
 			warn(unavailableReferenceWarning(n.via))
-		case n.col == "id":
-			for _, row := range rows {
-				row[n.name] = row[n.via.Name]
-			}
 		case n.col == "display":
 			// The display the row shows for the reference (showRelatedDisplays
 			// was asked for it); a referenced object the replica doesn't hold is
@@ -162,12 +168,18 @@ func (p *Provider) fillNested(ctx context.Context, c *catalog, rows []map[string
 	}
 	var read []nestedName
 	for _, n := range names {
+		via2, _, expansion := te.expandedColumn(n.col)
 		switch {
 		case te.has(n.col):
 			read = append(read, n)
+		case expansion && !via2.Ref.Available:
+			warn(fmt.Sprintf("%q is empty: %s has received no data in this replica; %s__%s still holds the value.",
+				n.name, strings.TrimPrefix(via2.Ref.Path, "/v1/"), n.ref, via2.Name))
 		case isNestedOn(te, n.col):
 			warn(fmt.Sprintf("%q is empty: %s has no column %s; a nested column reads one level.", n.name, objectType, n.col))
-		case netboxComputed(n.col):
+		case netboxComputed(n.col) || strings.HasPrefix(n.col, "_"):
+			// NetBox's underscore fields a short form carries (_depth, _occupied)
+			// are computed too; a stored one (_name) is a column, above.
 			warn(fmt.Sprintf("%q is computed by NetBox and is not available in replica-cache mode, so it is empty here. Use a datasource in NetBox mode for it.", n.name))
 		default:
 			// An expansion, a choice's _value or an alias: the read decides.
@@ -178,8 +190,10 @@ func (p *Provider) fillNested(ctx context.Context, c *catalog, rows []map[string
 		return nil
 	}
 	var ids []int
+	seen := map[int]bool{}
 	for _, row := range rows {
-		if id, ok := toInt(row[via.Name]); ok && !slices.Contains(ids, id) {
+		if id, ok := toInt(row[via.Name]); ok && !seen[id] {
+			seen[id] = true
 			ids = append(ids, id)
 		}
 	}
@@ -193,11 +207,14 @@ func (p *Provider) fillNested(ctx context.Context, c *catalog, rows []map[string
 	for _, n := range read {
 		cols = append(cols, n.col)
 	}
-	targets, err := p.readNestedTargets(ctx, c, te, objectType, cols, ids, st)
+	targets, displayWarnings, err := p.readNestedTargets(ctx, c, te, objectType, cols, ids, st)
 	if err != nil {
 		return err
 	}
 	missing := 0
+	// The second hop: a referenced row whose own reference names an object the
+	// replica doesn't hold yet, by nested column.
+	secondMissing := map[string]int{}
 	for _, row := range rows {
 		id, set := toInt(row[via.Name])
 		if !set {
@@ -210,7 +227,16 @@ func (p *Provider) fillNested(ctx context.Context, c *catalog, rows []map[string
 		}
 		for _, n := range read {
 			row[n.name] = target[n.col]
+			if via2, _, expansion := te.expandedColumn(n.col); expansion && target[n.col] == nil {
+				if _, set := toInt(target[via2.Name]); set {
+					secondMissing[n.name]++
+				}
+			}
 		}
+	}
+	blank := func(n nestedName, count int, of string) {
+		warn(fmt.Sprintf("%q is blank on %s of %s rows: they reference %s objects this replica does not hold yet.",
+			n.name, provider.HumanInt(count), provider.HumanInt(len(rows)), of))
 	}
 	for _, n := range read {
 		if len(targets) > 0 && !hasTargetColumn(targets, n.col) {
@@ -218,8 +244,17 @@ func (p *Provider) fillNested(ctx context.Context, c *catalog, rows []map[string
 			continue
 		}
 		if missing > 0 && !ownWarning {
-			warn(fmt.Sprintf("%q is blank on %s of %s rows: they reference %s objects this replica does not hold yet.",
-				n.name, provider.HumanInt(missing), provider.HumanInt(len(rows)), objectType))
+			blank(n, missing, objectType)
+		}
+		if via2, _, expansion := te.expandedColumn(n.col); expansion && secondMissing[n.name] > 0 {
+			blank(n, secondMissing[n.name], strings.TrimPrefix(via2.Ref.Path, "/v1/"))
+		}
+		// The target's display sentences, about its column, are about this one.
+		prefix := fmt.Sprintf("%q ", n.col)
+		for _, w := range displayWarnings {
+			if strings.HasPrefix(w, prefix) {
+				warn(fmt.Sprintf("%q ", n.name) + strings.TrimPrefix(w, prefix))
+			}
 		}
 	}
 	return nil
@@ -238,10 +273,18 @@ func hasTargetColumn(targets map[int]map[string]interface{}, col string) bool {
 // readNestedTargets reads objectType's rows with ids, the columns cols, shaped
 // as Query shapes its rows: addresses with their masks, MACs in capitals,
 // related objects by NetBox's display, choices by label and with their
-// _value, custom-field id aliases. Keyed by id. Its age goes into st; its own
-// notes and warnings are the caller's to word.
-func (p *Provider) readNestedTargets(ctx context.Context, c *catalog, te entity, objectType string, cols []string, ids []int, st *readStats) (map[int]map[string]interface{}, error) {
-	spec := provider.QuerySpec{ObjectType: objectType, Fields: cols}
+// _value, custom-field id aliases. Keyed by id. Its age goes into st; the
+// display warnings come back for the caller to word for its columns.
+func (p *Provider) readNestedTargets(ctx context.Context, c *catalog, te entity, objectType string, cols []string, ids []int, st *readStats) (map[int]map[string]interface{}, []string, error) {
+	// An expanded column's reference rides along, so a name the replica can't
+	// join in yet is told from one that isn't set.
+	var keys []string
+	for _, col := range cols {
+		if via, _, ok := te.expandedColumn(col); ok {
+			keys = append(keys, via.Name)
+		}
+	}
+	spec := provider.QuerySpec{ObjectType: objectType, Fields: cols, KeyFields: keys}
 	plan := planRequest(te, spec)
 	params := url.Values{}
 	if len(plan.expand) > 0 {
@@ -250,16 +293,17 @@ func (p *Provider) readNestedTargets(ctx context.Context, c *catalog, te entity,
 	params = withFields(params, plan.fields)
 	raws, _, err := p.listByIDs(ctx, objectType, te.pk(), intStrings(ids), params, st)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tcols, rows, err := flattenRows(raws, plan.fields, te.pk())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	showSingleHostMasks(rows, tcols, addressField(te, c))
 	showMACs(rows, tcols, macField(te, c))
-	if _, err := p.showRelatedDisplays(ctx, c, te, plan.expanded, rows, func(key string) bool { return slices.Contains(cols, key) }); err != nil {
-		return nil, err
+	warnings, err := p.showRelatedDisplays(ctx, c, te, plan.expanded, rows, func(key string) bool { return slices.Contains(cols, key) })
+	if err != nil {
+		return nil, nil, err
 	}
 	addChoiceValueAliases(cols, rows)
 	applyChoiceLabels(objectType, rows, false)
@@ -270,7 +314,7 @@ func (p *Provider) readNestedTargets(ctx context.Context, c *catalog, te entity,
 			out[id] = row
 		}
 	}
-	return out, nil
+	return out, warnings, nil
 }
 
 // undeclaredNestedWarning is the reason for a nested column whose reference

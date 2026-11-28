@@ -633,7 +633,7 @@ func overBudget(q url.Values) error {
 
 // tooLongFeature is overBudget's subject. A read that sizes its own requests
 // (a batch of ids) splits one that comes back refused for it: the refusal is
-// made before anything is sent, so the split costs no request.
+// made before that request is sent (a negated read may have counted first).
 const tooLongFeature = "a request this long"
 
 // isTooLong reports overBudget's refusal.

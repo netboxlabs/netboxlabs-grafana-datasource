@@ -224,3 +224,47 @@ func TestQueryRealDoubleUnderscoreColumnIsItself(t *testing.T) {
 		t.Errorf("row %v, warnings %q", res.Rows[0], res.Warnings)
 	}
 }
+
+// A second hop the replica doesn't hold (the device type is there, its
+// manufacturer not yet) blanks the column with a warning, as the reference's own
+// missing names do; a manufacturers table with no data says that instead.
+func TestQueryNestedColumnSecondHop(t *testing.T) {
+	f := nestedWorld()
+	f.entities["dcim/device-types"][1]["manufacturer_id"] = float64(99)
+	res := nestedQuery(t, f, provider.QuerySpec{Fields: []string{"name", "device_type__manufacturer"}})
+	if got := nestedValues(res, "device_type__manufacturer"); !slices.Equal(got, []interface{}{"Arista", nil, nil, "Arista"}) {
+		t.Errorf("values %v", got)
+	}
+	want := `"device_type__manufacturer" is blank on 1 of 4 rows: they reference dcim/manufacturers objects this replica does not hold yet.`
+	if !slices.Equal(res.Warnings, []string{want}) {
+		t.Errorf("warnings %q, want %q", res.Warnings, want)
+	}
+
+	f = nestedWorld()
+	f.unfeed("dcim/manufacturers")
+	res = nestedQuery(t, f, provider.QuerySpec{Fields: []string{"name", "device_type__manufacturer"}})
+	want = `"device_type__manufacturer" is empty: dcim/manufacturers has received no data in this replica; device_type__manufacturer_id still holds the value.`
+	if !slices.Equal(res.Warnings, []string{want}) {
+		t.Errorf("warnings %q, want %q", res.Warnings, want)
+	}
+}
+
+// <ref>__id is the reference's id whatever the replica holds of its target:
+// an unavailable one, or one of several types.
+func TestQueryNestedIDOfAnUnresolvedReference(t *testing.T) {
+	f := nestedWorld()
+	f.entities["dcim/devices"][0]["platform_id"] = float64(7)
+	res := nestedQuery(t, f, provider.QuerySpec{Fields: []string{"name", "platform__id"}})
+	if res.Rows[0]["platform__id"] != float64(7) || len(res.Warnings) != 0 {
+		t.Errorf("row %v, warnings %q", res.Rows[0], res.Warnings)
+	}
+}
+
+// Fields NetBox computes, the underscore ones included, say so.
+func TestQueryNestedComputedFields(t *testing.T) {
+	res := nestedQuery(t, nestedWorld(), provider.QuerySpec{Fields: []string{"name", "device_type___depth"}})
+	want := `"device_type___depth" is computed by NetBox and is not available in replica-cache mode, so it is empty here. Use a datasource in NetBox mode for it.`
+	if !slices.Equal(res.Warnings, []string{want}) {
+		t.Errorf("warnings %q", res.Warnings)
+	}
+}

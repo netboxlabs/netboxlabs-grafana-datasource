@@ -148,9 +148,9 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 				rows = rows[:limit]
 			}
 			if total > len(rows) {
-				plan.notes = append(plan.notes, naturalSortCutShortNote(field, len(rows), total))
+				plan.notes = append(plan.notes, naturalSortCutShortNote(field, len(rows), total, got.reads))
 			}
-		} else if got.reads > 1 {
+		} else if got.reads > 1 && !rd.keyOrdered() {
 			plan.notes = append(plan.notes, partsSortedNote(got, total, len(rows)))
 		}
 	}

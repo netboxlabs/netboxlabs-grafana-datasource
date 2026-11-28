@@ -618,7 +618,8 @@ func (p *Provider) queryNegated(ctx context.Context, nq negatedQuery) (negatedRo
 		}
 	}
 
-	fields := nq.fields
+	// A copy: batches of one query read at once share nq.fields.
+	fields := slices.Clone(nq.fields)
 	if nq.spec.CountOnly {
 		fields = []string{nq.e.pk()}
 	}

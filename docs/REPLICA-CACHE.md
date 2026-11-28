@@ -582,6 +582,10 @@ mode on the same data:
   `family`) has one there and is empty here. A choice, JSON or a reference to one
   of several types (`status__label`, `assigned_object__device`) is read in NetBox
   mode only.
+- **`has_primary_ip` = _true_ with a sort and a Limit below the matches** keeps
+  the devices with a primary IPv4 address first: its two parts are each sorted
+  by the replica, one after the other, and a note says so. Unsorted, or by a
+  name NetBox sorts naturally, the rows are NetBox mode's.
 - **A NetBox scope cut off by its limit** keeps different first rows than NetBox
   mode; the total agrees, and alert rules refuse it as truncated.
 - **An FHRP group** in a related column (an FHRP group assignment's `group`)

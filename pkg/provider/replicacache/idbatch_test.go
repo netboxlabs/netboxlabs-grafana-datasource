@@ -3,6 +3,7 @@ package replicacache
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -113,7 +114,7 @@ func TestQueryLongIDFilterIsBatched(t *testing.T) {
 		}
 	}
 	for _, n := range res.Notes {
-		if strings.Contains(n, "batch") {
+		if strings.Contains(n, "Read in") {
 			t.Errorf("an unsorted batched read is in the replica's order, yet notes %q", n)
 		}
 	}
@@ -223,9 +224,15 @@ func TestQueryBatchedSortedSaysSo(t *testing.T) {
 func TestQueryIDsWithoutRoomAreRefused(t *testing.T) {
 	f := idDevices(3000)
 	f.addColumns("dcim/devices", "vc_position:INTEGER")
-	// A vc_position list that fits on its own and leaves well under 1 KB.
+	// A vc_position list that fits on its own (so the query is refused for the
+	// ids, not for it) and leaves under 1 KB for them.
+	positions := idValues(10000, 11849)
+	if q := (url.Values{"filter[vc_position]__in": {positions}, "fields": {"name,id"}}); !fitsBudget(q) ||
+		queryBudget-cursorReserve-len(q.Encode()) >= minIDRoom {
+		t.Fatalf("the fixture leaves %d bytes", queryBudget-cursorReserve-len(q.Encode()))
+	}
 	_, err := newTestProvider(t, f).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
-		Fields: []string{"name"}, Filters: []provider.Filter{{Field: "id", Value: idValues(1, 3000)}, {Field: "vc_position", Value: idValues(10000, 11950)}}})
+		Fields: []string{"name"}, Filters: []provider.Filter{{Field: "id", Value: idValues(1, 3000)}, {Field: "vc_position", Value: positions}}})
 	if err == nil || !strings.Contains(err.Error(), "too long") {
 		t.Errorf("err = %v, want too long", err)
 	}
@@ -318,5 +325,109 @@ func TestQueryHasPrimaryIPWithALongIDList(t *testing.T) {
 	got := resultIDs(t, res)
 	if res.Total != 2000 || len(got) != 2000 || got[0] != 2 || got[1999] != 4000 || !slices.IsSorted(got) {
 		t.Errorf("total %d, rows %d (%v…); want the 2000 even ids in order", res.Total, len(got), got[:min(3, len(got))])
+	}
+}
+
+// Several selected columns, none of them the negated one, and a negation over
+// batches read at once: each batch adds the negated column to a projection of
+// its own (go test -race).
+func TestQueryBatchedNegationWithSeveralColumns(t *testing.T) {
+	f := idDevices(8000, 5, 7000)
+	res, err := newTestProvider(t, f).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
+		Fields: []string{"name", "serial"}, Limit: MaxLimit,
+		Filters: []provider.Filter{{Field: "id", Value: idValues(1, 8000)}, {Field: "status", Operator: "n", Value: "offline"}}})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if res.Total != 7998 || len(res.Rows) != 7998 {
+		t.Errorf("total %d, rows %d; want 7998", res.Total, len(res.Rows))
+	}
+}
+
+// A device that moves from one part to the other while has_primary_ip=true is
+// read (its IPv4 cleared, its IPv6 set) is one row, not a refused answer.
+func TestQueryHasPrimaryIPKeepsAMovedRowOnce(t *testing.T) {
+	f := idDevices(4)
+	f.entities["dcim/devices"][0]["primary_ip4_id"] = float64(10)
+	f.entities["dcim/devices"][1]["primary_ip6_id"] = float64(20)
+	moved := false
+	f.afterRequest = func(entity string, q url.Values) {
+		if entity == "dcim/devices" && q.Get("filter[primary_ip4_id]__isnull") == "false" && !moved {
+			moved = true
+			f.mu.Lock()
+			f.entities["dcim/devices"][0]["primary_ip4_id"], f.entities["dcim/devices"][0]["primary_ip6_id"] = nil, float64(30)
+			f.mu.Unlock()
+		}
+	}
+	res, err := newTestProvider(t, f).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices", Fields: []string{"name"},
+		Filters: []provider.Filter{{Field: "has_primary_ip", Value: "true"}}})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := resultIDs(t, res); !slices.Equal(got, []int{1, 2}) {
+		t.Errorf("ids %v, want 1 and 2 once each", got)
+	}
+}
+
+// A part with nothing to read makes no request, and the notes don't count it
+// as one; the ids of a batched part are counted once, not once a part.
+func TestQueryPartNotes(t *testing.T) {
+	f := idDevices(5000)
+	for i := range f.entities["dcim/devices"] {
+		f.entities["dcim/devices"][i]["primary_ip4_id"] = float64(100000 + i)
+	}
+	// One request: with IPv4 empty, part 1 (IPv4 set) contradicts itself and
+	// is known empty without asking.
+	res, err := newTestProvider(t, f).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
+		Fields: []string{"serial"}, Ordering: "serial", Limit: 10,
+		Filters: []provider.Filter{{Field: "has_primary_ip", Value: "true"}, {Field: "primary_ip4_id", Value: "null"}}})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	for _, n := range res.Notes {
+		if strings.Contains(n, "Read in") {
+			t.Errorf("one request, yet notes %q", n)
+		}
+	}
+	res, err = newTestProvider(t, f).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
+		Fields: []string{"serial"}, Ordering: "serial", Limit: 10,
+		Filters: []provider.Filter{{Field: "has_primary_ip", Value: "true"}, {Field: "id", Value: idValues(1, 4000)}}})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	notes := strings.Join(res.Notes, " | ")
+	if !strings.Contains(notes, "(4,000 ids)") {
+		t.Errorf("notes %q, want the 4,000 ids counted once", notes)
+	}
+}
+
+// Sorted by the primary key, batches are in order already: the rows are the
+// first ones by it, with no note, and the batches past the Limit are counted
+// only.
+func TestQueryBatchedSortedByIDIsInOrder(t *testing.T) {
+	f := idDevices(MaxLimit)
+	res, err := newTestProvider(t, f).Query(context.Background(), provider.QuerySpec{ObjectType: "dcim/devices",
+		Fields: []string{"name"}, Ordering: "id", Limit: 1000,
+		Filters: []provider.Filter{{Field: "id", Value: idValues(1, MaxLimit)}}})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := resultIDs(t, res); !slices.Equal(got, span(1, 1000)) || res.Total != MaxLimit {
+		t.Errorf("rows %d, total %d", len(got), res.Total)
+	}
+	for _, n := range res.Notes {
+		if strings.Contains(n, "Read in") {
+			t.Errorf("notes %q", n)
+		}
+	}
+}
+
+// A merge with a part the replica couldn't count is uncounted, as one read
+// would be: an uncounted part's 0 is no count to add.
+func TestMergeKeepsUncounted(t *testing.T) {
+	r := &partReader{limit: 10}
+	got, err := r.merge([]partRead{{total: 5, reads: 1}, {total: 0, uncounted: true, reads: 1}})
+	if err != nil || got.total != 0 || !got.uncounted {
+		t.Errorf("merged %+v, %v; want uncounted", got, err)
 	}
 }

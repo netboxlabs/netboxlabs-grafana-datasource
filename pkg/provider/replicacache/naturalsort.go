@@ -167,11 +167,15 @@ func sortByNetBoxName(rows []map[string]interface{}) {
 // first by their bytes, which NetBox mode, comparing by its collation, need not
 // keep: the rows are real and in NetBox's order, so it is a note, not a
 // warning, and how to read them all.
-func naturalSortCutShortNote(field string, kept, total int) string {
+func naturalSortCutShortNote(field string, kept, total, reads int) string {
 	how := fmt.Sprintf("Raise the limit to %s to read them all.", provider.HumanInt(total))
 	if total > MaxLimit {
 		how = fmt.Sprintf("Narrow the filters to %s rows or fewer to read them all.", provider.HumanInt(MaxLimit))
 	}
-	return fmt.Sprintf("Rows are sorted by %q as NetBox sorts it, but the limit kept %s of the %s rows that match, and the replica, which compares names by their bytes, chose which: NetBox mode can keep others. %s",
-		field, provider.HumanInt(kept), provider.HumanInt(total), how)
+	chose := "chose which"
+	if reads > 1 {
+		chose = fmt.Sprintf("chose which in each of its %d requests", reads)
+	}
+	return fmt.Sprintf("Rows are sorted by %q as NetBox sorts it, but the limit kept %s of the %s rows that match, and the replica, which compares names by their bytes, %s: NetBox mode can keep others. %s",
+		field, provider.HumanInt(kept), provider.HumanInt(total), chose, how)
 }

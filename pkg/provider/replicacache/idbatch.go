@@ -130,6 +130,10 @@ type partRead struct {
 	// reads and ids are how many requests the rows came from, and over how
 	// many ids when they were batches; for the note on a sorted read.
 	reads, ids int
+	// uncounted is a read the replica couldn't count (a negation on a caller
+	// that can do without a total): its total is no count, and nor is a sum
+	// with it.
+	uncounted bool
 }
 
 // partReader reads a query's parts, once its filters are translated: what
@@ -202,7 +206,7 @@ func (r *partReader) readPart(ctx context.Context, filters []provider.Filter, no
 		return partRead{}, err
 	}
 	if none {
-		return partRead{reads: 1}, nil
+		return partRead{}, nil
 	}
 	if !fitsBudget(q) {
 		if ids, rest, ok := r.batchable(filters); ok {
@@ -246,7 +250,10 @@ func (r *partReader) readOnce(ctx context.Context, filters []provider.Filter, ne
 		if err != nil {
 			return partRead{}, err
 		}
-		return partRead{raws: got.raws, total: got.total, asOf: got.asOf, warnings: got.warnings, fields: got.fields, reads: 1}, nil
+		// A total below the rows read is the route's "not counted" (an
+		// uncountable negation for a caller that can do without one).
+		return partRead{raws: got.raws, total: got.total, asOf: got.asOf, warnings: got.warnings, fields: got.fields, reads: 1,
+			uncounted: got.total < len(got.raws)}, nil
 	}
 	raws, total, asOf, err := r.p.client.list(ctx, r.spec.ObjectType, q, limit)
 	if err != nil {
@@ -315,7 +322,7 @@ func (r *partReader) readBatches(ctx context.Context, rest []provider.Filter, ne
 	for start := 0; start < len(batches); start += idBatchWorkers {
 		end := min(start+idBatchWorkers, len(batches))
 		limit := r.limit
-		countOnly := r.plan.sort == "" && rows >= r.limit
+		countOnly := r.keyOrdered() && rows >= r.limit
 		if countOnly {
 			limit = 1
 		}
@@ -421,9 +428,15 @@ func (r *partReader) merge(reads []partRead) (partRead, error) {
 	for i, got := range reads {
 		out.raws = append(out.raws, got.raws...)
 		out.total += got.total
-		out.warnings = append(out.warnings, got.warnings...)
+		for _, w := range got.warnings {
+			if !slices.Contains(out.warnings, w) {
+				out.warnings = append(out.warnings, w)
+			}
+		}
 		out.reads += got.reads
-		out.ids += got.ids
+		// Parts of one query batch the same ids: counted once.
+		out.ids = max(out.ids, got.ids)
+		out.uncounted = out.uncounted || got.uncounted
 		if out.fields == nil {
 			out.fields = got.fields
 		}
@@ -438,9 +451,12 @@ func (r *partReader) merge(reads []partRead) (partRead, error) {
 	if !known {
 		out.asOf = nil
 	}
-	if r.plan.sort == "" && len(reads) > 1 {
+	if out.uncounted {
+		out.total = 0
+	}
+	if len(reads) > 1 {
 		pk := r.e.pk()
-		keys := make(map[int]int, len(out.raws))
+		keys := make([]int, len(out.raws))
 		for i, raw := range out.raws {
 			id, err := rowID(raw, pk)
 			if err != nil {
@@ -452,12 +468,25 @@ func (r *partReader) merge(reads []partRead) (partRead, error) {
 		for i := range order {
 			order[i] = i
 		}
-		slices.SortStableFunc(order, func(a, b int) int { return cmp.Compare(keys[a], keys[b]) })
-		sorted := make([]json.RawMessage, len(order))
-		for i, j := range order {
-			sorted[i] = out.raws[j]
+		if r.keyOrdered() {
+			slices.SortStableFunc(order, func(a, b int) int { return cmp.Compare(keys[a], keys[b]) })
 		}
-		out.raws = sorted
+		// A row the replica moved from one part to another between their
+		// requests (has_primary_ip's, as an address is changed) is one row,
+		// kept where it was first read, and counted once.
+		seen := make(map[int]bool, len(order))
+		merged := make([]json.RawMessage, 0, len(order))
+		for _, j := range order {
+			if seen[keys[j]] {
+				if !out.uncounted && out.total > 0 {
+					out.total--
+				}
+				continue
+			}
+			seen[keys[j]] = true
+			merged = append(merged, out.raws[j])
+		}
+		out.raws = merged
 	}
 	if !r.keepAll && len(out.raws) > r.limit {
 		out.raws = out.raws[:r.limit]
@@ -510,6 +539,13 @@ func (r *partReader) sameProjection(reads []partRead) ([]partRead, error) {
 		out[i].fields = nil
 	}
 	return out, nil
+}
+
+// keyOrdered is whether the rows' order is the primary key's: unsorted (the
+// replica's own order) or sorted by it, ascending. Batches of sorted ids then
+// come back in order, so a merge by key is what one read returns.
+func (r *partReader) keyOrdered() bool {
+	return r.plan.sort == "" || r.plan.sort == r.e.pk()
 }
 
 // partsSortedNote says a sorted read made in several requests was sorted by

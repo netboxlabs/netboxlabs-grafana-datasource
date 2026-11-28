@@ -1053,7 +1053,8 @@ func flattenRows(raws []json.RawMessage, projected []string, pk string) ([]strin
 	}
 
 	for _, obj := range objs {
-		row := make(map[string]interface{}, len(obj)+4)
+		// Sized to the object; the aliases added later grow it as maps do.
+		row := make(map[string]interface{}, len(obj))
 		for k, v := range obj {
 			if k == customFieldDataColumn {
 				if err := expandCustomFields(v, row); err != nil {

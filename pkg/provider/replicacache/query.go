@@ -159,6 +159,11 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// does (displays.go), once the rows are in their order: the sort reads the
 		// name the expansion joined in, as the replica sorted by it.
 		wanted := wantedColumns(spec)
+		for _, n := range nestedNames(e, spec) {
+			if n.col == "display" && wanted != nil {
+				wanted[n.ref] = true
+			}
+		}
 		displayWarnings, err := p.showRelatedDisplays(ctx, c, e, plan.expanded, rows, func(key string) bool { return wanted == nil || wanted[key] })
 		if err != nil {
 			return nil, err
@@ -167,6 +172,21 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	}
 	if asOf == nil {
 		asOf = e.DataAsOf
+	}
+	var nested nestedAdditions
+	if !spec.CountOnly {
+		// A nested column's rows are read here, and their age is the result's
+		// too: as old as the oldest read, unknown when any is.
+		st := &readStats{}
+		if nested, err = p.addNestedColumns(ctx, c, e, spec, plan, rows, st); err != nil {
+			return nil, err
+		}
+		if st.unknown || st.asOf != nil {
+			st.note(asOf)
+			asOf = st.dataAsOf()
+		}
+		plan.notes = append(plan.notes, nested.notes...)
+		plan.warnings = append(plan.warnings, nested.warnings...)
 	}
 	notes, warnings := freshnessNotes(c, e, asOf)
 	notes, warnings = append(plan.notes, notes...), append(plan.warnings, warnings...)
@@ -186,6 +206,7 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		cols = append(cols, applyChoiceLabels(spec.ObjectType, rows, len(spec.Fields) == 0)...)
 		cols = append(cols, addCustomFieldIDAliases(selectedFields(spec), rows)...)
 		cols = append(cols, addUnsetCustomFieldColumns(spec, rows)...)
+		cols = append(cols, nested.cols...)
 		base := p.linkBase(c)
 		if addDeepLinks(base, spec.ObjectType, rows, e.pk()) {
 			cols = append(cols, deepLinkColumn)
@@ -343,6 +364,12 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 		for _, name := range selectedFields(spec) {
 			ask(name)
 		}
+		// <ref>__display is the display the row shows for <ref>.
+		for _, n := range nestedNames(e, spec) {
+			if n.col == "display" {
+				ask(n.ref)
+			}
+		}
 	}
 	if wantAll && !spec.CountOnly {
 		// Every reference whose target has data. One whose target has none is
@@ -383,6 +410,8 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 			r.notes = append(r.notes, fmt.Sprintf(
 				"Rows are not sorted by %q: %s has received no data on this replica, so the name cannot be resolved to sort on. Sort by %s instead.",
 				field, strings.TrimPrefix(via.Ref.Path, "/v1/"), via.Name))
+		case isNestedOn(e, field):
+			r.notes = append(r.notes, fmt.Sprintf("Rows are not sorted by %q: a nested column can't be sorted on.", field))
 		default:
 			r.notes = append(r.notes, fmt.Sprintf("Rows are not sorted by %q: this replica has no such column.", field))
 		}
@@ -424,6 +453,12 @@ func planRequest(e entity, spec provider.QuerySpec) request {
 			add(strings.TrimSuffix(f, "_value"))
 		case strings.HasPrefix(f, "cf_") && e.has(customFieldDataColumn):
 			add(customFieldDataColumn)
+		}
+	}
+	// A nested column is read through its reference's id (nested.go).
+	for _, n := range nestedNames(e, spec) {
+		if n.declared {
+			add(n.via.Name)
 		}
 	}
 	add(e.pk())

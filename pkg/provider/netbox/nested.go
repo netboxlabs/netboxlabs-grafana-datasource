@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
+
+	"github.com/netboxlabs/netboxlabs-grafana-datasource/pkg/provider"
 )
 
 // A nested column, <ref>__<col>, is column <col> of the object under the
@@ -23,19 +24,9 @@ import (
 const nestedSep = "__"
 
 // nestedColumn splits a nested column's name at its first "__" into the
-// reference and the column of it. ok is false for any other name, and for a
-// custom field's column (cf_…): custom fields aren't top-level properties, and
-// one whose name starts with an underscore flattens to cf__<name>.
-func nestedColumn(name string) (ref, col string, ok bool) {
-	if strings.HasPrefix(name, cfPrefix) {
-		return "", "", false
-	}
-	ref, col, ok = strings.Cut(name, nestedSep)
-	if !ok || ref == "" || col == "" {
-		return "", "", false
-	}
-	return ref, col, true
-}
+// reference and the column of it (provider.NestedColumn, which both modes
+// share).
+func nestedColumn(name string) (ref, col string, ok bool) { return provider.NestedColumn(name) }
 
 // isNestedColumn reports whether name is a nested column. No such name is ever
 // sent in ?fields= (NetBox has no property of that name); its reference is.

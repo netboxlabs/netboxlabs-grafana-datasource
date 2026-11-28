@@ -480,9 +480,11 @@ in batches, each id once, the total exact. Keep in mind:
 **A reference's own fields.** A NetBox row carries each reference (`site`,
 `device_type`) in a short form, and a column named `<ref>__<col>` reads a field of
 it: `device_type__manufacturer` is a device's manufacturer, `device_type__model`
-its model. They come with the row, so they cost no extra request. Add them to
-**Return fields** (the list offers the references nested in references; type any
-other), and use them in SQL as they are: `NB.device_type__manufacturer`. The short
+its model. In NetBox mode they come with the row, so they cost no extra request;
+replica-cache mode reads the referenced rows once for every reference named. Add
+them to **Return fields** (in NetBox mode the list offers the references nested
+in references; type any other), and use them in SQL as they are:
+`NB.device_type__manufacturer`. The short
 form carries only some fields (a site's has no region), so a column that can't
 exist, or a misspelled reference, comes back empty with a warning naming it, and
 an alert rule or SQL expression reading it fails with that warning.

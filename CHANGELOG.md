@@ -70,6 +70,8 @@
   URL**; with neither, a `display_url` column warns to set it.
 - **Replica-cache warns of columns only NetBox computes** (`utilization`,
   `tags`…), and an alert table on one fails saying so.
+- **Replica-cache answers `<ref>__<col>` columns, long id filters and
+  `has_primary_ip`** as NetBox mode does, so one panel works in either mode.
 - **Topology, Topology edges and IP enrichment work in replica-cache mode.**
   Where cache mode differs from NetBox: `docs/REPLICA-CACHE.md`.
 

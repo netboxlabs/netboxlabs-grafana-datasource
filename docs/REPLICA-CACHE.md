@@ -123,6 +123,12 @@ for this instance, or is empty in NetBox — the cache cannot tell which.
   same reason `cf_<name>_id` is not offered for an object field: the replica
   holds the id as a number and cannot tell it from an integer field. A saved
   panel that selects it still gets the id, where the value is a whole number;
+- **a reference's own fields** as `<ref>__<col>` (`device_type__manufacturer`),
+  when a query names one, as in NetBox mode: the referenced rows are read by id,
+  once for every reference named (`<ref>__id` and `<ref>__display` need no
+  read), and shown as a query on that type shows them. The column list doesn't
+  offer them here, so type the name. One that can't be read comes back empty,
+  with a warning naming it;
 - `display_url`, when there is a NetBox URL to build it on: the one the replica
   reports, else the Browser URL (see above).
 
@@ -240,6 +246,10 @@ NetBox's meaning is kept:
   `5856.9fd1.e300`, …) matches the stored address, and a value NetBox cannot
   read makes the whole filter match nothing, as there. _contains_ and the other
   text searches compare the text as written.
+
+**`has_primary_ip`** (devices, virtual machines, virtual device contexts) is
+NetBox's own: _true_ is a primary IPv4 or IPv6 address set, _false_ neither.
+_true_ is read in two requests, since the replica can't OR two columns.
 
 **Refused by name** — use a datasource in NetBox mode for these:
 
@@ -413,11 +423,15 @@ replica sorts them.
 
 **Limits.** Pages of 1,000 rows, walked by cursor up to the data source's
 10,000-row ceiling. The truncation and alert-table rules are the same as in
-NetBox mode. A request is kept within 16 KB: a filter whose values would take
-it past that — thousands of values, or of the ids a filter on related objects
-names — is refused before anything is sent, with a message saying how many
-values it carries and naming the filter (or, for the ids, the column they are
-sent on). A filter on a related object whose values name more than 10,000
+NetBox mode. A request is kept within 16 KB. An `id` filter past that is read
+in batches, as in NetBox mode, up to 10,000 distinct ids (more is refused, as
+there). Unsorted, the rows are in the replica's order, as one request returns
+them; a natural sort is redone over every batch's rows; any other sort is the
+replica's within each batch, which a note says. Any other filter whose values
+would take it past
+that — thousands of values, or of the ids a filter on related objects names —
+is refused before anything is sent, with a message saying how many values it
+carries and naming the filter (or, for the ids, the column they are sent on). A filter on a related object whose values name more than 10,000
 objects, or a tree node with more than 10,000 below it, is refused too.
 
 ## Topology
@@ -561,6 +575,13 @@ mode on the same data:
   related object's id, where NetBox orders VRFs by route distinguisher and
   clusters by the row's own id. A query with a negation it cannot count does
   not carry the note on rows kept.
+- **A reference's own fields** (`<ref>__<col>`): NetBox mode reads the short
+  form NetBox nests in the row, this mode the whole referenced row. A stored
+  field the short form leaves out (a site's `region`) has a value here and is
+  empty there; one NetBox computes (a device type's `device_count`, an address's
+  `family`) has one there and is empty here. A choice, JSON or a reference to one
+  of several types (`status__label`, `assigned_object__device`) is read in NetBox
+  mode only.
 - **A NetBox scope cut off by its limit** keeps different first rows than NetBox
   mode; the total agrees, and alert rules refuse it as truncated.
 - **An FHRP group** in a related column (an FHRP group assignment's `group`)
@@ -604,7 +625,8 @@ data source in NetBox mode; both can coexist on one Grafana.
 - **Filters NetBox applies through more than one relation or a reverse one**
   (a device's `region`, `site_group` and `manufacturer`, `tenant_group`, an
   interface's `mac_address`), **filters NetBox computes with a query of its own**
-  (other than `address`, `prefix`, `contains` and `local_context_data`), and
+  (other than `address`, `prefix`, `contains`, `local_context_data` and
+  `has_primary_ip`), and
   **content-type filters**.
 
 [Refused by name](#what-a-query-returns) above lists the filters by name. The

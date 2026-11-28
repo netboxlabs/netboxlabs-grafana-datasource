@@ -207,8 +207,7 @@ queries the recipes use, so most of them run there unchanged. These differ:
   `utilization`, `used` or `available`, which NetBox computes: the hot-prefix
   example needs NetBox mode. The offline-devices example runs.
 - **[Don't alert on devices that are being retired](alerting/lifecycle-suppression.md)**
-  runs; its `has_primary_ip = false` example does not, NetBox computing that
-  filter with a query of its own.
+  runs, its `has_primary_ip = false` example included.
 - **[Thresholds that differ by device role](alerting/thresholds-by-role.md)**
   runs. The replica holds no custom-field definitions, so the data source types
   a custom field from the values it sees: a field set on no row reads as a text

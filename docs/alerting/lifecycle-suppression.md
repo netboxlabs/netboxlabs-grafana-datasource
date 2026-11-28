@@ -37,9 +37,7 @@ count-only query and to an alert table. A rule that already filters on a
 status (`status = offline`) does not need it: a device has one status. A rule
 on anything else does. On the demo, `has_primary_ip = false` matches 3
 devices; add the row and a device that lost its IP _because_ it is being
-retired stops counting. (In replica-cache mode the `status` row works and
-`has_primary_ip` does not: NetBox computes that filter with a query of its own,
-which the replica cannot run.)
+retired stops counting. Both rows work in replica-cache mode too.
 
 ## Metric alerts
 

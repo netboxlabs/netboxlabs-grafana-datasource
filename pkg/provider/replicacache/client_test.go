@@ -611,7 +611,7 @@ func TestFitsBudget_ReservesTheCursor(t *testing.T) {
 func TestClient_RefusesQueriesOverTheBudget(t *testing.T) {
 	const widgets = "plugins/acme/widgets"
 	f := newFakeService()
-	f.addEntity(widgets, "id:BIGINT:pk", "name:VARCHAR")
+	f.addEntity(widgets, "id:BIGINT:pk", "name:VARCHAR", "kind:VARCHAR")
 	f.entities[widgets] = []map[string]interface{}{{"id": 1, "name": "w1"}, {"id": 2, "name": "w2"}}
 	p := newTestProvider(t, f)
 
@@ -633,8 +633,10 @@ func TestClient_RefusesQueriesOverTheBudget(t *testing.T) {
 			"name", "3,000", "filter[name]__in"},
 		{"a count term", provider.QuerySpec{CountOnly: true, Filters: []provider.Filter{{Field: "name", Operator: "n", Value: strings.Join(names, ",")}}},
 			"name", "3,000", "filter[name]__in"},
-		{"a walk", provider.QuerySpec{Filters: []provider.Filter{{Field: "id", Value: strings.Join(ids, ",")}, {Field: "name", Operator: "n", Value: "w1"}}},
-			"id", "4,000", "filter[id]__in"},
+		// A long id list is read in batches instead (idbatch_test.go), so the
+		// walk's long filter is another column's.
+		{"a walk", provider.QuerySpec{Filters: []provider.Filter{{Field: "name", Value: strings.Join(names, ",")}, {Field: "kind", Operator: "n", Value: "x"}}},
+			"name", "3,000", "filter[name]__in"},
 		{"one long value", provider.QuerySpec{Filters: []provider.Filter{{Field: "name", Value: strings.Repeat("w", 16<<10)}}},
 			"name", "1", "filter[name]__eq"},
 	} {

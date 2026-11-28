@@ -50,6 +50,15 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// as written: one NetBox reads from another column (cabled is cable_id)
 	// must not be checked, expanded or counted as the name it was written as.
 	spec.Filters = filters
+	// An id list past the ceiling is refused before anything is read, as in
+	// NetBox mode: each batch of it is a request, and no query shows more rows.
+	if n := len(primaryKeyIDs(filters, e.pk())); n > MaxLimit {
+		return nil, &tooManyIDsError{ids: n}
+	}
+	// has_primary_ip=true is read as two parts (idbatch.go); the steps below
+	// see the filters every part shares.
+	filters, extras := eitherSetParts(filters)
+	spec.Filters = filters
 	if err := validateChoiceValues(spec.ObjectType, filters); err != nil {
 		return nil, err
 	}
@@ -97,83 +106,28 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 	// Negations are answered here rather than by the service (negations.go),
 	// which needs the columns: on an unfed entity they stay among the filters
 	// and buildFilterValues refuses them, saying so (is empty on text is one).
-	var (
-		plan request
-		negs []negation
-	)
+	// That and the rest of each request's steps run per part (partReader).
+	var plan request
 	if e.Ingested {
-		var unsatisfiable bool
-		if filters, unsatisfiable, err = rewriteComparisons(filters, e, c); err != nil {
-			return nil, err
-		}
-		none = none || unsatisfiable
-		filters, negs = splitNegations(filters)
-		if err := validateFilters(filters, e, c); err != nil {
-			return nil, err
-		}
-		if err := validateNegations(negs, e, c); err != nil {
-			return nil, err
-		}
 		plan = planRequest(e, spec)
-		if !none {
-			filters, negs, none = subtractNegations(filters, negs, e, c)
-		}
-	} else {
-		if err := validateTextOperators(filters, c); err != nil {
-			return nil, err
-		}
-		if err := validateContainsBuild(filters, c); err != nil {
-			return nil, err
-		}
-	}
-	q, err := buildFilterValues(filters, addressField(e, c))
-	if err != nil {
-		return nil, err
-	}
-
-	// expand= goes with every query, count-only included: a filter on an
-	// expanded name is only valid under it, and the alert Count path sends the
-	// rule's filters with CountOnly. Only the sort and the projection are
-	// pointless when nothing but the total is read — and for that caller the
-	// smallest page the service returns is enough, since the count in the
-	// envelope is for the whole filter and unaffected by the limit.
-	if len(plan.expand) > 0 {
-		q.Set("expand", strings.Join(plan.expand, ","))
 	}
 	limit, projected := clampLimit(spec.Limit), plan.fields
 	if spec.CountOnly {
 		limit, projected = 1, nil
-	} else {
-		if plan.sort != "" {
-			q.Set("sort", plan.sort)
-		}
-		q = withFields(q, plan.fields)
 	}
-
-	var (
-		raws  []json.RawMessage
-		total int
-		asOf  *time.Time
-	)
-	switch {
-	case none:
-		// Left empty; the catalogue's instant stands in below.
-	case len(negs) > 0:
-		r, err := p.queryNegated(ctx, negatedQuery{spec: spec, e: e, c: c, filters: filters, negs: negs,
-			expand: plan.expand, countExpand: expandList(e, filterExpansions(e, spec.Filters)), sort: plan.sort,
-			fields: plan.fields, limit: limit, isAddress: addressField(e, c)})
-		if err != nil {
-			return nil, err
-		}
-		raws, total, asOf = r.raws, r.total, r.asOf
-		plan.warnings = append(plan.warnings, r.warnings...)
-		if r.fields != nil {
-			projected = r.fields
-		}
-	default:
-		if raws, total, asOf, err = p.client.list(ctx, spec.ObjectType, q, limit); err != nil {
-			return nil, err
-		}
+	natural := false
+	if !spec.CountOnly && plan.sort != "" {
+		_, natural = naturalSort(e, c, strings.TrimPrefix(plan.sort, "-"))
+	}
+	rd := &partReader{p: p, spec: spec, e: e, c: c, plan: plan, limit: limit, keepAll: natural}
+	got, err := rd.readParts(ctx, filters, extras, none)
+	if err != nil {
+		return nil, err
+	}
+	raws, total, asOf := got.raws, got.total, got.asOf
+	plan.warnings = append(plan.warnings, got.warnings...)
+	if got.fields != nil {
+		projected = got.fields
 	}
 	cols, rows, err := flattenRows(raws, projected, e.pk())
 	if err != nil {
@@ -185,12 +139,19 @@ func (p *Provider) Query(ctx context.Context, spec provider.QuerySpec) (*provide
 		// A sort on a name NetBox declares natural_sort is NetBox's order, not
 		// the replica's bytes (naturalsort.go); a result a limit cut short keeps
 		// the replica's first rows, which the note says.
+		// Read in several requests, the rows of every one are sorted together
+		// and then cut; any other sort was the replica's within each request.
 		field, descending := strings.CutPrefix(plan.sort, "-")
 		if via, natural := naturalSort(e, c, field); natural {
 			sortNaturally(rows, field, via, descending)
+			if len(rows) > limit {
+				rows = rows[:limit]
+			}
 			if total > len(rows) {
 				plan.notes = append(plan.notes, naturalSortCutShortNote(field, len(rows), total))
 			}
+		} else if got.reads > 1 {
+			plan.notes = append(plan.notes, partsSortedNote(got, total, len(rows)))
 		}
 	}
 	if !spec.CountOnly {

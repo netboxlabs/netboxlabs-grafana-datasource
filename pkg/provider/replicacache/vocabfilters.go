@@ -41,7 +41,7 @@ const (
 // which nothing translates, would otherwise have a hand-written "is null" taken
 // for what the translation means by it.
 var internalOperators = map[string]bool{
-	opIsNull: true, opNotNull: true, opContains: true, opWireGTBlank: true, opNotGTBlank: true,
+	opIsNull: true, opNotNull: true, opContains: true, opWireGTBlank: true, opNotGTBlank: true, opEitherSet: true,
 }
 
 // refuseInternalOperators is that refusal. A row with no field sends nothing,
@@ -241,6 +241,9 @@ func (tr translation) filter(name string, rows []provider.Filter) ([]provider.Fi
 	case kindPath:
 		return refused(first, fmt.Sprintf("NetBox filters %s through %s, which this replica cannot join; %s", first.Field, entry.Path, netboxModeAdvice))
 	case kindMethod:
+		if entry.Method == hasPrimaryIPMethod {
+			return tr.hasPrimaryIP(name, first, values)
+		}
 		return refused(first, fmt.Sprintf("NetBox computes %s with a query of its own (%s), which this replica cannot run; %s", first.Field, entry.Method, netboxModeAdvice))
 	}
 	return refused(first, refusedReason(entry.Reason, name, first.Field))

@@ -628,7 +628,18 @@ func overBudget(q url.Values) error {
 		detail = fmt.Sprintf("This query is too long to send to replica-cache: the filter on %s carries %s, which takes the request past the %d KB this datasource sends at once. Select fewer values, or filter on something that matches fewer objects.",
 			column, valueCount(len(strings.Split(value, ","))), queryBudget>>10)
 	}
-	return &UnsupportedError{Feature: "a request this long", Detail: detail}
+	return &UnsupportedError{Feature: tooLongFeature, Detail: detail}
+}
+
+// tooLongFeature is overBudget's subject. A read that sizes its own requests
+// (a batch of ids) splits one that comes back refused for it: the refusal is
+// made before anything is sent, so the split costs no request.
+const tooLongFeature = "a request this long"
+
+// isTooLong reports overBudget's refusal.
+func isTooLong(err error) bool {
+	var u *UnsupportedError
+	return errors.As(err, &u) && u.Feature == tooLongFeature
 }
 
 // valueCount is how many values a filter carries, in words: one value, 3,000
